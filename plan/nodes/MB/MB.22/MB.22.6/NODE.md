@@ -2,16 +2,16 @@
 id: MB.22.6
 title: "Audit and mutation-test blastit lsp, the manifest spans, the grammar queries and the editors guard (test-curator)"
 kind: task
-status: ready
+status: done
 owner: "test-curator"
 priority: 3
 depends_on: [MB.22.3, MB.22.4, MB.22.5]
 paths: ["docs/testing/AUDIT-MB.22.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:16"
-updated: "2026-11-16T09:16"
+updated: "2026-11-17T07:21"
 ---
 
 # Goal

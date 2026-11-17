@@ -2661,3 +2661,37 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T07:00 [MB.22.5] (lead) NODE.md item 6 reworded: scripts/check_zed_extension.py is the editors/** guard (design §12.8), guard.py only checks big/stray/binary files
 - 2026-11-17T07:00 [MB.22.5] (lead) NODE.md item 3: 45-theme renamed to the design's fifteen-name allowlist (design §12.8)
 - 2026-11-17T07:02 [MB.22.5] (lead) status review -> done
+- 2026-11-17T07:02 [MB.22.5] (lead) committed d08d04c
+- 2026-11-17T07:02 [MB.22.6] (lead) status ready -> active
+- 2026-11-17T07:02 [MB.22.6] (lead) attempt 1/3 started
+- 2026-11-17T07:02 [MB.22.6] (lead) base d08d04c
+- 2026-11-17T07:14 [MB.22.7] (test-curator) created (task) Gate grammar.js against the committed tree-sitter parser (regenerate + diff), because tree-sitter test never reads grammar.js
+- 2026-11-17T07:14 [MB.22.8] (test-curator) created (task) Make the blastit lsp page's exit codes and uv form true (1 also for an unframeable stream, 2 for a bad argument, --no-sync for the editor)
+- 2026-11-17T07:14 [MB.22.9] (test-curator) created (task) Prove blastit lsp exits 1 when the process cannot drop its file capabilities (S10's seventh session, rootless e2e)
+- 2026-11-17T07:14 [MB.22.10] (test-curator) created (task) Give critical_guard a per-node base: the release-branch merge base reports every earlier node as a violation
+- 2026-11-17T07:14 [MB.22.11] (test-curator) created (task) Give the five security-bearing zed-guard properties a negative twin (no capabilities, no process, argv, no scanner, no externals)
+- 2026-11-17T07:21 [MB.22.6] (lead) Reviewed the audit in place: it is complete (verdict, requirements matrix, seven proved regressions, mutation scope, protected-suite comparison, gap nodes MB.22
+- 2026-11-17T07:21 [MB.22.6] (lead) status active -> done
+- 2026-11-17T07:22 [MB.24.3] (lead) edited fields
+- 2026-11-17T07:22 [MB.24.4] (lead) edited fields
+- 2026-11-17T07:22 [MB.22.12] (test-curator) created (task) Locate an endpoint-level body raw warning (sites.rs raw_body's endpoint chain is untested)
+- 2026-11-17T07:22 [MB.26.9] (planner) created (task) Gate grammar.js against the committed tree-sitter parser (regenerate + diff), because tree-sitter test never reads grammar.js
+- 2026-11-17T07:22 [MB.26.10] (planner) created (task) Make the blastit lsp page's exit codes and uv form true (1 also for an unframeable stream, 2 for a bad argument, --no-sync for the editor)
+- 2026-11-17T07:22 [MB.26.11] (planner) created (task) Prove blastit lsp exits 1 when the process cannot drop its file capabilities (S10's seventh session, rootless e2e)
+- 2026-11-17T07:22 [MB.26.12] (planner) created (task) Give critical_guard a per-node base: the release-branch merge base reports every earlier node as a violation
+- 2026-11-17T07:22 [MB.26.13] (planner) created (task) Give the five security-bearing zed-guard properties a negative twin (no capabilities, no process, argv, no scanner, no externals)
+- 2026-11-17T07:22 [MB.26.9] (planner) edited fields
+- 2026-11-17T07:22 [MB.26.10] (planner) edited fields
+- 2026-11-17T07:22 [MB.26.11] (planner) edited fields
+- 2026-11-17T07:22 [MB.26.12] (planner) edited fields
+- 2026-11-17T07:22 [MB.26.13] (planner) edited fields
+- 2026-11-17T07:22 [MB.22.7] (planner) status ready -> superseded: Moved to MB.26.9 (post-0.2.0).
+- 2026-11-17T07:22 [MB.22.8] (planner) status ready -> superseded: Moved to MB.26.10 (post-0.2.0).
+- 2026-11-17T07:22 [MB.22.9] (planner) status ready -> superseded: Moved to MB.26.11 (post-0.2.0).
+- 2026-11-17T07:22 [MB.22.10] (planner) status ready -> superseded: Moved to MB.26.12 (post-0.2.0).
+- 2026-11-17T07:22 [MB.22.11] (planner) status ready -> superseded: Moved to MB.26.13 (post-0.2.0).
+- 2026-11-17T07:22 [MB.22] (planner) The five MB.22.6 audit gaps moved to MB.26.9..MB.26.13 as post-0.2.0 work; MB.22 ships only what 0.2.0 needs.
+- 2026-11-17T07:23 [MB.22.6] (test-curator) Audit written to docs/testing/AUDIT-MB.22.md (base d08d04c). Tier PASS, teeth PASS (6/7 regressions red; grammar.js drift is gap MB.22.7), mutation PASS 25/27 t
+- 2026-11-17T07:23 [MB.26.14] (planner) created (task) Locate an endpoint-level body raw warning (sites.rs raw_body's endpoint chain is untested)
+- 2026-11-17T07:23 [MB.22.12] (planner) status ready -> superseded: Moved to MB.26.14 (post-0.2.0).
+- 2026-11-17T07:23 [MB.22] (planner) status ready -> done
