@@ -142,6 +142,16 @@ struct Args {
     /// watcher (`ADR-0014` §4.1). Internal: stage 0 forwards the user's
     /// `--no-reload` here, and an absent token means `on` (the default).
     dev_reload: Option<bool>,
+    /// `--dev-adopt-fd=N`: the read end of a reload cycle's adoption document
+    /// (§4.6 step 6). Internal: only a replacement stage-1 image is started
+    /// with it, and only a `--stage=1 --dev-root` boot accepts it.
+    dev_adopt_fd: Option<RawFd>,
+    /// `--dev-policy-fd=N`: this image's end of the dev-only dbproxy policy
+    /// socket. Internal, like the rest of the `--dev-*` family.
+    dev_policy_fd: Option<RawFd>,
+    /// `--dev-reload-since=NANOS`: the instant the cycle that started this
+    /// image began, for its one-shot post-boot reconcile.
+    dev_reload_since: Option<u128>,
 }
 
 /// How to use the program, printed with a command-line error.
@@ -774,6 +784,9 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
                     dev_obs_fd: args.dev_obs_fd,
                     dev_ctl_fd: args.dev_ctl_fd,
                     dev_reload: args.dev_reload.unwrap_or(true),
+                    dev_adopt_fd: args.dev_adopt_fd,
+                    dev_policy_fd: args.dev_policy_fd,
+                    dev_reload_since: args.dev_reload_since,
                 },
                 interpreter,
             )
@@ -880,6 +893,13 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
             // `--no-reload` is the user's; this is how stage 0 carries it across
             // the `execve`, beside the other internal `--dev-*` tokens.
             "--dev-reload" => args.dev_reload = Some(on_off(value, key)?),
+            "--dev-adopt-fd" => args.dev_adopt_fd = Some(descriptor(value, key)?),
+            "--dev-policy-fd" => args.dev_policy_fd = Some(descriptor(value, key)?),
+            "--dev-reload-since" => {
+                args.dev_reload_since = Some(value.parse().map_err(|_| {
+                    format!("`--dev-reload-since` is not a unix-nanosecond number: {value}")
+                })?);
+            }
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -900,7 +920,10 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
         || args.dev_host.is_some()
         || args.dev_obs_fd.is_some()
         || args.dev_ctl_fd.is_some()
-        || args.dev_reload.is_some();
+        || args.dev_reload.is_some()
+        || args.dev_adopt_fd.is_some()
+        || args.dev_policy_fd.is_some()
+        || args.dev_reload_since.is_some();
     if any_dev && (args.stage != Some(1) || args.role.is_some()) {
         return Err("`--dev-*` arguments are only for `--stage=1`".to_string());
     }
@@ -1015,6 +1038,9 @@ mod tests {
             "--dev-obs-fd=11".to_string(),
             "--dev-ctl-fd=12".to_string(),
             "--dev-reload=off".to_string(),
+            "--dev-adopt-fd=13".to_string(),
+            "--dev-policy-fd=14".to_string(),
+            "--dev-reload-since=123456789".to_string(),
         ])
         .unwrap();
         assert_eq!(
@@ -1028,6 +1054,9 @@ mod tests {
             Some(false),
             "`--no-reload` travels to stage 1 as `--dev-reload=off`"
         );
+        assert_eq!(dev_stage1.dev_adopt_fd, Some(13));
+        assert_eq!(dev_stage1.dev_policy_fd, Some(14));
+        assert_eq!(dev_stage1.dev_reload_since, Some(123_456_789));
         assert!(
             parse(&[
                 "--stage=1".to_string(),
@@ -1039,6 +1068,26 @@ mod tests {
             "the token takes `on` or `off`, nothing else"
         );
         assert!(parse(&["--dev-root=/tmp/x".to_string()]).is_err());
+        // The cycle's tokens are stage-1-only too, and each needs `--dev-root`.
+        for token in [
+            "--dev-adopt-fd=13",
+            "--dev-policy-fd=14",
+            "--dev-reload-since=1",
+        ] {
+            assert!(
+                parse(&[
+                    "--stage=1".to_string(),
+                    "--config-fd=7".to_string(),
+                    token.to_string()
+                ])
+                .is_err(),
+                "`{token}` without `--dev-root` is refused"
+            );
+            assert!(
+                parse(&[token.to_string()]).is_err(),
+                "`{token}` outside `--stage=1` is refused"
+            );
+        }
         assert!(
             parse(&[
                 "--stage=1".to_string(),
@@ -1255,7 +1304,12 @@ mod tests {
         assert!(run(parse_dev(&["--no-reload".to_string()]).unwrap()).no_reload);
         // The internal stage-1 tokens are not `dev` arguments: a developer who
         // types one gets a sentence, not a silently ignored flag.
-        for internal in ["--dev-reload=on", "--dev-adopt-fd=3", "--dev-policy-fd=4"] {
+        for internal in [
+            "--dev-reload=on",
+            "--dev-adopt-fd=3",
+            "--dev-policy-fd=4",
+            "--dev-reload-since=1",
+        ] {
             let error = parse_dev(&[internal.to_string()]).unwrap_err();
             assert!(error.contains(internal), "{internal}: {error}");
         }

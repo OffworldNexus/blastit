@@ -33,6 +33,7 @@ use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 #[cfg(feature = "python")]
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -112,6 +113,19 @@ pub struct Options {
     /// watcher. Stage 0 forwards the user's `--no-reload` as `off`; absent is
     /// the default, `on`.
     pub dev_reload: bool,
+    /// `--dev-adopt-fd`: the read end of a reload cycle's adoption document
+    /// (§4.6 step 6). `Some` means this image is the replacement half of a
+    /// reload: it binds nothing, forks no `http`/dbproxy, and adopts their pids,
+    /// pipes and `http.chan` end from the document.
+    pub dev_adopt_fd: Option<RawFd>,
+    /// `--dev-policy-fd`: this image's end of the dev-only dbproxy policy
+    /// socket (§4.6 step 2). Carried into the next adoption document; the
+    /// refresh itself is `MB.23.5.3`'s.
+    pub dev_policy_fd: Option<RawFd>,
+    /// `--dev-reload-since`: the unix-nanosecond instant a reload cycle began,
+    /// for the one-shot `Policy::reconcile` after this image's boot report
+    /// (§4.6 step 7).
+    pub dev_reload_since: Option<u128>,
 }
 
 /// Everything a view needs of its scratch directory, in Python (§5.3).
@@ -245,10 +259,27 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         }
         None => None,
     };
-    let (config, php_probe_timeout, test_swap_point) =
-        read_config(&boot, dev.as_ref(), options.config_fd);
+    #[cfg_attr(not(feature = "python"), allow(unused_variables))]
+    let BootConfig {
+        config,
+        probe_timeout: php_probe_timeout,
+        swap_point: test_swap_point,
+        bytes: config_bytes,
+        restart,
+        reload_fault,
+    } = read_config(&boot, dev.as_ref(), options.config_fd);
     #[cfg(not(feature = "php"))]
     let _ = php_probe_timeout;
+    // The replacement half of a reload (§4.6 step 6): read before anything is
+    // bound, because an adoption document this image cannot honour refuses the
+    // boot instead of quietly starting a second listener.
+    let adopted = match options.dev_adopt_fd {
+        Some(fd) => match Adoption::read(fd) {
+            Ok(adoption) => Some(adoption),
+            Err(message) => fail(&boot, dev.as_ref(), &message),
+        },
+        None => None,
+    };
     let emitter = Emitter::stdout(config.log_format, config.log_level);
     // §8.1: a setting that is deprecated is the operator's to hear about, once,
     // and the log is the only place blastit can say it. The decision comes from
@@ -417,21 +448,25 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
 
     // `blastit dev` binds the address the operator asked for; production binds
     // every interface and is protected by the deployment around it (`R22`).
-    let bind = match &dev {
-        Some(dev) => SocketAddr::from((dev.host(), config.port)),
-        None => SocketAddr::from(([0, 0, 0, 0], config.port)),
-    };
-    let listener = match bind_tcp(bind, config.backlog) {
-        Ok(listener) => listener,
-        Err(err) => fail(&emitter, dev.as_ref(), &format!("binding {bind}: {err}")),
+    // A reload's replacement image binds nothing: `http` already owns `:8080`
+    // and adopted connections keep their byte stream (§4.6 step 7).
+    let listener = match &adopted {
+        Some(_) => None,
+        None => {
+            let bind = match &dev {
+                Some(dev) => SocketAddr::from((dev.host(), config.port)),
+                None => SocketAddr::from(([0, 0, 0, 0], config.port)),
+            };
+            match bind_tcp(bind, config.backlog) {
+                Ok(listener) => Some(listener),
+                Err(err) => fail(&emitter, dev.as_ref(), &format!("binding {bind}: {err}")),
+            }
+        }
     };
 
-    // Channels (§3): http.chan, ctl.chan, and three pipes per component.
-    let (http_end, sched_http_end) = pair_ok(&emitter, dev.as_ref(), "http.chan");
+    // Channels (§3): ctl.chan is this image's own in both halves; `http.chan`
+    // and the component pipes are created only by the half that forks `http`.
     let (ctl_end, sched_ctl_end) = pair_ok(&emitter, dev.as_ref(), "ctl.chan");
-    let (http_out_read, http_out_write) = pipe_ok(&emitter, dev.as_ref(), "http stdout");
-    let (http_err_read, http_err_write) = pipe_ok(&emitter, dev.as_ref(), "http stderr");
-    let (http_ev_read, http_ev_write) = pipe_ok(&emitter, dev.as_ref(), "http events");
     let (sched_out_read, sched_out_write) = pipe_ok(&emitter, dev.as_ref(), "scheduler stdout");
     let (sched_err_read, sched_err_write) = pipe_ok(&emitter, dev.as_ref(), "scheduler stderr");
     let (sched_ev_read, sched_ev_write) = pipe_ok(&emitter, dev.as_ref(), "scheduler events");
@@ -444,51 +479,111 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     };
     let mask = signals.previous_mask();
 
-    let http_cfg = http_config(&config, limits);
     let sched_cfg = scheduler_config(&config, &manifest, limits, memory, learn);
 
     // Production drops each component to its layout uid before it serves;
     // `dev` runs every role as the caller, so there is nobody to drop to and
     // `setresuid`/`setgroups` are never called (`R21`).
-    let drop_http = if dev.is_some() {
-        None
-    } else {
-        Some(layout.http())
-    };
     let drop_scheduler = if dev.is_some() {
         None
     } else {
         Some(layout.scheduler())
     };
-    let http_pid = match fork_http(
-        ChildIo {
-            stdout: Some(http_out_write),
-            stderr: Some(http_err_write),
-            keep: vec![
-                listener.as_raw_fd(),
-                http_end.as_raw_fd(),
-                http_ev_write.as_raw_fd(),
-            ],
-            limits: component_limits(&config),
-            working_dir: None,
-        },
-        HttpFds {
-            listener: listener.as_raw_fd(),
-            chan: http_end.as_raw_fd(),
-            events: http_ev_write.as_raw_fd(),
-        },
-        http_cfg,
-        drop_http,
-        mask,
-        config.seccomp,
-        hosted,
-    ) {
-        Ok(pid) => pid,
-        Err(err) => fail(&emitter, dev.as_ref(), &format!("forking http: {err}")),
+
+    let mut components: BTreeMap<i32, (Component, ComponentPipes)> = BTreeMap::new();
+    // The scheduler's end of `http.chan`: created here, or adopted. A dev boot
+    // with reload on **keeps** it after the fork, so `http`'s peer never sees
+    // end-of-file when the cycle stops the scheduler (§4.6 step 5).
+    let sched_http_end: OwnedFd = match &adopted {
+        Some(adoption) => {
+            let http = &adoption.http;
+            components.insert(
+                http.pid,
+                (
+                    Component::Http,
+                    ComponentPipes {
+                        // SAFETY: the adoption document named descriptors this
+                        // image inherited with `FD_CLOEXEC` cleared; ownership
+                        // is taken here once, as stage 0's own handover is.
+                        events: unsafe { OwnedFd::from_raw_fd(http.events) },
+                        stdout: unsafe { OwnedFd::from_raw_fd(http.stdout) },
+                        stderr: unsafe { OwnedFd::from_raw_fd(http.stderr) },
+                    },
+                ),
+            );
+            if let Some(dbproxy) = &adoption.dbproxy {
+                components.insert(
+                    dbproxy.pid,
+                    (
+                        Component::Dbproxy,
+                        ComponentPipes {
+                            events: unsafe { OwnedFd::from_raw_fd(dbproxy.events) },
+                            stdout: unsafe { OwnedFd::from_raw_fd(dbproxy.stdout) },
+                            stderr: unsafe { OwnedFd::from_raw_fd(dbproxy.stderr) },
+                        },
+                    ),
+                );
+            }
+            unsafe { OwnedFd::from_raw_fd(adoption.chan) }
+        }
+        None => {
+            let listener = match &listener {
+                Some(listener) => listener,
+                None => fail(&emitter, dev.as_ref(), "http: no listener to bind"),
+            };
+            let (http_end, http_chan) = pair_ok(&emitter, dev.as_ref(), "http.chan");
+            let (http_out_read, http_out_write) = pipe_ok(&emitter, dev.as_ref(), "http stdout");
+            let (http_err_read, http_err_write) = pipe_ok(&emitter, dev.as_ref(), "http stderr");
+            let (http_ev_read, http_ev_write) = pipe_ok(&emitter, dev.as_ref(), "http events");
+            let drop_http = if dev.is_some() {
+                None
+            } else {
+                Some(layout.http())
+            };
+            let http_pid = match fork_http(
+                ChildIo {
+                    stdout: Some(http_out_write),
+                    stderr: Some(http_err_write),
+                    keep: vec![
+                        listener.as_raw_fd(),
+                        http_end.as_raw_fd(),
+                        http_ev_write.as_raw_fd(),
+                    ],
+                    limits: component_limits(&config),
+                    working_dir: None,
+                },
+                HttpFds {
+                    listener: listener.as_raw_fd(),
+                    chan: http_end.as_raw_fd(),
+                    events: http_ev_write.as_raw_fd(),
+                },
+                http_config(&config, limits),
+                drop_http,
+                mask,
+                config.seccomp,
+                hosted,
+            ) {
+                Ok(pid) => pid,
+                Err(err) => fail(&emitter, dev.as_ref(), &format!("forking http: {err}")),
+            };
+            // The parent keeps only the read ends, and never the listening
+            // socket.
+            drop(http_end);
+            drop(http_ev_write);
+            components.insert(
+                http_pid.as_raw(),
+                (
+                    Component::Http,
+                    ComponentPipes {
+                        events: http_ev_read,
+                        stdout: http_out_read,
+                        stderr: http_err_read,
+                    },
+                ),
+            );
+            http_chan
+        }
     };
-    // The parent keeps only the read ends, and never the listening socket.
-    drop(http_end);
-    drop(http_ev_write);
     drop(listener);
 
     let sched_pid = match fork_scheduler(
@@ -524,22 +619,9 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             &format!("forking the scheduler: {err}"),
         ),
     };
-    drop(sched_http_end);
     drop(sched_ctl_end);
     drop(sched_ev_write);
 
-    let mut components: BTreeMap<i32, (Component, ComponentPipes)> = BTreeMap::new();
-    components.insert(
-        http_pid.as_raw(),
-        (
-            Component::Http,
-            ComponentPipes {
-                events: http_ev_read,
-                stdout: http_out_read,
-                stderr: http_err_read,
-            },
-        ),
-    );
     components.insert(
         sched_pid.as_raw(),
         (
@@ -551,12 +633,14 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             },
         ),
     );
-    if let (Some(pid), Some(events), Some(stdout), Some(stderr)) = (
-        options.dbproxy_pid,
-        options.dbproxy_events_fd,
-        options.dbproxy_stdout_fd,
-        options.dbproxy_stderr_fd,
-    ) && let Some(pid) = Pid::from_raw(pid)
+    if adopted.is_none()
+        && let (Some(pid), Some(events), Some(stdout), Some(stderr)) = (
+            options.dbproxy_pid,
+            options.dbproxy_events_fd,
+            options.dbproxy_stdout_fd,
+            options.dbproxy_stderr_fd,
+        )
+        && let Some(pid) = Pid::from_raw(pid)
     {
         components.insert(
             pid.as_raw(),
@@ -572,11 +656,26 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             ),
         );
     }
+    // A dev boot with reload on keeps the scheduler's end of `http.chan` for
+    // the cycle; every other boot closes it right after the fork, as before.
+    let reload_chan = match adopted.is_some() || (dev.is_some() && options.dev_reload) {
+        true => Some(sched_http_end),
+        false => {
+            drop(sched_http_end);
+            None
+        }
+    };
 
     // `dev --learn`: drain dbproxy's observation pipe and attribute statements
-    // to the route whose private socket served them (`R26`, `R27`).
-    let learn = match options.dev_obs_fd {
-        Some(fd) => match crate::dev_learn::Learn::adopt(fd, options.dev_ctl_fd) {
+    // to the route whose private socket served them (`R26`, `R27`). A reload
+    // image adopts the descriptors the document names; the cycle never runs
+    // under `--learn`, so this is the first image's path in practice.
+    let learn_fds = match &adopted {
+        Some(adoption) => adoption.learn,
+        None => options.dev_obs_fd.map(|obs| (obs, options.dev_ctl_fd)),
+    };
+    let learn = match learn_fds {
+        Some((fd, ctl)) => match crate::dev_learn::Learn::adopt(fd, ctl) {
             Ok(learn) => Some(learn),
             Err(err) => fail(
                 &emitter,
@@ -587,8 +686,44 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         None => None,
     };
 
+    // A replacement image owns no listener of its own, so a route the new
+    // manifest just added needs its private directory created here: stage 0
+    // made the ones the first boot knew about, and `:8080` is `http`'s.
+    if adopted.is_some()
+        && let Some(dev) = dev.as_ref()
+    {
+        for index in 0..routes.len() {
+            let dir = dev.view_dir(index);
+            if let Err(err) = std::fs::create_dir_all(&dir) {
+                fail(&emitter, Some(dev), &format!("view directory: {err}"));
+            }
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    // What a reload cycle re-execs with (§4.6 step 6). Every other boot carries
+    // `None` and can never cycle: production, `check`, `--no-reload` and a build
+    // without an interpreter.
+    let reload_source = match (dev.as_ref(), options.dev_reload) {
+        #[cfg(feature = "python")]
+        (Some(dev), true) => {
+            match stage1_program(restart.as_deref())
+                .and_then(|program| dev_root_from_cmdline().map(|dev_root| (program, dev_root)))
+            {
+                Ok((program, dev_root)) => Some(crate::supervise::ReloadSource {
+                    config: config_bytes,
+                    program,
+                    dev_root,
+                    dev_host: dev.host().to_string(),
+                }),
+                Err(message) => fail(&emitter, Some(dev), &message),
+            }
+        }
+        _ => None,
+    };
+
     // Everything from here on needs an interpreter, and the forks above were the
-    // last thing that had to happen while init was single-threaded (§2.1).
+    // last thing that had to happen while init is single-threaded (§2.1).
     let serving = Serving {
         config,
         limits,
@@ -607,6 +742,23 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         dev,
         learn,
         dev_reload: options.dev_reload,
+        chan: reload_chan,
+        policy: match (adopted.as_ref(), options.dev_policy_fd) {
+            (Some(adoption), _) => adoption
+                .policy
+                .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) }),
+            (None, Some(fd)) => Some(unsafe { OwnedFd::from_raw_fd(fd) }),
+            (None, None) => None,
+        },
+        learn_fds,
+        reload_source,
+        announce: adopted.is_none(),
+        reload_fault,
+        reload_since: options.dev_reload_since.and_then(|nanos| {
+            u64::try_from(nanos)
+                .ok()
+                .map(|nanos| std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos))
+        }),
     };
     // Everything from here on needs an interpreter for a WSGI view, and the
     // forks above were the last thing that had to happen while init was
@@ -658,6 +810,10 @@ fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
             // A build with no interpreter forks no view and imports no app, so
             // it has no report to watch (§4.4).
             reload: None,
+            reload_source: None,
+            chan: None,
+            policy: None,
+            learn_fds: None,
         },
         emitter,
     );
@@ -708,6 +864,34 @@ struct Serving {
     /// builds one.
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     dev_reload: bool,
+    /// The scheduler's end of `http.chan`, kept for a dev boot with reload on
+    /// (and for a replacement image that adopted it) so the cycle can hand it
+    /// to the new scheduler without `http` losing its peer (§4.6 step 5).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    chan: Option<OwnedFd>,
+    /// This image's end of the dev-only dbproxy policy socket.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    policy: Option<OwnedFd>,
+    /// The `--learn` descriptor numbers, for the next adoption document.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    learn_fds: Option<(RawFd, Option<RawFd>)>,
+    /// What a reload cycle re-execs with; `None` on every boot that cannot
+    /// cycle.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    reload_source: Option<crate::supervise::ReloadSource>,
+    /// Whether this image is the first half of a run (`true`) or the replacement
+    /// half of a reload (`false`, which repeats neither the boot line nor
+    /// `ready`).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    announce: bool,
+    /// The instant the cycle that started this image began, for the one-shot
+    /// post-boot `Policy::reconcile` (§4.6 step 7).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    reload_since: Option<std::time::SystemTime>,
+    /// The debug-only reload fault seam stage 0 carried across the `execve`
+    /// (`BLASTIT_TEST_RELOAD_FAULT`, compiled out of release builds).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    reload_fault: Option<String>,
 }
 
 /// What the post-preload marking pass owes the boot line (§4.7, `T32`).
@@ -750,7 +934,9 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
     // no watcher group, no mark, no report socket and no audit hook at all —
     // `--no-reload` is not a watcher that ignores events (§1, `R1`).
     let mut reload = match serving.dev.is_some() && serving.dev_reload {
-        true => crate::supervise::boot_reload(&serving.config, emitter),
+        true => {
+            crate::supervise::boot_reload(&serving.config, emitter, serving.reload_fault.as_deref())
+        }
         false => None,
     };
     // The `preload` phase reports on source `0xffff`; its paths are `pre_fork`,
@@ -781,6 +967,7 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
         Boot {
             dev: serving.dev.as_ref(),
             report: preload,
+            announce: serving.announce,
         },
     );
     // Boot order step 5: the parents the preload batch just added are marked,
@@ -788,6 +975,10 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
     // marking pass that ran out of room (`ENOSPC`, or the marks cap) emits the
     // ladder's one warning and prints no boot line, and a watcher that latched
     // dead drops the reload entirely: neither may claim `reload: on`.
+    //
+    // The replacement half of a reload repeats neither the line nor `ready`:
+    // both were the first image's, and claiming a boot that did not happen is
+    // exactly what the observable contract must not do (§4.6 step 7).
     if let Some(active) = reload.as_mut() {
         let outcome = active.sync_marks();
         let stopped = active.marking_stopped();
@@ -797,9 +988,10 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             // latched `ENOSPC`/the cap in `boot` already emitted its one
             // warning, and printing the line over it would be the lie the
             // ladder exists to prevent (§4.7, `T32`).
-            BootLine::Announce(dirs) => {
+            BootLine::Announce(dirs) if serving.announce => {
                 crate::supervise::announce_reload(serving.config.log_format, dirs);
             }
+            BootLine::Announce(_) => {}
             BootLine::Silent => {}
             BootLine::Unavailable(why) => crate::supervise::reload_unavailable(emitter, &why),
             BootLine::Stopped(why) => {
@@ -807,8 +999,19 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
                 reload = None;
             }
         }
+        // §4.6 step 7: one `stat` per union path, once, so a save that landed
+        // while no watcher existed is not lost. Never re-armed by a future
+        // mtime.
+        if let Some(since) = serving.reload_since
+            && let Some(active) = reload.as_mut()
+        {
+            let now = active.now();
+            active.policy().reconcile(since, now);
+        }
     }
-    emit_ready(emitter, &serving.config, serving.declared_routes);
+    if serving.announce {
+        emit_ready(emitter, &serving.config, serving.declared_routes);
+    }
     let mut supervisor = Supervisor::new(
         Parts {
             cfg: serving.config,
@@ -825,6 +1028,10 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             dev: serving.dev,
             learn: serving.learn,
             reload,
+            reload_source: serving.reload_source,
+            chan: serving.chan,
+            policy: serving.policy,
+            learn_fds: serving.learn_fds,
         },
         emitter,
     );
@@ -852,11 +1059,25 @@ fn learn_routing_table(manifest: &Manifest) -> Result<RoutingTable, String> {
 /// `blastit-env` strips every `BLASTIT_*` variable (`R12`), so stage 1 finds it
 /// in the document and nowhere else. The swap point crosses the same barrier for
 /// the same reason, and only a `debug_assertions` build has the member at all.
-fn read_config(
-    emitter: &Emitter,
-    dev: Option<&crate::dev_learn::Dev>,
-    fd: RawFd,
-) -> (Config, Duration, Option<PathBuf>) {
+/// What stage 0 handed this image on the configuration pipe.
+#[derive(Debug)]
+struct BootConfig {
+    /// The parsed configuration.
+    config: Config,
+    /// The `entrypoint php` probe's patience (`ADR-0010` §3).
+    probe_timeout: Duration,
+    /// The debug-only `BLASTIT_TEST_SWAP_POINT` rendezvous (`MB.3.64`).
+    swap_point: Option<PathBuf>,
+    /// The exact document bytes, re-supplied through a fresh pipe by a reload
+    /// cycle (§4.6 step 6).
+    bytes: Vec<u8>,
+    /// Stage 0's stage-1 program prefix, for the cycle.
+    restart: Option<Vec<String>>,
+    /// The debug-only reload fault seam (`MB.23.5.2.2`).
+    reload_fault: Option<String>,
+}
+
+fn read_config(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, fd: RawFd) -> BootConfig {
     // SAFETY: stage 0 cleared `FD_CLOEXEC` on this descriptor and stage 1 is its
     // only owner.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -880,11 +1101,242 @@ fn read_config(
         .map(PathBuf::from);
     #[cfg(not(debug_assertions))]
     let swap_point: Option<PathBuf> = None;
+    // Stage 0's handover of the stage-1 program prefix (§4.6 step 6). Kept in
+    // the configuration document, never in the environment: a `BLASTIT_*`
+    // variable would be inherited by views, and this token must not be.
+    let restart = value
+        .get(crate::stage0::RESTART_MEMBER)
+        .and_then(serde_json::Value::as_array)
+        .map(|argv| {
+            argv.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<String>>()
+        })
+        .filter(|argv| !argv.is_empty());
+    // `MB.23.5.2.2`: the debug-only reload fault seam, read back where the swap
+    // point is. A release build has neither the member's name nor this read.
+    #[cfg(debug_assertions)]
+    let reload_fault = value
+        .get(crate::stage0::TEST_RELOAD_FAULT_MEMBER)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    #[cfg(not(debug_assertions))]
+    let reload_fault: Option<String> = None;
     match Config::from_json(&value) {
-        Ok(config) => (config, probe_timeout, swap_point),
+        Ok(config) => BootConfig {
+            config,
+            probe_timeout,
+            swap_point,
+            bytes,
+            restart,
+            reload_fault,
+        },
         Err(err) => fail(emitter, dev, &err.to_string()),
     }
 }
+
+/// One component a reload's replacement image adopts instead of forking: its
+/// pid and the read ends of its three pipes (§4.6 step 6).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AdoptedComponent {
+    pub(crate) pid: i32,
+    pub(crate) stdout: RawFd,
+    pub(crate) stderr: RawFd,
+    pub(crate) events: RawFd,
+}
+
+/// The adoption document a reload's replacement image is started with.
+///
+/// UTF-8 JSON, at most 4096 bytes. `learn` is present exactly when the first
+/// boot had `--learn`; `policy` exactly when it had a dev policy socket. An
+/// unknown key, a missing key or a descriptor this image does not hold refuses
+/// the boot: an adoption that half-succeeds would bind nothing and fork `http`
+/// twice.
+#[derive(Debug)]
+pub(crate) struct Adoption {
+    pub(crate) http: AdoptedComponent,
+    pub(crate) dbproxy: Option<AdoptedComponent>,
+    pub(crate) chan: RawFd,
+    pub(crate) learn: Option<(RawFd, Option<RawFd>)>,
+    pub(crate) policy: Option<RawFd>,
+}
+
+impl Adoption {
+    /// Reads and validates the document on `fd`.
+    ///
+    /// # Errors
+    ///
+    /// One sentence for the boot: a size, a JSON, a shape or an open-descriptor
+    /// refusal.
+    pub(crate) fn read(fd: RawFd) -> Result<Self, String> {
+        // SAFETY: `exec_cycle` cleared `FD_CLOEXEC` on exactly this descriptor
+        // and handed it over; this image is its only owner.
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)
+            .map_err(|err| format!("adoption document: {err}"))?;
+        drop(file);
+        if bytes.len() > MAX_ADOPTION_DOCUMENT {
+            return Err(format!(
+                "the adoption document is {} bytes, more than the {MAX_ADOPTION_DOCUMENT}-byte limit",
+                bytes.len()
+            ));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|err| format!("adoption document: {err}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "adoption document: the document is not an object".to_string())?;
+        for key in object.keys() {
+            if !matches!(
+                key.as_str(),
+                "version" | "http" | "dbproxy" | "chan" | "learn" | "policy"
+            ) {
+                return Err(format!("adoption document: unknown key `{key}`"));
+            }
+        }
+        if object.get("version").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err("adoption document: `version` must be 1".to_string());
+        }
+        let component = |key: &str| -> Result<AdoptedComponent, String> {
+            let value = object
+                .get(key)
+                .ok_or_else(|| format!("adoption document: missing `{key}`"))?;
+            let component = AdoptedComponent {
+                pid: member(value, key, "pid")?,
+                stdout: member(value, key, "stdout")?,
+                stderr: member(value, key, "stderr")?,
+                events: member(value, key, "events")?,
+            };
+            for fd in [component.stdout, component.stderr, component.events] {
+                open(fd).map_err(|err| format!("adoption document: `{key}`: {err}"))?;
+            }
+            Ok(component)
+        };
+        let http = component("http")?;
+        let dbproxy = match object.contains_key("dbproxy") {
+            true => Some(component("dbproxy")?),
+            false => None,
+        };
+        let chan: RawFd = object
+            .get("chan")
+            .ok_or_else(|| "adoption document: missing `chan`".to_string())
+            .and_then(|value| number(value, "chan"))?;
+        open(chan).map_err(|err| format!("adoption document: `chan`: {err}"))?;
+        let learn = match object.get("learn") {
+            Some(value) => {
+                let obs = member(value, "learn", "obs")?;
+                open(obs).map_err(|err| format!("adoption document: `learn.obs`: {err}"))?;
+                let ctl = match value.get("ctl") {
+                    Some(ctl) => {
+                        let ctl = number(ctl, "learn.ctl")?;
+                        open(ctl)
+                            .map_err(|err| format!("adoption document: `learn.ctl`: {err}"))?;
+                        Some(ctl)
+                    }
+                    None => None,
+                };
+                Some((obs, ctl))
+            }
+            None => None,
+        };
+        let policy = match object.get("policy") {
+            Some(value) => {
+                let fd = number(value, "policy")?;
+                open(fd).map_err(|err| format!("adoption document: `policy`: {err}"))?;
+                Some(fd)
+            }
+            None => None,
+        };
+        Ok(Self {
+            http,
+            dbproxy,
+            chan,
+            learn,
+            policy,
+        })
+    }
+}
+
+/// One integer member of a component object.
+fn member(value: &serde_json::Value, key: &str, name: &str) -> Result<RawFd, String> {
+    value
+        .get(name)
+        .ok_or_else(|| format!("adoption document: `{key}` has no `{name}`"))
+        .and_then(|value| number(value, name))
+}
+
+/// One descriptor number from a JSON value.
+fn number(value: &serde_json::Value, name: &str) -> Result<RawFd, String> {
+    let raw = value
+        .as_u64()
+        .filter(|raw| i32::try_from(*raw).is_ok())
+        .ok_or_else(|| format!("adoption document: `{name}` is not a descriptor number"))?;
+    i32::try_from(raw).map_err(|_| format!("adoption document: `{name}` is not a descriptor"))
+}
+
+/// Whether this image really holds `fd`.
+fn open(fd: RawFd) -> Result<(), String> {
+    // SAFETY: `F_GETFD` reads descriptor flags and takes no pointer.
+    match unsafe { libc::fcntl(fd, libc::F_GETFD) } {
+        -1 => Err(format!("descriptor {fd} is not open")),
+        _ => Ok(()),
+    }
+}
+
+/// The stage-1 program prefix a reload cycle re-execs (§4.6 step 6).
+///
+/// Stage 0's handover when the configuration carried one, else
+/// `/proc/self/cmdline` up to the first `--stage=1` token — never
+/// `/proc/self/exe`, which for a wheel is the interpreter. At most eight
+/// tokens, and never an empty prefix.
+#[cfg(feature = "python")]
+fn stage1_program(restart: Option<&[String]>) -> Result<Vec<std::ffi::CString>, String> {
+    let argv: Vec<String> = match restart {
+        Some(argv) => argv.to_vec(),
+        None => {
+            let raw = std::fs::read("/proc/self/cmdline")
+                .map_err(|err| format!("reload: reading /proc/self/cmdline: {err}"))?;
+            raw.split(|byte| *byte == 0)
+                .filter(|part| !part.is_empty())
+                .map(|part| String::from_utf8_lossy(part).into_owned())
+                .take_while(|token| !token.starts_with("--stage=1"))
+                .collect()
+        }
+    };
+    if argv.is_empty() || argv.len() > 8 {
+        return Err(format!(
+            "reload: the stage-1 program prefix has {} token(s), not 1..=8",
+            argv.len()
+        ));
+    }
+    argv.iter()
+        .map(|token| {
+            std::ffi::CString::new(token.as_str())
+                .map_err(|_| "reload: the stage-1 program prefix contains a NUL byte".to_string())
+        })
+        .collect()
+}
+
+/// The `--dev-root` this image was started with, from its own argv.
+#[cfg(feature = "python")]
+///
+/// The runtime root is stage 0's, and `crate::dev_learn::Dev` keeps it private;
+/// the replacement image needs the same absolute path to re-exec itself with.
+fn dev_root_from_cmdline() -> Result<std::path::PathBuf, String> {
+    let raw = std::fs::read("/proc/self/cmdline")
+        .map_err(|err| format!("reload: reading /proc/self/cmdline: {err}"))?;
+    raw.split(|byte| *byte == 0)
+        .filter_map(|part| std::str::from_utf8(part).ok())
+        .find_map(|token| token.strip_prefix("--dev-root="))
+        .filter(|root| !root.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| "reload: this image has no `--dev-root` in its argv".to_string())
+}
+
+/// The adoption document's size bound (§4.6 step 6).
+const MAX_ADOPTION_DOCUMENT: usize = 4096;
 
 /// `MB.3.64`: pauses stage 1 at the test-only rendezvous, when — and only when —
 /// a `debug_assertions` build with the `php` capability was handed one.
@@ -1110,6 +1562,9 @@ struct Boot<'a> {
     dev: Option<&'a crate::dev_learn::Dev>,
     /// The `preload` phase's report socket, when live reload is on (`ADR-0014`).
     report: Option<blastit_view::Reporter>,
+    /// Whether this image is the first half of a run. A reload's replacement
+    /// image repeats neither the `boot` event nor `ready` (§4.6 step 7).
+    announce: bool,
 }
 
 /// Imports and prepares the application, and returns the WSGI callable (§4).
@@ -1130,7 +1585,11 @@ fn load(
     hosted: bool,
     boot: Boot<'_>,
 ) -> Py<PyAny> {
-    let Boot { dev, report } = boot;
+    let Boot {
+        dev,
+        report,
+        announce,
+    } = boot;
     // `R13`: an all-static site has no app to import — every answer comes from
     // the scheduler, so there is nothing to preload, nothing to warm up and no
     // heap a view would inherit. `None`, never a missing callable.
@@ -1253,13 +1712,15 @@ fn load(
     if let Err(err) = py.run(FREEZE, None, None) {
         python_fail(py, emitter, dev, "gc.freeze", &err);
     }
-    emit_preload(
-        emitter,
-        config,
-        &outcome,
-        refresh_memory(memory),
-        dev.is_some(),
-    );
+    if announce {
+        emit_preload(
+            emitter,
+            config,
+            &outcome,
+            refresh_memory(memory),
+            dev.is_some(),
+        );
+    }
     app
 }
 
@@ -2010,5 +2471,113 @@ view b regex '/robots\\.txt' {}\n";
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ------------------------------------------- the adoption document (§4.6)
+
+    /// Three open pipe read ends and their keepers, for a document that must
+    /// pass the open-descriptor check.
+    struct OpenFds {
+        fds: [RawFd; 4],
+        _keep: Vec<std::io::PipeWriter>,
+    }
+
+    fn open_fds() -> OpenFds {
+        let mut keep = Vec::new();
+        let mut fds = [0 as RawFd; 4];
+        for slot in &mut fds {
+            let (read, write) = std::io::pipe().expect("a pipe");
+            *slot = std::os::fd::IntoRawFd::into_raw_fd(read);
+            keep.push(write);
+        }
+        OpenFds { fds, _keep: keep }
+    }
+
+    /// Reads `document` through [`Adoption::read`] exactly as a boot would.
+    fn read_document(document: &[u8]) -> Result<Adoption, String> {
+        use std::io::Write as _;
+        let (read, mut write) = std::io::pipe().expect("a pipe");
+        write.write_all(document).expect("the document");
+        drop(write);
+        Adoption::read(std::os::fd::IntoRawFd::into_raw_fd(read))
+    }
+
+    fn component_json(fds: [RawFd; 3], pid: i32) -> serde_json::Value {
+        serde_json::json!({
+            "pid": pid,
+            "stdout": fds[0],
+            "stderr": fds[1],
+            "events": fds[2],
+        })
+    }
+
+    /// Every refusal in the adoption contract is a boot sentence, and each one
+    /// is a distinct reason: an unknown key, a missing key, the wrong version,
+    /// a descriptor this image does not hold, and the size bound.
+    #[test]
+    fn the_adoption_document_refuses_every_shape_it_cannot_honour() {
+        let open = open_fds();
+        let http = component_json([open.fds[0], open.fds[1], open.fds[2]], 4242);
+        let chan = open.fds[3];
+        let cases: Vec<(serde_json::Value, &str)> = vec![
+            (
+                serde_json::json!({"version": 1, "http": http, "chan": chan, "bogus": 0}),
+                "unknown key `bogus`",
+            ),
+            (
+                serde_json::json!({"version": 1, "http": http, "chan": chan, "dbproxy": {"pid": 1, "stdout": 999_999, "stderr": 999_999, "events": 999_999}}),
+                "descriptor 999999 is not open",
+            ),
+            (
+                serde_json::json!({"version": 2, "http": http, "chan": chan}),
+                "`version` must be 1",
+            ),
+            (
+                serde_json::json!({"version": 1, "chan": chan}),
+                "missing `http`",
+            ),
+            (
+                serde_json::json!({"version": 1, "http": http}),
+                "missing `chan`",
+            ),
+            (
+                serde_json::json!({"version": 1, "http": component_json([999_999, open.fds[1], open.fds[2]], 7), "chan": chan}),
+                "descriptor 999999 is not open",
+            ),
+        ];
+        for (document, expected) in cases {
+            let bytes = serde_json::to_vec(&document).expect("a document");
+            let error = read_document(&bytes).expect_err("this document must be refused");
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} from {document}, got {error:?}"
+            );
+        }
+
+        // The size bound is checked before parsing, so an oversized document
+        // never reaches `serde_json`.
+        let oversized = vec![b' '; MAX_ADOPTION_DOCUMENT + 1];
+        let error = read_document(&oversized).expect_err("an oversized document is refused");
+        assert!(error.contains("more than the 4096-byte limit"), "{error}");
+
+        // The positive control: these descriptors and this shape are accepted.
+        let good = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "http": http, "chan": chan,
+        }))
+        .expect("a document");
+        let adoption = read_document(&good).expect("a well-formed document is adopted");
+        assert_eq!(adoption.http.pid, 4242);
+        assert_eq!(adoption.chan, chan);
+    }
+
+    /// The stage-1 program prefix is collected in full and refused past eight
+    /// tokens — never silently truncated (§4.6 step 6).
+    #[test]
+    fn a_stage1_prefix_past_eight_tokens_is_refused_not_truncated() {
+        let long: Vec<String> = (0..9).map(|n| format!("--arg{n}")).collect();
+        let error = stage1_program(Some(&long)).expect_err("nine tokens is refused");
+        assert!(error.contains("9 token(s), not 1..=8"), "{error}");
+        let ok = stage1_program(Some(&long[..8])).expect("eight tokens are accepted");
+        assert_eq!(ok.len(), 8);
     }
 }

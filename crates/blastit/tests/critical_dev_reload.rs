@@ -275,6 +275,19 @@ impl Dev {
     /// Boots `blastit dev` with extra arguments — `--no-reload` and nothing
     /// else is a user-facing flag (`docs/reference/cli.md`).
     fn start_with(dir: &Path, tag: &str, format: &str, extra: &[&str]) -> Self {
+        Self::start_with_env(dir, tag, format, extra, &[])
+    }
+
+    /// Boots `blastit dev` with extra environment for the debug-only fault
+    /// seams (`BLASTIT_TEST_RELOAD_FAULT`, read by stage 0 and carried across
+    /// the `execve` in the configuration document).
+    fn start_with_env(
+        dir: &Path,
+        tag: &str,
+        format: &str,
+        extra: &[&str],
+        env: &[(&str, &str)],
+    ) -> Self {
         let port = free_port();
         let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
         command
@@ -289,6 +302,9 @@ impl Dev {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for (name, value) in env {
+            command.env(name, value);
+        }
         for name in ["LD_LIBRARY_PATH", "PYTHONHOME"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -585,21 +601,182 @@ impl Dev {
     /// for a component), and they share init's argv, so this is the one handle
     /// on "the scheduler and nothing else".
     fn scheduler_pid(&self) -> i32 {
-        let children =
-            fs::read_to_string(format!("/proc/{}/task/{}/children", self.pid(), self.pid()))
-                .expect("init's child list");
-        let views: Vec<u32> = self.live_views().into_iter().map(|(_, pid)| pid).collect();
-        let components: Vec<i32> = children
-            .split_whitespace()
-            .filter_map(|pid| pid.parse::<i32>().ok())
-            .filter(|pid| !views.contains(&u32::try_from(*pid).unwrap_or(u32::MAX)))
-            .collect();
+        let components = self.component_pids();
         assert_eq!(
             components.len(),
             2,
             "http and the scheduler, and no other component: {components:?}"
         );
         components[1]
+    }
+
+    /// Every live non-view child of init: `http`, the scheduler (and dbproxy
+    /// when the fixture declares one), in init's fork order.
+    fn component_pids(&self) -> Vec<i32> {
+        let children =
+            fs::read_to_string(format!("/proc/{}/task/{}/children", self.pid(), self.pid()))
+                .expect("init's child list");
+        let views: Vec<u32> = self.live_views().into_iter().map(|(_, pid)| pid).collect();
+        children
+            .split_whitespace()
+            .filter_map(|pid| pid.parse::<i32>().ok())
+            .filter(|pid| !views.contains(&u32::try_from(*pid).unwrap_or(u32::MAX)))
+            .collect()
+    }
+
+    /// Opens one keep-alive connection and sends the first request on it.
+    ///
+    /// The response is read by `Content-Length`, not to end-of-file, so the
+    /// same socket can carry a second request — which is the whole point of the
+    /// `:8080` leg: the listener and the accepted connection survive a cycle.
+    fn keep_alive(&self, path: &str) -> TcpStream {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port))
+            .unwrap_or_else(|err| panic!("connecting for {path}: {err}\n{}", self.diagnostic()));
+        stream
+            .set_read_timeout(Some(EVENT_TIMEOUT))
+            .expect("a read timeout");
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n"
+        )
+        .expect("the request goes out");
+        let body = read_one_response(&mut stream, path);
+        assert!(body.is_some(), "{path}: the first response had no body");
+        stream
+    }
+
+    /// Sends a second request on an already-open keep-alive connection.
+    fn keep_alive_get(&self, stream: &mut TcpStream, path: &str) -> String {
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n"
+        )
+        .expect("the request goes out");
+        read_one_response(stream, path).unwrap_or_else(|| {
+            panic!(
+                "{path}: the keep-alive connection had no answer\n{}",
+                self.diagnostic()
+            )
+        })
+    }
+
+    /// Waits (bounded) until `path` answers `200`, and returns the body.
+    ///
+    /// Used only after a cycle, where the request can arrive while the new
+    /// scheduler is still attaching to `http.chan`.
+    fn wait_answers(&self, path: &str) -> String {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while Instant::now() < deadline {
+            if let Ok(Some(body)) = try_get(self.port, path) {
+                return body;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "{path} never answered after the reload\n{}",
+            self.diagnostic()
+        );
+    }
+
+    /// The `--dev-root` this boot adopted, read from init's own argv.
+    fn dev_root(&self) -> PathBuf {
+        let raw = fs::read(format!("/proc/{}/cmdline", self.pid())).expect("init's argv");
+        raw.split(|byte| *byte == 0)
+            .filter_map(|part| std::str::from_utf8(part).ok())
+            .find_map(|token| token.strip_prefix("--dev-root="))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| panic!("no --dev-root in init's argv\n{}", self.diagnostic()))
+    }
+
+    /// Waits (bounded) until `path` exists.
+    fn wait_path(&self, path: &Path) {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while Instant::now() < deadline {
+            if path.is_dir() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("{} never appeared\n{}", path.display(), self.diagnostic());
+    }
+
+    /// Waits (bounded) until a scheduler pid different from `before` is live
+    /// beside `http` — the state that says a cycle's replacement image is up.
+    fn wait_new_scheduler(&self, before: i32) -> i32 {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while Instant::now() < deadline {
+            let components = self.component_pids();
+            if components.len() == 2 && components[1] != before {
+                return components[1];
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "no replacement scheduler within {EVENT_TIMEOUT:?}: {:?}\n{}",
+            self.component_pids(),
+            self.diagnostic()
+        )
+    }
+
+    /// Waits (bounded) until `path` answers a body containing `needle`.
+    ///
+    /// After a cycle the old scheduler can still answer for a moment, so a
+    /// plain `200` is not evidence that the replacement image is serving; the
+    /// new content is.
+    fn wait_body_containing(&self, path: &str, needle: &str) -> String {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while Instant::now() < deadline {
+            if let Ok(Some(body)) = try_get(self.port, path)
+                && body.contains(needle)
+            {
+                return body;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "{path} never served a body containing {needle:?}\n{}",
+            self.diagnostic()
+        )
+    }
+
+    /// Waits (bounded) until one `dev.reload.unavailable` has been emitted.
+    fn wait_unavailable(&self) -> Value {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while Instant::now() < deadline {
+            if let Some(event) = self
+                .events()
+                .into_iter()
+                .find(|event| event["event"] == "dev.reload.unavailable")
+            {
+                return event;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "no `dev.reload.unavailable` within {EVENT_TIMEOUT:?}\n{}",
+            self.diagnostic()
+        )
+    }
+
+    /// Waits (bounded) until a `manifest.warning` whose sentence contains
+    /// `needle` has been emitted, and returns it.
+    fn wait_warning(&self, needle: &str) -> Value {
+        let deadline = Instant::now() + EVENT_TIMEOUT;
+        while Instant::now() < deadline {
+            if let Some(event) = self.events().into_iter().find(|event| {
+                event["event"] == "manifest.warning"
+                    && event["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(needle))
+            }) {
+                return event;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "no `manifest.warning` naming {needle:?} within {EVENT_TIMEOUT:?}\n{}",
+            self.diagnostic()
+        );
     }
 
     /// Waits for init to exit and returns its status.
@@ -690,6 +867,68 @@ fn drain(stream: impl Read + Send + 'static, sink: Arc<Mutex<Vec<String>>>) -> J
 fn free_port() -> u16 {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a free port");
     listener.local_addr().expect("a bound address").port()
+}
+
+/// One `GET`, returning the body for a `200` and `None` for anything else.
+///
+/// The non-panicking sibling of [`Dev::get`], for the window right after a
+/// cycle when `http` may not have a scheduler attached yet — or may still be
+/// holding a request for the scheduler it is about to lose. The read timeout is
+/// short on purpose: a request that raced the old scheduler's death may never
+/// be answered, and [`Dev::wait_answers`] retries on a fresh connection.
+fn try_get(port: u16, path: &str) -> std::io::Result<Option<String>> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+    stream.set_read_timeout(Some(Duration::from_millis(500)))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )?;
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    while raw.len() < MAX_RESPONSE {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(read) => raw.extend_from_slice(&buf[..read]),
+            Err(err) => return Err(err),
+        }
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    match text.split_once("\r\n\r\n") {
+        Some((head, body)) if head.starts_with("HTTP/1.1 200") => Ok(Some(body.to_string())),
+        _ => Ok(None),
+    }
+}
+
+/// Reads one HTTP/1.1 response off a keep-alive connection.
+///
+/// The head is read one byte at a time so not one byte of the next response is
+/// consumed, and the body by its `Content-Length` — the only way a second
+/// request on the same socket can be answered unambiguously.
+fn read_one_response(stream: &mut TcpStream, path: &str) -> Option<String> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            Ok(_) => return None,
+            Err(_) => return None,
+        }
+        if head.len() > MAX_RESPONSE {
+            return None;
+        }
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    if !head.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    let length = head
+        .lines()
+        .find_map(|line| line.strip_prefix("Content-Length: "))
+        .and_then(|value| value.trim().parse::<usize>().ok())?;
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).ok()?;
+    let _ = path;
+    Some(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// The body an answer carries:
@@ -1006,6 +1245,7 @@ fn a_scheduler_exit_after_a_reload_still_stops_the_boot() {
     assert_eq!(body_of(&dev.get("/cart/x")).tag, "cart-1");
     assert_eq!(body_of(&dev.get("/products/x")).tag, "products-1");
     dev.wait_marked(&[fixture.path("views")]);
+    let previous = dev.scheduler_pid();
 
     // A manifest save is the reload that would need the cycle: its reason is the
     // one that names the manifest.
@@ -1022,6 +1262,12 @@ fn a_scheduler_exit_after_a_reload_still_stops_the_boot() {
         "the cycle's own reason: {reloads:?}"
     );
     assert_eq!(routes_of(&reloads[0]), every_route(), "every view reloads");
+    // A manifest save takes the **cycle**: the image re-execs and its
+    // replacement answers on the same `:8080`. Wait for the replacement's
+    // scheduler before the requests below, so they pin its views and not a
+    // request that raced the scheduler the cycle stopped.
+    dev.wait_new_scheduler(previous);
+    dev.wait_answers("/cart/x");
 
     // The pids that must not outlive init are the ones that **answered**. The
     // scheduler retires views lazily, so a route nobody requested has no live
@@ -1238,6 +1484,7 @@ fn a_queue_overflow_reloads_every_view_once_and_logs_one_line() {
     dev.wait_marked(&[fixture.path("views")]);
     let before = dev.live_views();
     assert_eq!(before.len(), 2, "one live view per route: {before:?}");
+    let previous_scheduler = dev.scheduler_pid();
 
     // Two events (create + close-write) per file, so this is comfortably past
     // the kernel's 16384-event queue; with init stopped, none of it drains.
@@ -1269,8 +1516,14 @@ fn a_queue_overflow_reloads_every_view_once_and_logs_one_line() {
         .count();
     assert_eq!(lines, 1, "exactly one log line for the overflow");
 
-    // Every view pid changed, and each answer comes from a replacement.
+    // Every view pid changed, and each answer comes from a replacement. An
+    // overflow takes the **cycle** (a dropped event may have been the
+    // manifest save), so a request sent before the replacement image answers
+    // can be held by `http` for the scheduler the cycle stopped: wait for a
+    // `200` rather than read on one connection until it times out.
     dev.wait_replaced(&before);
+    dev.wait_new_scheduler(previous_scheduler);
+    dev.wait_answers("/cart/x");
     let cart = body_of(&dev.get("/cart/x"));
     let products = body_of(&dev.get("/products/x"));
     let after = dev.live_views();
@@ -1638,4 +1891,330 @@ fn a_forged_source_is_dropped_and_never_tracked() {
         !script.reload.policy().union().contains_key(&other),
         "and the path it named is never tracked"
     );
+}
+
+// ------------------------------------------------- the reload cycle (§4.6)
+
+/// The `Blastfile` the cycle writes over the fixture's: valid, both routes.
+fn two_route_blastfile() -> String {
+    BLASTFILE.to_string()
+}
+
+/// Row 7a–7c: an invalid `Blastfile` save is refused with one sentence and the
+/// topology keeps serving; the next valid save replaces the topology exactly
+/// once, and `:8080` — including a keep-alive connection opened **before** the
+/// save — never drops.
+///
+/// What moves: the scheduler and every view (the cycle re-execs the image).
+/// What must not: the supervisor and `http`, because `http` owns the listener
+/// and the accepted connection, and this test names only those two.
+#[test]
+fn an_invalid_blastfile_keeps_serving_and_the_next_valid_one_reloads_once() {
+    let fixture = Fixture::new("blastfile");
+    let mut dev = fixture.start("blastfile", "json");
+    let first = body_of(&dev.get("/products/x"));
+    // Opened before the save: its byte stream has to survive the cycle.
+    let mut kept = dev.keep_alive("/products/x");
+    let supervisor = dev.pid();
+    let before = dev.component_pids();
+    assert_eq!(before.len(), 2, "http and the scheduler: {before:?}");
+    let (http, scheduler) = (before[0], before[1]);
+
+    // 7a: a half-saved manifest. The parser's own sentence, one event, no
+    // reload, no exec, and the old topology keeps answering.
+    fs::write(
+        fixture.path("Blastfile"),
+        "app \"shop\"\n\nentrypoint python \"app:app\"\n\nview products regex '/products/.*' {\n",
+    )
+    .expect("the invalid manifest");
+    let warning = dev.wait_warning("Blastfile");
+    assert_eq!(warning["level"], "warn", "{warning}");
+    let message = warning["message"].as_str().unwrap_or_default().to_string();
+    assert!(
+        message.contains("Blastfile") && message.contains("6:1"),
+        "one sentence carrying the file's own position: {message}"
+    );
+    assert_eq!(
+        dev.events()
+            .iter()
+            .filter(|event| event["event"] == "manifest.warning")
+            .count(),
+        1,
+        "one warning, never one per attempt"
+    );
+    assert!(
+        dev.reloads().is_empty(),
+        "an invalid manifest must not reload anything"
+    );
+    assert_eq!(
+        body_of(&dev.get("/products/x")).pid,
+        first.pid,
+        "the previous topology keeps serving the invalid save"
+    );
+
+    // 7b: the valid save. One `dev.reload`, the **re-parsed** manifest's routes
+    // in their new order — `cart` first, a `checkout` route added — and the
+    // added route answers on `:8080` from a private directory the first image
+    // never created. Emitting the boot's `self.routes` fails this.
+    fs::write(
+        fixture.path("Blastfile"),
+        "app \"shop\"\n\nentrypoint python \"app:app\"\n\n\
+         view cart regex '/cart/.*' {\n}\n\n\
+         view products regex '/products/.*' {\n}\n\n\
+         view checkout regex '/checkout/.*' {\n}\n",
+    )
+    .expect("the valid manifest");
+    let reloads = dev.wait_reloads(1);
+    assert_eq!(reloads.len(), 1, "exactly one reload for the valid save");
+    assert_eq!(
+        routes_of(&reloads[0]),
+        vec![
+            "cart".to_string(),
+            "products".to_string(),
+            "checkout".to_string()
+        ],
+        "the re-parsed manifest's routes, in their new order: {reloads:?}"
+    );
+    assert!(
+        files_of(&reloads[0])
+            .iter()
+            .any(|file| file.ends_with("Blastfile")),
+        "the event names the file that changed: {reloads:?}"
+    );
+    let cart = dev.wait_answers("/cart/x");
+    assert!(
+        cart.contains("cart-1:1|"),
+        "the renamed first route serves the new topology: {cart:?}"
+    );
+    let checkout = dev.wait_answers("/checkout/x");
+    assert!(
+        checkout.contains("|"),
+        "the route the save added answers on `:8080`: {checkout:?}"
+    );
+    // The added route's private directory (index 2, past the two the first
+    // image created) is this image's work (`stage1` adopt path).
+    dev.wait_path(&dev.dev_root().join("views/2"));
+
+    // 7c: the listener never dropped — the connection opened before the save
+    // still gets its response.
+    let after_keep_alive = dev.keep_alive_get(&mut kept, "/products/x");
+    assert!(
+        after_keep_alive.contains("products-1:1|"),
+        "the pre-save keep-alive connection still answers: {after_keep_alive:?}"
+    );
+
+    // 7c: the non-view pids survive, the scheduler does not.
+    let after = dev.component_pids();
+    assert_eq!(after.len(), 2, "http and the new scheduler: {after:?}");
+    assert_eq!(dev.pid(), supervisor, "the supervisor is the same process");
+    assert_eq!(after[0], http, "http owns `:8080` and is never replaced");
+    assert_ne!(
+        after[1], scheduler,
+        "the cycle starts a new scheduler on the adopted `http.chan` end"
+    );
+    dev.stop();
+}
+
+/// Row 7d: a `preload` module edit re-runs the preload cycle exactly once, and
+/// a half-written module keeps the old preload serving with one warning.
+///
+/// The module is imported before the fork (`preload "models"`), so every view's
+/// heap already holds it: only a fresh interpreter image can serve a new one,
+/// which is why this takes the cycle and not the all-views transaction.
+#[test]
+fn editing_a_preload_module_reloads_the_cycle_once() {
+    let fixture = Fixture::new("preload-cycle");
+    fs::write(
+        fixture.path("Blastfile"),
+        "app \"shop\"\n\nentrypoint python \"app:app\" {\n    preload \"models\"\n}\n\nview products regex '/products/.*' {\n}\n",
+    )
+    .expect("the preload manifest");
+    let mut dev = fixture.start("preload-cycle", "json");
+    let first = body_of(&dev.get("/products/x"));
+    assert_eq!(first.version, 1, "the preloaded module says VERSION = 1");
+
+    // A half-written module: the compile check refuses it before anything is
+    // torn down, and the old preload keeps serving.
+    fs::write(fixture.path("models.py"), "VERSION = (\n").expect("the half-written module");
+    let warning = dev.wait_warning("models.py");
+    assert_eq!(warning["level"], "warn", "{warning}");
+    assert!(dev.reloads().is_empty(), "a broken module reloads nothing");
+    let still = body_of(&dev.get("/products/x"));
+    assert_eq!(still.version, 1, "the old preload keeps serving");
+    assert_eq!(still.pid, first.pid, "and its view was never replaced");
+
+    // The valid module: exactly one cycle, and the next view serves it.
+    fs::write(fixture.path("models.py"), "VERSION = 2\n").expect("the fixed module");
+    let reloads = dev.wait_reloads(1);
+    assert_eq!(reloads.len(), 1, "exactly one cycle for the fixed module");
+    assert!(
+        files_of(&reloads[0])
+            .iter()
+            .any(|file| file.ends_with("models.py")),
+        "the event names the preload module: {reloads:?}"
+    );
+    let fresh = dev.wait_body_containing("/products/x", ":2|");
+    assert!(
+        fresh.contains(":2|"),
+        "the replacement image imported the new preload module: {fresh:?}"
+    );
+    dev.stop();
+}
+
+/// Row 8: the failure ladder's `EPERM` row is one `dev.reload.unavailable` and
+/// a run that keeps serving — never a retry, never a second watcher.
+///
+/// The boot is real: `BLASTIT_TEST_RELOAD_FAULT=open` (debug builds only, read
+/// by stage 0 and carried across the `execve` in the configuration document)
+/// makes the watcher construction fail `EPERM`, which is the ladder's
+/// "not permitted here" row. What is asserted is the whole contract: exactly one
+/// warning, no `dev.reload` at all, no `fanotify` descriptor (so no watcher and
+/// therefore no second one), and `200` for the rest of the run.
+#[test]
+fn an_eperm_watcher_is_one_unavailable_and_the_run_keeps_serving() {
+    let fixture = Fixture::new("eperm");
+    let mut dev = Dev::start_with_env(
+        &fixture.dir,
+        "eperm",
+        "json",
+        &[],
+        &[("BLASTIT_TEST_RELOAD_FAULT", "open")],
+    );
+    let unavailable = dev.wait_unavailable();
+    assert_eq!(unavailable["level"], "warn", "{unavailable}");
+    assert_eq!(unavailable["errno"], "EPERM", "the ladder's symbolic errno");
+    assert!(
+        unavailable["filesystem"]
+            .as_str()
+            .is_some_and(|filesystem| !filesystem.is_empty()),
+        "the event names the filesystem it read: {unavailable}"
+    );
+    assert!(
+        dev.reloads().is_empty(),
+        "the ladder never retries a reload"
+    );
+    assert_eq!(
+        dev.fanotify_fds(),
+        0,
+        "no watcher exists, so no group and no poll duplicate"
+    );
+    for _ in 0..3 {
+        assert!(
+            dev.get("/products/x").contains("products-1:1|"),
+            "the run keeps answering after the ladder's one warning"
+        );
+    }
+    assert_eq!(
+        dev.events()
+            .iter()
+            .filter(|event| event["event"] == "dev.reload.unavailable")
+            .count(),
+        1,
+        "one warning, never one per wakeup"
+    );
+    dev.stop();
+}
+
+/// A scheduler death in a reload's **replacement image** is fatal and still
+/// `kill_all`s every view.
+///
+/// What this witnesses, exactly: the replacement image's `Supervisor::new`
+/// starts with `reloading == false` (the gate is a field of the old image's
+/// supervisor and dies with its `execve`), so after a completed cycle the very
+/// next scheduler death takes the base fatal path — non-zero exit, no surviving
+/// view. That is the state the epic needs: a reload must never leave a boot that
+/// excuses a later `scheduler-died`.
+///
+/// What it does **not** witness: a gate that "survived" the replacement, since
+/// there is no such value — `reloading` is never carried across the exec. The
+/// two in-image clears are pinned by unit legs in `supervise.rs`:
+/// `a_late_ctl_write_to_a_gone_scheduler_is_best_effort` for the expected
+/// scheduler exit, and
+/// `a_cycle_whose_views_never_drain_is_abandoned_without_a_signal` for the
+/// drain-expiry abandon (it asserts `reloading == false` on real state, and
+/// that a reinstated `kill_all` kills its children).
+///
+/// Why the earlier row could not do this
+/// (`a_scheduler_exit_after_a_reload_still_stops_the_boot`): it kills the
+/// scheduler after an *all-views transaction*, where no gate is ever set, and
+/// `http` dies with it — fatal in every version — so it can pass through
+/// `http-died` and proves nothing about a post-cycle image.
+#[test]
+fn a_scheduler_exit_after_a_cycle_is_still_fatal() {
+    let fixture = Fixture::new("cycle-gate");
+    let mut dev = fixture.start("cycle-gate", "json");
+    let first = body_of(&dev.get("/products/x"));
+    let previous = dev.scheduler_pid();
+    fs::write(fixture.path("Blastfile"), two_route_blastfile()).expect("the valid manifest");
+    dev.wait_reloads(1);
+    // A view in the replacement image, so there is a pid for `kill_all` to reap.
+    dev.wait_replaced(&[("products".to_string(), first.pid)]);
+    dev.wait_new_scheduler(previous);
+    let fresh = body_of(&dev.wait_answers("/products/x"));
+    assert_ne!(fresh.pid, first.pid, "the cycle replaced the view");
+    let scheduler = dev.scheduler_pid();
+
+    // SAFETY: `kill` takes a pid this test owns and a signal number.
+    unsafe { libc::kill(scheduler, libc::SIGKILL) };
+    let status = dev.wait_exit();
+    assert!(
+        !status.success(),
+        "a scheduler death in the replacement image is fatal, got {status}"
+    );
+    let deadline = Instant::now() + EVENT_TIMEOUT;
+    while Path::new(&format!("/proc/{}", fresh.pid)).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !Path::new(&format!("/proc/{}", fresh.pid)).exists(),
+        "the view of the replacement image outlived init: `kill_all` did not run"
+    );
+}
+
+/// Acceptance 6: under `--learn` the manifest cycle does not run.
+///
+/// The one-pass tally lives in this image, so a re-exec would discard it: a
+/// `Blastfile` save emits one `manifest.warning` naming the restart and keeps
+/// the previous topology serving, while a `loaded` change still reloads views.
+#[test]
+fn learn_skips_the_manifest_cycle_and_still_reloads_views() {
+    let fixture = Fixture::new("learn-skip");
+    let mut dev = fixture.start_with("learn-skip", "json", &["--learn"]);
+    let first = body_of(&dev.get("/products/x"));
+
+    let manifest = fixture.path("Blastfile");
+    let original = fs::read_to_string(&manifest).expect("the manifest");
+    fs::write(
+        &manifest,
+        format!("{original}\n# under --learn this is not applied\n"),
+    )
+    .expect("the save");
+    let warning = dev.wait_warning("restart `blastit dev --learn`");
+    assert_eq!(warning["level"], "warn", "{warning}");
+    assert!(
+        dev.reloads().is_empty(),
+        "the manifest cycle must not run under --learn"
+    );
+    assert_eq!(
+        body_of(&dev.get("/products/x")).pid,
+        first.pid,
+        "the previous topology keeps serving"
+    );
+    assert_eq!(
+        dev.events()
+            .iter()
+            .filter(|event| event["event"] == "manifest.warning")
+            .count(),
+        1,
+        "one warning, not one per wakeup"
+    );
+
+    // A view file is `loaded`: the all-views transaction still runs.
+    fs::write(fixture.path("views/products.py"), view_source("products-2")).expect("the view save");
+    let reloads = dev.wait_reloads(1);
+    assert_eq!(reloads.len(), 1, "one reload for the view save");
+    assert_eq!(reloads[0]["reason"], "loaded", "{reloads:?}");
+    let fresh = dev.wait_body_containing("/products/x", "products-2");
+    assert!(fresh.contains("products-2"), "{fresh:?}");
+    dev.stop();
 }

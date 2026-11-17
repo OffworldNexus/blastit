@@ -2908,3 +2908,22 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T16:25 [MB.23.5.2.1] (lead) status active -> review
 - 2026-11-17T16:31 [MB.23.5.2.1] (lead) reviewer attempt 5 VERDICT PASS, zero findings. make check EXIT=0, docs-test dev-flags EXECUTED, 6/6 loaded runs. Committing.
 - 2026-11-17T16:31 [MB.23.5.2.1] (lead) status review -> done
+- 2026-11-17T16:31 [MB.23.5.2.2] (lead) status ready -> active
+- 2026-11-17T16:31 [MB.23.5.2.2] (lead) attempt 1/3 started
+- 2026-11-17T16:31 [MB.23.5.2.2] (lead) base 83c6bb9; inherits the follow-ups its sibling could not close: Fire::cycle/needs_cycle must come back, the true gate witness, and the manifest/preload re-re
+- 2026-11-17T17:17 [MB.23.5.2.2] (lead) implementer done: Fire::cycle + gate (with the true witness), validate-then-execve with one manifest.warning, the adoption document and stage-1 adoption (no bin
+- 2026-11-17T17:17 [MB.23.5.2.2] (lead) status active -> review
+- 2026-11-17T17:26 [MB.23.5.2.2] (lead) REVIEW FAIL (3 MAJOR, 4 MINOR): the seam guard never checks BLASTIT_TEST_RELOAD_PAUSE so make seam-check cannot catch it leaking (design and the node both claim
+- 2026-11-17T17:26 [MB.23.5.2.2] (lead) status review -> ready
+- 2026-11-17T17:26 [MB.23.5.2.2] (lead) status ready -> active
+- 2026-11-17T17:26 [MB.23.5.2.2] (lead) attempt 2/3 started
+- 2026-11-17T17:35 [MB.23.5.2.2] (lead) attempt 2: PAUSE is the third seam the guard checks (present 3 in debug, refused in a release-shaped file); the valid save now adds a checkout route so the emit
+- 2026-11-17T17:35 [MB.23.5.2.2] (lead) status active -> review
+- 2026-11-17T17:44 [MB.23.5.2.2] (lead) REVIEW FAIL attempt 2 (1 MAJOR, 2 MINOR): abandon_cycle/wedged_routes and the progress_cycle expiry arm are NEVER EXECUTED -- the only abandon leg calls the war
+- 2026-11-17T17:44 [MB.23.5.2.2] (lead) status review -> ready
+- 2026-11-17T17:44 [MB.23.5.2.2] (lead) status ready -> active
+- 2026-11-17T17:44 [MB.23.5.2.2] (lead) attempt 3/3 started
+- 2026-11-17T17:59 [MB.23.5.2.2] (lead) attempt 3: the abandon path is genuinely executed (a real Supervisor with three real sleep children and an injected expired Draining deadline); deleting reloadi
+- 2026-11-17T17:59 [MB.23.5.2.2] (lead) status active -> review
+- 2026-11-17T18:09 [MB.23.5.2.2] (lead) reviewer attempt 3 VERDICT PASS with one open MINOR (an unread, unreproduced panic from attempt 3 -- kept as an unexplained unknown; 17 more runs green). Commit
+- 2026-11-17T18:09 [MB.23.5.2.2] (lead) status review -> done

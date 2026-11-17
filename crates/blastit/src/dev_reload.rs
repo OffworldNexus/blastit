@@ -722,6 +722,22 @@ pub struct Fire {
     pub files: Vec<PathBuf>,
     /// What changed — the `dev.reload` `reason` word (§4.9).
     pub reason: ReloadReason,
+    /// Whether this change needs the reload **cycle** (a fresh interpreter
+    /// image) rather than the all-views transaction (§4.6).
+    ///
+    /// True for the `Blastfile`, for anything the boot imported before the
+    /// fork (`pre_fork`) and for an overflow, whose dropped events may have
+    /// included the `Blastfile`. The `reason` word says what changed; this says
+    /// what init has to do about it.
+    cycle: bool,
+}
+
+impl Fire {
+    /// Whether the supervisor must re-parse and re-exec this image (§4.6).
+    #[must_use]
+    pub const fn needs_cycle(&self) -> bool {
+        self.cycle
+    }
 }
 
 /// Why live reload cannot run here, in the terms the ladder and the event use
@@ -1057,9 +1073,15 @@ impl Policy {
     fn fire(&mut self, now: Instant) -> Fire {
         let files: Vec<PathBuf> = std::mem::take(&mut self.changed).into_iter().collect();
         let mut class = Class::Loaded;
+        // The action and the reason word are decided separately (§4.5): the
+        // reason says what changed (`blastfile` > `preload` > `loaded`), while
+        // `cycle` says whether the heap every view was forked from is stale —
+        // which is exactly the union's `pre_fork` bit, not its class.
+        let mut cycle = self.overflow;
         for path in &files {
             if let Some(entry) = self.reports.union().get(path) {
                 class = class.max(entry.class);
+                cycle |= entry.pre_fork || entry.class == Class::Blastfile;
             }
         }
         let reason = match self.overflow {
@@ -1069,7 +1091,11 @@ impl Policy {
         self.overflow = false;
         self.phase = Phase::Idle;
         self.last_fire = Some(now);
-        Fire { files, reason }
+        Fire {
+            files,
+            reason,
+            cycle,
+        }
     }
 
     /// The one-shot gap closure after a reload `execve` (§4.6 step 7).
@@ -1595,6 +1621,74 @@ mod tests {
         policy.on_datagram(fd, &buffer[..read], now)
     }
 
+    /// The action, not the reason word, is what `pre_fork` decides (§4.5).
+    ///
+    /// A view's file needs the all-views transaction; a file the boot imported
+    /// before the fork needs the cycle, because every view's heap copy of it is
+    /// already stale. The `reason` stays `loaded` in both cases — it says what
+    /// changed, never what init did about it.
+    #[test]
+    fn a_pre_fork_change_needs_the_cycle_and_a_view_change_does_not() {
+        let tree = Tree::new("cycle");
+        let view = tree.file("app/views.py");
+        let shared = tree.file("app/models.py");
+        let mut policy = tree.policy();
+        let view_end = report_pair(policy.reports(), 0, Class::Loaded, false).unwrap();
+        let preload_end =
+            report_pair(policy.reports(), PRELOAD_SOURCE, Class::Loaded, true).unwrap();
+        assert!(
+            !policy
+                .reports()
+                .absorb(
+                    0,
+                    Class::Loaded,
+                    false,
+                    std::slice::from_ref(&view),
+                    true,
+                    MAX_PATHS,
+                )
+                .refused()
+        );
+        assert!(
+            !policy
+                .reports()
+                .absorb(
+                    PRELOAD_SOURCE,
+                    Class::Loaded,
+                    true,
+                    std::slice::from_ref(&shared),
+                    true,
+                    MAX_PATHS,
+                )
+                .refused()
+        );
+        let mut clock = clock();
+        policy.observe(&[closed(&view)], readout(), clock.now());
+        clock.advance(QUIET);
+        let effects = policy.tick(clock.now());
+        let [Effect::Reload(fire)] = &effects[..] else {
+            panic!("one reload, got {effects:?}");
+        };
+        assert_eq!(fire.files, vec![view]);
+        assert_eq!(fire.reason, ReloadReason::Loaded);
+        assert!(!fire.needs_cycle(), "a view's own file needs no re-exec");
+
+        policy.observe(&[closed(&shared)], readout(), clock.now());
+        clock.advance(FLOOR);
+        let effects = policy.tick(clock.now());
+        let [Effect::Reload(fire)] = &effects[..] else {
+            panic!("one reload, got {effects:?}");
+        };
+        assert_eq!(fire.files, vec![shared]);
+        assert_eq!(fire.reason, ReloadReason::Loaded);
+        assert!(
+            fire.needs_cycle(),
+            "a pre-fork file is stale in every view's heap: the cycle is required"
+        );
+        drop(view_end);
+        drop(preload_end);
+    }
+
     #[test]
     fn modify_is_never_a_trigger() {
         let tree = Tree::new("modify");
@@ -1636,6 +1730,7 @@ mod tests {
             vec![Effect::Reload(Fire {
                 files: vec![path.clone()],
                 reason: ReloadReason::Loaded,
+                cycle: false,
             })],
             "the temp write and the rename coalesce into one reload"
         );
@@ -1869,6 +1964,7 @@ mod tests {
             vec![Effect::Reload(Fire {
                 files: vec![outside],
                 reason: ReloadReason::Loaded,
+                cycle: false,
             })],
             "one reload, naming the template outside the root"
         );

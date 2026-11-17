@@ -608,7 +608,13 @@ any file the boot imported before the fork.**
 3. Run the all-views transaction of the `loaded` case (one `Ctl::Reload`), and set
    `Supervisor::reloading = true`.
 4. Wait for `views.is_empty()` (a state, not a sleep): a view mid-request finishes; the
-   scheduler retires it at `DONE`. Nothing new is dispatched to an old view.
+   scheduler retires it at `DONE`. Nothing new is dispatched to an old view. The wait is
+   **bounded at `CYCLE_GRACE` (10 s)**. A view that does not drain inside it never turns
+   the save into a dead tree: the cycle is **abandoned** — one `manifest.warning` naming
+   the route(s) whose views are still live, `reloading` cleared, `cycle` dropped, and
+   *nothing is signalled*. `http`, dbproxy and the scheduler keep the serving topology,
+   the scheduler already holds the all-views transaction, and the next `Blastfile` save
+   tries again.
 5. Stop the scheduler only: `kill(sched_pid, SIGTERM)`, the signal `signal_all` already
    sends at shutdown, which makes it drain (`done()`: no slots, empty queue) and exit.
    While `reloading` is set, `component_exit` treats the scheduler's `EXITED` as the
@@ -620,14 +626,24 @@ any file the boot imported before the fork.**
    sync point for T31: when set (debug builds only, declared in `scripts/check-no-test-seam.sh`
    beside `BLASTIT_TEST_SWAP_POINT`), the supervisor creates `<path>.ready` and waits for
    `<path>.go` (bounded) before the exec, so a test can save a tracked file precisely in the
-   no-watcher window. A second debug-only seam, `BLASTIT_TEST_RELOAD_FAULT=read|mark`, makes
-   the first `read`/`mark_dir` return `EIO` once, so T16 can drive the mid-run latch through
-   the real supervisor (one `manifest.warning`, both fanotify fds closed, a later save
-   silent); both names are declared in the same allowlist and compiled out of release builds.
+   no-watcher window. A second debug-only seam, `BLASTIT_TEST_RELOAD_FAULT=open`, makes the
+   watcher **construction** fail `EPERM`, so the boot takes the §4.7 ladder's "not permitted
+   here" row on a real boot: exactly one `dev.reload.unavailable`, no group, no marks and a
+   run that keeps serving. (The mid-run latch is driven through the fake watcher at the
+   policy level, in `dev_reload`'s own tests, so no seam has to pretend to be a kernel
+   error.) Both names are read by stage 0 — before `blastit-env` strips `BLASTIT_*` — and
+   carried in the configuration document, declared in the same
+   `scripts/check-no-test-seam.sh` allowlist, and compiled out of release builds; `make
+   seam-check` requires both in the debug binary (`--present-all`) and neither in a shipped
+   one.
 6. `execve` the **stage-1 program prefix this image was started with**, not
-   `/proc/self/exe`: `/proc/self/cmdline` up to the first `--stage=1` token (the standalone
-   binary in the container, `python -I -m blastit` for a wheel), with at most 8 tokens,
-   re-checked non-empty. Then `--stage=1`, `--config-fd=N` re-supplying the exact
+   `/proc/self/exe`. Stage 0 records the prefix in the configuration document
+   (`restart`: the `Host` program plus its `-I -m blastit` arguments), because only stage 0
+   chose it; stage 1 falls back to `/proc/self/cmdline` up to the first `--stage=1` token
+   (the standalone binary in the container) when the member is absent. At most 8 tokens,
+   re-checked non-empty. The member is not an environment variable: a `BLASTIT_*` name
+   would be stripped from stage 1 by `blastit-env` and, if stage 1 ever got it, inherited by
+   every view. Then `--stage=1`, `--config-fd=N` re-supplying the exact
    configuration bytes this image received (kept for this purpose), `--dev-root`,
    `--dev-host`, `--dev-reload=on`, `--dev-reload-since=<unix nanos>` (the instant the
    cycle began) and one **adoption document** on `--dev-adopt-fd`. `FD_CLOEXEC` is cleared
@@ -825,6 +841,7 @@ T13 asserts each of the frame-side sites, not just the round trip.
 | event arrays | whole entries until 2048 bytes | tail cut, `truncated` names the array |
 | write to a reporting socket | never blocks (`SOCK_NONBLOCK`) | `EAGAIN` drops the batch and sets `resync` |
 | policy document | 1 MiB, one write + one ack byte, 100 ms | old policy stays, one `manifest.warning`, retirement continues |
+| reload drain (`views.is_empty()` before the scheduler stop) | 10 s (`CYCLE_GRACE`) | cycle abandoned: one `manifest.warning` naming the route(s), previous topology keeps serving, nothing signalled, next save retries |
 
 ## 5. Security & CVE Analysis
 
@@ -927,7 +944,7 @@ that needs a service runs in the target that provides it.
 | T13 | `ctl_reload_round_trip_and_arms` | `crates/blastit-frame/src/ctl.rs` + `src/frame.rs` (unit) | `0x45` encodes with `id == 0` and an empty payload; a payload-carrying `0x45` is refused by `reader.finish()`; `TypeCode::from_code(0x45)`, `name()`, `is_ctl()`, `Frame::decode`, `Ctl::{type_code, write_payload, decode}` and `scheduler::on_ctl` each have their arm (the last is T21) |
 | T14 | `one_live_group_and_no_view_holds_an_fd` | `crates/blastit/tests/critical_dev_reload.rs` | across three saves the supervisor's `/proc/<pid>/fd` holds exactly **two** `anon_inode:fanotify` links (the group and its `F_DUPFD_CLOEXEC` clone — the old generation's are gone), no view holds one, each view holds exactly one reporting socket, and no view's fd table has the policy, adoption or `learn` descriptors |
 | T15 | `forged_or_reused_sources_are_dropped` | `crates/blastit/src/dev_reload.rs` (unit) | a datagram whose `source` disagrees with the fd is dropped and logged once; a `seq` gap rebuilds that source's set; after `revoke(source)` a datagram on the reused number is dropped; a closed report end (`POLLHUP`) is revoked in the same wakeup; the 16 385th path is `Drop::Cap` with one warning and no mark |
-| T16 | `no_reload_means_nothing_at_all` | `crates/blastit/tests/critical_dev_reload.rs` | `--no-reload` yields no `dev.reload`, no `dev.reload.unavailable`, no fanotify link, no reporting socket, no `blastit_loaded_fd`, no hook, and the old body after an edit; a failed-watcher boot emits exactly one warning and a later save exactly one, no second group appears, and a mid-run watcher error (driven by the debug-only `BLASTIT_TEST_RELOAD_FAULT=read` seam, which makes the real watcher return `EIO` once) emits exactly one `manifest.warning`, closes both fanotify fds and leaves a later save silent |
+| T16 | `no_reload_means_nothing_at_all` | `crates/blastit/tests/critical_dev_reload.rs` | `--no-reload` yields no `dev.reload`, no `dev.reload.unavailable`, no fanotify link, no reporting socket, no `blastit_loaded_fd`, no hook, and the old body after an edit; a failed-watcher boot emits exactly one warning and a later save exactly one, no second group appears, and a mid-run watcher error (driven by a fake watcher at the policy level, or by the debug-only `BLASTIT_TEST_RELOAD_FAULT=open` seam for the boot row) emits exactly one `manifest.warning`, closes both fanotify fds and leaves a later save silent |
 | T17 | `production_and_check_never_watch_or_hook` | `crates/blastit/tests/critical_dev_reload.rs` | a real unprivileged `blastit check` run and the production-mode fail-closed boot hold no `anon_inode:fanotify` link and no report socket, no worker's loader scope carries `blastit_loaded_fd`, and no audit hook is installed; the gate-host `strace` and the byte-identical `seccomp.rs` are `MB.23.6`'s |
 | T18 | `a_grant_edit_applies_on_save` | `crates/blastit-dbproxy/src/learn.rs` (unit) + `crates/blastit/tests/critical_dev_reload.rs` | the unit half: `Learning::replace_route_policies` turns a denied statement into an allowed one, replaces the map (so an omitted pair denies) and refuses an unparsable document whole (old policy kept); the integration half runs under CI's `BLASTIT_TEST_PG_URL` `test` job and is the `docs/local.md` denial edit (denied → `200`, one `dev.reload`); a removal still denies, and a listener-set edit emits one `manifest.warning` and keeps serving |
 | T19 | `shared_module_leaves_no_view_on_the_old_version` | `crates/blastit/tests/critical_dev_reload.rs` | one `dev.reload` names every route, every view pid changes, and both routes' next bodies are new — a test that fails if one view were restarted |
@@ -1220,9 +1237,10 @@ The re-runs found real residue, all of it resolved in this document:
   (§8, 4b).
 - **Testability T-M3/T-M4/T-M5 and T-F4.** `DevReload.files` is `Vec<String>` (§4.9);
   T18 names CI's `BLASTIT_TEST_PG_URL` `test` job and its unit half; T16 drives the mid-run
-  latch through the debug-only `BLASTIT_TEST_RELOAD_FAULT=read|mark` seam (one
-  `manifest.warning`, both fds closed, a later save silent); `Policy::apply_report(report,
-  paths, now)` is the frozen entry point for a batch.
+  latch through a fake watcher at the policy level (one `manifest.warning`, both fds
+  closed, a later save silent), while the boot's `EPERM` row is driven end to end by the
+  debug-only `BLASTIT_TEST_RELOAD_FAULT=open` seam; `Policy::apply_report(report, paths,
+  now)` is the frozen entry point for a batch.
 - **Consistency C-F6 and its minors.** The ADR's decision 4 adopts the dev policy socket;
   §1 names all four internal tokens (plus dbproxy's own), and the verdict paragraph below
   was rewritten after the last lens finished.

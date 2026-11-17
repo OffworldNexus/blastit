@@ -2,7 +2,7 @@
 id: MB.23.5.2.2
 title: "Reload the preload cycle and the Blastfile without dropping :8080: the adoption document, the exec, stage-1 adoption and the two debug seams"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.23.5.2.1]
@@ -18,11 +18,11 @@ paths:
   - Makefile
   - "scripts/check-no-test-seam.sh"
   - python/tests/runnable_docs/inventory.toml
-attempts: 0
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:45"
-updated: "2026-11-17T13:45"
+updated: "2026-11-17T18:09"
 ---
 
 # Goal

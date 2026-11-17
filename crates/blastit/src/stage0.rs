@@ -604,6 +604,19 @@ pub(crate) const PROBE_TIMEOUT_DEFAULT: Duration = Duration::from_millis(5000);
 /// document stage 0 writes — the same way `seccomp` and the warnings do.
 pub(crate) const PROBE_TIMEOUT_MEMBER: &str = "php_probe_timeout_ms";
 
+/// The document member that carries the stage-1 **program prefix** across the
+/// `execve` (`MB.23.5.2.2`, design §4.6 step 6).
+///
+/// A reload cycle re-execs the program this image was started with — the
+/// standalone binary for a container, `python -I -m blastit` for a wheel — and
+/// that is a stage-0 fact: only stage 0 chose `Host::stage1()`. It travels in
+/// the configuration document rather than in the environment for the same
+/// reason the probe timeout does: every `BLASTIT_*` variable is stripped from a
+/// view, and a token in the environment would be exactly the leak the strip
+/// exists to prevent. `None` (stage 1's fallback) is `/proc/self/cmdline` up to
+/// the first `--stage=1` token.
+pub(crate) const RESTART_MEMBER: &str = "restart";
+
 /// Reads `BLASTIT_PROBE_TIMEOUT_MS`, the one place a probe's patience is
 /// decided.
 ///
@@ -649,6 +662,23 @@ fn probe_timeout() -> Result<Option<Duration>, String> {
 #[cfg(debug_assertions)]
 pub(crate) const TEST_SWAP_POINT_VAR: &str = "BLASTIT_TEST_SWAP_POINT";
 
+/// `MB.23.5.2.2`: the debug-only fault seam that makes the live-reload boot
+/// take a ladder row on purpose.
+///
+/// `BLASTIT_TEST_RELOAD_FAULT=open` makes stage 1's watcher construction fail
+/// `EPERM`, so `critical_dev_reload` can witness "exactly one
+/// `dev.reload.unavailable`, then serve" against real processes. Read here, in
+/// the composition root, because `blastit-env` strips every `BLASTIT_*`
+/// variable before stage 1 — it travels in the configuration document exactly
+/// as [`TEST_SWAP_POINT_VAR`] does, and exists only in a `debug_assertions`
+/// build.
+#[cfg(debug_assertions)]
+pub(crate) const TEST_RELOAD_FAULT_VAR: &str = "BLASTIT_TEST_RELOAD_FAULT";
+
+/// The configuration document member [`TEST_RELOAD_FAULT_VAR`] travels under.
+#[cfg(debug_assertions)]
+pub(crate) const TEST_RELOAD_FAULT_MEMBER: &str = "test_reload_fault";
+
 /// The configuration document member [`TEST_SWAP_POINT_VAR`] travels under.
 ///
 /// Stage 1 reads it back (`stage1::read_config`) and pauses at
@@ -685,6 +715,17 @@ fn config_document(config: &Config) -> Result<serde_json::Value, String> {
         object.insert(
             TEST_SWAP_POINT_MEMBER.to_string(),
             serde_json::Value::from(point.to_string_lossy().into_owned()),
+        );
+    }
+    // `MB.23.5.2.2`: the reload ladder's fault seam, carried the same way and
+    // compiled out of every release build.
+    #[cfg(debug_assertions)]
+    if let Some(fault) = std::env::var_os(TEST_RELOAD_FAULT_VAR)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert(
+            TEST_RELOAD_FAULT_MEMBER.to_string(),
+            serde_json::Value::from(fault.to_string_lossy().into_owned()),
         );
     }
     Ok(value)
@@ -3277,10 +3318,26 @@ fn exec_stage1_dev(
     learn: Option<OwnedFd>,
     no_reload: bool,
 ) -> ! {
-    let document_value = match config_document(boot.config) {
+    let stage1 = boot.host.stage1();
+    let mut document_value = match config_document(boot.config) {
         Ok(value) => value,
         Err(message) => fail_dev_root(boot.root, &message),
     };
+    // The stage-1 program prefix a reload cycle re-execs (§4.6 step 6): the
+    // standalone binary, or `python -I -m blastit` for a wheel. Stage 1 is the
+    // only stage that can cycle and the only one that cannot see `Host`, so
+    // stage 0 records the answer once here rather than let stage 1 guess from
+    // `/proc/self/exe`.
+    if let Some(object) = document_value.as_object_mut() {
+        let mut restart: Vec<String> = vec![stage1.program.to_string_lossy().into_owned()];
+        restart.extend(
+            stage1
+                .prefix
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned()),
+        );
+        object.insert(RESTART_MEMBER.to_string(), serde_json::Value::from(restart));
+    }
     let document = match serde_json::to_vec(&document_value) {
         Ok(document) => document,
         Err(err) => fail_dev_root(boot.root, &format!("configuration document: {err}")),
@@ -3304,7 +3361,6 @@ fn exec_stage1_dev(
     }
     drop(file);
 
-    let stage1 = boot.host.stage1();
     let mut argv = reexec_argv_dev(boot.root, stage1);
     argv.push(cstring_dev(boot.root, "--stage=1"));
     argv.push(cstring_dev(

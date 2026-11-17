@@ -38,15 +38,25 @@
 #         this check could not read (no verdict — never "absent").
 set -euo pipefail
 
-# The one name, spelled once. `crates/blastit/src/stage0.rs` (`TEST_SWAP_POINT_VAR`)
-# is where it is defined; the fixture in `scripts/test_packaging_gates.py` fails
-# if this script cannot be made to go red, so the two cannot silently drift.
-name="BLASTIT_TEST_SWAP_POINT"
+# The names, spelled once each. `crates/blastit/src/stage0.rs` defines two of
+# them (`TEST_SWAP_POINT_VAR`, `TEST_RELOAD_FAULT_VAR`) and
+# `crates/blastit/src/supervise.rs` reads the third (`BLASTIT_TEST_RELOAD_PAUSE`,
+# the pre-exec rendezvous); the fixture in `scripts/test_packaging_gates.py`
+# fails if this script cannot be made to go red, so the list cannot silently
+# drift from the code.
+#
+# `--absent` therefore covers **every** name (a shipped file must carry none of
+# them). `--present` stays "at least one", because the packaging fixture proves
+# the debug direction with a synthetic file that carries one name; `make
+# seam-check` uses `--present-all`, which every seam must satisfy, so a seam
+# deleted from the source cannot look green.
+names=("BLASTIT_TEST_SWAP_POINT" "BLASTIT_TEST_RELOAD_FAULT" "BLASTIT_TEST_RELOAD_PAUSE")
 
 mode=absent
 case "${1:-}" in
     --absent) mode=absent; shift ;;
     --present) mode=present; shift ;;
+    --present-all) mode=present_all; shift ;;
     --) shift ;;
 esac
 
@@ -64,7 +74,7 @@ fi
 # directions below would print a verdict about a reading that never happened
 # (`--present` fails too, for the wrong reason).
 if [ ! -r "$artifact" ]; then
-    echo "error: cannot read $artifact, so whether it carries $name is unknown:" >&2
+    echo "error: cannot read $artifact, so whether it carries the test seams is unknown:" >&2
     echo "  'absent, as shipped' is a verdict about a file this check read, and this one it" >&2
     echo "  could not. Make it readable (chmod +r $artifact) and re-run this check." >&2
     exit 2
@@ -74,34 +84,58 @@ fi
 # (zero hits), not an error — but only status 1 means that. Anything above 1
 # (`2`: the file could not be searched) is folded into `wc`'s `0` by the pipeline,
 # which is why the status is kept and judged instead of being discarded.
-grep_status=0
-hits=$(grep -a -o -F -- "$name" "$artifact" | wc -l | tr -d ' ') || grep_status=$?
-if [ "$grep_status" -gt 1 ]; then
-    echo "error: grep exited $grep_status while searching $artifact, so whether it carries" >&2
-    echo "  $name is unknown — this is 'unmeasured', not 'absent':" >&2
-    echo "  fix the file's permissions (chmod +r $artifact) and re-run $0 $artifact" >&2
-    exit 2
-fi
+carried=0
+for name in "${names[@]}"; do
+    # `|| grep_status=$?`: with `pipefail`, a `grep` that finds nothing is a
+    # *result* (zero hits), not an error — but only status 1 means that. Anything
+    # above 1 (`2`: the file could not be searched) is folded into `wc`'s `0` by
+    # the pipeline, which is why the status is kept and judged instead of being
+    # discarded.
+    grep_status=0
+    hits=$(grep -a -o -F -- "$name" "$artifact" | wc -l | tr -d ' ') || grep_status=$?
+    if [ "$grep_status" -gt 1 ]; then
+        echo "error: grep exited $grep_status while searching $artifact, so whether it carries" >&2
+        echo "  $name is unknown — this is 'unmeasured', not 'absent':" >&2
+        echo "  fix the file's permissions (chmod +r $artifact) and re-run $0 $artifact" >&2
+        exit 2
+    fi
+    if [ "$mode" = absent ]; then
+        if [ "$hits" -ne 0 ]; then
+            echo "error: $artifact contains $name ($hits occurrence(s)), so a shipped boot could be" >&2
+            echo "  paused by an environment variable before it binds a listener — a denial-of-service" >&2
+            echo "  surface that must exist only in a test build." >&2
+            echo "  the seam is compiled under \`debug_assertions\` alone: build the artifact with" >&2
+            echo "  \`--release\` (scripts/build-standalone.sh does), and never with" >&2
+            echo "  \`-C debug-assertions=yes\` or \`RUSTFLAGS\` that turns it back on." >&2
+            exit 1
+        fi
+        echo "ok   $artifact: no $name (absent, as shipped)"
+        continue
+    fi
+    if [ "$hits" -ne 0 ]; then
+        carried=$((carried + 1))
+    fi
+done
 
 if [ "$mode" = absent ]; then
-    if [ "$hits" -ne 0 ]; then
-        echo "error: $artifact contains $name ($hits occurrence(s)), so a shipped boot could be" >&2
-        echo "  paused by an environment variable before it binds a listener — a denial-of-service" >&2
-        echo "  surface that must exist only in a test build." >&2
-        echo "  the seam is compiled under \`debug_assertions\` alone: build the artifact with" >&2
-        echo "  \`--release\` (scripts/build-standalone.sh does), and never with" >&2
-        echo "  \`-C debug-assertions=yes\` or \`RUSTFLAGS\` that turns it back on." >&2
-        exit 1
-    fi
-    echo "ok   $artifact: no $name (absent, as shipped)"
     exit 0
 fi
 
-if [ "$hits" -eq 0 ]; then
-    echo "error: $artifact does not contain $name, so the seam is not in a debug build either:" >&2
-    echo "  either the rendezvous was deleted from \`crates/blastit/src\` (and" >&2
-    echo "  \`critical_php_embed\`'s inode-pin legs no longer place anything), or the name" >&2
-    echo "  changed here and in one place only. Both are the drift this direction catches." >&2
+if [ "$carried" -eq 0 ]; then
+    echo "error: $artifact does not contain any of the test seams, so they are not in a debug build either:" >&2
+    echo "  either the rendezvous was deleted from \`crates/blastit/src\`, or a name changed" >&2
+    echo "  here and in one place only. Both are the drift this direction catches." >&2
     exit 1
 fi
-echo "ok   $artifact: $name present ($hits occurrence(s)), as a debug build must"
+
+if [ "$mode" = present_all ] && [ "$carried" -ne "${#names[@]}" ]; then
+    echo "error: $artifact carries $carried of ${#names[@]} test seams, not all of them:" >&2
+    printf '  %s\n' "${names[@]}" >&2
+    echo "  a debug build must carry every seam this script declares; --present accepts one" >&2
+    echo "  only because scripts/test_packaging_gates.py proves the red direction with a" >&2
+    echo "  synthetic file that names a single seam." >&2
+    exit 1
+fi
+
+echo "ok   $artifact: ${carried} test seam(s) present, as a debug build must"
+exit 0

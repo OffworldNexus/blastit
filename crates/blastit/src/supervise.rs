@@ -26,19 +26,23 @@
 //! could want it, and the zygote needs it to fork.
 
 use std::collections::{BTreeMap, HashMap};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::ffi::CString;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 #[cfg(feature = "python")]
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use blastit_events::{
     Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind, Level, Lifecycle,
-    ManifestWarning, ProcessExited,
+    ManifestWarning, ProcessExited, ReloadReason,
 };
 use blastit_frame::{Ctl, Decoder, Frame, Limits};
+#[cfg(feature = "python")]
+use blastit_manifest::Manifest;
 use blastit_scheduler::RouteInfo;
 use blastit_sys::{
-    ExitStatus, Pid, Signal, SignalFd, SignalMask, kill, reap, recv_with_fd, send_with_fd,
+    ExitStatus, Pid, Signal, SignalFd, SignalMask, kill, pipe, reap, recv_with_fd, send_with_fd,
 };
 #[cfg(feature = "python")]
 use pyo3::{Py, PyAny};
@@ -301,6 +305,74 @@ pub struct ComponentPipes {
     pub stderr: OwnedFd,
 }
 
+/// What one reload cycle re-execs this image with (§4.6 step 6).
+///
+/// `config` is the exact byte string stage 0 wrote into `--config-fd` on this
+/// image's boot, re-supplied through a fresh pipe; `program` is the stage-1
+/// program prefix this image was started with (`/proc/self/cmdline` up to the
+/// first `--stage=1` token, or the handover stage 0 recorded), so a wheel
+/// re-execs `python -I -m blastit` and a standalone binary re-execs itself —
+/// never `/proc/self/exe`, which for a wheel is the interpreter.
+pub struct ReloadSource {
+    /// The configuration document bytes this image received.
+    pub config: Vec<u8>,
+    /// `argv[0..]` of the stage-1 program, without the stage-1 arguments.
+    pub program: Vec<CString>,
+    /// `--dev-root`: the runtime root this boot adopted.
+    pub dev_root: PathBuf,
+    /// `--dev-host`: the address `http` already owns.
+    pub dev_host: String,
+}
+
+/// The descriptors the adoption document names, captured before the pipes are
+/// moved into the poll sources (§4.6 step 6).
+struct ComponentFds {
+    pid: i32,
+    stdout: RawFd,
+    stderr: RawFd,
+    events: RawFd,
+}
+
+/// Everything the new image adopts instead of creating (§4.6 step 7).
+///
+/// Built once, at boot, from the components this image forked: their pids, the
+/// read ends of their log pipes, the scheduler's end of `http.chan` (kept open
+/// for the whole run so `http`'s peer never sees end-of-file), the `--learn`
+/// channels and the dev policy socket end. `None` on every boot that cannot
+/// cycle (production, `check`, `--no-reload`).
+struct Adoption {
+    http: ComponentFds,
+    dbproxy: Option<ComponentFds>,
+    chan: OwnedFd,
+    learn: Option<(RawFd, Option<RawFd>)>,
+    policy: Option<OwnedFd>,
+}
+
+/// Where one reload cycle is (§4.6 steps 3–6).
+///
+/// The cycle never blocks inside a `poll` wakeup: [`Supervisor::apply_effects`]
+/// asks the scheduler for the all-views transaction and records `Draining`; the
+/// loop keeps polling (refusing new `SPAWN`s), and [`Supervisor::progress_cycle`]
+/// stops the scheduler once no view is left, then execs.
+struct Cycle {
+    stage: CycleStage,
+    /// A bound on the wait, so a wedged scheduler is `SIGKILL`ed instead of
+    /// keeping the listener up forever.
+    deadline: Deadline,
+}
+
+/// The two states of a cycle that can be observed between wakeups.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+enum CycleStage {
+    /// `Ctl::Reload` is out; wait for every view to be reaped.
+    Draining,
+    /// The scheduler was asked to stop; wait for it to be reaped.
+    Stopping,
+}
+
+/// How long a cycle waits for the views to drain, and then for the scheduler.
+const CYCLE_GRACE: Duration = Duration::from_secs(10);
+
 /// What stage 1 hands the supervisor.
 pub struct Parts {
     /// The configuration, already parsed.
@@ -339,6 +411,19 @@ pub struct Parts {
     /// reload on. `None` for every production boot, for `check`, and for a dev
     /// boot with reload off.
     pub reload: Option<Reload>,
+    /// What a reload **cycle** re-execs with (§4.6 step 6). `Some` only on a
+    /// dev boot with reload on; the reload cycle has no other way to rebuild the
+    /// pre-fork heap while keeping `:8080`.
+    pub reload_source: Option<ReloadSource>,
+    /// The scheduler's end of `http.chan`, kept open on a dev boot with reload
+    /// on so `http`'s peer survives the scheduler the cycle stops (§4.6 step 5).
+    pub chan: Option<OwnedFd>,
+    /// This image's end of the dev-only dbproxy policy socket
+    /// (`--dev-policy-fd`). Carried into the adoption document; the refresh
+    /// itself is `MB.23.5.3`'s.
+    pub policy: Option<OwnedFd>,
+    /// The `--learn` descriptor numbers, for the adoption document.
+    pub learn_fds: Option<(RawFd, Option<RawFd>)>,
 }
 
 /// The supervisor of all of blastit's processes.
@@ -383,11 +468,60 @@ pub struct Supervisor<'a> {
     /// event loop: a boot that never constructed it (production, `check`,
     /// `--no-reload`) costs the poll loop nothing.
     reload: Option<Reload>,
+    /// What a reload cycle re-execs with; `None` on every boot that cannot
+    /// cycle (§4.6).
+    reload_source: Option<ReloadSource>,
+    /// The descriptors the adoption document names, or `None` when this boot
+    /// did not fork the components a cycle adopts.
+    adoption: Option<Adoption>,
+    /// The cycle in flight, if any.
+    cycle: Option<Cycle>,
+    /// Whether this image is stopping its scheduler on purpose as part of a
+    /// cycle (§4.6 step 5).
+    ///
+    /// The one gate: while it is set, the scheduler's exit is the expected stop
+    /// (`component_exit`) and a closed `ctl.chan` is not a death (`ctl_closed`).
+    /// It is set by [`Supervisor::begin_cycle`] and cleared when the scheduler's
+    /// expected exit is reaped — which is the same wakeup that execs the
+    /// replacement, so a *later* genuine `scheduler-died` is fatal again.
+    reloading: bool,
 }
 
 impl<'a> Supervisor<'a> {
     /// Builds the supervisor and registers every pipe it must drain.
     pub fn new(parts: Parts, emitter: &'a Emitter) -> Self {
+        // The adoption snapshot is taken before the pipes move into `sources`:
+        // the numbers stay valid because the `OwnedFd`s that own them live as
+        // long as the supervisor, and a component that closed its pipe is fatal
+        // outside a cycle anyway.
+        let mut parts = parts;
+        let adoption = match (&parts.reload_source, parts.chan.take()) {
+            (Some(_), Some(chan)) => {
+                let mut http: Option<ComponentFds> = None;
+                let mut dbproxy: Option<ComponentFds> = None;
+                for (pid, (component, pipes)) in &parts.components {
+                    let fds = ComponentFds {
+                        pid: *pid,
+                        stdout: pipes.stdout.as_raw_fd(),
+                        stderr: pipes.stderr.as_raw_fd(),
+                        events: pipes.events.as_raw_fd(),
+                    };
+                    match component {
+                        Component::Http => http = Some(fds),
+                        Component::Dbproxy => dbproxy = Some(fds),
+                        _ => {}
+                    }
+                }
+                http.map(|http| Adoption {
+                    http,
+                    dbproxy,
+                    chan,
+                    learn: parts.learn_fds,
+                    policy: parts.policy.take(),
+                })
+            }
+            _ => None,
+        };
         let mut sources = Vec::new();
         let mut components = BTreeMap::new();
         for (pid, (component, pipes)) in parts.components {
@@ -447,6 +581,10 @@ impl<'a> Supervisor<'a> {
             dev: parts.dev,
             learn: parts.learn,
             reload: parts.reload,
+            reload_source: parts.reload_source,
+            adoption,
+            cycle: None,
+            reloading: false,
         }
     }
 
@@ -455,6 +593,7 @@ impl<'a> Supervisor<'a> {
         loop {
             self.poll_once(py);
             self.reap_children();
+            self.progress_cycle();
             self.progress_shutdown();
         }
     }
@@ -470,6 +609,13 @@ impl<'a> Supervisor<'a> {
         };
         if let Some(deadline) = self.reload.as_ref().and_then(Reload::next_deadline) {
             let left = deadline.saturating_duration_since(Instant::now());
+            timeout = Some(timeout.map_or(left, |current| current.min(left)));
+        }
+        // A cycle between wakeups needs a bounded timeout of its own: the
+        // scheduler retires views and exits without a reload descriptor or a
+        // shutdown deadline ever being armed.
+        if let Some(cycle) = self.cycle.as_ref() {
+            let left = cycle.deadline.left();
             timeout = Some(timeout.map_or(left, |current| current.min(left)));
         }
         // The reload's descriptors are appended last: the watcher's poll
@@ -605,15 +751,23 @@ impl<'a> Supervisor<'a> {
                 }
                 effects.extend(reload.tick(now));
             }
-            self.apply_effects(effects);
+            self.apply_effects(py, effects);
         }
     }
 
     /// Turns one policy step into what init does: one event, one `Ctl::Reload`,
     /// and — when the watcher is gone — one warning and no retry (§4.6, §4.7).
-    fn apply_effects(&mut self, effects: Vec<Effect>) {
+    fn apply_effects(&mut self, py: Python<'_>, effects: Vec<Effect>) {
+        #[cfg(not(feature = "python"))]
+        let _ = py;
         for effect in effects {
             match effect {
+                // The all-views transaction, or the cycle when the changed file
+                // is one every view's heap already holds (§4.5, §4.6).
+                #[cfg(feature = "python")]
+                Effect::Reload(fire) if fire.needs_cycle() && self.reload_source.is_some() => {
+                    self.begin_cycle(py, &fire);
+                }
                 Effect::Reload(fire) => self.reload_all(&fire),
                 // The ladder's one `dev.reload.unavailable`: marking ran out of
                 // room (`ENOSPC`, or the `MAX_MARKS` cap). The marks already
@@ -636,23 +790,298 @@ impl<'a> Supervisor<'a> {
     /// `routes` is the whole set of view routes in routing order — the event
     /// says what the reload replaced, and the frame carries no route at all:
     /// there is no per-view restart to name.
-    ///
-    /// Nothing here stops the scheduler: the reload **cycle** (§4.6 step 5) is
-    /// `MB.23.5.2.2`'s, and until it lands no reload can excuse a scheduler
-    /// exit. A gate opened for a cycle this leaf could not complete would stay
-    /// set for the boot's life and swallow the next genuine `scheduler-died`.
     fn reload_all(&mut self, fire: &dev_reload::Fire) {
         let routes: Vec<String> = self.routes.iter().map(|route| route.name.clone()).collect();
-        let files: Vec<String> = fire
-            .files
+        self.emit_reload(&routes, fire.files.as_slice(), fire.reason);
+        self.send_ctl(&Ctl::Reload);
+    }
+
+    /// One `dev.reload` in the §4.9 shape.
+    fn emit_reload(&self, routes: &[String], files: &[std::path::PathBuf], reason: ReloadReason) {
+        let files: Vec<String> = files
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect();
         self.emitter.emit(&Event::now(
             Component::Init,
-            EventKind::DevReload(DevReload::new(routes, files, fire.reason)),
+            EventKind::DevReload(DevReload::new(routes.to_vec(), files, reason)),
         ));
+    }
+
+    /// One `manifest.warning`, the shape every refusal of the cycle uses: one
+    /// event, one sentence, and the previous topology keeps serving (§4.6).
+    fn warn(&self, message: String) {
+        self.emitter.emit(&Event::now(
+            Component::Init,
+            EventKind::ManifestWarning(ManifestWarning::new(message)),
+        ));
+    }
+
+    /// Starts the reload **cycle** for a change to a file every view's heap
+    /// already holds (§4.6).
+    ///
+    /// Validate before touching anything: the manifest is re-read and re-parsed,
+    /// and a changed Python source is compiled (never executed), so the common
+    /// half-saved file is refused with the file's own sentence and no view, no
+    /// scheduler and no listener is disturbed. Only a boot that passes all of
+    /// that asks for the all-views transaction and, once no view is left, stops
+    /// the scheduler and execs this image's replacement.
+    ///
+    /// Under `--learn` the manifest cycle does not run at all: the one-pass
+    /// tally lives in this image and a re-exec would discard it (§4.6 step 0).
+    #[cfg(feature = "python")]
+    fn begin_cycle(&mut self, py: Python<'_>, fire: &dev_reload::Fire) {
+        if self.learn.is_some() {
+            self.warn(
+                "the Blastfile changed; restart `blastit dev --learn` to apply it".to_string(),
+            );
+            return;
+        }
+        if self.reload_source.is_none() {
+            self.reload_all(fire);
+            return;
+        }
+        let manifest = match crate::config::read_manifest(&self.cfg.manifest) {
+            Ok(text) => match Manifest::parse_blastfile(&text, self.cfg.uid_base) {
+                Ok((manifest, _warnings)) => manifest,
+                Err(errors) => {
+                    self.warn(manifest_sentence(
+                        &self.cfg.manifest,
+                        errors.errors().first(),
+                    ));
+                    return;
+                }
+            },
+            Err(error) => {
+                self.warn(error.sentence(&self.cfg.manifest));
+                return;
+            }
+        };
+        // A `preload` module mid-write is the same story one import later: the
+        // old preload keeps serving until every changed module compiles.
+        for path in &fire.files {
+            if path == &self.cfg.manifest {
+                continue;
+            }
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("py") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(path) else {
+                // A deleted file is not a half-written one: the import that
+                // fails is the boot's own sentence, after the exec.
+                continue;
+            };
+            let (Ok(code), Ok(name)) = (
+                CString::new(bytes),
+                CString::new(path.as_os_str().as_bytes()),
+            ) else {
+                continue;
+            };
+            if let Err(err) = pyo3::types::code::PyCode::compile(
+                py,
+                &code,
+                &name,
+                pyo3::types::code::PyCodeInput::File,
+            ) {
+                self.warn(format!("{}: {err}", path.display()));
+                return;
+            }
+        }
+        // One `dev.reload` naming "every route serving after the reload" — the
+        // new manifest's view routes, in order.
+        let routes: Vec<String> = manifest
+            .routes()
+            .iter()
+            .map(|route| route.name().to_string())
+            .collect();
+        self.emit_reload(&routes, &fire.files, fire.reason);
         self.send_ctl(&Ctl::Reload);
+        self.reloading = true;
+        self.cycle = Some(Cycle {
+            stage: CycleStage::Draining,
+            deadline: Deadline::after(CYCLE_GRACE),
+        });
+    }
+
+    /// Moves a cycle along: stop the scheduler once no view is left, then
+    /// replace this image (§4.6 steps 4–6).
+    fn progress_cycle(&mut self) {
+        let Some(cycle) = self.cycle.as_mut() else {
+            return;
+        };
+        let expired = cycle.deadline.expired();
+        match cycle.stage {
+            CycleStage::Draining => {
+                if self.children.is_empty() {
+                    // Only the scheduler: `http` keeps the listener and every
+                    // accepted connection, dbproxy is untouched.
+                    if let Some(pid) = self.scheduler_pid()
+                        && let Err(err) = kill(pid, Signal::TERM)
+                    {
+                        self.warn(format!("stopping the scheduler for a reload: {err}"));
+                    }
+                    self.cycle = Some(Cycle {
+                        stage: CycleStage::Stopping,
+                        deadline: Deadline::after(CYCLE_GRACE),
+                    });
+                } else if expired {
+                    // Never `kill_all`: that would signal `http` and dbproxy
+                    // too, and their exits are fatal — one request stuck in a
+                    // view would turn every save into a dead dev tree. The
+                    // cycle is abandoned instead, the old topology keeps
+                    // serving, and one warning names the route that would not
+                    // drain (§4.6 step 4, `R9`).
+                    let wedged = self.wedged_routes();
+                    self.abandon_cycle(&wedged);
+                }
+            }
+            CycleStage::Stopping => {
+                if self.scheduler_pid().is_none() {
+                    self.cycle = None;
+                    self.reloading = false;
+                    self.exec_cycle();
+                } else if expired && let Some(pid) = self.scheduler_pid() {
+                    let _ = kill(pid, Signal::KILL);
+                }
+            }
+        }
+    }
+
+    /// The routes whose views kept a cycle from draining.
+    fn wedged_routes(&self) -> Vec<String> {
+        let mut routes: Vec<String> = self
+            .children
+            .pids()
+            .filter_map(|pid| self.children.route_of(pid))
+            .filter_map(|route| self.routes.get(route))
+            .map(|route| route.name.clone())
+            .collect();
+        routes.sort();
+        routes.dedup();
+        routes
+    }
+
+    /// Drops a cycle whose views never drained, and says so once.
+    ///
+    /// Nothing is signalled: `http`, dbproxy and the scheduler keep running
+    /// with the topology that was serving, which is the only outcome that
+    /// cannot kill a `dev` tree over one slow request. The scheduler already
+    /// has the all-views transaction, so the next request gets a fresh view and
+    /// a later save can try again.
+    fn abandon_cycle(&mut self, wedged: &[String]) {
+        self.cycle = None;
+        self.reloading = false;
+        self.warn(abandoned_cycle_warning(wedged));
+    }
+
+    /// The scheduler's pid, while it is still a live component.
+    fn scheduler_pid(&self) -> Option<Pid> {
+        self.components
+            .iter()
+            .find(|(_, component)| **component == Component::Scheduler)
+            .and_then(|(pid, _)| Pid::from_raw(*pid))
+    }
+
+    /// Replaces this image with a fresh stage 1 that adopts `:8080` (§4.6 step 6).
+    ///
+    /// An `execve` that returns is fatal: there is no event loop left to rebuild,
+    /// and a half-started reload must never keep serving.
+    fn exec_cycle(&mut self) -> ! {
+        let Some(source) = self.reload_source.as_ref() else {
+            self.fail("reload: there is no stage-1 program to re-exec");
+        };
+        let Some(adoption) = self.adoption.take() else {
+            self.fail("reload: this boot forked no components to adopt");
+        };
+        #[cfg(debug_assertions)]
+        reload_pause();
+        let since = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let document = match adoption_document(&adoption) {
+            Ok(document) => document,
+            Err(message) => self.fail(&message),
+        };
+        // The configuration bytes this image was started with, on a fresh pipe.
+        let (config_read, config_write) = match pipe() {
+            Ok(pair) => pair,
+            Err(err) => self.fail(&format!("reload: the configuration pipe: {err}")),
+        };
+        let (adopt_read, adopt_write) = match pipe() {
+            Ok(pair) => pair,
+            Err(err) => self.fail(&format!("reload: the adoption pipe: {err}")),
+        };
+        {
+            use std::io::Write as _;
+            for (fd, bytes) in [
+                (config_write, source.config.as_slice()),
+                (adopt_write, document.as_slice()),
+            ] {
+                let mut file = std::fs::File::from(fd);
+                if let Err(err) = file.write_all(bytes) {
+                    self.fail(&format!("reload: writing the reload pipes: {err}"));
+                }
+            }
+        }
+
+        let mut argv: Vec<CString> = source.program.clone();
+        for token in [
+            "--stage=1".to_string(),
+            format!("--config-fd={}", config_read.as_raw_fd()),
+            format!("--dev-root={}", source.dev_root.display()),
+            format!("--dev-host={}", source.dev_host),
+            "--dev-reload=on".to_string(),
+            format!("--dev-reload-since={since}"),
+            format!("--dev-adopt-fd={}", adopt_read.as_raw_fd()),
+        ] {
+            match CString::new(token) {
+                Ok(token) => argv.push(token),
+                Err(_) => self.fail("reload: a reload argument contains a NUL byte"),
+            }
+        }
+        let mut keep = vec![
+            config_read.as_raw_fd(),
+            adopt_read.as_raw_fd(),
+            adoption.chan.as_raw_fd(),
+            adoption.http.stdout,
+            adoption.http.stderr,
+            adoption.http.events,
+        ];
+        if let Some(dbproxy) = &adoption.dbproxy {
+            keep.extend([dbproxy.stdout, dbproxy.stderr, dbproxy.events]);
+        }
+        if let Some((obs, ctl)) = adoption.learn {
+            keep.push(obs);
+            if let Some(ctl) = ctl {
+                keep.push(ctl);
+            }
+        }
+        if let Some(policy) = &adoption.policy {
+            keep.push(policy.as_raw_fd());
+        }
+        for fd in keep {
+            // SAFETY: every number came from a descriptor this process owns.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+            if let Err(err) = blastit_sys::set_cloexec(borrowed, false) {
+                self.fail(&format!("reload: clearing FD_CLOEXEC: {err}"));
+            }
+        }
+        let env: Vec<(String, String)> = std::env::vars_os()
+            .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+            .collect();
+        let Some(program) = argv.first().cloned() else {
+            self.fail("reload: the stage-1 program prefix is empty");
+        };
+        if let Err(err) = blastit_sys::restore_signal_mask_in_child(self.mask) {
+            self.fail(&format!("reload: restoring the signal mask: {err}"));
+        }
+        let err = blastit_sys::exec(&program, &argv, &env);
+        // A reload that never started must not keep serving.
+        self.kill_all();
+        crate::logs::write_line(libc::STDERR_FILENO, &format!("reload: exec stage 1: {err}"));
+        // SAFETY: init is exiting; `_exit` runs no handler and cannot deadlock.
+        unsafe { libc::_exit(1) }
     }
 
     /// Reads every pending signal from the `signalfd`.
@@ -716,24 +1145,30 @@ impl<'a> Supervisor<'a> {
     ///
     /// While shutting down that is the normal end of the drain: the scheduler
     /// left, so init stops polling a dead channel and moves on to terminating
-    /// everyone else. At any other time it means the scheduler died without
-    /// being reaped, which is fatal (§8).
+    /// everyone else. During a reload **cycle** it is the scheduler being
+    /// stopped on purpose (§4.6 step 5), so it is not a death either. At any
+    /// other time it means the scheduler died without being reaped, which is
+    /// fatal (§8).
     fn ctl_closed(&mut self) {
         self.ctl = None;
-        // The scheduler is never expected to close its channel in this leaf: the
-        // reload **cycle** that stops it on purpose is `MB.23.5.2.2`'s, so any
-        // close outside a shutdown is a scheduler that died (§8).
-        if !self.shutting_down {
-            self.fail("ctl.chan: the scheduler closed the channel");
+        if self.shutting_down {
+            let scheduler = self
+                .components
+                .iter()
+                .find(|(_, component)| **component == Component::Scheduler)
+                .map(|(pid, _)| *pid);
+            if let Some(pid) = scheduler {
+                self.components.remove(&pid);
+            }
+            return;
         }
-        let scheduler = self
-            .components
-            .iter()
-            .find(|(_, component)| **component == Component::Scheduler)
-            .map(|(pid, _)| *pid);
-        if let Some(pid) = scheduler {
-            self.components.remove(&pid);
+        // A cycle stopped the scheduler on purpose: its exit is expected, and
+        // the pid is kept until it is reaped so `progress_cycle` never execs
+        // over a live scheduler that still owns `http.chan`.
+        if self.reloading {
+            return;
         }
+        self.fail("ctl.chan: the scheduler closed the channel");
     }
 
     /// Handles one `ctl.chan` message from the scheduler.
@@ -769,6 +1204,14 @@ impl<'a> Supervisor<'a> {
     /// kept is init's own fork bound — see [`may_fork`] — because the scheduler
     /// must not be the only thing deciding how many processes init holds.
     fn spawn(&mut self, py: Python<'_>, route: u32) {
+        // A cycle has asked every view to retire and is about to replace this
+        // image: forking a view now would fork the **old** pre-fork heap after
+        // the reload, which is exactly the mixed-version bug the cycle exists
+        // to prevent. The scheduler is owed an answer, so the slot is refused.
+        if self.reloading {
+            self.send_spawn_refused(route);
+            return;
+        }
         let index = route as usize;
         let Some(info) = self.routes.get(index).cloned() else {
             self.fail(&format!("ctl.chan: SPAWN for unknown route {route}"));
@@ -1127,11 +1570,14 @@ impl<'a> Supervisor<'a> {
 
     /// A component of blastit exited: fatal unless init is shutting down (§8).
     ///
-    /// No exception is carved out here: the reload **cycle** that stops the
-    /// scheduler on purpose is `MB.23.5.2.2`'s, and until it lands every
-    /// component exit — the scheduler's included — is fatal. A reload of any
-    /// kind must not turn a later genuine `scheduler-died` into a wedged boot.
+    /// The one exception is the scheduler a reload **cycle** stopped on purpose
+    /// (§4.6 step 5): while `reloading` is set its exit is the expected stop,
+    /// logged at `info` with no `shutdown` event, and the cycle then re-execs
+    /// this image. The flag is cleared in the same wakeup that execs, and a
+    /// replacement image starts with it clear, so a **later** scheduler death —
+    /// including one in the new image — is fatal again.
     fn component_exit(&mut self, component: Component, pid: Pid, status: ExitStatus) {
+        let expected = self.reloading && component == Component::Scheduler;
         let event = Event::now(
             Component::Init,
             EventKind::ProcessExited(ProcessExited::new(
@@ -1140,14 +1586,14 @@ impl<'a> Supervisor<'a> {
                 exit_kind(status),
             )),
         );
-        let event = event.with_level(if self.shutting_down {
+        let event = event.with_level(if self.shutting_down || expected {
             Level::Info
         } else {
             Level::Error
         });
         self.emitter.emit(&event);
 
-        if self.shutting_down {
+        if self.shutting_down || expected {
             return;
         }
         self.kill_all();
@@ -1279,7 +1725,7 @@ impl<'a> Supervisor<'a> {
         }
         match write_ctl(ctl, &bytes, Deadline::after(SEND_CTL_TIMEOUT)) {
             Ok(()) => {}
-            Err(err) if !ctl_failure_is_fatal(self.shutting_down, &err) => {}
+            Err(err) if !ctl_failure_is_fatal(self.shutting_down, self.reloading, &err) => {}
             Err(err) => self.ctl_fail(&err),
         }
     }
@@ -1338,6 +1784,109 @@ impl<'a> Supervisor<'a> {
     }
 }
 
+/// One `Blastfile` refusal as the editor sentence: `<path>:<line>:<col>: …`.
+///
+/// The cycle reports the **first** problem only: one event, one sentence, and
+/// the previous topology keeps serving (§4.6 step 1). A refusal with no
+/// position (a structural read error) still carries the path.
+#[cfg(feature = "python")]
+fn manifest_sentence(
+    path: &std::path::Path,
+    error: Option<&blastit_manifest::ManifestError>,
+) -> String {
+    match error {
+        Some(error) => format!("{}: {error}", path.display()),
+        None => format!("{}: refused", path.display()),
+    }
+}
+
+/// The adoption document of §4.6 step 6, UTF-8 JSON and bounded.
+///
+/// Unknown or missing key in the new image refuses the boot; every descriptor
+/// named here was cleared of `FD_CLOEXEC` by [`Supervisor::exec_cycle`]. It is
+/// written as one line so a bound of 4096 bytes is a fact about the document
+/// a test can check, not a hope.
+fn adoption_document(adoption: &Adoption) -> Result<Vec<u8>, String> {
+    let component = |fds: &ComponentFds| {
+        serde_json::json!({
+            "pid": fds.pid,
+            "stdout": fds.stdout,
+            "stderr": fds.stderr,
+            "events": fds.events,
+        })
+    };
+    let mut document = serde_json::json!({
+        "version": 1,
+        "http": component(&adoption.http),
+        "chan": adoption.chan.as_raw_fd(),
+    });
+    if let Some(dbproxy) = &adoption.dbproxy {
+        document["dbproxy"] = component(dbproxy);
+    }
+    if let Some((obs, ctl)) = adoption.learn {
+        document["learn"] = match ctl {
+            Some(ctl) => serde_json::json!({ "obs": obs, "ctl": ctl }),
+            None => serde_json::json!({ "obs": obs }),
+        };
+    }
+    if let Some(policy) = &adoption.policy {
+        document["policy"] = serde_json::json!(policy.as_raw_fd());
+    }
+    serde_json::to_vec(&document).map_err(|err| format!("reload: the adoption document: {err}"))
+}
+
+/// The one sentence a cycle owes when it is abandoned (§4.6 step 4).
+///
+/// It names the route(s) that would not drain, so the operator knows what to
+/// look at, and it says the reload did not happen — never a silent drop.
+fn abandoned_cycle_warning(wedged: &[String]) -> String {
+    let names = match wedged {
+        [] => "a view".to_string(),
+        routes => routes
+            .iter()
+            .map(|route| format!("\"{route}\""))
+            .collect::<Vec<_>>()
+            .join(", "),
+    };
+    format!(
+        "live reload: route {names} kept a view alive for {}s; the reload was abandoned, \
+         the previous topology keeps serving — save again to retry",
+        CYCLE_GRACE.as_secs()
+    )
+}
+
+/// The debug-only rendezvous between "the scheduler is stopped" and the
+/// `execve` (§4.6 step 5, `T31`).
+///
+/// `BLASTIT_TEST_RELOAD_PAUSE` names a path; the supervisor creates
+/// `<path>.ready` and waits (bounded) for `<path>.go`, so a test can save a
+/// tracked file precisely in the no-watcher window. Compiled out of a release
+/// build — an environment variable that holds a boot open before it re-execs is
+/// a denial-of-service surface in a shipped image, the same reason
+/// `BLASTIT_TEST_SWAP_POINT` is debug-only.
+#[cfg(debug_assertions)]
+fn reload_pause() {
+    use std::ffi::OsString;
+    let Some(path) = std::env::var_os("BLASTIT_TEST_RELOAD_PAUSE") else {
+        return;
+    };
+    let append = |suffix: &str| {
+        let mut name = OsString::from(&path);
+        name.push(suffix);
+        std::path::PathBuf::from(name)
+    };
+    let ready = append(".ready");
+    let go = append(".go");
+    let _ = std::fs::write(&ready, b"ready\n");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if go.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Boots the one dev-only live-reload watcher (`ADR-0014`, design §4.1).
 ///
 /// Called by stage 1 **before** the application's first import, so the
@@ -1347,7 +1896,7 @@ impl<'a> Supervisor<'a> {
 /// reload off never call it.
 #[cfg(feature = "python")]
 #[must_use]
-pub fn boot_reload(cfg: &Config, emitter: &Emitter) -> Option<Reload> {
+pub fn boot_reload(cfg: &Config, emitter: &Emitter, fault: Option<&str>) -> Option<Reload> {
     use std::os::unix::ffi::OsStringExt;
 
     // The union is absolute-only (§4.4): the app root comes from the `dev` boot
@@ -1361,6 +1910,22 @@ pub fn boot_reload(cfg: &Config, emitter: &Emitter) -> Option<Reload> {
     let filesystem = blastit_sys::fanotify::filesystem_type(&root)
         .unwrap_or("unknown")
         .to_string();
+    // `MB.23.5.2.2`'s debug-only fault seam: `BLASTIT_TEST_RELOAD_FAULT=open`
+    // makes the boot take the ladder's `EPERM` row, so a critical test can
+    // witness "one `dev.reload.unavailable`, then serve" against real
+    // processes. Stage 0 read the variable before the environment was stripped
+    // and carried it in the configuration document; a release build has
+    // neither the name nor the member.
+    if fault == Some(FAULT_OPEN) {
+        reload_unavailable(
+            emitter,
+            &dev_reload::Unavailable {
+                errno: libc::EPERM,
+                filesystem,
+            },
+        );
+        return None;
+    }
     let (watcher, poll) = match dev_reload::open() {
         Ok(pair) => pair,
         Err(err) => {
@@ -1407,6 +1972,14 @@ pub fn open_preload_report(reload: &mut Reload) -> std::io::Result<blastit_view:
     );
     Ok(reporter)
 }
+
+/// The one fault the debug-only reload seam injects (§4.6 step 5, `T31`).
+#[cfg(all(debug_assertions, feature = "python"))]
+pub const FAULT_OPEN: &str = "open";
+
+/// The fault seam in a release build can never match: it has no name.
+#[cfg(all(not(debug_assertions), feature = "python"))]
+pub const FAULT_OPEN: &str = "\u{0}release-has-no-seam";
 
 /// The boot line: `reload: on (N directories)`, pretty output only (§4.7).
 ///
@@ -1603,8 +2176,8 @@ fn wait_for_room(fd: BorrowedFd<'_>, deadline: Deadline) -> Result<(), CtlWriteE
 ///   peer *is* a dead scheduler init must not pretend is alive, and a scheduler
 ///   that took nothing for [`SEND_CTL_TIMEOUT`] is treated as dead whenever it
 ///   happens: that budget is what keeps init from wedging with it (§8).
-fn ctl_failure_is_fatal(shutting_down: bool, error: &CtlWriteError) -> bool {
-    !(shutting_down && error.peer_gone())
+fn ctl_failure_is_fatal(shutting_down: bool, reloading: bool, error: &CtlWriteError) -> bool {
+    !((shutting_down || reloading) && error.peer_gone())
 }
 
 /// Whether `raw` errno says the scheduler's end of `ctl.chan` is gone.
@@ -1690,14 +2263,20 @@ mod tests {
         assert!(error.peer_gone(), "{error:?}");
 
         assert!(
-            !ctl_failure_is_fatal(true, &error),
+            !ctl_failure_is_fatal(true, false, &error),
             "a late ctl.chan write during the drain must be best effort, \
              or a clean SIGTERM exits 1 (finding F4)"
         );
         assert!(
-            ctl_failure_is_fatal(false, &error),
+            ctl_failure_is_fatal(false, false, &error),
             "the same write before shutdown is a dead scheduler init must not \
              pretend is alive (§8)"
+        );
+        assert!(
+            !ctl_failure_is_fatal(false, true, &error),
+            "a cycle stopping the scheduler on purpose: its `Broken pipe` is \
+             the expected end of that component, not a reason to die before \
+             the exec (§4.6 step 5)"
         );
     }
 
@@ -1709,14 +2288,16 @@ mod tests {
         // or not: that budget is what keeps init from wedging with it (§8).
         let wedged = CtlWriteError::Wedged("the scheduler stopped reading".to_string());
         assert!(!wedged.peer_gone());
-        assert!(ctl_failure_is_fatal(false, &wedged));
-        assert!(ctl_failure_is_fatal(true, &wedged));
+        assert!(ctl_failure_is_fatal(false, false, &wedged));
+        assert!(ctl_failure_is_fatal(true, false, &wedged));
+        assert!(ctl_failure_is_fatal(false, true, &wedged));
 
         // A write error that is not a gone peer is not swallowed either.
         let failed = CtlWriteError::Write(rustix::io::Errno::BADF);
         assert!(!failed.peer_gone());
-        assert!(ctl_failure_is_fatal(false, &failed));
-        assert!(ctl_failure_is_fatal(true, &failed));
+        assert!(ctl_failure_is_fatal(false, false, &failed));
+        assert!(ctl_failure_is_fatal(true, false, &failed));
+        assert!(ctl_failure_is_fatal(false, true, &failed));
     }
 
     /// The half of finding F4 that does not look like end-of-file: a scheduler
@@ -1857,5 +2438,235 @@ mod tests {
         );
         // Another route is unaffected: the bound is per route, not global.
         assert!(may_fork(&children, 1, ceiling));
+    }
+
+    /// The one writer and the one reader agree: what `adoption_document`
+    /// emits is a document `Adoption::read` adopts, bounded and complete.
+    #[test]
+    fn the_adoption_document_round_trips_through_the_reader() {
+        use std::io::Write as _;
+        use std::os::fd::IntoRawFd as _;
+
+        let mut keep = Vec::new();
+        let mut fresh = || {
+            let (read, write) = std::io::pipe().expect("a pipe");
+            keep.push(write);
+            read.into_raw_fd()
+        };
+        let (stdout, stderr, events, chan) = (fresh(), fresh(), fresh(), fresh());
+        let adoption = Adoption {
+            http: ComponentFds {
+                pid: 77,
+                stdout,
+                stderr,
+                events,
+            },
+            dbproxy: None,
+            // SAFETY: the pipe end this test created and keeps open.
+            chan: unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(chan) },
+            learn: None,
+            policy: None,
+        };
+        let document = adoption_document(&adoption).expect("the document serialises");
+        assert!(
+            document.len() <= 4096,
+            "the document is {} bytes, past the 4096-byte bound",
+            document.len()
+        );
+        let (read, mut write) = std::io::pipe().expect("a pipe");
+        write.write_all(&document).expect("the document is written");
+        drop(write);
+        let parsed =
+            crate::stage1::Adoption::read(read.into_raw_fd()).expect("the reader adopts it");
+        assert_eq!(parsed.http.pid, 77);
+        assert_eq!(parsed.http.stdout, stdout);
+        assert_eq!(parsed.http.stderr, stderr);
+        assert_eq!(parsed.http.events, events);
+        assert_eq!(parsed.chan, chan);
+        assert!(parsed.dbproxy.is_none());
+    }
+
+    /// A cycle that could not drain abandons: one sentence naming the route,
+    /// no signal to anybody. The branch itself never calls `kill_all` — that is
+    /// the defect this pins (§4.6 step 4): `http` and dbproxy are siblings of
+    /// the wedged view and their exits are fatal.
+    #[test]
+    fn an_abandoned_cycle_names_the_route_and_never_asks_for_a_kill() {
+        let message = abandoned_cycle_warning(&["cart".to_string(), "products".to_string()]);
+        assert!(message.contains("\"cart\""), "{message}");
+        assert!(message.contains("\"products\""), "{message}");
+        assert!(message.contains("abandoned"), "{message}");
+        assert!(
+            !message.to_ascii_lowercase().contains("kill"),
+            "the sentence must not describe a kill: {message}"
+        );
+        assert!(message.len() <= 2048, "one line, {} bytes", message.len());
+        let generic = abandoned_cycle_warning(&[]);
+        assert!(generic.contains("a view"), "{generic}");
+    }
+
+    /// A view that never drains must not kill the tree: the cycle is abandoned,
+    /// the gate is cleared, one warning names the route, and nothing is
+    /// signalled — `http`, the scheduler and the wedged view all stay alive.
+    ///
+    /// This is the second half of "the gate is cleared when the replacement
+    /// completes **or is abandoned**" (the first is the exec). Every part is
+    /// observed on real state: the three children are real `sleep` processes, so
+    /// a restored `kill_all()` kills them and `try_wait` says so, and leaving
+    /// `reloading` set fails the assertion just below.
+    #[cfg(feature = "python")]
+    #[test]
+    fn a_cycle_whose_views_never_drain_is_abandoned_without_a_signal() {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+
+        /// Puts the thread's signal mask back even if the test panics.
+        struct RestoreMask(SignalMask);
+        impl Drop for RestoreMask {
+            fn drop(&mut self) {
+                let _ = blastit_sys::restore_signal_mask_in_child(self.0);
+            }
+        }
+
+        fn spawn_sleep() -> std::process::Child {
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("a child to watch")
+        }
+
+        fn component_pipes() -> ComponentPipes {
+            let (events, _ev) = pipe().expect("a pipe");
+            let (stdout, _out) = pipe().expect("a pipe");
+            let (stderr, _err) = pipe().expect("a pipe");
+            ComponentPipes {
+                events,
+                stdout,
+                stderr,
+            }
+        }
+
+        // A signalfd is part of a real `Parts`; it replaces the thread's mask,
+        // so the guard puts it back on the way out (even on a panic).
+        let signals = SignalFd::new(&[Signal::CHILD, Signal::TERM, Signal::INT, Signal::HUP])
+            .expect("signalfd");
+        let mask = signals.previous_mask();
+        let _restore = RestoreMask(mask);
+
+        let mut wedged = spawn_sleep();
+        let mut http = spawn_sleep();
+        let mut scheduler = spawn_sleep();
+
+        let mut components: BTreeMap<i32, (Component, ComponentPipes)> = BTreeMap::new();
+        components.insert(
+            i32::try_from(http.id()).expect("a pid"),
+            (Component::Http, component_pipes()),
+        );
+        components.insert(
+            i32::try_from(scheduler.id()).expect("a pid"),
+            (Component::Scheduler, component_pipes()),
+        );
+
+        let (ctl, _peer) = {
+            let (a, b) = UnixStream::pair().expect("a socketpair");
+            (OwnedFd::from(a), OwnedFd::from(b))
+        };
+        Python::initialize();
+        let app = Python::attach(|py| py.None());
+
+        let (read, write) = std::io::pipe().expect("a pipe");
+        let emitter = Emitter::new(
+            write.as_raw_fd(),
+            crate::config::LogFormat::Json,
+            Level::Info,
+            false,
+        );
+        let mut supervisor = Supervisor::new(
+            Parts {
+                cfg: Config::default(),
+                limits: Limits::new(64 * 1024).expect("frame limits"),
+                routes: vec![RouteInfo::new("cart", false, 0)],
+                #[cfg(feature = "php")]
+                php: Vec::new(),
+                egress: vec![false],
+                app,
+                ctl,
+                signals,
+                mask,
+                components,
+                dev: None,
+                learn: None,
+                reload: None,
+                reload_source: None,
+                chan: None,
+                policy: None,
+                learn_fds: None,
+            },
+            &emitter,
+        );
+        assert_eq!(supervisor.components.len(), 2, "http and the scheduler");
+        supervisor.children.insert(
+            i32::try_from(wedged.id()).expect("a pid"),
+            ViewChild {
+                route: 0,
+                uid: 0,
+                source: None,
+            },
+        );
+        supervisor.cycle = Some(Cycle {
+            stage: CycleStage::Draining,
+            deadline: Deadline::after(Duration::ZERO),
+        });
+        supervisor.reloading = true;
+
+        supervisor.progress_cycle();
+
+        assert!(
+            supervisor.cycle.is_none(),
+            "an abandoned cycle leaves no cycle in flight"
+        );
+        assert!(
+            !supervisor.reloading,
+            "the gate is cleared when the cycle is abandoned, or every later \
+             `scheduler-died` is swallowed and views refuse forever"
+        );
+        assert_eq!(
+            supervisor.components.len(),
+            2,
+            "`http` and the scheduler are still supervised: the tree keeps serving"
+        );
+
+        // Nothing was signalled: the abandoned path never calls `kill_all`.
+        std::thread::sleep(Duration::from_millis(100));
+        for (name, child) in [
+            ("the wedged view", &mut wedged),
+            ("http", &mut http),
+            ("the scheduler", &mut scheduler),
+        ] {
+            assert!(
+                child.try_wait().expect("a readable status").is_none(),
+                "{name} was signalled by the abandoned cycle"
+            );
+        }
+
+        drop(supervisor);
+        let _ = &emitter;
+        // The emitter writes to a borrowed descriptor, so the pipe's write end
+        // is this test's to close before reading to end-of-file.
+        drop(write);
+        let mut text = String::new();
+        std::io::BufReader::new(read)
+            .read_to_string(&mut text)
+            .expect("the warning");
+        let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "exactly one warning: {text:?}");
+        assert!(lines[0].contains("cart"), "{text}");
+        assert!(lines[0].contains("abandoned"), "{text}");
+
+        for child in [&mut wedged, &mut http, &mut scheduler] {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }

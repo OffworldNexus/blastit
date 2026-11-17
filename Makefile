@@ -261,7 +261,7 @@ seam-check: ## Prove the test-only boot seam is in the debug build and not in a 
 		echo "cargo build -p blastit --locked                    # the debug binary to compare"; \
 		$(STANDALONE_ENV) $(CARGO) build -p blastit --locked; \
 	fi
-	scripts/check-no-test-seam.sh --present "$(CURDIR)/target/debug/blastit"
+	scripts/check-no-test-seam.sh --present-all "$(CURDIR)/target/debug/blastit"
 	@if [ -x "$(CURDIR)/target/release/blastit" ]; then \
 		scripts/check-no-test-seam.sh "$(CURDIR)/target/release/blastit"; \
 	else \
