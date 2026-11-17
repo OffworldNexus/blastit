@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use blastit_events::EventKind;
-use blastit_frame::{Ctl, Frame};
+use blastit_frame::{Ctl, DoneOutcome, Frame};
 use common::{Options, Script, World, body_of, head, route, status_of};
 use tokio::sync::Semaphore;
 
@@ -34,6 +34,21 @@ fn warnings(world: &World) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+/// How many scheduler turns a negative assertion lets pass before it reads the
+/// view logs (`critical_charge`'s `SETTLE` idiom, `MB.3.45`).
+const SETTLE: usize = 256;
+
+/// How many requests the workers of `route` have been given, from the fake
+/// views' own logs.
+fn dispatched(world: &World, route: usize) -> usize {
+    world
+        .log
+        .lock()
+        .expect("the log lock")
+        .request_ids(route)
+        .len()
 }
 
 /// R1: a route whose provider runs one request per process forks one process
@@ -338,6 +353,97 @@ async fn a_queued_request_survives_the_worker_it_queued_behind() {
             .all(|(_, reason)| reason == "max_requests"),
         "{:?}",
         log.retired_pids
+    );
+}
+
+/// `MB.26.8`: a worker that answered `DONE { Bailed }` retires by design, so the
+/// request that queued behind it must be served by a replacement.
+///
+/// `Bailed` is a contained `exit()`/`die()`/fatal: the handler never returned,
+/// the interpreter state is unusable, and the runtime retires the process after
+/// that request (`php.rs`). The process is still alive for the frames it wrote
+/// when the scheduler reads them, so the pump between `DONE` and the ordered
+/// close used to dispatch the queued head into it — and the close then answered
+/// that request `502`/`view_died` for a retirement it had only queued behind.
+#[tokio::test]
+async fn a_bailed_worker_is_never_given_the_request_that_queued_behind_it() {
+    tokio::time::pause();
+    let mut options = Options::new().cap_route(0, 1).pool_route(0, true).script(
+        0,
+        Script::AnswerStatus {
+            status: 200,
+            body: b"bail".to_vec(),
+            cost: None,
+            outcome: DoneOutcome::Bailed,
+            gate: None,
+        },
+    );
+    // One process and one slot: the second request has nowhere to go but the
+    // queue, and the replacement is exactly what has to be forked for it.
+    options.cfg.max_workers = 1;
+    let mut world = World::start(options);
+
+    world.http.send_request(1, head("GET", "/first"), b"").await;
+    world.until(|world| dispatched(world, 0) == 1).await;
+    let first = world.http.awaited_response(1).await;
+    assert_eq!(status_of(&first), 200, "the bailed answer: {first:?}");
+    assert_eq!(body_of(&first), b"bail");
+
+    // The view has answered and is retiring, and its channel is still open —
+    // the frames were just read. A request arriving now must wait for a
+    // replacement, not be handed to the process that already served and is
+    // going away.
+    world
+        .http
+        .send_request(2, head("GET", "/second"), b"")
+        .await;
+    for _ in 0..SETTLE {
+        tokio::task::yield_now().await;
+    }
+    let bailed_pid = world.log.lock().unwrap().pids[0].1;
+    assert_eq!(
+        dispatched(&world, 0),
+        1,
+        "the request queued behind the retirement was dispatched before the worker \
+         closed: {:?}",
+        world.log.lock().unwrap().request_ids_of(bailed_pid)
+    );
+
+    // The ordered close is what removes the retiring worker; the replacement
+    // serves the queue, at its own pid.
+    world.set_script(
+        0,
+        Script::Answer {
+            body: b"next".to_vec(),
+        },
+    );
+    world.stop_view(bailed_pid);
+    let second = world.http.awaited_response(2).await;
+    assert_eq!(
+        status_of(&second),
+        200,
+        "the queued request must be served by the replacement: {second:?}"
+    );
+    assert_eq!(body_of(&second), b"next");
+    assert_eq!(
+        world.log.lock().unwrap().pids.len(),
+        2,
+        "exactly one replacement was forked for the queue"
+    );
+    let events = world.requests();
+    assert_eq!(events.len(), 2, "both requests were answered: {events:?}");
+    assert!(
+        events
+            .iter()
+            .filter(|event| event.path() == "/second")
+            .all(|event| event.outcome() == blastit_events::Outcome::Ok),
+        "the queued request was served, not failed: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.outcome() != blastit_events::Outcome::ViewDied),
+        "no queued request was failed for a retirement it had only queued behind: {events:?}"
     );
 }
 

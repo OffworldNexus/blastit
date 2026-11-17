@@ -114,6 +114,14 @@
 //! The first two need no host PHP; the last two are real-pair legs and take the
 //! [`refused_without_a_host`] branch on a PHP-free host, like every other
 //! real-pair leg here.
+//!
+//! [`a_queued_request_is_never_handed_to_a_retiring_view`] (`MB.26.8`) is the
+//! concurrency half of the containment rule: eight concurrent requests at a
+//! one-slot route whose page `exit()`s after answering — so every worker retires
+//! by design after its own request — must all be a `200` carrying their own
+//! body, never the `502` with `"outcome":"view_died"` a queued request got when
+//! it was dispatched to the worker it had queued behind. Twenty batches make it
+//! a rate; it is a real-pair leg too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
@@ -2697,6 +2705,231 @@ fn a_blocking_script_is_charged_cpu_time_not_wall_time() {
         "blocked {BLOCK_MS} ms in usleep: status 200  cpu_ns={cpu_ns}  wall_ns={wall_ns}  \
          cpu/wall=1/{}  answered in {elapsed:?}",
         wall_ns / cpu_ns.max(1)
+    );
+}
+
+/// `MB.26.8`: how many requests one batch of the queued-retirement leg drives
+/// at the one-slot route.
+const QUEUED_CONCURRENCY: usize = 8;
+
+/// `MB.26.8`: how many identical batches that leg repeats, so "every queued
+/// request was served" is a rate and not one observation that could be luck.
+const QUEUED_BATCHES: usize = 20;
+
+/// `MB.26.8`: what every answer carries, followed by the request's own path.
+const QUEUED_MARKER: &str = "queued:/q/";
+
+/// `MB.26.8`'s front controller: it answers with the request's own `PATH_INFO`
+/// and then **bails out of its own request** with `exit()`.
+///
+/// A contained exit is `DONE { Bailed }`, and the runtime retires the process
+/// after that request (`php.rs`'s `should_recycle`): the process is still alive
+/// for the frames it wrote when the scheduler reads them, and gone a moment
+/// later. The answer is still the `200` the handler produced (`echo "…"; exit;`
+/// is a completed answer, `answered_a_bailout`), so the marker proves *which*
+/// request each worker served. The `usleep` parks the worker for ~20 ms, so the
+/// seven requests behind the in-flight one really are queued when it bails.
+const QUEUED_PHP: &str = r#"<?php
+usleep(20000);
+header('Content-Type: text/plain');
+echo "queued:" . ($_SERVER['PATH_INFO'] ?? '/');
+exit(0);
+"#;
+
+/// `MB.26.8`: a queued request is never handed to a worker that is retiring.
+///
+/// The measured failure (`MB.21.7`): eight concurrent `GET`s at one PHP view
+/// returned **1 × `200` and 7 × `502`**, each `502` carrying
+/// `{"outcome":"view_died","queued_ms":…,"status":502}` — requests dispatched to
+/// a worker that had answered and was already going away. What makes the worker
+/// go away is the app itself: a contained `exit()` retires the process after
+/// that request, one `ctl.chan` report before its ordered `view.chan` close.
+///
+/// `BLASTIT_MAX_WORKERS=1` and no `BLASTIT_VIEW_MAX_REQUESTS` (its default `0`,
+/// so nothing is `stopping` and no cap masks the interleaving): one request in
+/// flight, seven in the admission queue, and the worker that frees the slot is
+/// retiring. The scheduler must grow a replacement for the queue and never hand
+/// it the process that has already answered. Twenty batches are 160 requests;
+/// one `502`, or one answer carrying another request's marker, fails the leg.
+#[test]
+fn a_queued_request_is_never_handed_to_a_retiring_view() {
+    let _root = StubRootGuard::start();
+    let Some(host) = host_php() else {
+        refused_without_a_host("queued behind a retiring view", "queued-retiring");
+        return;
+    };
+    let scratch = Scratch::new("queued-retiring", PHP_MANIFEST);
+    scratch.write(ENTRY, QUEUED_PHP);
+
+    let mut boot = Boot::start(
+        &scratch.dir,
+        &[
+            ("BLASTIT_LIBPHP", &host.libphp.to_string_lossy()),
+            (
+                "BLASTIT_PHP_SHIM_DIR",
+                &host
+                    .shim
+                    .parent()
+                    .expect("a shim directory")
+                    .to_string_lossy(),
+            ),
+            // One process, one request thread: the queued requests can only
+            // ever be served by a worker forked after the one they queued
+            // behind has gone.
+            ("BLASTIT_MAX_WORKERS", "1"),
+        ],
+    );
+    assert!(
+        boot.await_boot().is_none(),
+        "this host has {} and {}, so the route must be served: {}",
+        host.libphp.display(),
+        host.shim.display(),
+        boot.stderr_text()
+    );
+
+    let mut statuses: BTreeMap<u16, usize> = BTreeMap::new();
+    // The first answer that was not a `200`, kept so the summary can name the
+    // `request` event that told the story.
+    let mut failed: Option<(usize, usize, u16, String)> = None;
+    for batch in 0..QUEUED_BATCHES {
+        // One barrier, so the eight requests are in flight together: the first
+        // is dispatched and the other seven are queued behind it before it can
+        // answer.
+        let barrier = &std::sync::Barrier::new(QUEUED_CONCURRENCY);
+        let boot = &boot;
+        let answers: Vec<(usize, String)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..QUEUED_CONCURRENCY)
+                .map(|i| {
+                    scope.spawn(move || {
+                        barrier.wait();
+                        (i, boot.get(&format!("/q/{i}")))
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("a request thread"))
+                .collect()
+        });
+        for (i, answer) in answers {
+            let status = answer
+                .split_whitespace()
+                .nth(1)
+                .and_then(|status| status.parse::<u16>().ok())
+                .unwrap_or_else(|| {
+                    panic!("batch {batch}: request {i} has no status line: {answer}")
+                });
+            *statuses.entry(status).or_default() += 1;
+            // `view_died` is not a status the scheduler happens to pick: it is
+            // the word it writes when it believes a worker died under the
+            // request, and answering it for a request it *chose* to queue is a
+            // misreport. No answer may carry it, whatever its status line says.
+            assert!(
+                !answer.contains("view_died") && !answer.contains("outcome"),
+                "batch {batch}: request {i} was failed instead of served: {answer}"
+            );
+            if status != 200 {
+                if failed.is_none() {
+                    failed = Some((batch, i, status, answer));
+                }
+                continue;
+            }
+            let marker = format!("{QUEUED_MARKER}{i}");
+            assert_eq!(
+                answer.matches(QUEUED_MARKER).count(),
+                1,
+                "batch {batch}: request {i} must carry exactly its own marker {marker:?}: {answer}"
+            );
+            assert!(
+                answer.contains(&marker),
+                "batch {batch}: request {i} was answered with another request's body \
+                 ({marker:?} missing): {answer}"
+            );
+        }
+    }
+
+    let total = QUEUED_BATCHES * QUEUED_CONCURRENCY;
+    // The `request` event is where the failure's own words are: a `502` from
+    // the scheduler carries `"outcome":"view_died"`, which is a misreport for a
+    // request that was only ever queued. The counts come first — "1 × 200 and
+    // 7 × 502" is the same sentence as the totals — and the object and body are
+    // read with them.
+    let summary = failed
+        .as_ref()
+        .map_or_else(String::new, |(batch, i, status, answer)| {
+            let object = boot
+                .events()
+                .into_iter()
+                .find(|event| event["event"] == "request" && event["path"] == format!("/q/{i}"))
+                .map_or_else(
+                    || "<no request event>".to_string(),
+                    |event| event.to_string(),
+                );
+            format!(
+                "\nbatch {batch}: request {i} was handed to the worker it queued behind instead \
+             of being served by a replacement (status {status}): {object}\n{answer}"
+            )
+        });
+    assert_eq!(
+        statuses.get(&200),
+        Some(&total),
+        "every one of the {total} queued requests must be a 200 with its own body; the \
+         responses said {statuses:?}{summary}"
+    );
+
+    // The outcome the failing run carried: 160 `request` events, every one
+    // `ok`. The events are read after the last byte, so a short wait absorbs
+    // the one pump between `emit_request` and the reader task draining stdout.
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    let requests: Vec<serde_json::Value> = loop {
+        let requests: Vec<serde_json::Value> = boot
+            .events()
+            .into_iter()
+            .filter(|event| {
+                event["event"] == "request"
+                    && event["path"]
+                        .as_str()
+                        .is_some_and(|path| path.starts_with("/q/"))
+            })
+            .collect();
+        if requests.len() >= total || Instant::now() > deadline {
+            break requests;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(
+        requests.len(),
+        total,
+        "every one of the {total} requests must have a `request` event: {}",
+        boot.stdout_text()
+    );
+    let died: Vec<&serde_json::Value> = requests
+        .iter()
+        .filter(|event| event["status"] != 200 || event["outcome"] != "ok")
+        .collect();
+    assert!(
+        died.is_empty(),
+        "a queued request that was served must be reported as a 200 with outcome `ok`, \
+         and these were not: {died:?}"
+    );
+
+    // One request per worker, so eight answers per batch cannot come from the
+    // same process: the retirement the pool was grown over is real.
+    let spawned = boot
+        .events()
+        .into_iter()
+        .filter(|event| event["event"] == "process.spawned" && event["route"] == ROUTE)
+        .count();
+    assert!(
+        spawned >= total,
+        "a route that retires a worker after one request needs one worker per request: \
+         {spawned} spawned processes for {total} requests: {}",
+        boot.stdout_text()
+    );
+    boot.stop();
+    println!(
+        "queued behind retiring workers: {QUEUED_BATCHES} batches × {QUEUED_CONCURRENCY} = \
+         {total} requests, statuses {statuses:?}, {spawned} workers spawned, every outcome ok"
     );
 }
 

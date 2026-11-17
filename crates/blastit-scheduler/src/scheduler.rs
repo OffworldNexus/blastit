@@ -69,6 +69,18 @@
 //!   served it — a real instance did that thousands of times a second, and
 //!   answered every request `503`. With no evictable view the request keeps
 //!   waiting for a worker slot, bounded by `BLASTIT_QUEUE_TIMEOUT` as usual.
+//! * A worker that answers `DONE { Bailed }` retires by design — its handler
+//!   never returned, so the runtime retires the process after that request
+//!   ([`View::retiring`]). Nothing new is dispatched to it: the pump between
+//!   that frame and the ordered close grows a replacement for the queue, so a
+//!   request queued behind a `DONE { Bailed }` retirement is served, never
+//!   answered `502`/`view_died` (`MB.26.8`). The promise is only that wide: the
+//!   runtime also retires after answering a `DONE { Errored }` and after an
+//!   `Aborted` a client disconnect forced, and neither is marked — the
+//!   scheduler cannot tell them from a request it had already answered itself
+//!   ([`Scheduler::view_done`]). Those two shapes are covered only by the
+//!   bounded [`Scheduler::expire_exited_views`] path, one `request_timeout`
+//!   after the retirement, not at the next dispatch.
 //! * Spawning is also refused while aggregate usage is above
 //!   `BLASTIT_MEM_HIGH_WATERMARK` unless an evictable view can be retired
 //!   first, so memory pressure never becomes retire-then-respawn thrash. A view
@@ -302,6 +314,21 @@ struct View {
     /// failed. Nothing new is dispatched to an exited view, and
     /// [`Scheduler::expire_exited_views`] bounds the wait.
     exited: Option<Instant>,
+    /// When the worker answered a request the scheduler still tracked with
+    /// `DONE { Bailed }`, and the ordered `view.chan` has not closed yet
+    /// (`MB.26.8`).
+    ///
+    /// `Bailed` is the handler never returning — a contained `exit()`/`die()`/
+    /// fatal — and the runtime retires the process after it (the view's
+    /// `WorkerRuntime::recycle`, `crates/blastit-view/src/php.rs`). So the
+    /// worker has just said it cannot serve another request, one `ctl.chan`
+    /// report before [`View::exited`] arrives: without this, the pump between
+    /// `DONE` and the close dispatches the queued head into a process that has
+    /// already answered and is going away, and the close then bills that request
+    /// `view_died`. Nothing new is dispatched to a retiring view; the close (or
+    /// [`Scheduler::expire_exited_views`]) removes it and the route grows a
+    /// replacement for the queue.
+    retiring: Option<Instant>,
     /// A reload arrived while this worker was busy: nothing new reaches it
     /// (`View::admits`), and [`Scheduler::retire_finished_views`] retires it
     /// with this reason as soon as its last request is `DONE` (§4.6).
@@ -316,8 +343,9 @@ impl View {
     /// Whether this worker may take a request now.
     ///
     /// Ready, below its route's per-process ceiling, not stopping, not stale
-    /// (a reload invalidated it), not exited, and with its channel open. It
-    /// borrows nothing from the [`Scheduler`] but the cap, so the selection in
+    /// (a reload invalidated it), not on its way out (`exited`, or `retiring`
+    /// after a `DONE { Bailed }`), and with its channel open. It borrows
+    /// nothing from the [`Scheduler`] but the cap, so the selection in
     /// [`Scheduler::reserve`] can filter over the pool and take one entry
     /// mutably afterwards.
     fn admits(&self, per_process_cap: u32) -> bool {
@@ -325,8 +353,21 @@ impl View {
             && !self.stopping
             && self.stale.is_none()
             && self.exited.is_none()
+            && self.retiring.is_none()
             && self.inflight < per_process_cap
             && self.out.as_ref().is_some_and(Outbound::is_open)
+    }
+
+    /// When the worker became unable to serve, whichever report came first.
+    ///
+    /// Two signals say it is going away — init's `Ctl::Exited` and the
+    /// worker's own `DONE { Bailed }` — on two different channels, so the
+    /// earlier one is what [`Scheduler::expire_exited_views`] bounds.
+    fn leaving_at(&self) -> Option<Instant> {
+        match (self.exited, self.retiring) {
+            (Some(exited), Some(retiring)) => Some(exited.min(retiring)),
+            (exited, retiring) => exited.or(retiring),
+        }
     }
 
     /// The next free request id for this view.
@@ -1055,16 +1096,17 @@ impl Scheduler {
                 take(deadline);
             }
         }
-        // A view init reported gone whose `view.chan` has not closed yet is
-        // failed when this elapses (`MB.3.45`).
+        // A view on its way out — init reported it gone (`MB.3.45`) or it
+        // answered `DONE { Bailed }` (`MB.26.8`) — whose `view.chan` has not
+        // closed yet is failed when this elapses.
         for pool in self.pools.values() {
             if let Some((_, deadline)) = pool.spawning {
                 // A `SPAWN` nobody answers is freed when this elapses (§4.7).
                 take(deadline);
             }
             for view in pool.views.values() {
-                if let Some(exited) = view.exited {
-                    take(exited + self.cfg.request_timeout);
+                if let Some(leaving) = view.leaving_at() {
+                    take(leaving + self.cfg.request_timeout);
                 }
             }
         }
@@ -3438,7 +3480,7 @@ impl Scheduler {
         self.pools
             .values()
             .flat_map(|pool| pool.views.values())
-            .filter(|view| view.ready && view.inflight == 0)
+            .filter(|view| view.ready && view.inflight == 0 && view.leaving_at().is_none())
             .min_by_key(|view| view.last_used)
             .map(|view| view.key)
     }
@@ -3797,6 +3839,10 @@ impl Scheduler {
                 view.key.route != route
                     && view.ready
                     && view.inflight == 0
+                    // A worker on its way out frees itself; killing it would
+                    // only report an eviction for a process that had already
+                    // answered its last request (`MB.26.8`).
+                    && view.leaving_at().is_none()
                     && !self.route_waiting(view.key.route)
             })
             .min_by_key(|view| view.last_used)
@@ -4009,6 +4055,7 @@ impl Scheduler {
                 last_used: 0,
                 out: Some(out),
                 exited: None,
+                retiring: None,
                 stale: None,
                 spawned_epoch: sent_epoch,
             },
@@ -4102,12 +4149,31 @@ impl Scheduler {
         }
     }
 
-    /// Fails the requests of a view init reported gone whose `view.chan` never
-    /// closed, `request_timeout` after the report (`MB.3.45`).
+    /// Marks a worker that answered `DONE { Bailed }` as retiring (`MB.26.8`).
+    ///
+    /// The handler never returned, so the runtime retires the process after
+    /// this request — the view says so one `ctl.chan` report before init's
+    /// `Ctl::Exited` can. Until the ordered `view.chan` closes, the process is
+    /// still alive and the frames it wrote are still being read, so this is the
+    /// same window [`Scheduler::view_exited`] handles from the other channel:
+    /// nothing is failed here. What changes is the next dispatch — a queued
+    /// request must grow a replacement, never be handed to a worker that has
+    /// already answered and is going away.
+    fn view_retiring(&mut self, key: ViewKey) {
+        if let Some(view) = self.view_mut(key)
+            && view.retiring.is_none()
+        {
+            view.retiring = Some(Instant::now());
+        }
+    }
+
+    /// Fails the requests of a view on its way out whose `view.chan` never
+    /// closed, `request_timeout` after the report (`MB.3.45`, `MB.26.8`).
     ///
     /// The ordered close is what normally decides; this is the bound that keeps
-    /// a lost descriptor from turning a dead view into a request that waits
-    /// forever. It is only ever reached when no `ViewIn::Closed` came.
+    /// a lost descriptor from turning a dead (or a retiring) view into a request
+    /// that waits forever. It is only ever reached when no `ViewIn::Closed`
+    /// came.
     fn expire_exited_views(&mut self) {
         let now = Instant::now();
         let overdue: Vec<ViewKey> = self
@@ -4115,8 +4181,8 @@ impl Scheduler {
             .values()
             .flat_map(|pool| pool.views.values())
             .filter(|view| {
-                view.exited
-                    .is_some_and(|exited| now >= exited + self.cfg.request_timeout)
+                view.leaving_at()
+                    .is_some_and(|leaving| now >= leaving + self.cfg.request_timeout)
             })
             .map(|view| view.key)
             .collect();
@@ -4623,21 +4689,56 @@ impl Scheduler {
         id: u32,
         outcome: DoneOutcome,
     ) -> Result<(), SchedulerError> {
+        // A `DONE { Bailed }` the worker sends to conclude its **own** request
+        // retires it: the handler never returned, so the runtime retires the
+        // process after that request, and the pump between this frame and the
+        // close must grow a replacement for the queue instead of dispatching
+        // into it (`MB.26.8`).
+        //
+        // A `DONE { Bailed }` for a request the scheduler already answered
+        // itself is `LateDone`'s shape (`MB.3.45`): its slot was freed by that
+        // answer, and the worker's fate is the ordered close's business, so the
+        // route still dispatches to it. Two things narrow the mark to the first
+        // shape, and neither is a policy this frame could widen:
+        //
+        // * the early return just below — no dispatch entry, no mark — which is
+        //   what a `DONE` arriving after `release` hits (a repeated `DONE`, or a
+        //   request the scheduler answered and let go); and
+        // * the `!timed_out && !cancelled` guard below, which is what a cancel
+        //   or a timeout of a *dispatched* request hits: `release` has not run
+        //   yet (it runs at the bottom of this function, because the view keeps
+        //   its slot until its `DONE`), so the entry is still there and that
+        //   guard is the only thing that speaks.
+        //
+        // So a client disconnect during a handler that bails is **not**
+        // covered: the worker still retires (`crates/blastit-view/src/php.rs`
+        // sets `worker.bailed |= retire` and `recycle` acts on it), but its
+        // `DONE` is forced to `Aborted` for the cancelled stream (`if
+        // io.cancelled`), `cancelled` is set, and no mark is made. Such a
+        // worker is bounded only by `expire_exited_views`, one `request_timeout`
+        // after its channel closes, instead of at the next dispatch. The fix is
+        // for the transport to say it is retiring — an explicit `RETIRING`
+        // frame rather than an outcome the scheduler has to infer — which is a
+        // protocol change and belongs to its own node.
         let Some(&stream_id) = self.dispatch.get(&(key, id)) else {
             self.dropped += 1;
             return Ok(());
         };
-        let (complete, head_sent, view_answered, cancelled, status) =
+        let (complete, head_sent, view_answered, cancelled, timed_out, status) =
             match self.requests.get(&stream_id) {
                 Some(request) => (
                     request.complete,
                     request.head_sent,
                     request.view_answered,
                     request.cancelled,
+                    request.timed_out,
                     request.status,
                 ),
                 None => return Ok(()),
             };
+        if outcome == DoneOutcome::Bailed && !timed_out && !cancelled {
+            self.view_retiring(key);
+        }
         let bailed = outcome == DoneOutcome::Bailed;
         if !complete {
             match outcome {
