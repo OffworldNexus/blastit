@@ -2,7 +2,7 @@
 id: MB.23.11
 title: "Prove epic item 4 in a container: Docker's default seccomp gives one dev.reload.unavailable and 200s"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.23.6]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T20:59"
-updated: "2026-11-17T20:59"
+updated: "2026-11-17T21:09"
 ---
 
 # Goal

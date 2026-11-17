@@ -2,7 +2,7 @@
 id: MB.23
 title: "Reload what changed in blastit dev: unprivileged fanotify + exact preload/worker loaded-file tracking, all views reload together on any change, on by default with --no-reload"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.21.5.2]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:12"
-updated: "2026-11-17T00:47"
+updated: "2026-11-17T21:09"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.23.14
 title: "Repair MB.23.6's acceptance evidence commands (scripts/noop and the wheel .so path)"
 kind: task
-status: ready
+status: superseded
 owner: planner
 priority: 4
 depends_on: [MB.23.6]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T20:59"
-updated: "2026-11-17T20:59"
+updated: "2026-11-17T21:09"
 ---
 
 # Goal

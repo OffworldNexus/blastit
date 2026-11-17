@@ -3,7 +3,7 @@
 - generated: 2026-11-17T21:09
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP (embedded libphp), Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: proposed=18, ready=55, done=215, superseded=35
+- tasks: proposed=18, ready=46, done=215, superseded=44
 - open human requests: 0 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 12; expensive spent: $264.73 of $600.00 cap (44%)
 
@@ -20,15 +20,15 @@
 - execute: MB.6 Static files beside a Python/PHP app + the hashed-asset caching contract
 - execute: MB.11 Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 - execute: MB.13 Rewrite the deployments index page for scannability
-- execute: MB.23.7 Carry the out-of-step dev policy taint across the reload exec
-- execute: MB.23.8 Prove T31: a save during a reload cycle is not lost, and reconcile closes the gap
-- execute: MB.23.9 Prove T18's 200 half: a grant edit applies on save under the real PostgreSQL CI job
 - execute: MB.25.2 Emit the INFO runtime event: PHP version + php_ini_opened_path via the C SAPI, Python version + environment, static-only summary; retire the WARN line
 - execute: MB.3.5.2 Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]
 - execute: MB.3.15 Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
 - execute: MB.3.22 Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field
 - execute: MB.3.26 Subreaper + WNOWAIT, BLASTIT_ALLOW_EGRESS=1 as a security switch, R4 budget and the 4x3 residue matrix
 - execute: MB.3.68 The unsupported-minor sentence must not fire on a supported library at an unprobed name
+- execute: MB.3.69 Run the rewritten two-package witness, and correct the grepped-set list
+- execute: MB.8 e2e: Django collectstatic served by [static] beside the WSGI app
+- execute: MB.16 Deterministic ctl-write-to-gone-scheduler test (flake at supervise.rs:1045)
 
 ## Stuck / attention
 
@@ -36,18 +36,18 @@
 
 ## Recent journal
 
-- 2026-11-17T19:49 [MB.23.6] (lead) attempt 1/3 started
-- 2026-11-17T19:49 [MB.23.6] (lead) base 695e40a
-- 2026-11-17T20:59 [MB.23.7] (test-curator) created (task) Carry the out-of-step dev policy taint across the reload exec
-- 2026-11-17T20:59 [MB.23.8] (test-curator) created (task) Prove T31: a save during a reload cycle is not lost, and reconcile closes the gap
-- 2026-11-17T20:59 [MB.23.9] (test-curator) created (task) Prove T18's 200 half: a grant edit applies on save under the real PostgreSQL CI job
-- 2026-11-17T20:59 [MB.23.10] (test-curator) created (task) Close accepted rows T17, T20 and T23: production/check hold no hook, and keep-alive survives an all-views and a preload reload
-- 2026-11-17T20:59 [MB.23.11] (test-curator) created (task) Prove epic item 4 in a container: Docker's default seccomp gives one dev.reload.unavailable and 200s
-- 2026-11-17T20:59 [MB.23.12] (test-curator) created (task) Kill the dev_reload mutation survivors: create/delete trigger legs, pre_fork ordering, path boundary, EAGAIN, weak oracles
-- 2026-11-17T20:59 [MB.23.13] (test-curator) created (task) Triage the unread critical_dev_reload panic and remove the sleep-decided verdicts
-- 2026-11-17T20:59 [MB.23.14] (test-curator) created (task) Repair MB.23.6's acceptance evidence commands (scripts/noop and the wheel .so path)
-- 2026-11-17T20:59 [MB.23.15] (test-curator) created (task) Prove the reload transaction is idempotent and a payload-carrying 0x45 is refused by the streaming Decoder
-- 2026-11-17T21:02 [MB.23.6] (lead) audit written: 0 BLOCKER / 5 MAJOR / 13 MINOR; gates green, dropped behaviour absent, mutation 84.8% killed (123/180 caught, 22 missed, 35 unviable), guards on 
-- 2026-11-17T21:02 [MB.23.6] (lead) status active -> review
-- 2026-11-17T21:09 [MB.23.6] (lead) reviewer VERDICT PASS (3 MINOR accuracy fixes applied: test count 22->16, five->eight unprotected requirements, the docs-test PASS row as primary evidence). Com
-- 2026-11-17T21:09 [MB.23.6] (lead) status review -> done
+- 2026-11-17T21:09 [MB.23.9] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.10] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.10] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.11] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.11] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.12] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.12] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.13] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.13] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.14] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.14] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.15] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.15] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23] (lead) status ready -> done
+- 2026-11-17T21:09 [MB.23] (lead) closed with the audit's five MAJOR and thirteen MINOR gaps filed as MB.23.7..MB.23.15 and deferred to the next milestone (superseded, each with a log line). pla

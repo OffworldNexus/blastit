@@ -2,7 +2,7 @@
 id: MB.23.13
 title: "Triage the unread critical_dev_reload panic and remove the sleep-decided verdicts"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.23.6]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T20:59"
-updated: "2026-11-17T20:59"
+updated: "2026-11-17T21:09"
 ---
 
 # Goal

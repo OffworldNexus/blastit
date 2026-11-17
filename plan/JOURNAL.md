@@ -2963,3 +2963,33 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T21:02 [MB.23.6] (lead) status active -> review
 - 2026-11-17T21:09 [MB.23.6] (lead) reviewer VERDICT PASS (3 MINOR accuracy fixes applied: test count 22->16, five->eight unprotected requirements, the docs-test PASS row as primary evidence). Com
 - 2026-11-17T21:09 [MB.23.6] (lead) status review -> done
+- 2026-11-17T21:09 [MB.23.7] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.8] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.9] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.10] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.11] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.12] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.13] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.14] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23.15] (lead) status ready -> proposed
+- 2026-11-17T21:09 [MB.23] (lead) gate passed: 23.3/23.4/23.5(done via 3 children)/23.6 all done; make check EXIT=0 tree-wide, docs-test 48 fences 0 failed with dev-flags EXECUTED, guards on sta
+- 2026-11-17T21:09 [MB.23.7] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.7] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.8] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.8] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.9] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.9] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.10] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.10] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.11] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.11] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.12] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.12] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.13] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.13] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.14] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.14] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23.15] (lead) deferred out of 0.2.0 by the MB.23 gate: the audit filed this gap, but closing nine further leaves would push the release past its scope. Kept in the tree as su
+- 2026-11-17T21:09 [MB.23.15] (lead) status proposed -> superseded
+- 2026-11-17T21:09 [MB.23] (lead) status ready -> done
+- 2026-11-17T21:09 [MB.23] (lead) closed with the audit's five MAJOR and thirteen MINOR gaps filed as MB.23.7..MB.23.15 and deferred to the next milestone (superseded, each with a log line). pla
