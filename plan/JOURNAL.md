@@ -2408,3 +2408,42 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-16T23:04 [MB.21.5.10] (test-curator) created (task) Remove the uid-0 silent skip from critical_blastfile_fmt's write-failure case
 - 2026-11-16T23:07 [MB.21.5.8] (test-curator) body wording fixed so test_the_real_tree_carries_no_retired_php_vocabulary passes (the word the guard flags was used descriptively)
 - 2026-11-16T23:09 [MB.21.5.4] (lead) status active -> done
+- 2026-11-16T23:12 [MB.23] (planner) created (epic) Reload what changed in blastit dev: unprivileged fanotify + exact loaded-file tracking (Python & PHP), on by default with --no-reload
+- 2026-11-16T23:12 [MB.23.1] (planner) created (task) Write the live-reload DX docs first: local, dev --no-reload, log events, one troubleshooting row, dx + ai-ergonomics critics
+- 2026-11-16T23:12 [MB.23.2] (planner) created (task) Design the fanotify reload: watcher + clock seams, handle table, debounce, worker datagram, Ctl::Reload (ADR-0014) with security/implementability
+- 2026-11-16T23:12 [MB.23.3] (planner) created (task) Report each dev view's loaded files: Python sys.modules + open audit hook, PHP EG(included_files) via a dlsym sink, one bounded datagram codec
+- 2026-11-16T23:12 [MB.23.4] (planner) created (task) blastit-sys unprivileged fanotify watcher (x86_64/aarch64 x gnu/musl) with AT_HANDLE_FID handle table, critical event tests and the zero-inotify 
+- 2026-11-16T23:13 [MB.23.5] (planner) created (task) Wire reload into blastit dev: Ctl::Reload 0x45, supervisor fanotify loop, --no-reload, per-view surgical restart, Blastfile live re-parse, Python
+- 2026-11-16T23:13 [MB.23.6] (planner) created (task) Verify MB.23 live: runnable-docs --no-reload fence, zero-inotify guard on standalone + wheel, production strace, determinism and dev_reload mutat
+- 2026-11-16T23:13 [MB.23.3] (planner) edited fields
+- 2026-11-16T23:13 [MB.23.4] (planner) edited fields
+- 2026-11-16T23:19 [MB.23] (conductor) Owner/architecture simplification: DO NOT do selective single-route restarts — reload ALL view workers together (while keeping :8080 and proxies up) whenever an
+- 2026-11-16T23:20 [MB.23] (planner) edited fields
+- 2026-11-16T23:21 [MB.23.5] (planner) edited fields
+- 2026-11-16T23:21 [MB.23.4] (planner) edited fields
+- 2026-11-16T23:21 [MB.23.6] (planner) edited fields
+- 2026-11-16T23:22 [MB.23.1] (planner) edited fields
+- 2026-11-16T23:22 [MB.23.2] (planner) edited fields
+- 2026-11-16T23:22 [MB.23.3] (planner) edited fields
+- 2026-11-16T23:27 [MB.23.5] (conductor) Owner explicit requirement: test multi-file modification bursts (e.g. 12 tracked files modified back-to-back, like Save-All / git checkout / agent multi-file ed
+- 2026-11-17T00:47 [MB.20] (planner) edited fields
+- 2026-11-17T00:47 [MB.22] (planner) edited fields
+- 2026-11-17T00:47 [MB.22.1] (planner) edited fields
+- 2026-11-17T00:47 [MB.23] (planner) edited fields
+- 2026-11-17T00:47 [MB.23.1] (planner) edited fields
+- 2026-11-17T00:50 [MB.20] (lead) status ready -> active
+- 2026-11-17T00:50 [MB.20] (lead) attempt 1/3 started
+- 2026-11-17T00:50 [MB.20] (lead) base 6d2bd4129d6ce24b1bfc46d0da65c9b358deb953
+- 2026-11-17T01:13 [MB.21.5.11] (test-curator) created (task) Refuse a second bare word in a named-store grant (parser matrix accept-side hole)
+- 2026-11-17T01:13 [MB.21.5.12] (test-curator) created (task) Close the four message-only refusal-matrix survivors (lexer name_run, three parser guards)
+- 2026-11-17T01:23 [MB.24] (planner) created (epic) Parallel PHP workers: several view processes per route under the scheduler's max_workers (matching Python's on-demand threads)
+- 2026-11-17T01:26 [MB.24.1] (planner) created (task) Align the concurrency docs: a route serves as many requests as the budget allows (one or more view processes per route)
+- 2026-11-17T01:26 [MB.24.2] (planner) created (task) Design the per-route view pool: per_process_cap, spawn-on-demand, LRU and reload (ADR-0015)
+- 2026-11-17T01:26 [MB.24.3] (planner) created (task) Multi-instance per-route view pool in blastit-scheduler and (route, pid) supervision, with scheduler concurrency tests
+- 2026-11-17T01:27 [MB.24.4] (planner) created (task) Wire per_process_cap = 1 for entrypoint php and prove parallel routes end-to-end (protected critical_parallel_views)
+- 2026-11-17T01:28 [MB.25] (planner) created (epic) Clean runtime startup diagnostics: INFO runtime line (PHP version + php.ini, or Python version + virtualenv) instead of WARN manifest.warning
+- 2026-11-17T01:28 [MB.25.1] (planner) created (task) Document the INFO runtime event and the two dev lines (PHP version + php.ini, Python version + environment) with dx + ai-ergonomics critics
+- 2026-11-17T01:30 [MB.25.2] (planner) created (task) Emit the INFO runtime event: PHP version + php_ini_opened_path via the C SAPI, Python version + environment, static-only summary; retire the WARN
+- 2026-11-17T01:40 [MB.21.5.13] (test-curator) created (task) Close the printer and pattern-name survivors (four corpus cases, five mutants)
+- 2026-11-17T01:40 [MB.21.5.13] (test-curator) count in the title/acceptance corrected to six mutants (the paren row is three)
+- 2026-11-17T02:55 [MB.20] (lead) outline docs/design/frameworks-restructure.md written; goldfish critics on disk: dx VERDICT: PASS, ai-ergonomics VERDICT: PASS (both before any page prose). MIN
