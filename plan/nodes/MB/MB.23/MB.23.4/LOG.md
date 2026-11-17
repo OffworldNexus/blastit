@@ -43,3 +43,11 @@ edited fields
 ## 2026-11-17T11:16 [lead]
 
 status active -> ready
+
+## 2026-11-17T12:35 [lead]
+
+gate passed: both children done (95b0db4 codec+Python, c289f19 PHP sink); 23+8+15+1+2 legs; make check 175 targets ok with only the MB.23.5 fence; Cargo.toml/lock untouched. PHP 8.3/8.5 e2e deferred to the milestone gate.
+
+## 2026-11-17T12:35 [lead]
+
+status ready -> done

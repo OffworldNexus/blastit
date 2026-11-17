@@ -175,3 +175,23 @@ the PHP assertions belong in `critical_file_sink.rs`.
 3. **`os.open()` raises its own `open` event with the string path**, so an `os.open`ed data file
    is reported as well as `open()`; the critical test pins that (it is a feature, not a leak). A
    future reader of the codec should not "fix" the fd case by scoping it away.
+
+## Gate
+
+Both children are `done`: **MB.23.4.1** (the codec + Python reporter, commit `95b0db4`) and
+**MB.23.4.2** (the PHP sink, commit `c289f19`).
+
+| Command | Result |
+|---|---|
+| `cargo test -p blastit-view --locked loaded` | `23 passed` |
+| `cargo test -p blastit-php-sapi --locked` | `5 + 8 + 15 + 1 passed (2 ignored php_native)` |
+| `cargo test -p blastit --features python --test critical_loaded_files` | `2 passed` |
+| `make check` | `175 test targets ok, 0 FAILED`; sole failure the MB.23.5-owned `docs/reference/cli.md` fence 1 (`--no-reload`) |
+
+`git diff -- Cargo.toml Cargo.lock` is empty across the epic, and `critical_guard` is clean for
+both children. Mutation evidence is the children's reviewers — split-boot, the 32 KiB cap,
+the non-blocking send, the hook ban list, the snapshot call, the absolute filter and the source
+merge each turned a named test red and was restored byte-identical — so no separate epic audit
+was opened. The PHP 8.3/8.5 legs are structurally covered but unproven by execution on this host:
+the milestone gate must run `make php-sapi-e2e` on all three minors before MB.23.5 relies on the
+report.

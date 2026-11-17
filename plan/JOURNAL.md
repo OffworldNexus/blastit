@@ -2774,3 +2774,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T12:33 [MB.31.4] (planner) created (task) Hover and tree-sitter teach bare immutable and regex: regenerate parser.c, then re-pin the Zed grammar rev
 - 2026-11-17T12:35 [MB.23.4.2] (lead) polish: sink moved into a loader-owned Box before C sees its address (NoSink::NotInitialised/Absent/Refused replaces the conflating bool), memo cap now real, va
 - 2026-11-17T12:35 [MB.23.4.2] (lead) status review -> done
+- 2026-11-17T12:35 [MB.23.4] (lead) gate passed: both children done (95b0db4 codec+Python, c289f19 PHP sink); 23+8+15+1+2 legs; make check 175 targets ok with only the MB.23.5 fence; Cargo.toml/lo
+- 2026-11-17T12:35 [MB.23.4] (lead) status ready -> done

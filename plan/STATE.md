@@ -17,10 +17,10 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.23.4 Report the preload phase's and each dev view's loaded files: Python sys.modules + open audit hook, PHP EG(included_files) via a dlsym sink, one bounded datagram codec, no route map
 - execute: MB.6 Static files beside a Python/PHP app + the hashed-asset caching contract
 - execute: MB.11 Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 - execute: MB.13 Rewrite the deployments index page for scannability
+- execute: MB.23.5 Wire reload into blastit dev: Ctl::Reload 0x45 with no payload (all views retire together), supervisor fanotify loop, --no-reload, preload/Blastfile re-run with :8080 held open, Python+PHP live-reload critical tests
 - execute: MB.25.2 Emit the INFO runtime event: PHP version + php_ini_opened_path via the C SAPI, Python version + environment, static-only summary; retire the WARN line
 - execute: MB.3.5.2 Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]
 - execute: MB.3.15 Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
@@ -36,8 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-17T11:46 [MB.23.4.1] (lead) status active -> review
-- 2026-11-17T11:53 [MB.23.4.1] (lead) reviewer attempt 2 VERDICT PASS (mutation-checked: split-boot, 32 KiB cap, nonblocking, hook ban list). Two MINORs carried to MB.23.5 (its adopting leaf): a deb
 - 2026-11-17T11:53 [MB.23.4.1] (lead) status review -> done
 - 2026-11-17T11:53 [MB.23.4.2] (lead) status ready -> active
 - 2026-11-17T11:53 [MB.23.4.2] (lead) attempt 1/3 started
@@ -51,3 +49,5 @@
 - 2026-11-17T12:33 [MB.31.4] (planner) created (task) Hover and tree-sitter teach bare immutable and regex: regenerate parser.c, then re-pin the Zed grammar rev
 - 2026-11-17T12:35 [MB.23.4.2] (lead) polish: sink moved into a loader-owned Box before C sees its address (NoSink::NotInitialised/Absent/Refused replaces the conflating bool), memo cap now real, va
 - 2026-11-17T12:35 [MB.23.4.2] (lead) status review -> done
+- 2026-11-17T12:35 [MB.23.4] (lead) gate passed: both children done (95b0db4 codec+Python, c289f19 PHP sink); 23+8+15+1+2 legs; make check 175 targets ok with only the MB.23.5 fence; Cargo.toml/lo
+- 2026-11-17T12:35 [MB.23.4] (lead) status ready -> done
