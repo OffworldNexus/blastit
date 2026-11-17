@@ -90,6 +90,12 @@ pub struct ViewSpawn<'a> {
     pub dir: PathBuf,
     /// `true` in production (`setresuid` + `RLIMIT_NPROC`), `false` in `dev`.
     pub drop_privileges: bool,
+    /// The dev-only loaded-file report: this view's own datagram socket and the
+    /// source id its batches name (`ADR-0014` §2, design §4.4).
+    ///
+    /// `None` is every production view, `check`, a dev boot with reload off and
+    /// every PHP slot. A view with no report serves exactly as it did before.
+    pub loaded: Option<blastit_view::LoadedReport>,
 }
 
 /// Forks a view process for `spawn`, or returns the errno and leaves the
@@ -104,10 +110,17 @@ pub fn fork_view(py: Python<'_>, spawn: ViewSpawn<'_>) -> std::io::Result<Forked
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
 
+    // The report socket is one extra descriptor in the child's keep list: it is
+    // created per spawn, so a view's second boot can never reuse the first
+    // reporter (`loaded::Reporter` refuses a second boot on one stream).
+    let mut keep = vec![view_end.as_raw_fd()];
+    if let Some(report) = &spawn.loaded {
+        keep.push(report.socket.as_raw_fd());
+    }
     let child = ChildIo {
         stdout: Some(stdout_write),
         stderr: Some(stderr_write),
-        keep: vec![view_end.as_raw_fd()],
+        keep,
         limits: Rlimits {
             // `dev` shares one uid with every other process of the caller:
             // lowering `RLIMIT_NPROC` there would cap the developer's whole
@@ -151,7 +164,7 @@ pub fn fork_view(py: Python<'_>, spawn: ViewSpawn<'_>) -> std::io::Result<Forked
 /// panic — a poisoned lock, an index that should not be out of range — is
 /// turned into an exit code instead of an unwinding child that leaves a
 /// half-initialised interpreter behind. A view that panics exits `70`.
-fn child_main(py: Python<'_>, spawn: ViewSpawn<'_>, child: ChildIo, view_end: OwnedFd) -> ! {
+fn child_main(py: Python<'_>, mut spawn: ViewSpawn<'_>, child: ChildIo, view_end: OwnedFd) -> ! {
     // The child sequence, in the order `blastit_sys` documents: descriptors,
     // limits, umask, working directory, then privileges, then hardening, then
     // the seccomp filter (§4, §7.3) — which is the last thing to happen before
@@ -179,8 +192,12 @@ fn child_main(py: Python<'_>, spawn: ViewSpawn<'_>, child: ChildIo, view_end: Ow
     }
 
     let name = spawn.info.name.clone();
+    // The report socket travels into the view as a value, never through the
+    // environment (`S3`): stage 0 strips every `BLASTIT_*` variable, and this
+    // design introduces none.
+    let loaded = spawn.loaded.take();
     let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        serve_forever(py, &spawn, view_end)
+        serve_forever(py, &spawn, view_end, loaded)
     }));
     match started {
         // `serve_forever` never returns normally; this is unreachable in
@@ -203,8 +220,14 @@ fn child_main(py: Python<'_>, spawn: ViewSpawn<'_>, child: ChildIo, view_end: Ow
 ///
 /// This is the part `child_main` guards with `catch_unwind`; it is with the GIL
 /// held throughout, and the only call that touches the interpreter is
-/// [`blastit_view::serve`], which detaches.
-fn serve_forever(py: Python<'_>, spawn: &ViewSpawn<'_>, view_end: OwnedFd) {
+/// [`blastit_view::serve_reporting`], which detaches. `loaded` is this view's
+/// report socket: one `boot` batch before `READY`, then one delta per request.
+fn serve_forever(
+    py: Python<'_>,
+    spawn: &ViewSpawn<'_>,
+    view_end: OwnedFd,
+    loaded: Option<blastit_view::LoadedReport>,
+) {
     if let Err(err) = set_view_environment(py, &spawn.dir) {
         child_exit(&format!("view {}: HOME/TMPDIR: {err}", spawn.info.name), 1);
     }
@@ -223,7 +246,7 @@ fn serve_forever(py: Python<'_>, spawn: &ViewSpawn<'_>, view_end: OwnedFd) {
         frame_limits: spawn.limits,
         max_threads: Some(spawn.cfg.view_worker_cap()),
     };
-    match blastit_view::serve(py, chan, spawn.app.clone_ref(py), view_cfg) {
+    match blastit_view::serve_reporting(py, chan, spawn.app.clone_ref(py), view_cfg, loaded) {
         Ok(()) => child_exit("", 0),
         Err(err) => child_exit(&format!("view {}: {err}", spawn.info.name), 1),
     }

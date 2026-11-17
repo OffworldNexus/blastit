@@ -36,6 +36,8 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(feature = "python")]
+use blastit_events::ManifestWarning;
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
@@ -56,6 +58,8 @@ use pyo3::types::{PyBytes, PyDict};
 
 use crate::child::{ChildIo, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
+#[cfg(feature = "python")]
+use crate::dev_reload::{MarkOutcome, Unavailable};
 #[cfg(feature = "python")]
 use crate::immortal::{Decision, Outcome};
 use crate::logs::{Emitter, output_event};
@@ -104,6 +108,10 @@ pub struct Options {
     pub dev_obs_fd: Option<RawFd>,
     /// `--dev-ctl-fd`: this stage's end of the `--learn` attribution socket.
     pub dev_ctl_fd: Option<RawFd>,
+    /// `--dev-reload=on|off`: whether this boot constructs the live-reload
+    /// watcher. Stage 0 forwards the user's `--no-reload` as `off`; absent is
+    /// the default, `on`.
+    pub dev_reload: bool,
 }
 
 /// Everything a view needs of its scratch directory, in Python (§5.3).
@@ -598,6 +606,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         hosted: interpreter.is_hosted(),
         dev,
         learn,
+        dev_reload: options.dev_reload,
     };
     // Everything from here on needs an interpreter for a WSGI view, and the
     // forks above were the last thing that had to happen while init was
@@ -646,6 +655,9 @@ fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
             components: serving.components,
             dev: serving.dev,
             learn: serving.learn,
+            // A build with no interpreter forks no view and imports no app, so
+            // it has no report to watch (§4.4).
+            reload: None,
         },
         emitter,
     );
@@ -690,11 +702,75 @@ struct Serving {
     dev: Option<crate::dev_learn::Dev>,
     /// The `dev --learn` observation and attribution channels (`R29`).
     learn: Option<crate::dev_learn::Learn>,
+    /// Whether this `dev` boot wants live reload (`--dev-reload=on`, the
+    /// default). `false` under `--no-reload`: no watcher, no marks, no report
+    /// socket, no audit hook (§4.1, `R1`). Only a build with an interpreter
+    /// builds one.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    dev_reload: bool,
+}
+
+/// What the post-preload marking pass owes the boot line (§4.7, `T32`).
+///
+/// `reload: on` is a claim, and only a pass that actually marked may make it: a
+/// watcher that latched `ENOSPC`/the cap already emitted the ladder's one
+/// warning, and one that latched dead must print nothing at all.
+#[cfg(feature = "python")]
+#[derive(Debug, PartialEq, Eq)]
+enum BootLine {
+    /// `reload: on (N directories)`, with the marks the pass placed.
+    Announce(usize),
+    /// No line: the boot already owed its one warning.
+    Silent,
+    /// The ladder's one `dev.reload.unavailable`, then no line.
+    Unavailable(Unavailable),
+    /// A watcher that latched dead: the ladder's one warning, no line, and the
+    /// `Reload` is dropped (`reload = None`).
+    Stopped(Unavailable),
+}
+
+/// Turns one marking outcome into what the boot does about the boot line.
+#[cfg(feature = "python")]
+fn after_preload_marks(outcome: MarkOutcome, marking_stopped: bool, dirs: usize) -> BootLine {
+    match outcome {
+        MarkOutcome::Marked if !marking_stopped => BootLine::Announce(dirs),
+        MarkOutcome::Marked => BootLine::Silent,
+        MarkOutcome::Exhausted(why) => BootLine::Unavailable(why),
+        MarkOutcome::Dead(why) => BootLine::Stopped(why),
+    }
 }
 
 /// Loads the application, emits `ready`, and supervises. Never returns.
 #[cfg(feature = "python")]
 fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
+    // `MB.23.5`: the one live-reload watcher of this boot, created **before** the
+    // first import so the `preload` phase's modules and file opens are watched
+    // too (§4.1 boot order). A production boot, `check` and a `dev` boot with
+    // `--no-reload` never reach it: reload is a `dev`-only path, and "off" means
+    // no watcher group, no mark, no report socket and no audit hook at all —
+    // `--no-reload` is not a watcher that ignores events (§1, `R1`).
+    let mut reload = match serving.dev.is_some() && serving.dev_reload {
+        true => crate::supervise::boot_reload(&serving.config, emitter),
+        false => None,
+    };
+    // The `preload` phase reports on source `0xffff`; its paths are `pre_fork`,
+    // so a change to one takes the reload cycle (§4.4). This socket is also the
+    // **gate** for the loaded-file hook: no socket, no hook, no marks (`S3`).
+    let preload = match reload.as_mut() {
+        Some(reload) => match crate::supervise::open_preload_report(reload) {
+            Ok(reporter) => Some(reporter),
+            Err(err) => {
+                emitter.emit(&Event::now(
+                    Component::Init,
+                    EventKind::ManifestWarning(ManifestWarning::new(format!(
+                        "live reload: the preload report socket: {err}"
+                    ))),
+                ));
+                None
+            }
+        },
+        None => None,
+    };
     let app = load(
         py,
         &serving.config,
@@ -702,8 +778,36 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
         emitter,
         serving.memory,
         serving.hosted,
-        serving.dev.as_ref(),
+        Boot {
+            dev: serving.dev.as_ref(),
+            report: preload,
+        },
     );
+    // Boot order step 5: the parents the preload batch just added are marked,
+    // then the one boot line — pretty stdout, never an event (§4.7, §4.9). A
+    // marking pass that ran out of room (`ENOSPC`, or the marks cap) emits the
+    // ladder's one warning and prints no boot line, and a watcher that latched
+    // dead drops the reload entirely: neither may claim `reload: on`.
+    if let Some(active) = reload.as_mut() {
+        let outcome = active.sync_marks();
+        let stopped = active.marking_stopped();
+        let dirs = active.marked_dirs();
+        match after_preload_marks(outcome, stopped, dirs) {
+            // `reload: on` is a claim that marking succeeded: a policy that
+            // latched `ENOSPC`/the cap in `boot` already emitted its one
+            // warning, and printing the line over it would be the lie the
+            // ladder exists to prevent (§4.7, `T32`).
+            BootLine::Announce(dirs) => {
+                crate::supervise::announce_reload(serving.config.log_format, dirs);
+            }
+            BootLine::Silent => {}
+            BootLine::Unavailable(why) => crate::supervise::reload_unavailable(emitter, &why),
+            BootLine::Stopped(why) => {
+                crate::supervise::reload_stopped(emitter, &why);
+                reload = None;
+            }
+        }
+    }
     emit_ready(emitter, &serving.config, serving.declared_routes);
     let mut supervisor = Supervisor::new(
         Parts {
@@ -720,6 +824,7 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             components: serving.components,
             dev: serving.dev,
             learn: serving.learn,
+            reload,
         },
         emitter,
     );
@@ -994,6 +1099,19 @@ fn prepare_child(
     restore_signal_mask_in_child(mask).map_err(|err| format!("{name}: {err}"))
 }
 
+/// What a `dev` boot hands [`load`] beyond the configuration: the runtime root
+/// its failure paths clean up, and the `preload` phase's report socket.
+///
+/// The socket is the loaded-file hook's gate (§5 `S3`): a boot that has none —
+/// production, `check`, and a `dev` boot with reload off — installs no hook.
+#[cfg(feature = "python")]
+struct Boot<'a> {
+    /// The `blastit dev` runtime root, when this is a dev boot (`R20`).
+    dev: Option<&'a crate::dev_learn::Dev>,
+    /// The `preload` phase's report socket, when live reload is on (`ADR-0014`).
+    report: Option<blastit_view::Reporter>,
+}
+
 /// Imports and prepares the application, and returns the WSGI callable (§4).
 ///
 /// `memory` is the reading `run` took before the fork: it is the one that
@@ -1010,8 +1128,9 @@ fn load(
     emitter: &Emitter,
     memory: Option<mem_usage::Usage>,
     hosted: bool,
-    dev: Option<&crate::dev_learn::Dev>,
+    boot: Boot<'_>,
 ) -> Py<PyAny> {
+    let Boot { dev, report } = boot;
     // `R13`: an all-static site has no app to import — every answer comes from
     // the scheduler, so there is nothing to preload, nothing to warm up and no
     // heap a view would inherit. `None`, never a missing callable.
@@ -1055,16 +1174,18 @@ fn load(
     // the preloaded closure reaches the supervisor by inheritance, with no
     // second socket in this process (`ADR-0014` §2).
     //
-    // A production boot, `check` and `test` are `dev == None` and never install
-    // it. The `--no-reload` switch (`MB.23.5`) clears this gate too; until it
-    // exists, `blastit dev` is the enabled case.
+    // The gate is the **report socket's presence**, which is what a `dev` boot
+    // with reload off does not have (§5 `S3`): no socket, no hook, no mark, and
+    // a production boot, `check` and `test` have no socket either. There is no
+    // second `Config` field to keep in step with the flag.
     #[cfg(feature = "python")]
     let loaded = if dev.is_some() {
-        config
+        let root = config
             .cwd
             .as_deref()
             .map(|cwd| PathBuf::from(std::ffi::OsString::from_vec(cwd.to_vec())))
-            .and_then(|root| blastit_view::LoadedTracker::install(py, &root))
+            .filter(|_| report.is_some());
+        root.and_then(|root| blastit_view::LoadedTracker::install(py, &root))
     } else {
         None
     };
@@ -1107,9 +1228,19 @@ fn load(
     // The baseline scan: every module the boot imported is now in
     // `sys.modules`, so one cold harvest here means every view's first report
     // is warm and the preloaded closure is part of it (`MB.23.4`). Best effort:
-    // instrumentation must never fail a boot.
+    // instrumentation must never fail a boot. The preload phase's own batch goes
+    // out here, with `boot` set, so the supervisor replaces source `0xffff`'s
+    // set before the first view exists (§4.1 step 4).
     if let Some(loaded) = &loaded {
         let _ = loaded.harvest(py);
+        if let Some(mut sender) = report
+            && let Some((paths, resync)) = loaded.flush(py)
+        {
+            if resync {
+                sender.arm_resync();
+            }
+            let _ = sender.send(true, &paths);
+        }
     }
     if let Err(err) = py.run(CLOSE_AND_COLLECT, None, None) {
         python_fail(py, emitter, dev, "close_all/gc.collect", &err);
@@ -1798,5 +1929,86 @@ view b regex '/robots\\.txt' {}\n";
             );
         });
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Finding: the post-preload `sync_marks` can come back `Dead` — the boot's
+    /// own pass succeeded and a *later* one died — and that row used to have no
+    /// test at all. It must drop the `Reload` **and** keep `reload: on` off the
+    /// transcript: printing it would claim a watcher that is gone.
+    ///
+    /// Grey-box: the real `Reload`, a real `Policy`/`ReportTable` and a scripted
+    /// watcher whose second marking pass fails `EIO`.
+    #[test]
+    fn a_watcher_that_dies_after_the_preload_keeps_the_boot_line_off() {
+        use std::os::fd::OwnedFd;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::dev_reload::{
+            Class, FakeWatcher, MAX_PATHS, Reload, ReloadConfig, TestClock, report_pair,
+        };
+
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "blastit-stage1-marks-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("app/views")).unwrap();
+        let loaded = root.join("app/views/cart.py");
+        std::fs::write(&loaded, "TAG = 1\n").unwrap();
+
+        // `Default`, not the constructor named `new`: the no-inotify guard
+        // counts that call in `src/` and allows exactly one, in `dev_reload.rs`.
+        let mut watcher = FakeWatcher::default();
+        // Call 1 is the boot's app-root mark, the only one it needs; the
+        // preload pass is call 2 and dies.
+        watcher.fail_from = Some((2, libc::EIO));
+        let poll = std::os::unix::net::UnixStream::pair().unwrap().0;
+        let mut reload = Reload::boot(
+            ReloadConfig::new(root.clone(), root.join("Blastfile"), "tmpfs".to_string()),
+            Box::new(watcher),
+            OwnedFd::from(poll),
+            Box::new(TestClock::new(std::time::Instant::now())),
+        )
+        .expect("the boot's own marking pass succeeds");
+        assert_eq!(
+            reload.marked_dirs(),
+            1,
+            "the app root, and nothing else yet"
+        );
+
+        // The preload batch adds a parent the boot had not marked.
+        let _write = report_pair(reload.policy().reports(), 0, Class::Loaded, true).unwrap();
+        let absorbed =
+            reload
+                .policy()
+                .reports()
+                .absorb(0, Class::Loaded, true, &[loaded], true, MAX_PATHS);
+        assert!(!absorbed.refused(), "the loaded file joined the union");
+        assert_eq!(absorbed.added, 1);
+
+        let outcome = reload.sync_marks();
+        assert!(reload.is_dead(), "the second pass latched the watcher dead");
+        let dirs = reload.marked_dirs();
+        match after_preload_marks(outcome, false, dirs) {
+            BootLine::Stopped(why) => assert_eq!(why.errno_name(), "EIO"),
+            other => panic!(
+                "a watcher that dies after the preload prints no boot line and drops the \
+                 reload, got {other:?}"
+            ),
+        }
+        // The positive control: a pass that marked prints the line it claims.
+        assert_eq!(
+            after_preload_marks(MarkOutcome::Marked, false, 3),
+            BootLine::Announce(3)
+        );
+        assert_eq!(
+            after_preload_marks(MarkOutcome::Marked, true, 3),
+            BootLine::Silent,
+            "a boot that already owed its one warning never prints the line"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

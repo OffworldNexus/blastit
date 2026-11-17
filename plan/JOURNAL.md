@@ -2891,3 +2891,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T15:48 [MB.23.5.2.1] (lead) status ready -> active
 - 2026-11-17T15:48 [MB.23.5.2.1] (lead) attempt 4/4 started
 - 2026-11-17T15:56 [MB.36.1] (lead) status active -> done
+- 2026-11-17T15:56 [MB.36.1] (lead) committed 23339d8 (reviewer PASS, 4/4 critics PASS); 7 reviewer MINORs fixed pre-commit
+- 2026-11-17T15:57 [MB.36.2] (planner) edited fields
+- 2026-11-17T15:57 [MB.36.3] (planner) edited fields
+- 2026-11-17T15:57 [MB.36.4] (planner) edited fields
+- 2026-11-17T15:57 [MB.36.5] (planner) edited fields
+- 2026-11-17T15:57 [MB.36.6] (planner) edited fields
+- 2026-11-17T16:13 [MB.23.5.2.1] (lead) attempt 4: the lazy-retirement wait replaced by the pids that answered; any named <component>-died accepted and the doc comment now states the test proves a com
+- 2026-11-17T16:13 [MB.23.5.2.1] (lead) status active -> review
+- 2026-11-17T16:19 [MB.23.5.2.1] (lead) edited fields
+- 2026-11-17T16:19 [MB.23.5.2.1] (lead) attempt 4 FAIL on one MAJOR confined to the test wording: a third legitimate fatal path (init dying via send_ctl write failure prints ctl.chan: Broken pipe, wit
+- 2026-11-17T16:19 [MB.23.5.2.1] (lead) status review -> ready
+- 2026-11-17T16:19 [MB.23.5.2.1] (lead) status ready -> active
+- 2026-11-17T16:19 [MB.23.5.2.1] (lead) attempt 5/6 started
+- 2026-11-17T16:25 [MB.23.5.2.1] (lead) attempt 5: wording enumeration deleted; the test asserts non-zero exit + no surviving view, with a log witness recorded but never required, and a comment forbid
+- 2026-11-17T16:25 [MB.23.5.2.1] (lead) status active -> review
+- 2026-11-17T16:31 [MB.23.5.2.1] (lead) reviewer attempt 5 VERDICT PASS, zero findings. make check EXIT=0, docs-test dev-flags EXECUTED, 6/6 loaded runs. Committing.
+- 2026-11-17T16:31 [MB.23.5.2.1] (lead) status review -> done

@@ -1,9 +1,8 @@
 ---
 id: MB.23.5.2
 title: "Wire reload into blastit dev: the policy, the supervisor loop, --no-reload, and the preload/Blastfile re-run with :8080 held open"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 1
 depends_on: [MB.23.5.1]
 paths:
@@ -25,7 +24,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:37"
-updated: "2026-11-17T12:37"
+updated: "2026-11-17T13:43"
 ---
 
 # Goal

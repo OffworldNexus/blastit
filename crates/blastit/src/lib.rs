@@ -35,6 +35,10 @@ pub mod audit_v1;
 pub mod check;
 pub mod cli;
 pub mod config;
+// The `dev` live-reload policy (`MB.23.5.2`, `ADR-0014`). `pub` for now because
+// the supervisor that consumes it is the next leaf: a private module with no
+// caller would be a wall of `dead_code` for code that is already tested.
+pub mod dev_reload;
 pub mod host;
 pub mod infer_routes;
 pub mod lsp;

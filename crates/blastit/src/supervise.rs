@@ -27,10 +27,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
-use std::time::Duration;
+#[cfg(feature = "python")]
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use blastit_events::{
-    Component, Event, EventKind, ExitKind, Level, Lifecycle, ManifestWarning, ProcessExited,
+    Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind, Level, Lifecycle,
+    ManifestWarning, ProcessExited,
 };
 use blastit_frame::{Ctl, Decoder, Frame, Limits};
 use blastit_scheduler::RouteInfo;
@@ -42,6 +45,9 @@ use pyo3::{Py, PyAny};
 
 use crate::child::{Deadline, wait_writable};
 use crate::config::Config;
+use crate::dev_reload::{self, Effect, Reload};
+#[cfg(feature = "python")]
+use crate::dev_reload::{Class, ReloadConfig, SystemClock};
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
 use crate::py::Python;
 #[cfg(feature = "python")]
@@ -80,6 +86,14 @@ const VIEW_PROCESS_MARGIN: u32 = 16;
 struct ViewChild {
     route: usize,
     uid: u32,
+    /// The live-reload source this pid reports as, when it has one (`dev` with
+    /// reload on, and a WSGI slot).
+    ///
+    /// The report end is registered by `spawn_now` and revoked by
+    /// `reap_children` — but only by the pid that still owns it: a route can
+    /// fork a fresh view while a stale busy one is still serving, and the
+    /// second registration replaces the first end for the same source (§4.4).
+    source: Option<u16>,
 }
 
 /// Every supervised view child, by pid.
@@ -135,6 +149,20 @@ impl ChildTable {
     fn is_empty(&self) -> bool {
         self.by_pid.is_empty()
     }
+
+    /// Gives up the report source of every live child of `route`.
+    ///
+    /// A fresh view's `spawn_now` registers a new end for the route's source
+    /// ([`ReportTable::register`] keys the source, so the old end is gone); the
+    /// stale pid must then not revoke the new one when it is reaped.
+    #[cfg(feature = "python")]
+    fn forget_source(&mut self, route: usize) {
+        for child in self.by_pid.values_mut() {
+            if child.route == route {
+                child.source = None;
+            }
+        }
+    }
 }
 
 /// Whether init may fork one more worker for `route` (§4.5).
@@ -148,8 +176,34 @@ fn may_fork(children: &ChildTable, route: usize, ceiling: u32) -> bool {
     children.count_for(route) < ceiling
 }
 
-/// A freshly forked worker of either runtime, as the parent sees it.
+/// What one view fork is for: the slot's data, its scratch directory, and its
+/// report socket (which the WSGI arm takes and the PHP arm has none of).
+struct Spawn<'a> {
+    /// Which route slot is being forked (`SPAWN`'s route).
+    index: usize,
+    /// Route metadata and target uid.
+    info: &'a RouteInfo,
+    /// Whether the route's filter keeps `AF_INET`/`AF_INET6` (§7.3).
+    egress: bool,
+    /// Private scratch directory (`HOME`, `TMPDIR`, `chdir`).
+    dir: &'a std::path::Path,
+    /// `true` in production (`setresuid` + `RLIMIT_NPROC`), `false` in `dev`.
+    drop_privileges: bool,
+    /// The dev-only loaded-file report, when this slot has one.
+    report: ViewReport,
+}
+
+/// What `spawn_now` hands the view fork: its own report socket, or nothing.
 ///
+/// A `python`-less build forks no WSGI view at all, so the type is uninhabited
+/// there and the parameter costs nothing.
+#[cfg(feature = "python")]
+type ViewReport = Option<blastit_view::LoadedReport>;
+/// See the `python` half: a build with no view runtime has no report.
+#[cfg(not(feature = "python"))]
+type ViewReport = Option<std::convert::Infallible>;
+
+/// A freshly forked worker of either runtime, as the parent sees it.
 /// `ForkedView` (WSGI) and `ForkedPhpView` (embedded PHP) describe the same
 /// five things, so the supervisor's bookkeeping — `SPAWNED`, the two log pipes,
 /// the pid maps, the `process.spawned` event — is written once instead of once
@@ -281,6 +335,10 @@ pub struct Parts {
     pub dev: Option<crate::dev_learn::Dev>,
     /// The `dev --learn` observation and attribution channels (`R29`).
     pub learn: Option<crate::dev_learn::Learn>,
+    /// The one live-reload watcher of this boot (`ADR-0014`), when `dev` has
+    /// reload on. `None` for every production boot, for `check`, and for a dev
+    /// boot with reload off.
+    pub reload: Option<Reload>,
 }
 
 /// The supervisor of all of blastit's processes.
@@ -319,6 +377,12 @@ pub struct Supervisor<'a> {
     dev: Option<crate::dev_learn::Dev>,
     /// The `dev --learn` observation pipe, attribution socket and collector.
     learn: Option<crate::dev_learn::Learn>,
+    /// The one live-reload watcher of a `dev` boot with reload on (§4.1).
+    ///
+    /// Exactly one `Source` in the poll set, one armed deadline and no second
+    /// event loop: a boot that never constructed it (production, `check`,
+    /// `--no-reload`) costs the poll loop nothing.
+    reload: Option<Reload>,
 }
 
 impl<'a> Supervisor<'a> {
@@ -382,6 +446,7 @@ impl<'a> Supervisor<'a> {
             source_base: 2,
             dev: parts.dev,
             learn: parts.learn,
+            reload: parts.reload,
         }
     }
 
@@ -396,11 +461,21 @@ impl<'a> Supervisor<'a> {
 
     /// One `poll` and everything it found ready.
     fn poll_once(&mut self, py: Python<'_>) {
-        let timeout = match self.shutdown {
+        // The shutdown deadline and the debounce window share the timeout: the
+        // loop must wake for whichever comes first, and it sleeps forever while
+        // neither is armed (§4.5).
+        let mut timeout = match self.shutdown {
             Shutdown::Serving => None,
             Shutdown::Drain(deadline) | Shutdown::Terminate(deadline) => Some(deadline.left()),
         };
-        let ready: Vec<rustix::event::PollFlags> = {
+        if let Some(deadline) = self.reload.as_ref().and_then(Reload::next_deadline) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            timeout = Some(timeout.map_or(left, |current| current.min(left)));
+        }
+        // The reload's descriptors are appended last: the watcher's poll
+        // duplicate first, then every live report end (§4.5).
+        let mut reload_fds: Vec<std::os::fd::RawFd> = Vec::new();
+        let (ready, polled_sources): (Vec<rustix::event::PollFlags>, usize) = {
             let mut pollfds: Vec<rustix::event::PollFd<'_>> =
                 Vec::with_capacity(self.sources.len() + 2);
             pollfds.push(rustix::event::PollFd::from_borrowed_fd(
@@ -425,10 +500,29 @@ impl<'a> Supervisor<'a> {
                     rustix::event::PollFlags::IN,
                 ));
             }
+            if let Some(reload) = self.reload.as_mut() {
+                reload.poll_fds(&mut reload_fds);
+            }
+            for fd in &reload_fds {
+                // SAFETY: every number came from `Reload::poll_fds`, whose
+                // descriptors the `Reload` owns; nothing drops it before `poll`
+                // returns below, and the loop is single-threaded.
+                let borrowed = unsafe { BorrowedFd::borrow_raw(*fd) };
+                pollfds.push(rustix::event::PollFd::from_borrowed_fd(
+                    borrowed,
+                    rustix::event::PollFlags::IN,
+                ));
+            }
             let timespec = timeout.map(|left| rustix::event::Timespec {
                 tv_sec: left.as_secs().min(i64::MAX as u64) as _,
                 tv_nsec: left.subsec_nanos() as _,
             });
+            // The number of log sources **in the poll set**, read here while it
+            // is being built: `read_ctl` below can fork a view and push two
+            // more, and the reload's descriptors sit after the ones that were
+            // polled, not after the ones init now owns (a same-wakeup `SPAWN`
+            // used to shift them, so report datagrams were never drained).
+            let polled_sources = self.sources.len();
             let flags: Vec<rustix::event::PollFlags> =
                 match rustix::event::poll(&mut pollfds, timespec.as_ref()) {
                     Ok(_) => pollfds.iter().map(|fd| fd.revents()).collect(),
@@ -438,7 +532,7 @@ impl<'a> Supervisor<'a> {
             // and the sources then start an entry earlier.
             let learn_polled = self.learn.as_ref().is_some_and(|learn| learn.open);
             self.source_base = usize::from(self.ctl.is_some()) + usize::from(learn_polled) + 1;
-            flags
+            (flags, polled_sources)
         };
 
         if ready
@@ -467,7 +561,8 @@ impl<'a> Supervisor<'a> {
         let emitter = self.emitter;
         let base = self.source_base;
         let mut closed: Vec<usize> = Vec::new();
-        for index in 0..self.sources.len() {
+        let polled = polled_source_range(polled_sources, self.sources.len());
+        for index in polled {
             let Some(flags) = ready.get(index + base) else {
                 continue;
             };
@@ -490,6 +585,74 @@ impl<'a> Supervisor<'a> {
                 emit_line(emitter, &source.pipe, &line);
             }
         }
+
+        // The reload's own wakeups: a ready watcher or report end, and then the
+        // armed deadline. `tick` is a no-op while the window is not due, so the
+        // deadline needs no separate "did poll time out" question.
+        if !reload_fds.is_empty() {
+            let first = reload_base(base, polled_sources);
+            let mut effects: Vec<Effect> = Vec::new();
+            if let Some(reload) = self.reload.as_mut() {
+                let now = reload.now();
+                for (offset, fd) in reload_fds.iter().enumerate() {
+                    if let Some(flags) = ready.get(first + offset)
+                        && flags.intersects(readable())
+                    {
+                        // The flags travel with the descriptor: a hangup is the
+                        // one thing a report end's `read` cannot report.
+                        effects.extend(reload.on_fd(*fd, *flags, now));
+                    }
+                }
+                effects.extend(reload.tick(now));
+            }
+            self.apply_effects(effects);
+        }
+    }
+
+    /// Turns one policy step into what init does: one event, one `Ctl::Reload`,
+    /// and — when the watcher is gone — one warning and no retry (§4.6, §4.7).
+    fn apply_effects(&mut self, effects: Vec<Effect>) {
+        for effect in effects {
+            match effect {
+                Effect::Reload(fire) => self.reload_all(&fire),
+                // The ladder's one `dev.reload.unavailable`: marking ran out of
+                // room (`ENOSPC`, or the `MAX_MARKS` cap). The marks already
+                // placed keep watching, so the watcher is **kept** — this is
+                // not the dead arm (§4.7, `T32`).
+                Effect::Unavailable(why) => reload_unavailable(self.emitter, &why),
+                // A running watcher that dies produces one `manifest.warning`
+                // and no second watcher: closing the group and its duplicate is
+                // dropping the one watcher (§4.7).
+                Effect::Stopped(why) => {
+                    reload_stopped(self.emitter, &why);
+                    self.reload = None;
+                }
+            }
+        }
+    }
+
+    /// One `dev.reload` and one `Ctl::Reload` for **every** view (§4.6).
+    ///
+    /// `routes` is the whole set of view routes in routing order — the event
+    /// says what the reload replaced, and the frame carries no route at all:
+    /// there is no per-view restart to name.
+    ///
+    /// Nothing here stops the scheduler: the reload **cycle** (§4.6 step 5) is
+    /// `MB.23.5.2.2`'s, and until it lands no reload can excuse a scheduler
+    /// exit. A gate opened for a cycle this leaf could not complete would stay
+    /// set for the boot's life and swallow the next genuine `scheduler-died`.
+    fn reload_all(&mut self, fire: &dev_reload::Fire) {
+        let routes: Vec<String> = self.routes.iter().map(|route| route.name.clone()).collect();
+        let files: Vec<String> = fire
+            .files
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        self.emitter.emit(&Event::now(
+            Component::Init,
+            EventKind::DevReload(DevReload::new(routes, files, fire.reason)),
+        ));
+        self.send_ctl(&Ctl::Reload);
     }
 
     /// Reads every pending signal from the `signalfd`.
@@ -557,6 +720,9 @@ impl<'a> Supervisor<'a> {
     /// being reaped, which is fatal (§8).
     fn ctl_closed(&mut self) {
         self.ctl = None;
+        // The scheduler is never expected to close its channel in this leaf: the
+        // reload **cycle** that stops it on purpose is `MB.23.5.2.2`'s, so any
+        // close outside a shutdown is a scheduler that died (§8).
         if !self.shutting_down {
             self.fail("ctl.chan: the scheduler closed the channel");
         }
@@ -640,7 +806,34 @@ impl<'a> Supervisor<'a> {
             Some(dev) => (dev.view_dir(index), false),
             None => (crate::config::view_dir(info.uid), true),
         };
-        let child = match self.fork_view(py, index, info, egress, &dir, drop_privileges) {
+        // The view's report socket, created **before** the fork so its read end
+        // is in the supervisor's poll set before the child could send its boot
+        // batch, and a fresh reporter per boot (§4.4).
+        let (report, source) = match self.open_report(index) {
+            Ok(pair) => pair,
+            Err(err) => {
+                self.emitter.emit(&Event::now(
+                    Component::Init,
+                    EventKind::ManifestWarning(ManifestWarning::new(format!(
+                        "live reload: a report socket for route {:?}: {err}",
+                        info.name
+                    ))),
+                ));
+                self.send_spawn_refused(index as u32);
+                return;
+            }
+        };
+        let child = match self.fork_view(
+            py,
+            Spawn {
+                index,
+                info,
+                egress,
+                dir: &dir,
+                drop_privileges,
+                report,
+            },
+        ) {
             Ok(child) => child,
             Err(err) => {
                 // Never `fail`: one route's resource exhaustion is not the
@@ -657,7 +850,52 @@ impl<'a> Supervisor<'a> {
                 return;
             }
         };
-        self.record_view(index, info, child);
+        self.record_view(index, info, child, source);
+    }
+
+    /// Registers this view's report end with the reload policy, or returns
+    /// `None` when there is nothing to report to.
+    ///
+    /// `None` is every production boot, `check`, a dev boot with reload off, and
+    /// a PHP slot (`php_view.rs` carries no report yet — `MB.23.5.3`). A view
+    /// whose slot has no report is a view that never triggers a reload, which is
+    /// exactly what it did before `MB.23.5`.
+    fn open_report(&mut self, index: usize) -> std::io::Result<(ViewReport, Option<u16>)> {
+        #[cfg(feature = "python")]
+        {
+            #[cfg(feature = "php")]
+            let php_slot = self.php.get(index).is_some_and(Option::is_some);
+            #[cfg(not(feature = "php"))]
+            let php_slot = false;
+            let Some(source) = u16::try_from(index).ok().filter(|_| !php_slot) else {
+                return Ok((None, None));
+            };
+            let Some(reload) = self.reload.as_mut() else {
+                return Ok((None, None));
+            };
+            let (read, write) = dev_reload::report_socket()?;
+            // A route can fork a fresh view while a stale busy one still serves:
+            // the table keys the source, so the newest end wins and the stale
+            // pid must not revoke it later.
+            self.children.forget_source(index);
+            reload
+                .policy()
+                .reports()
+                .register(read.into(), source, Class::Loaded, false);
+            Ok((
+                Some(blastit_view::LoadedReport {
+                    socket: write,
+                    source,
+                }),
+                Some(source),
+            ))
+        }
+        // A `python`-less build forks no WSGI view, so it has no report to open.
+        #[cfg(not(feature = "python"))]
+        {
+            let _ = index;
+            Ok((None, None))
+        }
     }
 
     /// `SPAWNED` with pid 0 is the one answer that names no process: this
@@ -675,17 +913,20 @@ impl<'a> Supervisor<'a> {
     /// The PHP arm reads the binding the boot stored; the WSGI arm is the
     /// zygote. Neither is reached by asking what backend a request is — the
     /// scheduler sends `SPAWN { route }` and the slot's own data decides.
-    fn fork_view(
-        &self,
-        py: Python<'_>,
-        index: usize,
-        info: &RouteInfo,
-        egress: bool,
-        dir: &std::path::Path,
-        drop_privileges: bool,
-    ) -> std::io::Result<Forked> {
+    fn fork_view(&self, py: Python<'_>, spawn: Spawn<'_>) -> std::io::Result<Forked> {
+        let Spawn {
+            index,
+            info,
+            egress,
+            dir,
+            drop_privileges,
+            report,
+        } = spawn;
         #[cfg(feature = "php")]
         if let Some(binding) = self.php.get(index).and_then(Option::as_ref) {
+            // `php_view.rs` carries no report socket yet (`MB.23.5.3`); the slot
+            // has none, so there is nothing to pass and nothing to drop.
+            let _ = report;
             return crate::php_view::fork_php_view(
                 crate::php_view::PhpViewSpawn {
                     cfg: &self.cfg,
@@ -719,6 +960,7 @@ impl<'a> Supervisor<'a> {
                     egress,
                     dir: dir.to_path_buf(),
                     drop_privileges,
+                    loaded: report,
                 },
             )
             .map(Forked::from)
@@ -732,7 +974,7 @@ impl<'a> Supervisor<'a> {
             // ([`crate::stage0::no_python_support`]). Failing the boot keeps it
             // true: a scheduler that asks anyway is one the manifest gate never
             // admitted.
-            let _ = (py, dir, drop_privileges, egress);
+            let _ = (py, dir, drop_privileges, egress, report);
             Err(std::io::Error::other(format!(
                 "route {:?} (slot {index}): ctl.chan asked for a view and this blastit build \
                  has no Python worker runtime",
@@ -743,7 +985,7 @@ impl<'a> Supervisor<'a> {
 
     /// Tells the scheduler where the new view is, then records the process and
     /// its two log pipes (§3, §4).
-    fn record_view(&mut self, index: usize, info: &RouteInfo, child: Forked) {
+    fn record_view(&mut self, index: usize, info: &RouteInfo, child: Forked, source: Option<u16>) {
         let route = index as u32;
         // The scheduler's end of `view.chan` travels next to `SPAWNED` (§3).
         let mut bytes = Vec::new();
@@ -782,6 +1024,7 @@ impl<'a> Supervisor<'a> {
             ViewChild {
                 route: index,
                 uid: info.uid,
+                source,
             },
         );
 
@@ -848,6 +1091,13 @@ impl<'a> Supervisor<'a> {
                 // is nothing to report.
                 continue;
             };
+            // The view's report end goes with the process: a closed end is
+            // revoked in the same wakeup that reaped it, so the poll set never
+            // spins on a dead peer (§4.4). Only the pid that still owns the
+            // source may revoke it — a route's replacement end outlives it.
+            if let (Some(source), Some(reload)) = (view.source, self.reload.as_mut()) {
+                reload.policy().reports().revoke(source);
+            }
             self.view_exit(view, pid, status);
         }
     }
@@ -876,6 +1126,11 @@ impl<'a> Supervisor<'a> {
     }
 
     /// A component of blastit exited: fatal unless init is shutting down (§8).
+    ///
+    /// No exception is carved out here: the reload **cycle** that stops the
+    /// scheduler on purpose is `MB.23.5.2.2`'s, and until it lands every
+    /// component exit — the scheduler's included — is fatal. A reload of any
+    /// kind must not turn a later genuine `scheduler-died` into a wedged boot.
     fn component_exit(&mut self, component: Component, pid: Pid, status: ExitStatus) {
         let event = Event::now(
             Component::Init,
@@ -1083,6 +1338,119 @@ impl<'a> Supervisor<'a> {
     }
 }
 
+/// Boots the one dev-only live-reload watcher (`ADR-0014`, design §4.1).
+///
+/// Called by stage 1 **before** the application's first import, so the
+/// preload phase's files are watched too. Returns `None` — and exactly one
+/// `dev.reload.unavailable` — for every row of the failure ladder: there is no
+/// retry and no second watcher (§4.7). Production, `check` and a dev boot with
+/// reload off never call it.
+#[cfg(feature = "python")]
+#[must_use]
+pub fn boot_reload(cfg: &Config, emitter: &Emitter) -> Option<Reload> {
+    use std::os::unix::ffi::OsStringExt;
+
+    // The union is absolute-only (§4.4): the app root comes from the `dev` boot
+    // and `./Blastfile` is the dev default, so both are made absolute before the
+    // policy sees them. A relative root would mark the right inode under a
+    // relative name, and every event for a file beside the manifest would then be
+    // joined as `./name` and miss the union.
+    let root = PathBuf::from(std::ffi::OsString::from_vec(cfg.cwd.clone()?));
+    let root = std::path::absolute(&root).ok()?;
+    let manifest = std::path::absolute(&cfg.manifest).ok()?;
+    let filesystem = blastit_sys::fanotify::filesystem_type(&root)
+        .unwrap_or("unknown")
+        .to_string();
+    let (watcher, poll) = match dev_reload::open() {
+        Ok(pair) => pair,
+        Err(err) => {
+            reload_unavailable(emitter, &dev_reload::Unavailable::of(&err, &filesystem));
+            return None;
+        }
+    };
+    let config = ReloadConfig::new(root, manifest, filesystem.clone());
+    match Reload::boot(config, Box::new(watcher), poll, Box::new(SystemClock)) {
+        Ok(mut reload) => {
+            // `ENOSPC` (or the marks cap) boots and keeps the marks it placed,
+            // but it owes the ladder's one warning: the boot line must not print
+            // `reload: on` over a policy that can never mark again (§4.7, T32).
+            if let Some(why) = reload.take_latch() {
+                reload_unavailable(emitter, &why);
+            }
+            Some(reload)
+        }
+        Err(why) => {
+            reload_unavailable(emitter, &why);
+            None
+        }
+    }
+}
+
+/// The `preload` phase's report socket: source [`dev_reload::PRELOAD_SOURCE`],
+/// registered before the first import (§4.1 step 3).
+///
+/// Its paths are `pre_fork`: the boot imported them, so the heap every view was
+/// forked from is stale when one changes (§4.4).
+///
+/// # Errors
+///
+/// The `socketpair` errno, which a normal boot never sees.
+#[cfg(feature = "python")]
+pub fn open_preload_report(reload: &mut Reload) -> std::io::Result<blastit_view::Reporter> {
+    let (read, write) = dev_reload::report_socket()?;
+    let reporter = blastit_view::Reporter::new(write, dev_reload::PRELOAD_SOURCE)?;
+    reload.policy().reports().register(
+        read.into(),
+        dev_reload::PRELOAD_SOURCE,
+        Class::Loaded,
+        true,
+    );
+    Ok(reporter)
+}
+
+/// The boot line: `reload: on (N directories)`, pretty output only (§4.7).
+///
+/// It is deliberately **not** an event: the machine contract stays at the two
+/// events of §4.9. `N` is the number of directories the boot marked.
+#[cfg(feature = "python")]
+pub fn announce_reload(format: crate::config::LogFormat, dirs: usize) {
+    if format == crate::config::LogFormat::Pretty {
+        crate::logs::write_line(
+            libc::STDOUT_FILENO,
+            &format!("reload: on ({dirs} directories)"),
+        );
+    }
+}
+
+/// The one `dev.reload.unavailable` the ladder emits (§4.7).
+///
+/// One event, emitted exactly once: a refused boot, and the `ENOSPC`/`MAX_MARKS`
+/// row that stops marking while the marks already placed keep watching. Its
+/// pretty sentence names the errno and the filesystem, never a value.
+pub(crate) fn reload_unavailable(emitter: &Emitter, why: &dev_reload::Unavailable) {
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::DevReloadUnavailable(DevReloadUnavailable::new(
+            why.errno_name(),
+            why.filesystem.clone(),
+        )),
+    ));
+}
+
+/// The one mid-run `manifest.warning` of a watcher that latched dead (§4.7).
+///
+/// Not the boot event: the design separates "serve without reload" from
+/// "reload stopped while serving", and the sentence says which errno ended it.
+pub(crate) fn reload_stopped(emitter: &Emitter, why: &dev_reload::Unavailable) {
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::ManifestWarning(ManifestWarning::new(format!(
+            "live reload stopped: {}; restart blastit dev",
+            why.errno_name()
+        ))),
+    ));
+}
+
 /// What reading one source found.
 enum SourceRead {
     /// Still open.
@@ -1140,6 +1508,31 @@ fn emit_line(emitter: &Emitter, pipe: &Pipe, line: &[u8]) {
 /// The `poll` flags that mean "there is something to read".
 fn readable() -> rustix::event::PollFlags {
     rustix::event::PollFlags::IN | rustix::event::PollFlags::HUP | rustix::event::PollFlags::ERR
+}
+
+/// The log-source indices one wakeup may read.
+///
+/// Only the sources that were **in the poll set** have a ready slot: `ready`
+/// carries `polled_sources` of them and the reload's descriptors come after. A
+/// `Ctl::Spawn` handled by `read_ctl` in the same wakeup forks a view, which
+/// pushes two log pipes onto `self.sources` — but `ready` has no slot for them.
+/// Reading them indexes a reload descriptor's flag as if it were a source's and
+/// then `read_source`s an empty pipe, and the pipes are blocking: one
+/// misalignment parks init in `read(2)` for good instead of costing a wakeup.
+/// The live count is still applied, because a source that went away must never
+/// be indexed either.
+fn polled_source_range(polled_sources: usize, live_sources: usize) -> std::ops::Range<usize> {
+    0..polled_sources.min(live_sources)
+}
+
+/// The `ready` index where this wakeup's reload descriptors start.
+///
+/// The reload's descriptors are appended to the poll set after every log source,
+/// so their base is the number of sources that were **polled** — never the
+/// number init owns after `read_ctl` forked (the same shift, in the other
+/// direction).
+fn reload_base(base: usize, polled_sources: usize) -> usize {
+    base + polled_sources
 }
 
 /// A wait status as the `process.exited` event wants it (§8.1).
@@ -1239,6 +1632,36 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     use super::*;
+
+    /// A wakeup must read exactly the log sources its poll set carried.
+    ///
+    /// The shape that wedged `make check`: the poll set carried four log
+    /// sources (slots `2..6`, after the signalfd and `ctl.chan`), a watcher and
+    /// one report end (`6`, `7`); a `Ctl::Spawn` in the same wakeup forked a
+    /// view, so `self.sources` grew to six. Reading six sources made source
+    /// index 4 read the watcher's flag and index 5 a report end's, and then
+    /// `read_source`ed the forked view's empty, blocking pipe — a permanent
+    /// wedge, not a lost wakeup.
+    #[test]
+    fn a_wakeup_reads_only_the_sources_its_poll_set_carried() {
+        assert_eq!(
+            polled_source_range(4, 6),
+            0..4,
+            "the two pipes a same-wakeup SPAWN added have no ready slot, and \
+             reading them indexes the reload descriptors instead"
+        );
+        assert_eq!(
+            reload_base(2, 4),
+            6,
+            "the reload descriptors sit after the sources that were polled, not \
+             after the ones init owns now"
+        );
+        // A source that went away is never indexed either.
+        assert_eq!(polled_source_range(4, 2), 0..2);
+        // The ordinary wakeup: nothing changed, so every polled source is read.
+        assert_eq!(polled_source_range(4, 4), 0..4);
+        assert_eq!(polled_source_range(0, 0), 0..0, "a boot with no source yet");
+    }
 
     /// Finding F4: a view reaped after `DRAIN` still owes the scheduler an
     /// `EXITED`, and once the scheduler has gone that write can only fail. A
@@ -1347,6 +1770,7 @@ mod tests {
             ViewChild {
                 route: 0,
                 uid: 21_000,
+                source: None,
             },
         );
         children.insert(
@@ -1354,6 +1778,7 @@ mod tests {
             ViewChild {
                 route: 1,
                 uid: 21_001,
+                source: None,
             },
         );
         children.insert(
@@ -1361,6 +1786,7 @@ mod tests {
             ViewChild {
                 route: 1,
                 uid: 21_001,
+                source: None,
             },
         );
 
@@ -1388,6 +1814,7 @@ mod tests {
             ViewChild {
                 route: 0,
                 uid: 21_000,
+                source: None,
             },
         );
 
@@ -1419,6 +1846,7 @@ mod tests {
                 ViewChild {
                     route: 0,
                     uid: 21_000,
+                    source: None,
                 },
             );
         }

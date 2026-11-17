@@ -72,6 +72,12 @@ pub struct DevOptions {
     pub host: IpAddr,
     /// `--learn`: observe statements instead of refusing them.
     pub learn: bool,
+    /// `--no-reload`: turn live reload off — nothing is watched, and neither
+    /// reload event is printed (`docs/reference/cli.md` `## blastit dev`).
+    ///
+    /// Reload is on by default, so this is the one user-facing switch and its
+    /// value is `false` unless the flag is given.
+    pub no_reload: bool,
 }
 
 /// `blastit check`'s accepted arguments, validated (`R3`).
@@ -132,6 +138,10 @@ struct Args {
     dev_obs_fd: Option<RawFd>,
     /// `--dev-ctl-fd=N`: the `--learn` attribution socket's stage 1 end.
     dev_ctl_fd: Option<RawFd>,
+    /// `--dev-reload=on|off`: whether stage 1 constructs the live-reload
+    /// watcher (`ADR-0014` §4.1). Internal: stage 0 forwards the user's
+    /// `--no-reload` here, and an absent token means `on` (the default).
+    dev_reload: Option<bool>,
 }
 
 /// How to use the program, printed with a command-line error.
@@ -151,7 +161,7 @@ fn usage() -> String {
 const USAGE: &str = "\
 usage:
   blastit [--preset NAME]                   stage 0 (production)
-  blastit dev [--port N] [--host ADDR] [--learn]
+  blastit dev [--port N] [--host ADDR] [--learn] [--no-reload]
                                             unprivileged single-UID simulation
   blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
                                             audit a pytest suite (alias: test)
@@ -164,12 +174,14 @@ usage:
 
 /// `blastit dev --help` (§1.1).
 const DEV_USAGE: &str = "\
-usage: blastit dev [--port N] [--host ADDR] [--learn]
+usage: blastit dev [--port N] [--host ADDR] [--learn] [--no-reload]
 
   --port N      port to bind, 1..=65535 (default 8080, or PORT when set)
   --host ADDR   IP address to bind (default 127.0.0.1); a non-loopback
                 address needs BLASTIT_DEV_EXPOSE=1
   --learn       observe requests and SQL and propose manifest additions
+  --no-reload   turn live reload off: nothing is watched, and no
+                `dev.reload.unavailable` warning is printed
   -h, --help    print this help
 
 `blastit dev` runs the real five-role tree as the current uid: no sudo, no
@@ -340,6 +352,7 @@ fn parse_dev(arguments: &[String]) -> Result<Subcommand<DevOptions>, String> {
     let mut port = None;
     let mut host = None;
     let mut learn = false;
+    let mut no_reload = false;
     let mut index = 0;
     while index < arguments.len() {
         let argument = &arguments[index];
@@ -347,6 +360,7 @@ fn parse_dev(arguments: &[String]) -> Result<Subcommand<DevOptions>, String> {
         match argument.as_str() {
             "-h" | "--help" => return Ok(Subcommand::Help),
             "--learn" => learn = true,
+            "--no-reload" => no_reload = true,
             "--manifest" => {
                 return Err(format!(
                     "`--manifest` is not accepted: put `Blastfile` in the working \
@@ -395,6 +409,7 @@ fn parse_dev(arguments: &[String]) -> Result<Subcommand<DevOptions>, String> {
         },
         host: host.unwrap_or(IpAddr::from([127, 0, 0, 1])),
         learn,
+        no_reload,
     }))
 }
 
@@ -758,6 +773,7 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
                     dev_host: args.dev_host,
                     dev_obs_fd: args.dev_obs_fd,
                     dev_ctl_fd: args.dev_ctl_fd,
+                    dev_reload: args.dev_reload.unwrap_or(true),
                 },
                 interpreter,
             )
@@ -853,14 +869,17 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
             "--ready-fd" => args.ready_fd = Some(descriptor(value, key)?),
             "--seccomp" => args.seccomp = Some(flag(value, key)?),
             "--preset" => args.preset = Some(preset_name(value)?),
-            // The four `dev`-only arguments travel from stage 0 to stage 1 and
-            // name state an operator never types: the ephemeral root, the bind
-            // address, and the two internal `--learn` descriptors (`R20`,
-            // `R22`, `R29`).
+            // The `dev`-only arguments travel from stage 0 to stage 1 and name
+            // state an operator never types: the ephemeral root, the bind
+            // address, the internal `--learn` descriptors and the reload on/off
+            // token (`R20`, `R22`, `R29`, §4.1).
             "--dev-root" => args.dev_root = Some(std::path::PathBuf::from(value)),
             "--dev-host" => args.dev_host = Some(parse_host(value)?),
             "--dev-obs-fd" => args.dev_obs_fd = Some(descriptor(value, key)?),
             "--dev-ctl-fd" => args.dev_ctl_fd = Some(descriptor(value, key)?),
+            // `--no-reload` is the user's; this is how stage 0 carries it across
+            // the `execve`, beside the other internal `--dev-*` tokens.
+            "--dev-reload" => args.dev_reload = Some(on_off(value, key)?),
             other => return Err(format!("unknown argument `{other}`")),
         }
     }
@@ -880,7 +899,8 @@ fn parse(arguments: &[String]) -> Result<Args, String> {
     let any_dev = args.dev_root.is_some()
         || args.dev_host.is_some()
         || args.dev_obs_fd.is_some()
-        || args.dev_ctl_fd.is_some();
+        || args.dev_ctl_fd.is_some()
+        || args.dev_reload.is_some();
     if any_dev && (args.stage != Some(1) || args.role.is_some()) {
         return Err("`--dev-*` arguments are only for `--stage=1`".to_string());
     }
@@ -913,6 +933,16 @@ fn flag(value: &str, key: &str) -> Result<bool, String> {
         "1" => Ok(true),
         "0" => Ok(false),
         other => Err(format!("`{key}` wants 0 or 1, not `{other}`")),
+    }
+}
+
+/// A `on`/`off` argument: the spelling the internal reload token uses, so the
+/// `--dev-reload=on|off` the design names is what travels (§4.1, §4.6).
+fn on_off(value: &str, key: &str) -> Result<bool, String> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(format!("`{key}` wants on or off, not `{other}`")),
     }
 }
 
@@ -984,6 +1014,7 @@ mod tests {
             "--dev-host=127.0.0.1".to_string(),
             "--dev-obs-fd=11".to_string(),
             "--dev-ctl-fd=12".to_string(),
+            "--dev-reload=off".to_string(),
         ])
         .unwrap();
         assert_eq!(
@@ -992,6 +1023,21 @@ mod tests {
         );
         assert_eq!(dev_stage1.dev_obs_fd, Some(11));
         assert_eq!(dev_stage1.dev_ctl_fd, Some(12));
+        assert_eq!(
+            dev_stage1.dev_reload,
+            Some(false),
+            "`--no-reload` travels to stage 1 as `--dev-reload=off`"
+        );
+        assert!(
+            parse(&[
+                "--stage=1".to_string(),
+                "--config-fd=7".to_string(),
+                "--dev-root=/tmp/blastit-dev-test".to_string(),
+                "--dev-reload=maybe".to_string(),
+            ])
+            .is_err(),
+            "the token takes `on` or `off`, nothing else"
+        );
         assert!(parse(&["--dev-root=/tmp/x".to_string()]).is_err());
         assert!(
             parse(&[
@@ -1187,6 +1233,7 @@ mod tests {
                 port: 9000,
                 host: loopback,
                 learn: false,
+                no_reload: false,
             }
         );
         assert_eq!(
@@ -1200,8 +1247,18 @@ mod tests {
                 port: 9001,
                 host: loopback,
                 learn: true,
+                no_reload: false,
             }
         );
+        // `--no-reload` is the one user-facing reload switch, and reload is on
+        // unless it is given (`docs/reference/cli.md` `## blastit dev`).
+        assert!(run(parse_dev(&["--no-reload".to_string()]).unwrap()).no_reload);
+        // The internal stage-1 tokens are not `dev` arguments: a developer who
+        // types one gets a sentence, not a silently ignored flag.
+        for internal in ["--dev-reload=on", "--dev-adopt-fd=3", "--dev-policy-fd=4"] {
+            let error = parse_dev(&[internal.to_string()]).unwrap_err();
+            assert!(error.contains(internal), "{internal}: {error}");
+        }
         assert_eq!(
             run(parse_dev(&[
                 "--port=9002".to_string(),

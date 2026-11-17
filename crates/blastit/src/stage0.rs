@@ -3026,7 +3026,14 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         );
     }
 
-    exec_stage1_dev(&boot, options.host, prepared.app_env(), dbproxy, learn)
+    exec_stage1_dev(
+        &boot,
+        options.host,
+        prepared.app_env(),
+        dbproxy,
+        learn,
+        options.no_reload,
+    )
 }
 
 /// Binds the per-route sockets of a `dev` boot (`R20`).
@@ -3268,6 +3275,7 @@ fn exec_stage1_dev(
     app_env: &BTreeMap<String, String>,
     dbproxy: Option<DbproxyHandover>,
     learn: Option<OwnedFd>,
+    no_reload: bool,
 ) -> ! {
     let document_value = match config_document(boot.config) {
         Ok(value) => value,
@@ -3329,6 +3337,12 @@ fn exec_stage1_dev(
             format!("--dev-obs-fd={}", obs.as_raw_fd()),
         ));
         keep.push(obs.as_raw_fd());
+    }
+    // `--no-reload` is the user's flag and stage 1 is where the watcher would be
+    // built, so this is the one token that carries it across the `execve`
+    // (§4.1: off means no group, no mark, no hook, no report socket).
+    if no_reload {
+        argv.push(cstring_dev(boot.root, "--dev-reload=off"));
     }
     for fd in &keep {
         // SAFETY: every descriptor in `keep` is one this function created and

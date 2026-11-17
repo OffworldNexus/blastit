@@ -193,7 +193,9 @@ flowchart TB
 - **dbproxy** is untouched by every reload; its sockets and ports are never re-bound
   (§4.8).
 
-**Boot order** (`dev`, reload on; each step is skipped entirely under `--no-reload`):
+**Boot order** (`dev`, reload on; each step is skipped entirely under `--no-reload`,
+which stage 0 carries across the `execve` as the internal token `--dev-reload=off` beside
+the other `--dev-*` arguments):
 
 1. adopt the runtime root; read `filesystem_type(root)` once (`None` becomes `"unknown"`);
 2. `Watcher::new()` and `mark_dir` for the manifest's parent and the app root; a failure
@@ -202,7 +204,9 @@ flowchart TB
    `open` hook gated on the report fd being present;
 4. import the app, import `preload`, run `BLASTIT_WARMUP`, harvest, send the preload batch;
 5. mark the parents the preload batch just added, print the boot line
-   `reload: on (N directories)`;
+   `reload: on (N directories)`; a boot whose marking latched `ENOSPC` (or hit the
+   marks cap) prints its one warning **instead** of that line, because `reload: on`
+   is a claim that marking succeeded;
 6. immortalize the heap, `gc.freeze()`, and fork views lazily as today.
 
 Every later source (a view) registers at `spawn_now`, before the fork; `reap_children`
@@ -240,8 +244,12 @@ The fake and `TestClock` are `#[cfg(any(test, debug_assertions))] pub` in `dev_r
 kernel and no sleeps; a release build carries neither.
 
 **The real watcher's frozen surface** (`crates/blastit-sys/src/fanotify.rs`, `MB.23.3`).
-Every fallible function returns `io::Result`, per `blastit-sys/src/lib.rs`'s rule; there is
-no separate error enum, and the errno *is* the classification:
+Every fallible function returns `io::Result`, per `blastit-sys/src/lib.rs`'s rule, and the
+errno *is* the classification: the one typed error is `fanotify::WatcherError`
+(`Unavailable { op, errno }` and `NoFileHandle { fs_type }`), carried inside the
+`io::Error`, and the errno behind a failure is read with
+`WatcherError::of(&err)?.errno()`, never `io::Error::raw_os_error` (`None` on every error
+this module returns).
 
 ```rust
 pub const INIT_FLAGS: u32 = 0x0c03;           // FAN_CLOEXEC|FAN_NONBLOCK|FAN_REPORT_DFID_NAME
@@ -278,9 +286,9 @@ maps `ShortBuffer` to `EINVAL` (research §1.2.3: a bug to fix, not to retry). T
 size and alignment are asserted with `size_of`/`align_of` in the crate's own tests.
 
 `io::Result` carries the classification: `new`/`mark_dir` fail with the ladder's errno, and
-the policy names the cause from `err.raw_os_error()` and the filesystem from
-`ReloadConfig::filesystem` (§4.5), so a fake can produce `EPERM` on any host and the
-emitted event is byte-identical to the real one.
+the policy names the cause from `WatcherError::of(&err)` — its `errno()` for the symbol — and
+the filesystem from `ReloadConfig::filesystem` (§4.5), so a fake can produce `EPERM` on any
+host and the emitted event is byte-identical to the real one.
 
 Measured constants, unchanged from the research (§1.1–§1.5):
 
@@ -507,11 +515,16 @@ landed while no watcher existed is not lost and a future mtime can never re-arm 
 
 `poll_fds` **appends** to the caller's vector and returns how many entries it added; the
 supervisor records the first index, so a ready flag maps back to the descriptor it polled,
-and `on_fd` decides from the descriptor whether it is the watcher dup or a report end. The
-report fds change as views are born and reaped, which is why the poll set is rebuilt on
-every wakeup (it already is); no `Source`/`Pipe` variant is involved.
-`sync_marks` is called after every batch that changed the union; `Exhausted` is the
-`ENOSPC` row (stop marking, keep what is marked, no event), `Dead` is the mid-run latch.
+and `on_fd(fd, flags, now)` decides from the descriptor whether it is the watcher dup or a
+report end. The flags travel with it because an `AF_UNIX` `SOCK_DGRAM` report end whose
+writer exited reports neither a hangup nor a zero-length read on Linux, so a `POLLHUP`/
+`POLLERR` is the descriptor's end when a transport does report one, and it closes the source
+in the same wakeup. The report fds change as views are born and reaped, which is why the
+poll set is rebuilt on every wakeup (it already is); no `Source`/`Pipe` variant is involved.
+`sync_marks` is called after every batch that changed the union; `Exhausted(why)` is the
+`ENOSPC` row (stop marking, keep what is marked, **one** `dev.reload.unavailable` — the
+same row the marks cap of §4.10 hits, so a cap is never a silent `break`), `Dead` is the
+mid-run latch.
 
 `Vec<Effect>` is bounded to two (an `ENOSPC` while marking can follow a fire); the
 supervisor handles them in order. `Reload::boot`'s `Err` is the §4.7 ladder: one
