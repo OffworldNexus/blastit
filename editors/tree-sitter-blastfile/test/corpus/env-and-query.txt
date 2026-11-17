@@ -1,0 +1,56 @@
+==================
+an environment variable, a double-quoted query and a bind placeholder
+==================
+postgres analytics $ANALYTICS_URL
+
+view catalog GET "/products" {
+    postgres {
+        query "SET TIME ZONE 'UTC'"
+        query 'SELECT count(*) FROM products WHERE price > $?'
+    }
+}
+
+postgres {
+    host $DB_HOST
+    port $DB_PORT
+    user $DB_USERNAME
+    password $DB_PASSWORD
+    database $DB_DATABASE
+}
+
+---
+
+(source_file
+  (store_decl
+    (name)
+    (env_var))
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (directive
+            (keyword)
+            (string))
+          (directive
+            (keyword)
+            (raw_string))))))
+  (store_decl
+    (block
+      (directive
+        (keyword)
+        (env_var))
+      (directive
+        (keyword)
+        (env_var))
+      (directive
+        (keyword)
+        (env_var))
+      (directive
+        (keyword)
+        (env_var))
+      (directive
+        (keyword)
+        (env_var)))))

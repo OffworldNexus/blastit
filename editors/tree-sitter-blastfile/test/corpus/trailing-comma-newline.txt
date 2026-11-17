@@ -1,0 +1,56 @@
+==================
+a newline after a trailing comma continues the list
+==================
+static "/" {
+    root "public"
+    immutable "/assets/*",
+        "/fonts/*"
+}
+
+---
+
+(source_file
+  (static_decl
+    (string)
+    (block
+      (directive
+        (keyword)
+        (string))
+      (directive
+        (keyword)
+        (string)
+        (string)))))
+
+==================
+a wrapped function grant continues after the comma
+==================
+view catalog GET "/products" {
+    postgres {
+        functions st_distance,
+            unaccent
+        select products(id,
+            name,
+            price)
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (directive
+            (keyword)
+            (name)
+            (name))
+          (table_grant
+            (keyword)
+            (table)
+            (column)
+            (column)
+            (column)))))))

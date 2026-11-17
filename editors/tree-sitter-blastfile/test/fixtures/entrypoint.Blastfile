@@ -1,0 +1,5 @@
+app "shop"
+
+entrypoint python "shop.wsgi:application" {
+    preload "shop.urls", "shop.signals"
+}

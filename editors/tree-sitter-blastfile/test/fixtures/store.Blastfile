@@ -1,0 +1,13 @@
+postgres $DATABASE_URL
+
+postgres analytics $ANALYTICS_URL
+
+postgres {
+    host $DB_HOST
+    port $DB_PORT
+    user $DB_USERNAME
+    password $DB_PASSWORD
+    database $DB_DATABASE
+    sslmode $DB_SSLMODE
+    ca_cert $DB_CA_CERT
+}

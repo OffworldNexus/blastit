@@ -2567,3 +2567,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T06:03 [MB.25.1] (lead) status ready -> active
 - 2026-11-17T06:03 [MB.25.1] (lead) attempt 1/3 started
 - 2026-11-17T06:03 [MB.25.1] (lead) base 055607b; lead dispatch doc-writer. Paths widened with docs_fences.rs + inventory.toml only because a new fence would change the pinned per-page counts; no 
+- 2026-11-17T06:03 [MB.22.2] (lead) committed 7c2e9ca; docs/decisions/README.md row left uncommitted (ADR-0014/0015 rows from MB.23 are untracked) and will be staged at the MB.22 epic gate
+- 2026-11-17T06:03 [MB.22.4] (lead) status review -> done
+- 2026-11-17T06:03 [MB.22.4] (lead) make check: only docs/reference/cli.md fence 1 (dev-flags) fails, on MB.23.1's --no-reload page before MB.23 lands the flag; every other target green

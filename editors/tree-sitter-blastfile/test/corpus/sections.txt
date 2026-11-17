@@ -1,0 +1,136 @@
+==================
+the reference page's complete example parses as six sections
+==================
+app "shop"
+
+entrypoint python "shop.wsgi:application" {
+    preload "shop.urls"
+}
+
+postgres $DATABASE_URL
+
+postgres analytics $ANALYTICS_URL
+
+trait session {
+    postgres {
+        transactions
+        query "SET TIME ZONE 'UTC'"
+    }
+}
+
+static "/assets" {
+    root "public/assets"
+    immutable "/assets/*"
+}
+
+view products GET "/products", "/products/{id:int}" {
+    use session
+    postgres {
+        select products(id, name, price)
+    }
+    postgres analytics {
+        select events(id)
+    }
+}
+
+view cart {
+    GET "/cart"
+    POST "/cart/items" {
+        body json
+    }
+    DELETE "/cart/items/{id:int}"
+    use session
+    postgres {
+        select carts(id)
+        insert cart_items(product_id, quantity)
+    }
+}
+
+---
+
+(source_file
+  (app_decl
+    (string))
+  (entrypoint_decl
+    (language)
+    (string)
+    (block
+      (directive
+        (keyword)
+        (string))))
+  (store_decl
+    (env_var))
+  (store_decl
+    (name)
+    (env_var))
+  (trait_decl
+    (name)
+    (block
+      (grant
+        (block
+          (mode
+            (keyword))
+          (directive
+            (keyword)
+            (string))))))
+  (static_decl
+    (string)
+    (block
+      (directive
+        (keyword)
+        (string))
+      (directive
+        (keyword)
+        (string))))
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (string)
+    (block
+      (use_directive
+        (name))
+      (grant
+        (block
+          (table_grant
+            (keyword)
+            (table)
+            (column)
+            (column)
+            (column))))
+      (grant
+        (name)
+        (block
+          (table_grant
+            (keyword)
+            (table)
+            (column))))))
+  (view_decl
+    (name)
+    (block
+      (endpoint
+        (method)
+        (string))
+      (endpoint
+        (method)
+        (string)
+        (block
+          (directive
+            (keyword)
+            (codec))))
+      (endpoint
+        (method)
+        (string))
+      (use_directive
+        (name))
+      (grant
+        (block
+          (table_grant
+            (keyword)
+            (table)
+            (column))
+          (table_grant
+            (keyword)
+            (table)
+            (column)
+            (column)))))))

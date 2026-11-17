@@ -1,0 +1,6 @@
+# `tree-sitter generate` also writes these two headers, which only an external
+# scanner includes. This grammar has no scanner and `parser.c` includes only
+# `tree_sitter/parser.h`, so the committed generated files are the four in
+# `docs/design/blastfile-lsp-zed.md` §9.1 and these two stay out of the tree.
+/src/tree_sitter/alloc.h
+/src/tree_sitter/array.h

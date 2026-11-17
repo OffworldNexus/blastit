@@ -1,0 +1,45 @@
+app "shop"
+
+entrypoint python "shop.wsgi:application" {
+    preload "shop.urls"
+}
+
+postgres $DATABASE_URL
+
+postgres analytics $ANALYTICS_URL
+
+trait session {
+    postgres {
+        transactions
+        query "SET TIME ZONE 'UTC'"
+    }
+}
+
+static "/assets" {
+    root "public/assets"
+    immutable "/assets/*"
+}
+
+view products GET "/products", "/products/{id:int}" {
+    use session
+    postgres {
+        functions pg_catalog.unaccent
+        select products(id, name, price)
+    }
+    postgres analytics {
+        select events(id)
+    }
+}
+
+view cart {
+    GET "/cart"
+    POST "/cart/items" {
+        body json
+    }
+    DELETE "/cart/items/{id:int}"
+    use session
+    postgres {
+        select carts(id)
+        insert cart_items(product_id, quantity)
+    }
+}

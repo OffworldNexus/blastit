@@ -1,0 +1,27 @@
+view products GET "/products", "/products/{id:int}" {
+    body none
+    use session
+    postgres {
+        select products(id, name, price)
+        update products(price)
+        delete archived_products
+        insert orders(id, total)
+        egress any
+        prefork
+    }
+}
+
+view cart {
+    GET "/cart"
+    POST "/cart/items" {
+        body json
+    }
+    DELETE "/cart/items/{id:int}"
+    postgres analytics {
+        query 'SELECT count(*) FROM carts WHERE id = $?'
+    }
+}
+
+view api regex '/v[0-9]+/items' {
+    body raw unvalidated
+}

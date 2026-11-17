@@ -1,0 +1,38 @@
+==================
+a regex pattern is its own node, not a raw string
+==================
+view v regex '/v[0-9]+/items' {
+    body none
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (regex_raw_string
+      (regex_body))
+    (block
+      (directive
+        (keyword)
+        (codec)))))
+
+==================
+a string pattern list stays one string per item
+==================
+view items GET "/items", "/items/{id:int}" {
+    body none
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (string)
+    (block
+      (directive
+        (keyword)
+        (codec)))))

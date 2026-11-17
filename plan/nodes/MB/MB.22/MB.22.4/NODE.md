@@ -2,16 +2,16 @@
 id: MB.22.4
 title: "Ship editors/zed and the in-repo tree-sitter-blastfile grammar with corpus/query proofs"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.22.2]
 paths: ["editors/zed/**", "editors/tree-sitter-blastfile/**", .zed/settings.json]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:16"
-updated: "2026-11-16T09:16"
+updated: "2026-11-17T06:03"
 ---
 
 # Goal

@@ -1,0 +1,24 @@
+==================
+a raw string spans lines and is byte-verbatim
+==================
+view catalog GET "/products" {
+    postgres {
+        query 'SELECT count(*)
+FROM products
+WHERE price > $?'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (directive
+            (keyword)
+            (raw_string)))))))
