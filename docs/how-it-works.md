@@ -10,7 +10,7 @@ One Rust program plays five roles. The specification is
 | **init** | `0`, or the uid it was started as | the listen socket, the app (stage 1 only) |
 | **http** | `UID_BASE + 1` | the listening TCP socket |
 | **scheduler** | `UID_BASE + 2` | the routing table, the worker budget |
-| **view** | `UID_BASE + 1000 + i` | nothing but its own channel; one per route, forked lazily |
+| **view** | `UID_BASE + 1000 + i` | nothing but its own channel; one or more per route, forked lazily |
 | **dbproxy** | `UID_BASE + 3` | **the real credentials**, the query policy |
 
 ```mermaid
@@ -22,7 +22,7 @@ flowchart TB
         init["<b>init</b> · PID 1 · uid 0"]
         http["<b>http</b> · uid B+1"]
         sched["<b>scheduler</b> · uid B+2"]
-        v0["<b>view</b> per route · uid B+1000+i"]
+        v0["<b>view</b> · one or more per route · uid B+1000+i"]
         dbproxy["<b>dbproxy</b> · uid B+3"]
     end
 
@@ -43,6 +43,11 @@ Solid arrows are data, dotted ones parenthood; `B` is `BLASTIT_UID_BASE`.
 Internal traffic never uses TCP: only the PostgreSQL sockets are named, because
 drivers need a path.
 
+A route serves as many requests at once as the shared `BLASTIT_MAX_WORKERS`
+budget allows. Python threads each request inside its view process; PHP runs each
+concurrent request in its own view process, because NTS `libphp` runs one request
+per process ([settings](reference/settings.md#admission-and-threads)).
+
 ## A request
 
 ```mermaid
@@ -58,7 +63,7 @@ sequenceDiagram
     C->>H: HTTP/1.1
     H->>S: REQ_HEAD …
     S->>S: match PATH_INFO → route (404 if none)
-    opt no live process for this route
+    opt no idle view process for this route
         S->>S: SPAWN via init
     end
     S->>V: REQ_HEAD

@@ -56,12 +56,15 @@ package.
 
 We support supported PHP versions: 8.3, 8.4 and 8.5.
 
-## One request at a time
+## Concurrency
+
+Concurrent requests to one PHP route run in parallel in separate view processes, bounded by the
+shared `BLASTIT_MAX_WORKERS` budget, because the distro's NTS `libphp` runs one request per process
+([settings](../../reference/settings.md#admission-and-threads)). `BLASTIT_VIEW_MAX_WORKERS` caps one
+process, not the route; there is no daemon or socket between Blastit and PHP.
 
 Route uids are `BLASTIT_UID_BASE + 1000 + i` — `21000`, `21001`, … — each with `gid == uid` and no
 supplementary groups, so a directory a view writes must be owned by that uid or carry its ACL.
-`BLASTIT_MAX_WORKERS` caps how many requests run at once, one at a time per worker, with no daemon,
-pool or socket between Blastit and PHP.
 
 ## public/ is the static root
 
