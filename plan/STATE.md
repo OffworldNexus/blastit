@@ -17,10 +17,10 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.23.5.2 Wire reload into blastit dev: the policy, the supervisor loop, --no-reload, and the preload/Blastfile re-run with :8080 held open
 - execute: MB.6 Static files beside a Python/PHP app + the hashed-asset caching contract
 - execute: MB.11 Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 - execute: MB.13 Rewrite the deployments index page for scannability
+- execute: MB.23.5.3 Refresh the dbproxy policies on a reload without dropping :8080, and the PHP live-reload row
 - execute: MB.25.2 Emit the INFO runtime event: PHP version + php_ini_opened_path via the C SAPI, Python version + environment, static-only summary; retire the WARN line
 - execute: MB.3.5.2 Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]
 - execute: MB.3.15 Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
@@ -36,8 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-17T17:17 [MB.23.5.2.2] (lead) status active -> review
-- 2026-11-17T17:26 [MB.23.5.2.2] (lead) REVIEW FAIL (3 MAJOR, 4 MINOR): the seam guard never checks BLASTIT_TEST_RELOAD_PAUSE so make seam-check cannot catch it leaking (design and the node both claim
 - 2026-11-17T17:26 [MB.23.5.2.2] (lead) status review -> ready
 - 2026-11-17T17:26 [MB.23.5.2.2] (lead) status ready -> active
 - 2026-11-17T17:26 [MB.23.5.2.2] (lead) attempt 2/3 started
@@ -51,3 +49,5 @@
 - 2026-11-17T17:59 [MB.23.5.2.2] (lead) status active -> review
 - 2026-11-17T18:09 [MB.23.5.2.2] (lead) reviewer attempt 3 VERDICT PASS with one open MINOR (an unread, unreproduced panic from attempt 3 -- kept as an unexplained unknown; 17 more runs green). Commit
 - 2026-11-17T18:09 [MB.23.5.2.2] (lead) status review -> done
+- 2026-11-17T18:09 [MB.23.5.2] (lead) gate passed: both children done (83c6bb9 policy+supervisor+no-reload, bdd23c5 cycle+adoption+abandon); 19 critical legs, lib 282, make check EXIT=0, docs-test 4
+- 2026-11-17T18:09 [MB.23.5.2] (lead) status ready -> done

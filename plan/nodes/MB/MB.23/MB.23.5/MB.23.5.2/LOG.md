@@ -27,3 +27,11 @@ edited fields
 ## 2026-11-17T13:43 [lead]
 
 status active -> ready
+
+## 2026-11-17T18:09 [lead]
+
+gate passed: both children done (83c6bb9 policy+supervisor+no-reload, bdd23c5 cycle+adoption+abandon); 19 critical legs, lib 282, make check EXIT=0, docs-test 48/30/0 with dev-flags executed, three seams proved absent from release, lock/seccomp identical. One open unknown recorded: a single unread panic that never reproduced.
+
+## 2026-11-17T18:09 [lead]
+
+status ready -> done

@@ -247,3 +247,28 @@ No dependency, no feature, no workspace member, no config key, no `seccomp.rs` b
   within 250 ms", passes alone and in the next full `make check`. Worth a
   `docs/knowledge/LESSONS.md` line (a 250 ms probe budget is tight under a full gate);
   `LESSONS.md` is outside this node's paths so it was not edited.
+
+## Gate
+
+Both children are `done`: **`MB.23.5.2.1`** (commit `83c6bb9` — the policy, the supervisor's
+single source and armed deadline, real `--no-reload`, the 14-leg live-reload suite) and
+**`MB.23.5.2.2`** (commit `bdd23c5` — validate-then-`execve`, the adoption document, the cycle
+and its abandon path, the three seams, five more legs).
+
+| Command | Result |
+|---|---|
+| `cargo test -p blastit --test critical_dev_reload` | `19 passed; 0 failed` (repeated serial and under all cores busy) |
+| `cargo test -p blastit --lib` | `282 passed, 2 pre-existing ignored` |
+| `make check` | `exit 0, 0 FAIL, 0 FAILED` |
+| `make docs-test` | `48 fences, 30 executed, 0 failed, dev-flags EXECUTED` |
+
+`make seam-check` proves three debug seams present in a debug build and all three absent from a
+release build; `Cargo.toml`, `Cargo.lock` and `crates/blastit-sys/src/seccomp.rs` are
+byte-identical to the base. The gates that used to be red are green: this container is what
+closed `docs/reference/cli.md`'s `--no-reload` fence for the whole tree.
+
+**ONE OPEN UNKNOWN, stated plainly:** during `MB.23.5.2.2` attempt 3 a single
+`critical_dev_reload` run failed early and its panic was destroyed by piping through `tail -2`, so
+it could never be triaged. It did not reproduce in 90+ subsequent runs, including many with every
+core busy, and it is recorded as an unexplained unknown rather than attributed to host load. Any
+future failure must be captured to a full log.

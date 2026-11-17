@@ -2927,3 +2927,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T17:59 [MB.23.5.2.2] (lead) status active -> review
 - 2026-11-17T18:09 [MB.23.5.2.2] (lead) reviewer attempt 3 VERDICT PASS with one open MINOR (an unread, unreproduced panic from attempt 3 -- kept as an unexplained unknown; 17 more runs green). Commit
 - 2026-11-17T18:09 [MB.23.5.2.2] (lead) status review -> done
+- 2026-11-17T18:09 [MB.23.5.2] (lead) gate passed: both children done (83c6bb9 policy+supervisor+no-reload, bdd23c5 cycle+adoption+abandon); 19 critical legs, lib 282, make check EXIT=0, docs-test 4
+- 2026-11-17T18:09 [MB.23.5.2] (lead) status ready -> done
