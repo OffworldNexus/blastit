@@ -808,3 +808,63 @@ fn read_headers(reader: &mut Reader<'_>) -> Result<Headers, FrameError> {
     }
     Ok(headers)
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::ctl::Ctl;
+    use crate::limits::Limits;
+
+    /// `RELOAD` is `0x45`, a `ctl.chan` message with an empty payload and
+    /// `id == 0` (§3.1, §4.9). The four catch-all receiver sites this crate
+    /// owns are asserted here, not left to the compiler.
+    #[test]
+    fn ctl_reload_is_0x45_and_has_no_payload() {
+        assert_eq!(TypeCode::Reload.code(), 0x45);
+        assert_eq!(TypeCode::from_code(0x45), Ok(TypeCode::Reload));
+        assert_eq!(TypeCode::Reload.name(), "RELOAD");
+        assert!(TypeCode::Reload.is_ctl());
+        assert!(TypeCode::Reload.requires_zero_id());
+
+        let frame = Frame::Ctl(Ctl::Reload);
+        assert_eq!(frame.code(), 0x45);
+        assert_eq!(frame.as_ctl(), Some(&Ctl::Reload));
+
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&frame, 0, &mut wire)
+            .expect("RELOAD encodes");
+        // The header alone: `u32 length | u8 type | u32 id`.
+        assert_eq!(wire.len(), crate::HEADER_LEN);
+        assert_eq!(wire[4], 0x45);
+        assert_eq!(&wire[5..crate::HEADER_LEN], &[0, 0, 0, 0]);
+
+        assert_eq!(Frame::decode(0x45, &[]), Ok(Frame::Ctl(Ctl::Reload)));
+        // And through the real streaming decoder, not just the payload arm.
+        let mut decoder = crate::Decoder::new(Limits::default());
+        decoder.push(&wire);
+        assert_eq!(
+            decoder.next_frame().expect("decodes"),
+            Some((0, Frame::Ctl(Ctl::Reload)))
+        );
+        assert_eq!(decoder.next_frame().expect("clean end"), None);
+    }
+
+    /// A `RELOAD` with a payload is not this build's frame: `reader.finish()`
+    /// refuses the trailing bytes, and a non-zero id is refused before any
+    /// byte is written.
+    #[test]
+    fn ctl_reload_refuses_a_payload_and_a_non_zero_id() {
+        for payload in [&[0u8][..], &[1, 2, 3][..], &[0xff; 8][..]] {
+            assert!(
+                Frame::decode(0x45, payload).is_err(),
+                "a payload-carrying RELOAD decoded: {payload:?}"
+            );
+        }
+        let mut out = Vec::new();
+        let refused = Limits::default().encode(&Frame::Ctl(Ctl::Reload), 1, &mut out);
+        assert!(refused.is_err(), "a ctl frame with id 1 was encoded");
+        assert!(out.is_empty(), "nothing may be written for a refused frame");
+    }
+}

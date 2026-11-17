@@ -8,10 +8,10 @@ use serde_json::{Map, Value};
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::{
-    AppOutput, Component, Event, EventKind, ExitKind, HttpRejected, Level, Lifecycle,
-    MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason, PgRefused, ProcessCap,
-    ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, RequestInfo, RetireReason,
-    SqlDenied, SqlKind, Stream, floor_boundary,
+    AppOutput, Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind,
+    HttpRejected, Level, Lifecycle, MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason,
+    PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason,
+    ReloadReason, RequestInfo, RetireReason, SqlDenied, SqlKind, Stream, floor_boundary,
 };
 
 /// Encode one event as a single JSON object, without a trailing newline.
@@ -57,6 +57,20 @@ pub fn encode_json_into(out: &mut Vec<u8>, event: &Event) {
     // Work on a copy: the caller keeps the complete event.
     let mut truncated: Vec<&'static str> = declared.to_vec();
     let mut event = event.clone();
+
+    // The `dev.reload` arrays grow with the app, and an entry is either whole or
+    // gone: drop them from the tail first, so no path or route name is ever
+    // half-written (§4.9, §4.10).
+    loop {
+        out.truncate(start);
+        encode_into_with(out, &event, &truncated);
+        if out.len() - start <= MAX_EVENT_BYTES {
+            break;
+        }
+        if !drop_reload_entry(&mut event, &mut truncated) {
+            break;
+        }
+    }
 
     // Cut the long string fields, largest first, until the line fits. Every
     // cut removes at least as many encoded bytes as raw bytes, so this
@@ -205,6 +219,20 @@ fn encode_into_with(out: &mut Vec<u8>, event: &Event, truncated: &[&'static str]
         }
         EventKind::ManifestWarning(info) => {
             push_str_member(out, "message", &info.message);
+        }
+        EventKind::DevReload(info) => {
+            // §4.9's order: `routes`, `files`, `reason`. Both arrays are always
+            // written, empty when the lists are, so a reader never has to tell
+            // "absent" from "nothing".
+            begin_member(out, "routes");
+            push_str_array(out, info.routes.iter().map(String::as_str));
+            begin_member(out, "files");
+            push_str_array(out, info.files.iter().map(String::as_str));
+            push_str_member(out, "reason", info.reason.as_str());
+        }
+        EventKind::DevReloadUnavailable(info) => {
+            push_str_member(out, "errno", &info.errno);
+            push_str_member(out, "filesystem", &info.filesystem);
         }
     }
 
@@ -783,6 +811,15 @@ fn decode_kind(name: &str, object: &Map<String, Value>) -> Option<EventKind> {
         "manifest.warning" => {
             EventKind::ManifestWarning(ManifestWarning::new(text(object, "message")?))
         }
+        "dev.reload" => EventKind::DevReload(DevReload::new(
+            string_array(object, "routes")?,
+            string_array(object, "files")?,
+            parse_reload_reason(text(object, "reason")?)?,
+        )),
+        "dev.reload.unavailable" => EventKind::DevReloadUnavailable(DevReloadUnavailable::new(
+            text(object, "errno")?,
+            text(object, "filesystem")?,
+        )),
         _ => return None,
     };
     Some(kind)
@@ -946,6 +983,17 @@ fn optional_strings(object: &Map<String, Value>, name: &str) -> Option<Vec<Strin
     Some(strings)
 }
 
+/// A member that is an array of strings, required: the encoder always writes
+/// both `dev.reload` arrays, so a missing one is not this build's line.
+fn string_array(object: &Map<String, Value>, name: &str) -> Option<Vec<String>> {
+    let array = member(object, name)?.as_array()?;
+    let mut strings = Vec::with_capacity(array.len());
+    for item in array {
+        strings.push(item.as_str()?.to_string());
+    }
+    Some(strings)
+}
+
 /// A member that is an object of strings, or absent.
 fn optional_strings_map(object: &Map<String, Value>, name: &str) -> Option<Vec<(String, String)>> {
     let Some(value) = member(object, name) else {
@@ -1050,8 +1098,21 @@ fn parse_retire_reason(text: &str) -> RetireReason {
         "stuck_threads" => RetireReason::StuckThreads,
         "memory_pressure" => RetireReason::MemoryPressure,
         "lru_cap" => RetireReason::LruCap,
+        "reload" => RetireReason::Reload,
         other => RetireReason::Other(other.to_string()),
     }
+}
+
+/// A `dev.reload` reason: a closed set, so a word outside it makes the line
+/// undecodable rather than inventing a reason.
+fn parse_reload_reason(text: &str) -> Option<ReloadReason> {
+    Some(match text {
+        "loaded" => ReloadReason::Loaded,
+        "preload" => ReloadReason::Preload,
+        "blastfile" => ReloadReason::Blastfile,
+        "overflow" => ReloadReason::Overflow,
+        _ => return None,
+    })
 }
 
 /// `2026-10-25T14:02:11.384Z`, the one spelling `format_timestamp` writes.
@@ -1157,9 +1218,40 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
         EventKind::ManifestWarning(info) => {
             slots.push(("message", &mut info.message));
         }
+        // `dev.reload`'s only variable-size fields are its arrays, which are cut
+        // whole by `drop_reload_entry` before any string is touched; its
+        // `reason` is a fixed word.
+        EventKind::DevReload(_) => {}
+        EventKind::DevReloadUnavailable(info) => {
+            slots.push(("errno", &mut info.errno));
+            slots.push(("filesystem", &mut info.filesystem));
+        }
         EventKind::ProcessSpawned(_) | EventKind::ProcessExited(_) | EventKind::ProcessCap(_) => {}
     }
     slots
+}
+
+/// Drop one whole `dev.reload` entry from the tail, recording the array's name
+/// in `truncated`. Returns `false` when both arrays are empty.
+///
+/// Files go first, then routes: the reason and the route set serving after the
+/// reload are the more useful half of the event, and a README-length path list
+/// is what actually forces the cut in practice. Whole entries only, so a reader
+/// never mistakes a sliced path for a file the app loaded.
+fn drop_reload_entry(event: &mut Event, truncated: &mut Vec<&'static str>) -> bool {
+    let EventKind::DevReload(info) = &mut event.kind else {
+        return false;
+    };
+
+    if info.files.pop().is_some() {
+        mark(truncated, "files");
+        return true;
+    }
+    if info.routes.pop().is_some() {
+        mark(truncated, "routes");
+        return true;
+    }
+    false
 }
 
 /// Cut at most `excess` raw bytes off the longest string, keeping its prefix.
@@ -1254,9 +1346,10 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::{
-        AppOutput, Component, ExitKind, HttpRejected, ManifestWarning, Outcome, PgRefuseReason,
-        PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason,
-        RequestInfo, RetireReason, SqlDenied, Stream,
+        AppOutput, Component, DevReload, DevReloadUnavailable, ExitKind, HttpRejected,
+        ManifestWarning, Outcome, PgRefuseReason, PgRefused, ProcessCap, ProcessExited,
+        ProcessRetired, ProcessSpawned, RejectReason, ReloadReason, RequestInfo, RetireReason,
+        SqlDenied, Stream,
     };
 
     /// The keys of the top-level object, in order.
@@ -1394,6 +1487,15 @@ mod tests {
             fixture::event(EventKind::Shutdown(lifecycle)),
             fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
                 "the group `session` is attached to no route",
+            ))),
+            fixture::event(EventKind::DevReload(DevReload::new(
+                vec!["products".to_owned(), "cart".to_owned()],
+                vec!["/srv/shop/app/views/cart.py".to_owned()],
+                ReloadReason::Loaded,
+            ))),
+            fixture::event(EventKind::DevReloadUnavailable(DevReloadUnavailable::new(
+                "EPERM",
+                "overlayfs",
             ))),
         ]
     }
@@ -2615,5 +2717,216 @@ mod tests {
                 .unwrap()
                 .contains(r#""route":"about""#)
         );
+    }
+
+    /// §4.9's example line: both arrays in order, and the four-word reason.
+    #[test]
+    fn dev_reload_has_the_documented_shape_and_order() {
+        let event = fixture::event(EventKind::DevReload(DevReload::new(
+            vec!["products".to_owned(), "cart".to_owned()],
+            vec!["/srv/shop/app/views/cart.py".to_owned()],
+            ReloadReason::Loaded,
+        )));
+        let json = encode_json(&event);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "routes",
+                "files",
+                "reason"
+            ],
+            "{json}"
+        );
+        let parsed = parse(&json);
+        assert_eq!(parsed["event"], "dev.reload");
+        assert_eq!(parsed["level"], "info");
+        assert_eq!(parsed["reason"], "loaded");
+        assert_eq!(
+            parsed["routes"],
+            serde_json::json!(["products", "cart"]),
+            "{json}"
+        );
+        assert_eq!(
+            parsed["files"],
+            serde_json::json!(["/srv/shop/app/views/cart.py"]),
+            "{json}"
+        );
+        assert_eq!(decode_json(&json), Some(event), "{json}");
+    }
+
+    /// §4.9's warning: symbolic errno and filesystem type, nothing else.
+    #[test]
+    fn dev_reload_unavailable_has_the_documented_shape() {
+        let event = fixture::event(EventKind::DevReloadUnavailable(DevReloadUnavailable::new(
+            "EPERM",
+            "overlayfs",
+        )));
+        let json = encode_json(&event);
+        assert_eq!(
+            top_level_keys(&json),
+            ["ts", "level", "event", "component", "errno", "filesystem"],
+            "{json}"
+        );
+        let parsed = parse(&json);
+        assert_eq!(parsed["event"], "dev.reload.unavailable");
+        assert_eq!(parsed["level"], "warn");
+        assert_eq!(parsed["errno"], "EPERM");
+        assert_eq!(parsed["filesystem"], "overlayfs");
+        assert_eq!(decode_json(&json), Some(event), "{json}");
+    }
+
+    /// `reason` is a closed four-word set: a line naming anything else is not
+    /// decoded into an invented reason.
+    #[test]
+    fn an_unknown_reload_reason_is_not_an_event() {
+        for reason in ["", "LOADED", "saved", "Other", "reload"] {
+            let line = format!(
+                r#"{{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"dev.reload","component":"init","routes":[],"files":[],"reason":"{reason}"}}"#
+            );
+            assert!(decode_json(&line).is_none(), "{line} decoded");
+        }
+        // A missing array is not a line this build wrote either.
+        let line = r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"dev.reload","component":"init","files":[],"reason":"loaded"}"#;
+        assert!(decode_json(line).is_none(), "{line} decoded");
+    }
+
+    /// T12: the worst `dev.reload` a bounded report can build still encodes to
+    /// at most [`MAX_EVENT_BYTES`], and the arrays are cut from the tail in whole
+    /// entries — never a sliced path or route name.
+    #[test]
+    fn a_worst_case_dev_reload_is_cut_whole_and_stays_under_the_bound() {
+        let files: Vec<String> = (0..64)
+            .map(|index| format!("/srv/{index:02}/{}", "a".repeat(4096)))
+            .collect();
+        let routes: Vec<String> = (0..64)
+            .map(|index| format!("{index:02}-{}", "r".repeat(256)))
+            .collect();
+        let event = fixture::event(EventKind::DevReload(DevReload::new(
+            routes.clone(),
+            files.clone(),
+            ReloadReason::Loaded,
+        )));
+
+        let json = encode_json(&event);
+        assert!(
+            json.len() <= MAX_EVENT_BYTES,
+            "line is {} bytes",
+            json.len()
+        );
+        let parsed = check_fits(&event, &json);
+
+        let kept_files: Vec<&str> = parsed["files"]
+            .as_array()
+            .expect("files array")
+            .iter()
+            .map(|item| item.as_str().expect("a file path"))
+            .collect();
+        let kept_routes: Vec<&str> = parsed["routes"]
+            .as_array()
+            .expect("routes array")
+            .iter()
+            .map(|item| item.as_str().expect("a route name"))
+            .collect();
+        // Every kept entry is exactly an original one, and the survivors are
+        // the prefix: the tail was cut, not the middle and not a prefix.
+        assert!(kept_files.len() < files.len(), "files were not cut");
+        assert_eq!(
+            kept_files,
+            files[..kept_files.len()]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "files must keep the first entries"
+        );
+        assert_eq!(
+            kept_routes,
+            routes[..kept_routes.len()]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "routes must keep the first entries"
+        );
+        assert!(
+            parsed["truncated"]
+                .as_array()
+                .expect("truncated")
+                .iter()
+                .any(|name| name == "files"),
+            "{json}"
+        );
+    }
+
+    /// A long route list alone names `routes` in `truncated`, keeps its first
+    /// entries, and still fits.
+    #[test]
+    fn a_sixty_five_route_reload_is_truncated_in_order() {
+        let routes: Vec<String> = (0..65)
+            .map(|index| format!("route-{index:02}-{}", "x".repeat(80)))
+            .collect();
+        let event = fixture::event(EventKind::DevReload(DevReload::new(
+            routes.clone(),
+            Vec::new(),
+            ReloadReason::Overflow,
+        )));
+        let json = encode_json(&event);
+        assert!(
+            json.len() <= MAX_EVENT_BYTES,
+            "line is {} bytes",
+            json.len()
+        );
+        let parsed = check_fits(&event, &json);
+        let kept: Vec<&str> = parsed["routes"]
+            .as_array()
+            .expect("routes array")
+            .iter()
+            .map(|item| item.as_str().expect("a route name"))
+            .collect();
+        assert!(kept.len() < routes.len(), "routes were not cut");
+        assert_eq!(
+            kept,
+            routes[..kept.len()]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            "routes must keep the first entries"
+        );
+        assert!(
+            parsed["truncated"]
+                .as_array()
+                .expect("truncated")
+                .iter()
+                .any(|name| name == "routes"),
+            "{json}"
+        );
+        assert!(
+            !parsed["truncated"]
+                .as_array()
+                .expect("truncated")
+                .iter()
+                .any(|name| name == "files"),
+            "an empty files array was not cut: {json}"
+        );
+    }
+
+    /// The one new retire reason: `reload` decodes to the typed variant, and the
+    /// free-form escape hatch still round-trips its own word.
+    #[test]
+    fn process_retired_reload_reason_round_trips_typed() {
+        for reason in [RetireReason::Reload, RetireReason::Other("oom".to_owned())] {
+            let event = fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
+                57, 20_001, reason,
+            )));
+            let json = encode_json(&event);
+            let decoded = decode_json(&json).expect("the line decodes");
+            assert_eq!(decoded, event, "{json}");
+        }
+        let json = encode_json(&fixture::event(EventKind::ProcessRetired(
+            ProcessRetired::new(57, 20_001, RetireReason::Reload),
+        )));
+        assert!(json.contains(r#""reason":"reload""#), "{json}");
     }
 }

@@ -43,7 +43,7 @@
 //! * A view that exceeds its response credit, or one whose outbound queue
 //!   overflows, is retired with `credit_overflow`, a
 //!   [`RetireReason::Other`] (§8.1's reasons are init's: idle, max_requests,
-//!   stuck_threads, memory_pressure, lru_cap).
+//!   stuck_threads, memory_pressure, lru_cap, reload).
 //! * A `RESP_ABORT` from a view is reported with the `view_died` outcome, and
 //!   so is a `DONE { Errored }`: §8.1's outcome list is closed and has no "the
 //!   app failed", so a response that died under the view is labelled like a
@@ -196,13 +196,6 @@ const CTL_OUTBOUND_CAP: usize = 1024 * 1024;
 /// The `reason` a view is retired with when it breaks flow control, or when
 /// its outbound queue overflows (§8.1's reasons are init's).
 const CREDIT_OVERFLOW: &str = "credit_overflow";
-/// The `reason` a view is retired with when a reload invalidated the code it
-/// runs (`ADR-0014` decision 3, `MB.23.1`'s frozen vocabulary).
-///
-/// It is a [`RetireReason::Other`] rather than a typed variant because
-/// `crates/blastit-events` is another leaf's; it serialises as the string
-/// `reload`, which is the reason `MB.23.1` froze.
-const RELOAD: &str = "reload";
 /// How many finished static reads may wait for the scheduler before a blocking
 /// task waits. At most one read per admission slot can ever be outstanding, so
 /// this is a handful of windows rather than a queue.
@@ -3970,9 +3963,9 @@ impl Scheduler {
             .collect();
         for (key, busy) in keys {
             if !busy {
-                self.retire(key, RetireReason::Other(RELOAD.to_string()))?;
+                self.retire(key, RetireReason::Reload)?;
             } else if let Some(view) = self.view_mut(key) {
-                view.stale = Some(RetireReason::Other(RELOAD.to_string()));
+                view.stale = Some(RetireReason::Reload);
             }
         }
         Ok(())
@@ -4065,7 +4058,7 @@ impl Scheduler {
             // A worker forked for a `SPAWN` sent before the last reload is stale
             // from birth: retire it now rather than let it serve old code
             // (§4.6).
-            self.retire(key, RetireReason::Other(RELOAD.to_string()))?;
+            self.retire(key, RetireReason::Reload)?;
         }
         Ok(())
     }
@@ -4083,7 +4076,7 @@ impl Scheduler {
             .view_mut(key)
             .is_some_and(|view| view.spawned_epoch < epoch);
         if birth_stale {
-            return self.retire(key, RetireReason::Other(RELOAD.to_string()));
+            return self.retire(key, RetireReason::Reload);
         }
         let mut marked = false;
         if let Some(view) = self.view_mut(key) {

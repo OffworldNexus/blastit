@@ -320,6 +320,9 @@ pub enum RetireReason {
     MemoryPressure,
     /// The least-recently-used view under `BLASTIT_MAX_VIEW_PROCESSES`.
     LruCap,
+    /// `blastit dev` reloaded every view together after a tracked file changed
+    /// (`ADR-0014` decision 3).
+    Reload,
     /// Anything else.
     Other(String),
 }
@@ -333,6 +336,7 @@ impl RetireReason {
             Self::StuckThreads => "stuck_threads",
             Self::MemoryPressure => "memory_pressure",
             Self::LruCap => "lru_cap",
+            Self::Reload => "reload",
             Self::Other(reason) => reason,
         }
     }
@@ -1298,6 +1302,107 @@ impl ManifestWarning {
     }
 }
 
+/// What changed in `blastit dev`, and therefore why every view was reloaded
+/// (§4.9 `dev.reload`).
+///
+/// A closed set: the four words `docs/reference/log-events.md` freezes. There
+/// is deliberately no free-form arm — a reason this crate cannot name is not a
+/// value it may invent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReloadReason {
+    /// A file the app loaded changed.
+    Loaded,
+    /// A module the manifest's `preload` list names changed.
+    Preload,
+    /// `./Blastfile` changed.
+    Blastfile,
+    /// The kernel's event queue overflowed, so the changed set is unknown.
+    Overflow,
+}
+
+impl ReloadReason {
+    /// The name used in the JSON stream.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Loaded => "loaded",
+            Self::Preload => "preload",
+            Self::Blastfile => "blastfile",
+            Self::Overflow => "overflow",
+        }
+    }
+}
+
+/// Every view was reloaded together in `blastit dev` (§4.9 `dev.reload`).
+///
+/// `routes` is every route serving after the reload, in manifest order, and
+/// `files` the absolute paths that triggered it, sorted. Both arrays are cut
+/// from the tail, whole entries only, when the encoded event would pass
+/// [`MAX_EVENT_BYTES`]; the *transaction* is never bounded by the log, so every
+/// route and file still takes part in the reload itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevReload {
+    routes: Vec<String>,
+    files: Vec<String>,
+    reason: ReloadReason,
+}
+
+impl DevReload {
+    /// A reload record.
+    pub fn new(routes: Vec<String>, files: Vec<String>, reason: ReloadReason) -> Self {
+        Self {
+            routes,
+            files,
+            reason,
+        }
+    }
+
+    /// Every route serving after the reload, in manifest order.
+    pub fn routes(&self) -> &[String] {
+        &self.routes
+    }
+
+    /// The absolute paths that triggered the reload, sorted.
+    pub fn files(&self) -> &[String] {
+        &self.files
+    }
+
+    /// What changed.
+    pub fn reason(&self) -> ReloadReason {
+        self.reason
+    }
+}
+
+/// `blastit dev` could not watch anything at boot, and serves without live
+/// reload (§4.7 `dev.reload.unavailable`, §4.9).
+///
+/// `errno` is the symbolic name (`EPERM`); a value outside the failure ladder
+/// is spelled `E<number>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevReloadUnavailable {
+    errno: String,
+    filesystem: String,
+}
+
+impl DevReloadUnavailable {
+    /// An unavailable-watcher record.
+    pub fn new(errno: impl Into<String>, filesystem: impl Into<String>) -> Self {
+        Self {
+            errno: errno.into(),
+            filesystem: filesystem.into(),
+        }
+    }
+
+    /// The symbolic errno, for example `EPERM`.
+    pub fn errno(&self) -> &str {
+        &self.errno
+    }
+
+    /// The filesystem type, for example `overlayfs`.
+    pub fn filesystem(&self) -> &str {
+        &self.filesystem
+    }
+}
+
 /// What an event is about; one variant per row of the §8.1 table.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -1328,6 +1433,11 @@ pub enum EventKind {
     Shutdown(Lifecycle),
     /// The manifest is usable but has a problem worth reporting.
     ManifestWarning(ManifestWarning),
+    /// `blastit dev` reloaded every view together (`ADR-0014`).
+    DevReload(DevReload),
+    /// `blastit dev` could not watch anything at boot and serves without live
+    /// reload (`ADR-0014`).
+    DevReloadUnavailable(DevReloadUnavailable),
 }
 
 impl EventKind {
@@ -1347,6 +1457,8 @@ impl EventKind {
             Self::Ready(_) => "ready",
             Self::Shutdown(_) => "shutdown",
             Self::ManifestWarning(_) => "manifest.warning",
+            Self::DevReload(_) => "dev.reload",
+            Self::DevReloadUnavailable(_) => "dev.reload.unavailable",
         }
     }
 
@@ -1361,7 +1473,10 @@ impl EventKind {
                     Level::Info
                 }
             }
-            Self::SqlDenied(_) | Self::PgRefused(_) | Self::ManifestWarning(_) => Level::Warn,
+            Self::SqlDenied(_)
+            | Self::PgRefused(_)
+            | Self::ManifestWarning(_)
+            | Self::DevReloadUnavailable(_) => Level::Warn,
             Self::AppOutput(output) => match output.stream {
                 Stream::Stdout => Level::Info,
                 Stream::Stderr => Level::Warn,
@@ -1379,7 +1494,8 @@ impl EventKind {
             | Self::ProcessCap(_)
             | Self::Boot(_)
             | Self::Ready(_)
-            | Self::Shutdown(_) => Level::Info,
+            | Self::Shutdown(_)
+            | Self::DevReload(_) => Level::Info,
         }
     }
 }
@@ -1645,6 +1761,18 @@ mod tests {
                 EventKind::ManifestWarning(ManifestWarning::new("unattached group")),
                 Level::Warn,
             ),
+            (
+                EventKind::DevReload(DevReload::new(
+                    vec!["cart".to_owned()],
+                    vec!["/srv/app/cart.py".to_owned()],
+                    ReloadReason::Loaded,
+                )),
+                Level::Info,
+            ),
+            (
+                EventKind::DevReloadUnavailable(DevReloadUnavailable::new("EPERM", "overlayfs")),
+                Level::Warn,
+            ),
         ]
     }
 
@@ -1750,8 +1878,49 @@ mod tests {
         assert_eq!(RejectReason::HeaderTooLarge.as_str(), "header_too_large");
         assert_eq!(RejectReason::Other("teapot".to_owned()).as_str(), "teapot");
         assert_eq!(RetireReason::MemoryPressure.as_str(), "memory_pressure");
+        // `MB.23.5.1`: `reload` is a typed reason, not `Other("reload")`, and
+        // the free-form escape hatch still carries its own word.
+        assert_eq!(RetireReason::Reload.as_str(), "reload");
         assert_eq!(RetireReason::Other("oom".to_owned()).as_str(), "oom");
         assert_eq!(Stream::Stderr.as_str(), "stderr");
+    }
+
+    /// The four `reload` reasons are a closed set with four distinct words, so
+    /// no reader has to guess which change it saw.
+    #[test]
+    fn reload_reasons_are_a_closed_four_word_set() {
+        let reasons = [
+            ReloadReason::Loaded,
+            ReloadReason::Preload,
+            ReloadReason::Blastfile,
+            ReloadReason::Overflow,
+        ];
+        let names: Vec<&str> = reasons.iter().map(ReloadReason::as_str).collect();
+        assert_eq!(names, ["loaded", "preload", "blastfile", "overflow"]);
+    }
+
+    /// Every named `RetireReason` is distinct from the others and from the
+    /// free-form escape hatch's spelling, so `reason=reload` can only be the
+    /// typed variant.
+    #[test]
+    fn named_retire_reasons_do_not_collide_with_the_escape_hatch() {
+        let named = [
+            RetireReason::Idle,
+            RetireReason::MaxRequests,
+            RetireReason::StuckThreads,
+            RetireReason::MemoryPressure,
+            RetireReason::LruCap,
+            RetireReason::Reload,
+        ];
+        for (index, reason) in named.iter().enumerate() {
+            for other in &named[index + 1..] {
+                assert_ne!(reason.as_str(), other.as_str(), "{reason:?} vs {other:?}");
+            }
+            assert!(
+                !matches!(reason, RetireReason::Other(_)),
+                "{reason:?} must be a typed variant"
+            );
+        }
     }
 
     #[test]

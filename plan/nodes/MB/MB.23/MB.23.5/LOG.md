@@ -27,3 +27,15 @@ edited fields
 ## 2026-11-17T10:39 [lead]
 
 edited fields
+
+## 2026-11-17T12:35 [lead]
+
+pre-emptively promoted to an epic: the design's own four-commit cut is ~25 files / well over the 650-line leaf budget, so one implementer cannot land it reviewably. Splitting along design §8's 5a/5b-i/5b-ii/5c seams.
+
+## 2026-11-17T12:35 [lead]
+
+edited fields
+
+## 2026-11-17T12:35 [lead]
+
+status ready -> ready

@@ -1,8 +1,8 @@
 //! The pretty line encoder (ARCHITECTURE.md §8.1: `BLASTIT_LOG_FORMAT=pretty`).
 
 use crate::{
-    Event, EventKind, ExitKind, Level, Lifecycle, MAX_EVENT_BYTES, Outcome, RequestInfo,
-    floor_boundary, format_clock_time,
+    DevReloadUnavailable, Event, EventKind, ExitKind, Level, Lifecycle, MAX_EVENT_BYTES, Outcome,
+    RequestInfo, floor_boundary, format_clock_time,
 };
 
 const RESET: &str = "\u{1b}[0m";
@@ -117,7 +117,42 @@ fn summary(event: &Event) -> String {
         | EventKind::Ready(lifecycle)
         | EventKind::Shutdown(lifecycle) => lifecycle_summary(lifecycle),
         EventKind::ManifestWarning(info) => escape_inline(&info.message),
+        // §4.9's frozen shape: the route column (no route, so `-`), then the
+        // counts and the reason word.
+        EventKind::DevReload(info) => format!(
+            "{}  routes={}  reason={}  files={}",
+            route(),
+            info.routes.len(),
+            info.reason.as_str(),
+            info.files.len()
+        ),
+        EventKind::DevReloadUnavailable(info) => reload_disabled_summary(info),
     }
+}
+
+/// §4.7's one sentence: `reload disabled: <cause> (<ERRNO> on <fs>); serving
+/// without live reload`.
+///
+/// The cause clause is chosen by the symbolic errno, so every row of the
+/// failure ladder has its own words; anything outside the ladder still says
+/// `reload disabled` and carries the errno it was given.
+fn reload_disabled_summary(info: &DevReloadUnavailable) -> String {
+    let cause = match info.errno() {
+        "ENOSYS" => "fanotify is not available here: this kernel has no fanotify",
+        "EPERM" => "fanotify is not permitted here: a container security profile",
+        "EINVAL" => {
+            "fanotify refused this boot's flags: this kernel does not accept the file-handle group"
+        }
+        "EOPNOTSUPP" => "this filesystem has no file handles: bind-mount the project from the host",
+        "ENOSPC" => "no marks left: the reloads already marked keep working",
+        "EMFILE" => "no fanotify group is left: close another one and restart",
+        _ => "fanotify refused to start",
+    };
+    format!(
+        "reload disabled: {cause} ({} on {}); serving without live reload",
+        escape_inline(info.errno()),
+        escape_inline(info.filesystem())
+    )
 }
 
 fn request_summary(event: &Event, info: &RequestInfo) -> String {
@@ -281,8 +316,9 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::{
-        AppOutput, ExitKind, Lifecycle, ManifestWarning, Outcome, ProcessCap, ProcessExited,
-        ProcessRetired, ProcessSpawned, RequestInfo, RetireReason, Stream,
+        AppOutput, DevReload, ExitKind, Lifecycle, ManifestWarning, Outcome, ProcessCap,
+        ProcessExited, ProcessRetired, ProcessSpawned, ReloadReason, RequestInfo, RetireReason,
+        Stream,
     };
 
     fn plain(event: &Event) -> String {
@@ -356,6 +392,18 @@ mod tests {
             fixture::event(EventKind::Ready(Lifecycle::default())),
             fixture::event(EventKind::Shutdown(Lifecycle::default())),
             fixture::event(EventKind::ManifestWarning(ManifestWarning::new("oops"))),
+            fixture::event(EventKind::DevReload(DevReload::new(
+                vec!["products".to_owned(), "cart".to_owned(), "about".to_owned()],
+                vec![
+                    "/srv/shop/app/views/cart.py".to_owned(),
+                    "/srv/shop/app/views/products.py".to_owned(),
+                ],
+                ReloadReason::Loaded,
+            ))),
+            fixture::event(EventKind::DevReloadUnavailable(DevReloadUnavailable::new(
+                "EPERM",
+                "overlayfs",
+            ))),
         ];
         for event in &events {
             for color in [false, true] {
@@ -561,6 +609,67 @@ mod tests {
         let plain = fixture::event(EventKind::Boot(Lifecycle::default().with_stage("stage0")));
         let line = encode_pretty(&plain, false);
         assert!(!line.contains("preset"), "{line}");
+    }
+
+    /// §4.9's frozen text form: the (empty) route column, the counts and the
+    /// reason word.
+    #[test]
+    fn dev_reload_matches_the_documented_text_form() {
+        let event = fixture::event(EventKind::DevReload(DevReload::new(
+            vec!["products".to_owned(), "cart".to_owned(), "about".to_owned()],
+            vec![
+                "/srv/shop/app/views/cart.py".to_owned(),
+                "/srv/shop/app/views/products.py".to_owned(),
+            ],
+            ReloadReason::Loaded,
+        )));
+        let line = plain(&event);
+        assert_eq!(
+            line,
+            "14:02:11.384 INFO  dev.reload  -  routes=3  reason=loaded  files=2"
+        );
+    }
+
+    /// §4.7's one sentence, with the cause clause for each ladder row and a
+    /// fallback that still says `reload disabled`.
+    #[test]
+    fn dev_reload_unavailable_matches_the_documented_sentence() {
+        let sentence = |errno: &str, filesystem: &str| {
+            plain(&fixture::event(EventKind::DevReloadUnavailable(
+                DevReloadUnavailable::new(errno, filesystem),
+            )))
+        };
+        assert_eq!(
+            sentence("EPERM", "overlayfs"),
+            "14:02:11.384 WARN  dev.reload.unavailable reload disabled: fanotify is not \
+             permitted here: a container security profile (EPERM on overlayfs); serving \
+             without live reload"
+        );
+        for (errno, filesystem) in [
+            ("ENOSYS", "xfs"),
+            ("EINVAL", "xfs"),
+            ("EOPNOTSUPP", "9p"),
+            ("ENOSPC", "xfs"),
+            ("EMFILE", "xfs"),
+            ("EIO", "xfs"),
+            ("E99", "unknown"),
+        ] {
+            let line = sentence(errno, filesystem);
+            assert!(
+                line.starts_with(
+                    "14:02:11.384 WARN  dev.reload.unavailable \
+                     reload disabled: "
+                ),
+                "{line}"
+            );
+            assert!(
+                line.contains(&format!(
+                    "({errno} on {filesystem}); serving without live reload"
+                )),
+                "{line}"
+            );
+            assert!(!line.contains('\n'), "{line}");
+        }
     }
 
     #[test]

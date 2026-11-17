@@ -320,4 +320,32 @@ mod tests {
                 .is_err()
         );
     }
+
+    /// `RELOAD` decodes off the real channel with no descriptor, and a
+    /// descriptor next to it is a protocol error (§3, §4.9).
+    #[tokio::test]
+    async fn reload_is_accepted_without_a_descriptor_and_refused_with_one() {
+        let (stream, _peer) = UnixStream::pair().expect("a socketpair");
+        let mut ctl = UnixCtl::new(stream);
+
+        let mut wire = Vec::new();
+        Limits::default()
+            .encode(&Frame::Ctl(Ctl::Reload), 0, &mut wire)
+            .expect("RELOAD encodes");
+        ctl.read.extend_from_slice(&wire);
+        let frame = ctl.take_frame().expect("decodes").expect("a whole frame");
+        assert_eq!(frame, Frame::Ctl(Ctl::Reload));
+        let (msg, fd) = ctl.finish_frame(frame).expect("no descriptor");
+        assert_eq!(msg, Ctl::Reload);
+        assert!(fd.is_none());
+
+        // A descriptor that travelled with a message carrying none is refused,
+        // and the refusal names the frame.
+        ctl.descriptors
+            .push(std::fs::File::open("/dev/null").expect("/dev/null").into());
+        let refused = ctl
+            .finish_frame(Frame::Ctl(Ctl::Reload))
+            .expect_err("a descriptor next to RELOAD is a protocol error");
+        assert!(refused.to_string().contains("RELOAD"), "{refused}");
+    }
 }

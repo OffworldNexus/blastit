@@ -2776,3 +2776,23 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T12:35 [MB.23.4.2] (lead) status review -> done
 - 2026-11-17T12:35 [MB.23.4] (lead) gate passed: both children done (95b0db4 codec+Python, c289f19 PHP sink); 23+8+15+1+2 legs; make check 175 targets ok with only the MB.23.5 fence; Cargo.toml/lo
 - 2026-11-17T12:35 [MB.23.4] (lead) status ready -> done
+- 2026-11-17T12:35 [MB.23.5] (lead) pre-emptively promoted to an epic: the design's own four-commit cut is ~25 files / well over the 650-line leaf budget, so one implementer cannot land it reviewa
+- 2026-11-17T12:35 [MB.23.5] (lead) edited fields
+- 2026-11-17T12:35 [MB.23.5] (lead) status ready -> ready
+- 2026-11-17T12:37 [MB.23.5.1] (planner) created (task) Ctl::Reload 0x45 with no payload: the frame and scheduler all-views retire transaction, the reason reload, and the two dev events
+- 2026-11-17T12:37 [MB.23.5.1] (planner) edited fields
+- 2026-11-17T12:37 [MB.23.5.2] (planner) created (task) Wire reload into blastit dev: the policy, the supervisor loop, --no-reload, and the preload/Blastfile re-run with :8080 held open
+- 2026-11-17T12:37 [MB.23.5.3] (planner) created (task) Refresh the dbproxy policies on a reload without dropping :8080, and the PHP live-reload row
+- 2026-11-17T12:38 [MB.23.5.3] (lead) edited fields
+- 2026-11-17T12:38 [MB.23.5.1] (lead) status ready -> active
+- 2026-11-17T12:38 [MB.23.5.1] (lead) attempt 1/3 started
+- 2026-11-17T12:38 [MB.23.5.1] (lead) base 6d07742
+- 2026-11-17T12:46 [MB.32] (planner) created (epic) Blastfile syntax highlighting on the Zensical site: one offline lexer, an AA palette in light and dark, asset tests and a browser proof
+- 2026-11-17T12:46 [MB.32.1] (planner) created (task) Ship docs/javascripts/blastfile-highlight.js plus the AA token palette and the asset tests that pin the 33-fence classification
+- 2026-11-17T12:46 [MB.32.2] (planner) created (task) Browser proof of the Blastfile highlighter: light and dark computed colours at AA, copy text and line anchors intact, instant navigation and plai
+- 2026-11-17T12:50 [MB.31.4] (conductor) Polish in editors/zed/src/lib.rs while touching editors/: check zed::settings::LspSettings::for_worktree('blastit-lsp', worktree) binary.path/arguments/env firs
+- 2026-11-17T12:56 [MB.23.5.1] (lead) implementer done: typed RetireReason::Reload (4 stringly sites gone), ReloadReason/DevReload/DevReloadUnavailable with whole-entry truncation under the unchange
+- 2026-11-17T12:56 [MB.23.5.1] (lead) status active -> review
+- 2026-11-17T12:57 [MB.33] (planner) created (task) Resolve blastit lsp without uv: Zed LspSettings -> which(blastit) -> GitHub Release download, with the exact [[capabilities]] the host grants and
+- 2026-11-17T13:08 [MB.23.5.1] (lead) reviewer VERDICT PASS (4 MINOR: 2 proof gaps -- no idempotent double-reload / queued-request-served-by-fresh-view test, and the 0x45 refusals proven via Frame::
+- 2026-11-17T13:08 [MB.23.5.1] (lead) status review -> done

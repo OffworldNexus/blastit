@@ -567,7 +567,7 @@ forks whom). `B` is `BLASTIT_UID_BASE`.
 | # | Channel | Type | Created by | Ends | Carries |
 |---|---|---|---|---|---|
 | ① | `http.chan` | `socketpair(AF_UNIX, SOCK_STREAM)` | init | http ↔ scheduler | request/response frames, muxed by `stream_id` |
-| ② | `ctl.chan` | `socketpair(AF_UNIX, SOCK_STREAM)` | init | init ↔ scheduler | `SPAWN`, `SPAWNED`+fd (`SCM_RIGHTS`), `RETIRE`, `EXITED`, `DRAIN` |
+| ② | `ctl.chan` | `socketpair(AF_UNIX, SOCK_STREAM)` | init | init ↔ scheduler | `SPAWN`, `SPAWNED`+fd (`SCM_RIGHTS`), `RETIRE`, `EXITED`, `DRAIN`, `RELOAD` |
 | ③ | `view.chan` | `socketpair(AF_UNIX, SOCK_STREAM)`, one per view process | init, at spawn | scheduler ↔ view | request/response frames, muxed by `req_id`; `DONE` |
 | ④ | pg sockets | named Unix sockets, one per (view, store) with a grant, in `/run/blastit/views/<uid>/` (`0700`), each `0600` and owned by the view uid, `SO_PASSCRED` set | init (stage 0), then inherited by dbproxy | one view → dbproxy | PostgreSQL wire protocol; identity = which listener, checked against `SCM_CREDENTIALS` |
 | ⑤ | upstream | TCP (+TLS) | dbproxy | dbproxy → PostgreSQL | PostgreSQL wire protocol, real role |
@@ -591,6 +591,10 @@ Rules that apply to every channel:
 * **Never trust `SO_PEERCRED` under gVisor.** It returns the local socket's
   own credentials. Use `SCM_CREDENTIALS` (`SO_PASSCRED`) or the identity of
   the endpoint.
+* **`RELOAD` is one all-views transaction.** init sends the empty message with
+  no route; the scheduler retires every idle worker of every route and marks
+  the busy ones stale, so no two views ever serve different versions of a
+  shared or preloaded module.
 
 ### 3.1 Framing
 
@@ -605,6 +609,7 @@ payload`, in little-endian, with a hard maximum frame size of
 | towards the client | `RESP_HEAD {status, reason, headers}`, `RESP_BODY {bytes}`, `RESP_END` / `RESP_END_COST {cost_ns, cpu_present, cpu_ns}`, `RESP_ABORT {reason}` |
 | view → scheduler only | `DONE {req_id, outcome}`, which releases the worker slot; `READY` (id 0), once, when the view can take requests |
 | both ways | `WINDOW {bytes}`: flow-control credit for this stream's body (see below) |
+| `ctl.chan`, init → scheduler | `RELOAD` (`0x45`), empty payload, id 0: every view reloads together (§3) |
 
 `RESP_END` and `RESP_END_COST` are one frame kind with two wire forms: a view
 that measured what the request cost it sends the second, one that has nothing
@@ -1599,7 +1604,7 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `sql.denied` | dbproxy | warn | `route`, `pid` (view process), `proxy`, `kind` (`query`, `parse`, `function_call`, `copy`, …), `sql` (normalised), `sqlstate`, `in_transaction`, `reason` (the policy's explanation, for example `select on auth_user.password not granted`; never a parameter value) | a statement was rejected |
 | `pg.refused` | dbproxy | warn | `route`, `proxy`, `reason` (`credentials_mismatch`, `too_many_connections`, `upstream_unreachable`, …) | a connection to the proxy was refused |
 | `http.rejected` | http | info | `remote_addr`, `status` (400, 413, 431, 501…), `reason` | a request was refused before reaching the scheduler |
-| `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`) | view process lifecycle |
+| `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`, `reload`) | view process lifecycle |
 | `process.cap` | scheduler | info | `estimate_bytes` (the measured cost of one view process), `cap` (the live view process cap it buys) | the measured cost or the cap changed (§8 Sizing); never once per request |
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
 | `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root` or `capabilities`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the preset in force with the settings it supplied and the ones an explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`; E1 — `preset` is written as `null` in a `boot` that has none, and the supplied settings' values are the preset's own, never the operator's), the rendered output variable *names* per proxy (never values), the warning text (for example a trait no view uses) | lifecycle of the whole server |
