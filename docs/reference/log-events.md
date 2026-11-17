@@ -30,11 +30,23 @@ and `parts`.
 | `sql.denied` | a statement was rejected | `route`, `pid`, `proxy`, `kind`, `sql` (normalised), `sqlstate`, `in_transaction`, `reason` |
 | `pg.refused` | a connection to a proxy was refused | `route`, `proxy`, `reason` (`credentials_mismatch`, `upstream_unreachable`, …) |
 | `http.rejected` | a request was refused before the scheduler | `remote_addr`, `status` (`400`, `413`, `431`, `501`…), `reason` |
-| `process.spawned` / `process.exited` / `process.retired` | view process lifecycle | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`) |
+| `process.spawned` / `process.exited` / `process.retired` | view process lifecycle | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`, `reload`) |
 | `process.cap` | the measured cost or the live cap changed | `estimate_bytes`, `cap` |
 | `app.output` | the app or a library printed something | `stream`, `line`, `part`, `parts` |
 | `boot`, `ready`, `shutdown` | the server's lifecycle | see below |
 | `manifest.warning` | the manifest is usable but has a problem | `message` |
+| `dev.reload` | `blastit dev` replaced every view after a save | `routes` (all of them), `files` (what changed), `reason` (`loaded`, `preload`, `blastfile`, `overflow`) |
+| `dev.reload.unavailable` | `blastit dev` could not watch anything at boot; the server serves | `errno`, `filesystem` |
+
+`dev.reload` is `info`: one reload of every view, never a subset. On any tracked
+change `routes` lists every route serving after the reload, `files` the absolute
+paths that triggered it, and `reason` is `loaded` (a file the app loaded), `preload`
+(a `preload` module), `blastfile` (the `Blastfile`) or `overflow` (changes were
+dropped, so it reloads all). `dev.reload.unavailable` is the one `warn` at boot:
+watching is a dev convenience, so the server serves without it; `errno` is the
+symbolic name (`"EPERM"`), `filesystem` the filesystem type (`"overlayfs"`).
+`--no-reload` emits neither, `blastit check` and `blastit test` never watch, and
+production has no reload at all.
 
 `outcome` is one of `ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`,
 `view_died`, `bailed`, `client_gone`. `bailed` — the handler exited, died or

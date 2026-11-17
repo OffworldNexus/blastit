@@ -2558,3 +2558,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T05:54 [MB.23.2] (lead) status active -> review
 - 2026-11-17T05:54 [MB.23.2] (lead) STATUS done from designer (attempt 1): design + ADR-0014 + 4 lens critics all PASS after one re-run each; index rows added.
 - 2026-11-17T05:56 [MB.21.6] (lead) status review -> done
+- 2026-11-17T05:59 [MB.22.4] (implementer) round-2 review fixes: method regex widened to [A-Z][A-Z0-9_-]* (M-SEARCH corpus), (dotted_name) @property capture, complete.Blastfile +1 functions directive; al
+- 2026-11-17T06:00 [MB.22.2] (designer) fix round closed: section 9.2 now byte-identical to the MB.22.4 grammar.js (13 corpus cases green), 10.2 carries table_grant + dotted_name, 12.8 hands MB.22.4 t
+- 2026-11-17T06:00 [MB.22.2] (lead) status active -> done
+- 2026-11-17T06:02 [MB.23.1] (lead) status review -> done

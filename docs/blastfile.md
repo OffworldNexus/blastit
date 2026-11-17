@@ -31,19 +31,19 @@ expands a one-line block onto its own lines.
 `blastit dev` needs no `sudo` — it runs every process as you; a PHP host's `libphp` install does.
 
 `DATABASE_URL` is your app's normal libpq URL and must be in the environment; the
-[Local development](local.md) guide (0.1.1 page, rewritten in this release)
-starts a throwaway one, and `uv add blastit` adds the CLI to the project.
+[Local development](local.md) guide starts a throwaway one, and `uv add blastit`
+adds the CLI to the project.
 
 ```console
 $ uv run blastit dev
 ```
 
-It reads the file once — restart after an edit — binds `127.0.0.1:8080` (`--port`
-moves it), and logs each request and each decision. A view with no `postgres`
-block has no listener yet: run `--learn` first. A statement a granted view may not
-run fails with PostgreSQL's permission error, and that log line is the statement
-to grant: paste it as `query '…'`, or grant the columns it touches instead.
-`BEGIN` is not a statement to paste — declare `transactions`.
+It binds `127.0.0.1:8080` (`--port` moves it) and logs each request and each
+decision; edits reload your views, all together — `--no-reload` turns that off. A
+view with no `postgres` block has no listener yet: run `--learn` first. A statement
+a granted view may not run fails with PostgreSQL's permission error, and that log
+line is the statement to grant: paste it as `query '…'`, or grant the columns it
+touches instead. `BEGIN` is not a statement to paste — declare `transactions`.
 
 Run `blastit dev --learn` to fill the grants in one pass: it allows what the file
 does not cover and records it. Stop it with `Ctrl-C`, then read
@@ -92,7 +92,7 @@ On a laptop it exits `1` and names the missing `cap_*`. The preset's stack runs
 the same command as a dedicated non-root uid that holds those capabilities, so
 the same `Blastfile` runs in production and locally. A body sent to a view with
 no `body` is a `413` in `dev` and production, not a warning. The recipes are in
-[Deployments](deploy/index.md) (0.1.1 page, rewritten in this release).
+[Deployments](deploy/index.md).
 
 Every keyword, directive and path pattern is in the
 [Blastfile reference](reference/blastfile.md).

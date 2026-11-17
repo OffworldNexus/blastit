@@ -23,8 +23,8 @@ view products GET "/products" {
 workers fork, so every view starts with it in memory — name the URLconf or the app module, never
 `settings`.
 
-`uv add blastit`, then `uv run blastit dev` from the project root. The file is read once, so
-restart after an edit; `uv run blastit fmt` puts it in canonical layout.
+`uv add blastit`, then `uv run blastit dev` from the project root. Edits reload your views, all
+together, and `--no-reload` turns that off; `uv run blastit fmt` puts it in canonical layout.
 
 ## One view, one worker
 

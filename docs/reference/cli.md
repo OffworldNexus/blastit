@@ -8,9 +8,8 @@
 | `blastit` | production |
 | `blastit-manifest fold` | grants from a log |
 
-`dev`, `check` and `blastit` read `./Blastfile` from the current directory;
-`BLASTIT_MANIFEST` names another file, which is the only way to move it. There is
-no upward search.
+`dev`, `check` and `blastit` read `./Blastfile` here; `BLASTIT_MANIFEST` names
+another file, the only way to move it. There is no upward search.
 
 ## `blastit dev`
 
@@ -18,6 +17,7 @@ no upward search.
 $ blastit dev
 $ blastit dev --port 9000
 $ blastit dev --learn
+$ blastit dev --no-reload
 ```
 
 | Flag | Default | What it does |
@@ -25,13 +25,16 @@ $ blastit dev --learn
 | `--port N` | `8080`, or `PORT` | listen on `N` |
 | `--host ADDR` | `127.0.0.1` | expose the server on another address; also needs `BLASTIT_DEV_EXPOSE=1`, and the boot line names the address and your uid |
 | `--learn` | off | allow what the file lacks and record it; writes exact `query` lines to the `Blastfile` when it stops |
+| `--no-reload` | reload on | turn live reload off: nothing is watched, and no `dev.reload.unavailable` is printed |
 
 It runs the real process topology — http, scheduler, dbproxy and one view per
 route — on your own uid, with the stage-0 secret swap and the policy checks. It
 is not a sandbox: the banner says so, and the `boot` event reports
 `"privilege": "unprivileged-dev"`. Logs are pretty; `BLASTIT_LOG_FORMAT` wins.
-A taken port exits `1` with `binding 127.0.0.1:8080: Address already in use`;
-pick another with `--port`.
+Reload is on by default in `dev` only and needs the host kernel to allow it: a
+container profile that denies it gets one warning at boot, and serving continues.
+A taken port exits `1` with `binding 127.0.0.1:8080: Address already in use`; pick
+another with `--port`.
 
 ## `blastit check`
 
@@ -67,17 +70,16 @@ and [the `--json` contract](../ci.md#for-agents-json) are on the CI page.
 ## `blastit lsp`
 
 An editor spawns it; you never run it by hand. Start it with no arguments —
-`blastit lsp`, or `uv run blastit lsp` when the CLI is not installed (that needs
-`uv add blastit`) — and register the extensionless file name `Blastfile` for the
-buffers it serves. It speaks the Language Server Protocol on stdin/stdout: the
-editor sends each document, so it reads no `./Blastfile`, no config and no network,
-and needs no privileges. Logs go to stderr, so stdout stays the protocol. An error
-carries the sentence `blastit check` prints after the `Blastfile:` prefix, and a
-refusal with no position is already one sentence; grants, queries and coverage stay
-with [`blastit check`](#blastit-check). Formatting rewrites the file to the
-[canonical layout](blastfile.md#formatting). It exits `0` after the client's
-`shutdown`, and `1` only if the client disappears without one — never because a
-document is broken.
+`blastit lsp`, or `uv run blastit lsp` when the CLI is not installed (`uv add
+blastit`) — and register the extensionless name `Blastfile` for the buffers it
+serves. It speaks the Language Server Protocol on stdin/stdout: the editor sends
+each document, so it reads no `./Blastfile`, no config and no network, and needs no
+privileges; logs go to stderr, so stdout stays the protocol. An error carries the
+sentence `blastit check` prints after its `Blastfile:` prefix, and a refusal with
+no position is already one sentence — grants, queries and coverage stay with
+[`blastit check`](#blastit-check). Formatting rewrites the file to the [canonical
+layout](blastfile.md#formatting). It exits `0` after the client's `shutdown`, and
+`1` only if the client disappears without one — never because a document is broken.
 
 ## `blastit`
 
@@ -93,9 +95,8 @@ $ blastit --help
 | `--preset NAME`, `--preset=NAME` | one platform's defaults; a set `BLASTIT_*` or `PORT` still wins |
 | `--help`, `-h` | prints the usage and the preset list |
 
-There is no `--port` here: the listener is a [setting](settings.md) (`PORT`, or
-`BLASTIT_*`), and `blastit --port 8080` exits `1` with the usage. `--port` is
-`blastit dev`'s flag.
+There is no `--port` here: the listener is a [setting](settings.md) (`PORT` or
+`BLASTIT_*`), and `blastit --port 8080` exits `1` with the usage.
 
 Production **fails closed**: without root or the capability set in
 [the settings](settings.md#privileges-and-the-uid-layout), and without seccomp,

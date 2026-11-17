@@ -26,6 +26,12 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `is the uid the layout hands out` | the service uid collides with `BLASTIT_UID_BASE + 1…3` or a route's uid |
 | `memory: … is above BLASTIT_MEM_HIGH_WATERMARK` | `blastit dev` stops rather than serve `503`s: the memory the kernel cannot reclaim is over the knob. Free memory, or raise `BLASTIT_MEM_HIGH_WATERMARK` |
 
+## A boot warning
+
+| Symptom | Fix |
+|---|---|
+| `reload disabled` … `EPERM` (`dev.reload.unavailable`) | live reload is not permitted here: a container security profile, an older kernel, or a filesystem without file handles. The server serves either way; for a filesystem without handles, bind-mount the project from the host. `blastit dev --no-reload` silences the warning |
+
 ## `blastit check` fails
 
 | Symptom | Fix |
