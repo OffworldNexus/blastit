@@ -3052,3 +3052,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T00:06 [MB.31.3] (lead) status active -> review
 - 2026-11-18T00:14 [MB.31.3] (lead) reviewer VERDICT PASS (5 MINOR, all flags for the gate/MB.31.4): hover.rs still teaches stop-at-/, the design's interim paragraph is now false four ways, and th
 - 2026-11-18T00:14 [MB.31.3] (lead) status review -> done
+- 2026-11-18T00:14 [MB.31.4] (lead) status ready -> active
+- 2026-11-18T00:14 [MB.31.4] (lead) attempt 1/3 started
+- 2026-11-18T00:14 [MB.31.4] (lead) base 32dc8ca; hover.rs:120-124 still teaches stop-at-/ and docs/design/static-and-spa.md:261-268's interim paragraph is false four ways -- both land here
+- 2026-11-18T00:14 [MB.31.4] (lead) edited fields
+- 2026-11-18T00:30 [MB.31.4] (lead) done: hover teaches the three shapes; grammar _value admits regex_raw_string so bare/list/regex all parse with all 8 fixtures still 0 ERROR; parser.c/grammar.js
+- 2026-11-18T00:30 [MB.31.4] (lead) status active -> review
+- 2026-11-18T00:37 [MB.31.4] (lead) reviewer VERDICT PASS (3 MINOR, none blocking): the design doc's R5 sentence should be past tense, the NODE Goal should name the design-doc amendment, and zed-c
+- 2026-11-18T00:37 [MB.31.4] (lead) status review -> done

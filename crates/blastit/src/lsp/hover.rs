@@ -120,7 +120,7 @@ const HOVER_TABLE: &[(&str, &str)] = &[
     ),
     (
         "immutable",
-        "`immutable \"/assets/*\"` adds `Cache-Control: public, max-age=31536000, immutable`; `*` stops at `/`, so a nested tree needs one glob per depth.",
+        "`immutable` adds `Cache-Control: public, max-age=31536000, immutable` to every exact file the mount serves; a pattern list caches the files a pattern matches — a trailing `/*` crosses `/` at any depth and `regex '…'` is the escape hatch — while an `index` or `fallback` answer is always `no-cache`.",
     ),
     (
         "index",

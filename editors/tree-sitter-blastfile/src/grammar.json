@@ -465,6 +465,14 @@
           "name": "string"
         },
         {
+          "type": "PREC",
+          "value": 1,
+          "content": {
+            "type": "SYMBOL",
+            "name": "regex_raw_string"
+          }
+        },
+        {
           "type": "SYMBOL",
           "name": "raw_string"
         },

@@ -2,12 +2,13 @@
 id: MB.31.4
 title: "Hover and tree-sitter teach bare immutable and regex: regenerate parser.c, then re-pin the Zed grammar rev"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.31.2]
 paths:
   - crates/blastit/src/lsp/hover.rs
+  - "docs/design/static-and-spa.md"
   - "editors/tree-sitter-blastfile/grammar.js"
   - "editors/tree-sitter-blastfile/src/parser.c"
   - "editors/tree-sitter-blastfile/src/grammar.json"
@@ -15,11 +16,11 @@ paths:
   - "editors/tree-sitter-blastfile/test/corpus/sections.txt"
   - "editors/tree-sitter-blastfile/highlights.scm"
   - editors/zed/extension.toml
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:33"
-updated: "2026-11-17T12:33"
+updated: "2026-11-18T00:37"
 ---
 
 # Goal

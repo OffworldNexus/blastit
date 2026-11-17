@@ -30,7 +30,7 @@ Companion ADR: [ADR-0007](../decisions/ADR-0007-static-asset-serving-and-rewriti
 | the five-row "What is served" table | §4.3 total order |
 | "a directory without its `index` file falls through like any missing path" | §4.3 steps 7–10 |
 | "a fallback whose file is missing is a `404`" | §4.3 step 8 |
-| "only a file from `root` whose path matches `immutable`" gets the year | §4.5: only an exact-file answer is glob-matched |
+| "only a file from `root` whose path matches `immutable`" gets the year | §4.5: only an exact-file answer is pattern-matched |
 | `GET`/`HEAD` only, `405` + `Allow: GET, HEAD`, body → `413` | §4.4 |
 | a path it does not answer reaches the app with the route's `methods` and `[route.ingress]` | §4.4 |
 | `HEAD` is `GET` without a body | §4.5 |
@@ -114,13 +114,14 @@ role, uid or supervisor for static files.
   bytes except `/`; the only metacharacter is `*`. The year-long cache is given to an
   **exact-file** answer only; a directory `index` and an SPA fallback are always
   `no-cache`, whatever a pattern says.
-  **Superseded 2026-11-17 (`MB.31.2`):** the matcher is no longer the `glob()` helper.
+  **Superseded 2026-11-17 (`MB.31.2`):** the two sentences above about `*` and `/` are the
+  retired `glob()` record; the matcher is now the one compiler.
   `immutable` is compiled by `pattern::compile` + `routing::compile_pattern` — the pair
   a `view` pattern uses — so a trailing `/*` crosses `/`, `{id}`/`{id:int}`/`{id:uuid}`
   work, `regex '…'` is available, and bare `immutable` caches every exact file. It matches
   `StaticFile::url_path` — the request path rebuilt as mount prefix + resolved remainder,
   prefix included — not the root-relative remainder in R5's parenthetical. The
-  `no-cache` rule above and §4.5's vectors stay as the historical `glob()` record.
+  `no-cache` rule above is unchanged, and §4.5's vectors are the one compiler's.
 - **R6 Rewrite precedence** is the total order in §4.3; two routes claiming one path
   keep today's rule (first matching route in manifest order wins) and `[static]` never
   changes matching.
@@ -255,17 +256,18 @@ bare `immutable`, and `Patterns` holds one `StaticPattern` per written pattern. 
 `StaticPattern` keeps its text (what `blastit fmt` prints), its spelling, **and** the
 anchored matcher `routing::compile_pattern` built at lower time, so
 `StaticImmutable::matches(url_path)` is one comparison per pattern and a request never
-compiles a pattern. Equality is on the text, because a compiled program has no structural
-equality worth asserting.
+compiles a pattern. Equality is on `(text, spelling)`: the two spellings share a compiled
+form but not a meaning, so a spelling flip that changes which paths are cached must not
+compare equal, and a compiled program has no structural equality worth asserting.
 
-**Interim (`MB.31.2`, replaced by `MB.31.3`):** `blastit-scheduler` does **not** call
-`StaticImmutable::matches` yet. `StaticRoot` still holds its own `ImmutableGlob` entries and
-matches them with the retired stop-at-`/` `glob()`, so only **quoted** patterns are honoured
-there (`*` stops at `/`); a `regex '…'` entry, and a quoted one over the retired 256-byte
-guard, caches nothing until `MB.31.3` deletes `ImmutableGlob`/`glob()` and matches with the
-manifest's compiled pattern. The scheduler deliberately skips rather than re-reads a regex
-entry: the two spellings share a compiled form, not a meaning, and two matchers disagreeing
-may never over-cache.
+**One matcher, evaluated in the scheduler (`MB.31.3`).** `StaticRoot` holds that
+`StaticImmutable` itself — cloned from the policy in `open_with`, never re-derived — and
+`static_response::cache_control` asks `StaticImmutable::matches(&file.url_path)`. There is
+no second matcher and no second syntax in the tree: a quoted pattern's trailing `/*`
+crosses `/` at any depth, `{id}`/`{id:int}`/`{id:uuid}` work, `regex '…'` caches exactly
+what it compiles to, and bare `immutable` caches every **exact-file** answer. An `index`
+or `fallback` answer never reaches the matcher at all, so the year is never pinned on a
+shell that changes (S3).
 
 `check_static_roots` uses `std::fs::metadata` (symlinks followed: `root = "current/public"`
 must work), requires `is_dir`, then `read_dir(root)` whose first `next()` must not be an
@@ -338,16 +340,11 @@ pub fn classify(kind: FileType, len: u64, max_bytes: u64) -> Result<(), StaticOu
 /// `SchedulerError::Protocol("static root <root>: <source>")`, which exits the role.
 pub struct StaticError { pub root: String, pub source: io::Error }
 
-/// One `immutable` entry (`MB.31.2`): `EveryFile` is bare `immutable`; `Pattern`
-/// is a written pattern, still matched by the retired stop-at-`/` glob until
-/// `MB.31.3` swaps it for the manifest's compiled pattern.
-pub enum ImmutableGlob { EveryFile, Pattern(String) }
-impl ImmutableGlob {
-    pub fn new(pattern: &str) -> Option<Self>;   // `None` only if MB.2.3 let it through
-    pub fn matches(&self, url_path: &str) -> bool;  // `EveryFile` matches every path
-}
-
-pub struct StaticRoot { /* dirfd, index segments, spa, immutable entries, max_bytes */ }
+/// `StaticRoot` keeps the manifest's policy, never a matcher of its own
+/// (`MB.31.3`): `None` is no `immutable`, `All` is bare `immutable`, and
+/// `Patterns` holds the `StaticPattern`s the one compiler already anchored, so
+/// `StaticImmutable::matches(url_path)` is the only cache decision in the tree.
+pub struct StaticRoot { /* dirfd, index segments, spa, immutable: StaticImmutable, max_bytes */ }
 pub enum Backend { Openat2, Walk }   // `Walk` is selectable in tests
 
 impl StaticRoot {
@@ -639,21 +636,26 @@ inverse of days-from-civil (~30 lines, pure). Vectors: `0` →
 `Thu, 01 Jan 1970 00:00:00 GMT`; `784111777` → `Sun, 06 Nov 1994 08:49:37 GMT`;
 `1700000000` → `Tue, 14 Nov 2023 22:13:20 GMT`.
 
-`immutable` glob vectors (the matcher is ~30 lines, no regex; `MB.2.3` validates the
-same syntax and both suites use this table). **Superseded 2026-11-17 (`MB.31.2`):**
-these are the retired `glob()` semantics, kept as the record; the matcher is now
-`pattern::compile` + `routing::compile_pattern`, and the reference's
-[Path patterns](../../reference/blastfile.md#path-patterns) table is the contract.
+`immutable` pattern vectors (`MB.31.3`). The matcher is `pattern::compile` +
+`routing::compile_pattern`, the pair a `view` pattern uses, and both the manifest and the
+scheduler suites table-drive these rows; the reference's
+[Path patterns](../../reference/blastfile.md#path-patterns) table is the contract. A
+pattern is matched **whole** against `StaticFile::url_path` — the mount prefix plus the
+resolved remainder — so `/assets/*` selects the same files under any mount that serves
+them.
 
 | Pattern | Answering path | Match |
 |---|---|---|
 | `/assets/*` | `/assets/app.4f1c2a9b7d3e.js` | yes |
 | `/assets/*` | `/assets/` | yes (`*` may be empty) |
-| `/assets/*` | `/assets/x/y.js` | **no** (`*` stops at `/`) |
+| `/assets/*` | `/assets/chunks/x/y.js` | yes (a trailing `/*` crosses `/` at any depth) |
+| `/assets/*` | `/assets` | no (the pattern requires the `/` before `*`) |
+| `/assets/*` | `/assets-secret/key.pem` | no (`*` only follows a `/`, so a shared prefix cannot leak) |
 | `/assets/*` | `/x/assets/app.js` | no (anchored) |
-| `/assets/*/*` | `/assets/chunks/x.js` | yes (one pattern per depth, no `**`) |
-| `/assets/app.*` | `/assets/app.js` | yes |
-| `/index.html` | `/index.html` | yes, **but** only as `AnswerKind::Exact`; `/` and `/dashboard` answer the same file as an index and stay `no-cache` |
+| `/assets/*/*` · `/assets/app.*` | — | **refused** at lower time: `*` must end the pattern |
+| `/assets/{file}` | `/assets/app.js` | yes, but not `/assets/chunks/x.js` (one non-empty segment) |
+| `/assets/app.js` | `/assets/app.js` | yes, **but** only as `AnswerKind::Exact`; `/` and `/dashboard` answer the same file as an index and stay `no-cache` |
+| `regex '/assets/.+\.[0-9a-f]{12}\.[^/]+'` | `/assets/app.4f1c2a9b7d3e.js` | yes (the expression is anchored whole) |
 
 ### 4.6 Flow, admission and the body pump
 
@@ -970,7 +972,7 @@ declared and `[route.ingress] body = "json"` (front controller). Column **N** = 
 | 32 | `/assets/app.4f1c2a9b7d3e.js?v=1` | `200` immutable | `200` no-cache | `200` no-cache | query ignored; F/N declare no `immutable` |
 | 33 | `/assets/app.4f1c2a9b7d3e.js/` | `200` immutable | `200` no-cache | `200` no-cache | trailing empty segment dropped; F/N declare no `immutable` |
 | 34 | `/index.html` (fixture D) | `200` immutable | — | — | `Exact` + `/index.html` pattern |
-| 35 | `/` and `/dashboard` (fixture D) | `200` `no-cache` | — | — | `index` answer, never globbed |
+| 35 | `/` and `/dashboard` (fixture D) | `200` `no-cache` | — | — | `index` answer, never pattern-matched |
 | 36 | `/device` | `404` | `404` | `404` | device node: **e2e only** (needs root); `classify` unit-tested |
 | 37 | `/caf%C3%A9.js` (NFC) | `200` file | `200` file | `200` file | the NFC bytes name `café.js`: no normalization, real file |
 | 38 | `/cafe%CC%81.js` (NFD) | `200` index | forward | `404` | NFD is a different filename: the miss is the SPA fallback, never `café.js` |
@@ -983,7 +985,7 @@ file. Rows 14, 18–19, 27–35, 37–38 and 40 are the positive twins: they pro
 refusals are not a blanket `404`. Row 20 is a `..` under the `.well-known` exemption and
 row 21 a dotfile below it: both are refusals (`400`, `404`), not positives. Rows 32, 33
 and 40 read `no-cache` in the F/N columns because fixtures F and N declare
-`immutable = []` (the year is a configured glob, not a property of a hashed name); the
+`immutable = []` (the year is a configured pattern, not a property of a hashed name); the
 rule keeps real-file oracles in the S column of those rows, in fixture D's `/index.html`
 (row 34) against its `/` and `/dashboard` (row 35), and in a front-controller policy
 that does declare `/assets/*`. Every
@@ -1043,11 +1045,9 @@ executable unprivileged; it is `MB.2.7`'s.
    syscall and closes both that and the substitution race.
 6. **`spawn_blocking` per chunk vs inline reads** — chosen `spawn_blocking`: an inline
    `read()` on a stalled mount stops the whole scheduler and its own request timeout.
-7. **`**` recursive globs** — rejected for 0.2.0: the page documents one metacharacter
-   and says `*` stops at `/`; a nested output directory uses one pattern per depth, and
-   a later docs node can add `**` with the page change it needs.
-   *(Superseded 2026-11-17, `MB.31.2`: `immutable` uses the `view` pattern grammar, so a
-   trailing `/*` crosses `/` and no `**` was needed; §4.5's note names the replacement.)*
+7. **`**` recursive globs** — not needed and not added: `immutable` uses the `view`
+   pattern grammar, so a trailing `/*` already crosses `/` at any depth and the page
+   keeps its one metacharacter (a `*` that must end the pattern).
 
 ---
 
@@ -1145,7 +1145,7 @@ No leaf needs an out-of-lane edit.
 | Node | Files | Lands | Acceptance |
 |---|---|---|---|
 | `MB.2.3` | `blastit-manifest/{model,parse,validate,error,lib}.rs`, `tests/critical_static_manifest.rs`, `tests/docs_fences.rs`, `docs/reference/manifest.md` | `StaticPolicy`, `Route::static_policy`, `Manifest::{is_all_static,static_roots,check_static_roots}`, the five error variants, `docs_fences` 7 rows + shape assertion, the `[static]` reference entry | `cargo test -p blastit-manifest --test critical_static_manifest --locked` |
-| `MB.2.4.1` | `blastit-scheduler/src/{static_asset,config,lib}.rs`, `blastit-scheduler/tests/critical_static_resolve.rs`, `blastit-scheduler/tests/common/static_fixture.rs` | `segments` (the exact-one-leading-`/` rule), `is_dotfile`, `classify`, `StaticRoot::{open,open_with,resolve,resolve_with}`, `same_inode`, `ImmutableGlob`, `STATIC_RESOLVE_FLAGS`, `Backend::Walk`, total errno table, `static_max_bytes`, `manifest_dir`; **≤ 500 production lines** | `cargo test -p blastit-scheduler --test critical_static_resolve --locked` |
+| `MB.2.4.1` | `blastit-scheduler/src/{static_asset,config,lib}.rs`, `blastit-scheduler/tests/critical_static_resolve.rs`, `blastit-scheduler/tests/common/static_fixture.rs` | `segments` (the exact-one-leading-`/` rule), `is_dotfile`, `classify`, `StaticRoot::{open,open_with,resolve,resolve_with}`, `same_inode`, `STATIC_RESOLVE_FLAGS`, `Backend::Walk`, total errno table, `static_max_bytes`, `manifest_dir`; **≤ 500 production lines** | `cargo test -p blastit-scheduler --test critical_static_resolve --locked` |
 | `MB.2.5.1` | `blastit-scheduler/src/{rewrite,route,lib}.rs`, `blastit-scheduler/tests/critical_rewrite.rs` | `decide`, `declares_body`, `STATIC_ALLOW`, `RouteInfo::with_static`, the precedence/status pure half; **≤ 250 production lines** in `rewrite.rs`; `critical_rewrite.rs` under the shared 1,600-line file ceiling | `cargo test -p blastit-scheduler --test critical_rewrite --locked` |
 | `MB.2.4.2` | `blastit-scheduler/src/{static_response,lib}.rs`, `blastit-scheduler/tests/critical_static_assets.rs` | `respond`, `ETag`/`Last-Modified`/`304`, the answer-kind cache rule, the `Content-Type` table, `http_date`, the response half of the matrix (24 cases) through `decide` with refusals left to `critical_static_resolve.rs`; **≤ 500 production lines** (317 landed, 200 non-comment) | `cargo test -p blastit-scheduler --test critical_static_assets --locked` |
 | `MB.2.5.2` | `blastit-scheduler/src/scheduler.rs`, `blastit-scheduler/tests/critical_rewrite.rs` | `run` opens roots, `static_target`/`static_body`/`pumping`, `static_in`, `dispatch_static`/`can_dispatch_static`, `RouteInfo.static_forward`, spawn rule, `body_plan_error`, forward release-and-re-enter, `slot_releasable`/`release_static_slot`, timeout/cancel; **appends** to `critical_rewrite.rs` under the same shared ceiling | `cargo test -p blastit-scheduler --test critical_rewrite --locked` |

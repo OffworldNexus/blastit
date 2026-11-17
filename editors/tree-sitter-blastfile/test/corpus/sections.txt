@@ -134,3 +134,67 @@ view cart {
             (table)
             (column)
             (column)))))))
+
+==================
+bare immutable caches every exact file the mount serves
+==================
+static "/static" {
+    root "staticfiles"
+    immutable
+}
+
+---
+
+(source_file
+  (static_decl
+    (string)
+    (block
+      (directive
+        (keyword)
+        (string))
+      (directive
+        (keyword)))))
+
+==================
+an immutable list is one pattern per item, the same spellings a view takes
+==================
+static "/static" {
+    root "staticfiles"
+    immutable "/static/*", "/static/admin/*"
+}
+
+---
+
+(source_file
+  (static_decl
+    (string)
+    (block
+      (directive
+        (keyword)
+        (string))
+      (directive
+        (keyword)
+        (string)
+        (string)))))
+
+==================
+an immutable regex is its own node, not a name and a raw string
+==================
+static "/static" {
+    root "staticfiles"
+    immutable regex '/static/.+\.[0-9a-f]{12}\.[^/]+'
+}
+
+---
+
+(source_file
+  (static_decl
+    (string)
+    (block
+      (directive
+        (keyword)
+        (string))
+      (directive
+        (keyword)
+        (regex_raw_string
+          (regex_body))))))

@@ -87,6 +87,10 @@
           "named": true
         },
         {
+          "type": "regex_raw_string",
+          "named": true
+        },
+        {
           "type": "string",
           "named": true
         }

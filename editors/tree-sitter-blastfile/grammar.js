@@ -74,7 +74,16 @@ module.exports = grammar({
       $._value,
       repeat(seq(optional(seq(',', optional($._terminator))), $._value)),
     ),
-    _value: $ => choice($.codec, $.env_var, $.string, $.raw_string, $.name, $.dotted_name),
+    // `immutable` is a directive and takes the same two spellings a `view`
+    // pattern does -- `"..."` and `regex '...'` -- so both `_pattern` items are
+    // `_value`s here and bare `immutable` is the valueless directive it already
+    // was. `prec(1)` resolves the one overlap the addition creates: `regex` also
+    // matches `$.name`, and the longer `regex_raw_string` must win over a name
+    // followed by a raw string (the `table_grant` idiom below).
+    _value: $ => choice(
+      $.codec, $.env_var, $.string, prec(1, $.regex_raw_string), $.raw_string,
+      $.name, $.dotted_name,
+    ),
     // A function name is `Word ('.' Word)*` (docs/design/blastfile-dsl.md §6.1),
     // and `blastit fmt` writes the qualified form: `functions pg_catalog.unaccent`
     // is one function in three tokens. `repeat1`, not `repeat`: a bare name is
