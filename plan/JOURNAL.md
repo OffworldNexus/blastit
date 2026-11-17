@@ -2929,3 +2929,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T18:09 [MB.23.5.2.2] (lead) status review -> done
 - 2026-11-17T18:09 [MB.23.5.2] (lead) gate passed: both children done (83c6bb9 policy+supervisor+no-reload, bdd23c5 cycle+adoption+abandon); 19 critical legs, lib 282, make check EXIT=0, docs-test 4
 - 2026-11-17T18:09 [MB.23.5.2] (lead) status ready -> done
+- 2026-11-17T18:10 [MB.23.5.3] (lead) status ready -> active
+- 2026-11-17T18:10 [MB.23.5.3] (lead) attempt 1/3 started
+- 2026-11-17T18:10 [MB.23.5.3] (lead) base fde43da; row 8 (EPERM) already landed in MB.23.5.2.2 -- confirm it, do not duplicate
+- 2026-11-17T18:46 [MB.23.5.3] (lead) edited fields
+- 2026-11-17T18:46 [MB.23.5.3] (lead) attempt 1 landed the dbproxy half green (policy wire module, replace_route_policies with Arc<Allowlist> swap, ListenerPolicy cell, ack loop, stage-0 socketpair 
+- 2026-11-17T18:46 [MB.23.5.3] (lead) attempt 2/3 started
+- 2026-11-17T19:03 [MB.23.5.3] (lead) attempt 2: the sender writes u32 LE len + JSON through the poll set with a 100 ms ack and emits exactly one manifest.warning naming the cause on any failure whi
+- 2026-11-17T19:03 [MB.23.5.3] (lead) status active -> review
+- 2026-11-17T19:13 [MB.23.5.3] (lead) edited fields
+- 2026-11-17T19:13 [MB.23.5.3] (lead) REVIEW FAIL attempt 2 (2 MAJOR, 3 MINOR): a timed-out ack leaves its byte unread so the NEXT save reads it as its own answer and a refused document is reported 
+- 2026-11-17T19:13 [MB.23.5.3] (lead) attempt 3/3 started
+- 2026-11-17T19:39 [MB.23.5.3] (lead) attempt 3: PolicyOutcome drains a stray ack before writing and taints the image on Broken so a late ack can never be read as the next document success (two-docu
+- 2026-11-17T19:39 [MB.23.5.3] (lead) status review -> review
+- 2026-11-17T19:48 [MB.23.5.3] (lead) reviewer attempt 3 VERDICT PASS (3 MINOR): the exec boundary loses the out-of-step taint (carry it in the adoption document -- filed for MB.23.6), a duplicated 
+- 2026-11-17T19:48 [MB.23.6] (lead) inherits three MB.23.5.3 MINORs: carry policy_out_of_step in the adoption document so a pre-existing taint survives the exec; drop the duplicated body assertion
+- 2026-11-17T19:48 [MB.23.5.3] (lead) status review -> done

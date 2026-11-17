@@ -2,7 +2,7 @@
 id: MB.23.5.3
 title: "Refresh the dbproxy policies on a reload without dropping :8080, and the PHP live-reload row"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.23.5.2]
@@ -13,13 +13,18 @@ paths:
   - "crates/blastit-dbproxy/src/state.rs"
   - "crates/blastit-dbproxy/src/server.rs"
   - crates/blastit/src/stage0.rs
+  - crates/blastit/src/stage1.rs
+  - crates/blastit/src/supervise.rs
   - crates/blastit/src/php_view.rs
+  - crates/blastit/src/cli.rs
+  - crates/blastit/src/roles.rs
   - crates/blastit/tests/critical_dev_reload.rs
-attempts: 0
+  - docs/knowledge/LESSONS.md
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:37"
-updated: "2026-11-17T13:43"
+updated: "2026-11-17T19:48"
 ---
 
 # Goal

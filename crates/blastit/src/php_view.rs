@@ -938,6 +938,11 @@ pub struct PhpViewSpawn<'a> {
     pub dir: PathBuf,
     /// `true` in production (`setresuid` + `RLIMIT_NPROC`), `false` in `dev`.
     pub drop_privileges: bool,
+    /// The dev-only loaded-file report (`MB.23.4.2`, `MB.23.5.3`): the write end
+    /// of this view's own report socketpair, created by the supervisor before the
+    /// fork and moved into `ChildIo.keep` here. `None` is production,
+    /// `--no-reload` and every host without a usable shim sink.
+    pub loaded: Option<blastit_view::php::PhpLoadedReport>,
 }
 
 /// A freshly forked PHP view, as the parent sees it.
@@ -987,6 +992,13 @@ pub fn fork_php_view(
     // them would make the load fail with `ENOENT` in production.
     let mut keep = vec![view_end.as_raw_fd()];
     keep.extend(spawn.binding.pinned_fds());
+    // The dev-only loaded-file report's write end (`MB.23.5.3`): an inherited
+    // descriptor the worker's shim sink sends on, exactly like `view.chan` — no
+    // environment variable, so nothing for the app to see or for stage 0 to
+    // strip.
+    if let Some(report) = &spawn.loaded {
+        keep.push(report.socket.as_raw_fd());
+    }
     let child = ChildIo {
         stdout: Some(stdout_write),
         stderr: Some(stderr_write),
@@ -1107,13 +1119,11 @@ fn serve(
         SharedObject::Fd(spawn.binding.libphp.as_raw_fd()),
         SharedObject::Fd(spawn.binding.shim.as_raw_fd()),
         config,
-        // `MB.23.4.2`'s dev-only loaded-file report. `None` is production and
-        // `--no-reload`: no socket, no reader, and not one byte of extra work
-        // per request. `MB.23.5` passes this view's report socketpair here —
-        // it is the zygote that creates it before the fork and adds the write
-        // end to the child's keep list, exactly like `view.chan` — from the
-        // `PhpViewSpawn` field it owns.
-        None,
+        // `MB.23.4.2`'s dev-only loaded-file report, wired by `MB.23.5.3`:
+        // `None` is production and `--no-reload` (no socket, no reader, and not
+        // one byte of extra work per request). A shim without the optional sink
+        // symbol keeps that `None` behaviour inside `load_reporting`.
+        spawn.loaded,
     )
     .map_err(|err| format!("{err}"))?;
     // `ADR-0010` §3 / `MB.3.56`: every request re-checks the resolved entry

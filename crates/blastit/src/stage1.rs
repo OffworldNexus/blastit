@@ -752,6 +752,14 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         },
         learn_fds,
         reload_source,
+        // §4.8: the `(route, proxy)` pairs *this image's* manifest declares, so
+        // a save that adds or removes a store is one warning naming the restart
+        // instead of a silent refusal. A replacement image boots with the new
+        // manifest, which is exactly why a change is warned on the save that
+        // makes it (the first image) and not again on every later save.
+        boot_pairs: crate::supervise::policy_pairs(&manifest)
+            .into_iter()
+            .collect(),
         announce: adopted.is_none(),
         reload_fault,
         reload_since: options.dev_reload_since.and_then(|nanos| {
@@ -814,6 +822,7 @@ fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
             chan: None,
             policy: None,
             learn_fds: None,
+            boot_pairs: serving.boot_pairs,
         },
         emitter,
     );
@@ -892,6 +901,10 @@ struct Serving {
     /// (`BLASTIT_TEST_RELOAD_FAULT`, compiled out of release builds).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     reload_fault: Option<String>,
+    /// The `(route, proxy)` pairs this image's manifest declares, which are the
+    /// pairs dbproxy's listeners were bound for (§4.8).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    boot_pairs: std::collections::BTreeSet<(String, String)>,
 }
 
 /// What the post-preload marking pass owes the boot line (§4.7, `T32`).
@@ -1032,6 +1045,7 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             chan: serving.chan,
             policy: serving.policy,
             learn_fds: serving.learn_fds,
+            boot_pairs: serving.boot_pairs,
         },
         emitter,
     );

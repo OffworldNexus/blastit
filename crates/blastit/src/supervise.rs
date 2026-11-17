@@ -25,12 +25,15 @@
 //! init is single-threaded and holds the GIL for the whole loop: nothing else
 //! could want it, and the zygote needs it to fork.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::CString;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 #[cfg(feature = "python")]
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "python")]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
 use blastit_events::{
@@ -47,11 +50,13 @@ use blastit_sys::{
 #[cfg(feature = "python")]
 use pyo3::{Py, PyAny};
 
+#[cfg(feature = "python")]
+use crate::child::wait_readable;
 use crate::child::{Deadline, wait_writable};
 use crate::config::Config;
-use crate::dev_reload::{self, Effect, Reload};
+use crate::dev_reload::{self, Class, Effect, Reload};
 #[cfg(feature = "python")]
-use crate::dev_reload::{Class, ReloadConfig, SystemClock};
+use crate::dev_reload::{ReloadConfig, SystemClock};
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
 use crate::py::Python;
 #[cfg(feature = "python")]
@@ -69,6 +74,16 @@ pub const TERMINATE_GRACE: Duration = Duration::from_secs(2);
 /// forever would wedge init with it, which is exactly what the reap loop must
 /// not do.
 pub const SEND_CTL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long a `Blastfile` save may hold the supervisor for dbproxy's policy ack
+/// (§4.6 step 2).
+///
+/// The document is small and dbproxy answers before it retires a view, so this
+/// is the whole cost a save can add: one hundred milliseconds at worst, after
+/// which the old grants stay in force and one `manifest.warning` says so. It is
+/// deliberately the design's number, not a guess.
+#[cfg(feature = "python")]
+pub const POLICY_ACK_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// One descriptor in the poll set, with what to do with its bytes.
 struct Source {
@@ -159,7 +174,6 @@ impl ChildTable {
     /// A fresh view's `spawn_now` registers a new end for the route's source
     /// ([`ReportTable::register`] keys the source, so the old end is gone); the
     /// stale pid must then not revoke the new one when it is reaped.
-    #[cfg(feature = "python")]
     fn forget_source(&mut self, route: usize) {
         for child in self.by_pid.values_mut() {
             if child.route == route {
@@ -199,13 +213,20 @@ struct Spawn<'a> {
 
 /// What `spawn_now` hands the view fork: its own report socket, or nothing.
 ///
-/// A `python`-less build forks no WSGI view at all, so the type is uninhabited
-/// there and the parameter costs nothing.
-#[cfg(feature = "python")]
-type ViewReport = Option<blastit_view::LoadedReport>;
-/// See the `python` half: a build with no view runtime has no report.
-#[cfg(not(feature = "python"))]
-type ViewReport = Option<std::convert::Infallible>;
+/// One crate-local shape for both backends: a WSGI view's `LoadedReport` and a
+/// PHP worker's `PhpLoadedReport` are the same two things (the write end of a
+/// `SOCK_DGRAM` socketpair and the source its batches name), and each fork
+/// converts it at its own boundary. `None` is every boot with nothing to report
+/// to — production, `check`, `--no-reload`.
+type ViewReport = Option<ViewReportEnd>;
+
+/// The write end of a view's report socketpair, before a backend claims it.
+struct ViewReportEnd {
+    /// The view's end of the datagram socketpair.
+    socket: std::os::unix::net::UnixDatagram,
+    /// The id its batches name: the route slot, for logging and `seq` only.
+    source: u16,
+}
 
 /// A freshly forked worker of either runtime, as the parent sees it.
 /// `ForkedView` (WSGI) and `ForkedPhpView` (embedded PHP) describe the same
@@ -422,6 +443,11 @@ pub struct Parts {
     /// (`--dev-policy-fd`). Carried into the adoption document; the refresh
     /// itself is `MB.23.5.3`'s.
     pub policy: Option<OwnedFd>,
+    /// The `(route, proxy)` pairs dbproxy's **listeners** were bound for at boot
+    /// (`§4.8`): the set a save's document is compared against, so a store that
+    /// is added or removed is one `manifest.warning` naming the restart instead
+    /// of a silent refusal. Filled by stage 1 from the manifest it parsed.
+    pub boot_pairs: BTreeSet<(String, String)>,
     /// The `--learn` descriptor numbers, for the adoption document.
     pub learn_fds: Option<(RawFd, Option<RawFd>)>,
 }
@@ -476,6 +502,20 @@ pub struct Supervisor<'a> {
     adoption: Option<Adoption>,
     /// The cycle in flight, if any.
     cycle: Option<Cycle>,
+    /// Whether the dev policy channel is left in a state this image cannot
+    /// trust, so no later save may report a swap it did not get (§4.6 step 2).
+    ///
+    /// Set when a document was written but its ack never arrived (a timeout, a
+    /// broken read or write): dbproxy may still be applying that document, so
+    /// the next ack byte on the socket cannot be attributed to the next
+    /// document. Every later save then emits the one warning and sends nothing,
+    /// which is why the sentence ends "restart blastit dev".
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    policy_out_of_step: AtomicBool,
+    /// The `(route, proxy)` pairs dbproxy's listeners were bound for at boot
+    /// (§4.8), read by [`Supervisor::changed_pairs`].
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    boot_pairs: BTreeSet<(String, String)>,
     /// Whether this image is stopping its scheduler on purpose as part of a
     /// cycle (§4.6 step 5).
     ///
@@ -517,7 +557,24 @@ impl<'a> Supervisor<'a> {
                     dbproxy,
                     chan,
                     learn: parts.learn_fds,
-                    policy: parts.policy.take(),
+                    policy: match parts.policy.take() {
+                        Some(policy) => {
+                            // The supervisor writes a policy document and waits
+                            // for one ack byte through `poll`, so this end must
+                            // never block: a dbproxy that stopped reading has to
+                            // be a 100 ms timeout, not an init that hangs (§4.6).
+                            if let Err(err) =
+                                rustix::fs::fcntl_setfl(&policy, rustix::fs::OFlags::NONBLOCK)
+                            {
+                                if let Some(dev) = &parts.dev {
+                                    dev.cleanup();
+                                }
+                                crate::logs::fail(emitter, &format!("policy socket: {err}"));
+                            }
+                            Some(policy)
+                        }
+                        None => None,
+                    },
                 })
             }
             _ => None,
@@ -584,6 +641,8 @@ impl<'a> Supervisor<'a> {
             reload_source: parts.reload_source,
             adoption,
             cycle: None,
+            policy_out_of_step: AtomicBool::new(false),
+            boot_pairs: parts.boot_pairs,
             reloading: false,
         }
     }
@@ -817,6 +876,89 @@ impl<'a> Supervisor<'a> {
         ));
     }
 
+    /// Replaces dbproxy's whole route-policy map with `manifest`'s grants, and
+    /// waits for the one-byte ack (§4.6 step 2, §4.8).
+    ///
+    /// The channel is the socketpair stage 0 created for this boot, held by
+    /// [`Adoption::policy`](struct@Adoption); it is **never** re-created, so a
+    /// save costs no descriptor and no re-bind. `None` is every boot with no
+    /// channel (no dbproxy was forked, or the descriptor was not handed over):
+    /// there is nothing to refresh and no warning to invent.
+    ///
+    /// A save whose document changes the **pair set** — a store added or removed
+    /// — cannot bind a new socket (they are fixed at boot, §4.8), so it emits one
+    /// warning naming the restart *and* still sends the document: the entries
+    /// that exist are updated, and the ones that do not can never fail open.
+    ///
+    /// A document that cannot be built, a write that cannot finish, an ack that
+    /// does not arrive inside [`POLICY_ACK_TIMEOUT`] and a `0x01` all take the
+    /// same arm: the previous grants stay in force, one `manifest.warning` names
+    /// the reason and the restart, and the cycle continues. Dev saves never fail
+    /// and never block — the wait is a bounded synchronous exchange
+    /// ([`POLICY_ACK_TIMEOUT`], measured in
+    /// `the_ack_wait_is_bounded_by_the_design_s_deadline`), the one deviation
+    /// from §4.6's `policy_ack` poll state, recorded in this node's `RESULT.md`.
+    #[cfg(feature = "python")]
+    fn refresh_policy(&self, manifest: &Manifest) {
+        let Some(adoption) = self.adoption.as_ref() else {
+            return;
+        };
+        // The listener set is a property of the topology, not of the channel: a
+        // boot that forked no dbproxy still owes the warning when a save adds a
+        // store (and a boot that has one owes it when a save removes one).
+        if let Some(changed) = self.changed_pairs(manifest) {
+            self.warn(changed);
+        }
+        // No dbproxy was forked (a boot whose manifest grants nothing on a
+        // `postgresql` proxy): there is no reader for the document.
+        if adoption.dbproxy.is_none() {
+            return;
+        }
+        let Some(policy) = adoption.policy.as_ref() else {
+            return;
+        };
+        // A channel this image left out of step can never be trusted again: the
+        // next ack byte could belong to the document whose ack timed out, so a
+        // "swap" would be a report of something that did not happen (§4.6's
+        // "never report a success it did not get"). One warning, nothing sent.
+        if self.policy_out_of_step.load(Ordering::Relaxed) {
+            self.warn(
+                "the new grants were not applied; restart blastit dev (an earlier save left \
+                 the policy channel out of step, so its message can no longer be attributed)"
+                    .to_string(),
+            );
+            return;
+        }
+
+        let outcome = match policy_document(manifest) {
+            Ok(document) => exchange_policy(
+                policy.as_fd(),
+                &document,
+                Deadline::after(POLICY_ACK_TIMEOUT),
+            ),
+            Err(cause) => PolicyOutcome::Broken(cause),
+        };
+        match outcome {
+            PolicyOutcome::Swapped => {}
+            PolicyOutcome::Refused(cause) => self.warn(format!(
+                "the new grants were not applied; restart blastit dev ({cause})"
+            )),
+            PolicyOutcome::Broken(cause) => {
+                self.policy_out_of_step.store(true, Ordering::Relaxed);
+                self.warn(format!(
+                    "the new grants were not applied; restart blastit dev ({cause})"
+                ));
+            }
+        }
+    }
+
+    /// The one warning a save whose document changes the `(route, proxy)` set
+    /// owes (§4.8), or `None` when the set is unchanged.
+    #[cfg(feature = "python")]
+    fn changed_pairs(&self, manifest: &Manifest) -> Option<String> {
+        store_set_warning(&self.boot_pairs, manifest)
+    }
+
     /// Starts the reload **cycle** for a change to a file every view's heap
     /// already holds (§4.6).
     ///
@@ -895,6 +1037,12 @@ impl<'a> Supervisor<'a> {
             .map(|route| route.name().to_string())
             .collect();
         self.emit_reload(&routes, &fire.files, fire.reason);
+        // §4.6 step 2, before `Ctl::Reload`: dbproxy's allowlist is refreshed
+        // from the new manifest's own pairs, so the first query a replacement
+        // view runs is decided by the new grants. A refusal or a timeout keeps
+        // the previous grants and warns once; the retirement below continues
+        // either way, because a dev save never fails and never blocks.
+        self.refresh_policy(&manifest);
         self.send_ctl(&Ctl::Reload);
         self.reloading = true;
         self.cycle = Some(Cycle {
@@ -1299,46 +1447,34 @@ impl<'a> Supervisor<'a> {
     /// Registers this view's report end with the reload policy, or returns
     /// `None` when there is nothing to report to.
     ///
-    /// `None` is every production boot, `check`, a dev boot with reload off, and
-    /// a PHP slot (`php_view.rs` carries no report yet — `MB.23.5.3`). A view
-    /// whose slot has no report is a view that never triggers a reload, which is
-    /// exactly what it did before `MB.23.5`.
+    /// `None` is every production boot, `check` and a dev boot with reload off.
+    /// Both backends report — a WSGI view's loader and a PHP worker's file sink
+    /// are the same wire (`MB.23.4.2`) — so a slot gets its socket whatever
+    /// runtime serves it, and a fresh reporter is created **per boot** (this
+    /// call) because a source's first batch is its `boot` set (`loaded.rs`).
     fn open_report(&mut self, index: usize) -> std::io::Result<(ViewReport, Option<u16>)> {
-        #[cfg(feature = "python")]
-        {
-            #[cfg(feature = "php")]
-            let php_slot = self.php.get(index).is_some_and(Option::is_some);
-            #[cfg(not(feature = "php"))]
-            let php_slot = false;
-            let Some(source) = u16::try_from(index).ok().filter(|_| !php_slot) else {
-                return Ok((None, None));
-            };
-            let Some(reload) = self.reload.as_mut() else {
-                return Ok((None, None));
-            };
-            let (read, write) = dev_reload::report_socket()?;
-            // A route can fork a fresh view while a stale busy one still serves:
-            // the table keys the source, so the newest end wins and the stale
-            // pid must not revoke it later.
-            self.children.forget_source(index);
-            reload
-                .policy()
-                .reports()
-                .register(read.into(), source, Class::Loaded, false);
-            Ok((
-                Some(blastit_view::LoadedReport {
-                    socket: write,
-                    source,
-                }),
-                Some(source),
-            ))
-        }
-        // A `python`-less build forks no WSGI view, so it has no report to open.
-        #[cfg(not(feature = "python"))]
-        {
-            let _ = index;
-            Ok((None, None))
-        }
+        let Some(source) = u16::try_from(index).ok() else {
+            return Ok((None, None));
+        };
+        let Some(reload) = self.reload.as_mut() else {
+            return Ok((None, None));
+        };
+        let (read, write) = dev_reload::report_socket()?;
+        // A route can fork a fresh view while a stale busy one still serves:
+        // the table keys the source, so the newest end wins and the stale pid
+        // must not revoke it later.
+        self.children.forget_source(index);
+        reload
+            .policy()
+            .reports()
+            .register(read.into(), source, Class::Loaded, false);
+        Ok((
+            Some(ViewReportEnd {
+                socket: write,
+                source,
+            }),
+            Some(source),
+        ))
     }
 
     /// `SPAWNED` with pid 0 is the one answer that names no process: this
@@ -1367,9 +1503,13 @@ impl<'a> Supervisor<'a> {
         } = spawn;
         #[cfg(feature = "php")]
         if let Some(binding) = self.php.get(index).and_then(Option::as_ref) {
-            // `php_view.rs` carries no report socket yet (`MB.23.5.3`); the slot
-            // has none, so there is nothing to pass and nothing to drop.
-            let _ = report;
+            // The same wire the WSGI arm gets (`MB.23.4.2`'s sink is the PHP
+            // half): the worker reports the files each request included, and
+            // its first batch is the source's `boot` set.
+            let loaded = report.map(|report| blastit_view::php::PhpLoadedReport {
+                socket: report.socket,
+                source: report.source,
+            });
             return crate::php_view::fork_php_view(
                 crate::php_view::PhpViewSpawn {
                     cfg: &self.cfg,
@@ -1382,6 +1522,7 @@ impl<'a> Supervisor<'a> {
                     // `sys_temp_dir`, so the fork cannot disagree with it.
                     dir: binding.view_tmp.clone(),
                     drop_privileges,
+                    loaded,
                 },
                 interpreter_live(py),
             )
@@ -1403,7 +1544,10 @@ impl<'a> Supervisor<'a> {
                     egress,
                     dir: dir.to_path_buf(),
                     drop_privileges,
-                    loaded: report,
+                    loaded: report.map(|report| blastit_view::LoadedReport {
+                        socket: report.socket,
+                        source: report.source,
+                    }),
                 },
             )
             .map(Forked::from)
@@ -2145,6 +2289,262 @@ fn write_ctl(fd: BorrowedFd<'_>, bytes: &[u8], deadline: Deadline) -> Result<(),
     Ok(())
 }
 
+/// The one warning a save whose document changes the `(route, proxy)` set owes
+/// (§4.8: "adding or removing a store emits one `manifest.warning` naming the
+/// restart"), or `None` when the set is unchanged.
+///
+/// The sockets are bound at boot and never re-bound, so a pair the new file adds
+/// has no listener to reach it, and a pair it removes leaves a listener whose
+/// grants are now empty. The document is still sent afterwards: an entry that
+/// exists is applied and an entry that does not is never widened, so this
+/// warning never stands in for the refresh and nothing fails open.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+fn store_set_warning(
+    boot_pairs: &BTreeSet<(String, String)>,
+    manifest: &blastit_manifest::Manifest,
+) -> Option<String> {
+    let next: BTreeSet<(String, String)> = policy_pairs(manifest).into_iter().collect();
+    if next == *boot_pairs {
+        return None;
+    }
+    let added: Vec<String> = next
+        .difference(boot_pairs)
+        .map(|(route, proxy)| format!("{route}→{proxy}"))
+        .collect();
+    let removed: Vec<String> = boot_pairs
+        .difference(&next)
+        .map(|(route, proxy)| format!("{route}→{proxy}"))
+        .collect();
+    let mut parts: Vec<String> = Vec::new();
+    if !added.is_empty() {
+        parts.push(format!("added {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        parts.push(format!("removed {}", removed.join(", ")));
+    }
+    Some(format!(
+        "the database listener set changed ({}); every socket was bound at boot, so the \
+         existing listeners keep serving and the new grants apply only to them — restart \
+         blastit dev to bind the new set",
+        parts.join("; ")
+    ))
+}
+
+/// Every `postgresql` proxy the manifest declares, in name order.
+fn postgres_proxies(manifest: &blastit_manifest::Manifest) -> Vec<&blastit_manifest::ProxyName> {
+    manifest
+        .proxies()
+        .values()
+        .filter(|proxy| proxy.protocol() == blastit_manifest::Protocol::Postgresql)
+        .map(blastit_manifest::Proxy::name)
+        .collect()
+}
+
+/// The `(route, proxy)` pairs `manifest` declares or grants — exactly the set
+/// [`policy_document`] carries, and therefore the set stage 1 records as the
+/// boot's listeners (`§4.8`).
+///
+/// A pair exists when the route's effective grants hold it (an empty grant
+/// included) or when the route — or an attached group — names the proxy, which
+/// is [`crate::stage0::route_declares_proxy`], the same predicate stage 0 bound
+/// its sockets with.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn policy_pairs(manifest: &blastit_manifest::Manifest) -> Vec<(String, String)> {
+    let proxies = postgres_proxies(manifest);
+    let mut pairs = Vec::new();
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let grants = manifest.effective_grants(index);
+        for proxy in proxies.iter().copied() {
+            if grants
+                .get(proxy)
+                .and_then(|grant| grant.as_postgresql())
+                .is_none()
+                && !crate::stage0::route_declares_proxy(manifest, index, proxy)
+            {
+                continue;
+            }
+            pairs.push((route.name().to_string(), proxy.as_str().to_string()));
+        }
+    }
+    pairs
+}
+
+/// The dev-only policy document for `manifest` (§4.6 step 2, §4.8).
+///
+/// `u32 length | JSON`, both little-endian, `{"version":1,"route_policies":[…]}`;
+/// one entry per `(route, proxy)` the new manifest **declares or grants** —
+/// [`crate::stage0::route_declares_proxy`], the same predicate that bound the
+/// sockets at boot — with the crate's own member names and neither `fd` nor
+/// `uid` (the boot's identity wins and the socket is never re-bound). It is
+/// authoritative: a pair the document does not name evaluates against the empty
+/// allowlist, so a route that dropped its block, or a save that removed a
+/// grant, can never fail open.
+///
+/// # Errors
+///
+/// A one-line reason when the document cannot be encoded or exceeds
+/// [`blastit_dbproxy::MAX_POLICY_DOCUMENT`]; it never contains a literal, a
+/// parameter or a credential (its members are the manifest's own grant text).
+#[cfg(feature = "python")]
+fn policy_document(manifest: &Manifest) -> Result<Vec<u8>, String> {
+    let proxies = postgres_proxies(manifest);
+    let mut policies: Vec<serde_json::Value> = Vec::new();
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let grants = manifest.effective_grants(index);
+        for proxy in proxies.iter().copied() {
+            let grant = grants.get(proxy).and_then(|grant| grant.as_postgresql());
+            let policy = match grant {
+                Some(grant) => serde_json::json!({
+                    "route": route.name(),
+                    "proxy": proxy.as_str(),
+                    "queries": grant.queries(),
+                    "transaction_control": grant.transaction_control(),
+                    "unrestricted": grant.is_unrestricted(),
+                    "tables": grant.tables(),
+                }),
+                // A route that names the proxy with an empty grant keeps its
+                // listener and allows nothing; a route that names nothing at all
+                // gets no entry, and an omitted pair denies.
+                None if crate::stage0::route_declares_proxy(manifest, index, proxy) => {
+                    serde_json::json!({"route": route.name(), "proxy": proxy.as_str()})
+                }
+                None => continue,
+            };
+            policies.push(policy);
+        }
+    }
+    let document = serde_json::json!({"version": 1, "route_policies": policies});
+    let body =
+        serde_json::to_vec(&document).map_err(|err| format!("the policy document: {err}"))?;
+    if body.len() > blastit_dbproxy::MAX_POLICY_DOCUMENT {
+        return Err(format!(
+            "the policy document is {} bytes, more than the {}-byte limit",
+            body.len(),
+            blastit_dbproxy::MAX_POLICY_DOCUMENT
+        ));
+    }
+    let length = u32::try_from(body.len())
+        .map_err(|_| "the policy document is too large to frame".to_string())?;
+    let mut framed = Vec::with_capacity(4 + body.len());
+    framed.extend_from_slice(&length.to_le_bytes());
+    framed.extend_from_slice(&body);
+    Ok(framed)
+}
+
+/// What one policy exchange did (§4.6 step 2).
+///
+/// The distinction the design needs is between "the peer answered, and the answer
+/// is a refusal" (the stream is in step, the previous grants are in force, a
+/// later save may try again) and "the answer cannot be trusted" (a byte was left
+/// on the socket, the peer went away, or nothing arrived) — after which no later
+/// save may report a swap it did not get.
+#[cfg(feature = "python")]
+enum PolicyOutcome {
+    /// `0x00`: the whole map was replaced.
+    Swapped,
+    /// `0x01`: the peer refused the document whole, in step.
+    Refused(String),
+    /// The exchange left the channel in an unknown state.
+    Broken(String),
+}
+
+/// Writes one already-framed policy document and waits for dbproxy's one-byte
+/// ack, both inside `deadline` (§4.6 step 2).
+///
+/// Non-blocking on a non-blocking socket: a short write waits for writability
+/// and the ack for readability, so a dbproxy that stopped reading or answering
+/// costs at most the deadline and never a wedged supervisor.
+///
+/// **Alignment first.** Before writing, a readable byte is an ack nobody waited
+/// for — the previous save timed out while dbproxy was still working, so that
+/// byte belongs to the *previous* document and cannot answer this one. It is
+/// consumed (the stream is then back in step) and reported as [`PolicyOutcome::
+/// Broken`], so the save warns instead of reporting a success it did not get. A
+/// timeout or a broken read leaves the channel untrusted for the same reason:
+/// dbproxy may still be applying the document whose ack never arrived, and the
+/// next byte would be attributed to the wrong document.
+///
+/// # Errors
+///
+/// A one-line cause naming the stage. It never carries a byte of the document.
+#[cfg(feature = "python")]
+fn exchange_policy(fd: BorrowedFd<'_>, document: &[u8], deadline: Deadline) -> PolicyOutcome {
+    let millis = POLICY_ACK_TIMEOUT.as_millis();
+    // The stray-ack check: one non-blocking read before anything is written.
+    let mut stray = [0u8; 1];
+    match rustix::io::read(fd, &mut stray) {
+        Ok(0) => {
+            return PolicyOutcome::Broken(
+                "dbproxy closed the policy channel before this save".to_string(),
+            );
+        }
+        Ok(_read) => {
+            return PolicyOutcome::Broken(format!(
+                "an earlier save's policy answer (0x{:02x}) was still unread, so it cannot be \
+                 attributed to this document",
+                stray[0]
+            ));
+        }
+        Err(rustix::io::Errno::AGAIN) | Err(rustix::io::Errno::INTR) => {}
+        Err(err) => {
+            return PolicyOutcome::Broken(format!("reading the policy channel: {err}"));
+        }
+    }
+    let mut written = 0;
+    while written < document.len() {
+        match rustix::io::write(fd, &document[written..]) {
+            Ok(0) => {
+                return PolicyOutcome::Broken("the policy socket accepted no bytes".to_string());
+            }
+            Ok(count) => written += count,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::AGAIN) => {
+                let room =
+                    !deadline.expired() && matches!(wait_writable(fd, deadline.left()), Ok(true));
+                if !room {
+                    return PolicyOutcome::Broken(format!(
+                        "the document could not be written within {millis} ms"
+                    ));
+                }
+            }
+            Err(err) => {
+                return PolicyOutcome::Broken(format!("writing the policy document: {err}"));
+            }
+        }
+    }
+    let mut ack = [0u8; 1];
+    loop {
+        match rustix::io::read(fd, &mut ack) {
+            Ok(0) => {
+                return PolicyOutcome::Broken(
+                    "dbproxy closed the policy channel before acknowledging".to_string(),
+                );
+            }
+            Ok(_read) => break,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::AGAIN) => {
+                let ready =
+                    !deadline.expired() && matches!(wait_readable(fd, deadline.left()), Ok(true));
+                if !ready {
+                    return PolicyOutcome::Broken(format!(
+                        "dbproxy did not acknowledge within {millis} ms"
+                    ));
+                }
+            }
+            Err(err) => return PolicyOutcome::Broken(format!("reading the policy ack: {err}")),
+        }
+    }
+    match ack[0] {
+        blastit_dbproxy::ACK_SWAPPED => PolicyOutcome::Swapped,
+        blastit_dbproxy::ACK_REFUSED => PolicyOutcome::Refused(
+            "dbproxy refused the document, so the previous grants are still in force".to_string(),
+        ),
+        other => PolicyOutcome::Broken(format!(
+            "dbproxy answered the policy document with the unknown byte {other:#04x}"
+        )),
+    }
+}
+
 /// Waits until `fd` takes a write, or reports the scheduler wedged.
 ///
 /// A scheduler that stopped reading is a dead scheduler: waiting for it forever
@@ -2601,6 +3001,7 @@ mod tests {
                 reload_source: None,
                 chan: None,
                 policy: None,
+                boot_pairs: BTreeSet::new(),
                 learn_fds: None,
             },
             &emitter,
@@ -2668,5 +3069,522 @@ mod tests {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+#[cfg(all(test, feature = "python"))]
+mod policy_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use std::io::{Read, Write};
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixStream;
+
+    use super::{Deadline, POLICY_ACK_TIMEOUT, PolicyOutcome, exchange_policy, policy_document};
+    use blastit_dbproxy::{ACK_REFUSED, ACK_SWAPPED};
+    use blastit_manifest::Manifest;
+
+    /// A manifest with the default `db` proxy, one granted route, one route that
+    /// names the proxy with an empty grant, and one that names no proxy at all
+    /// (`MB.23.5.3`).
+    const MANIFEST: &str = "\
+postgres $DATABASE_URL
+
+view cart regex '/cart/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+
+view locked regex '/locked/.*' {
+    postgres {}
+}
+
+view plain regex '/plain/.*' {}
+";
+
+    fn document() -> serde_json::Value {
+        let (manifest, _warnings) = Manifest::parse_blastfile(MANIFEST, 20_000).expect("parses");
+        let framed = policy_document(&manifest).expect("a document");
+        let length = u32::from_le_bytes(framed[..4].try_into().expect("four bytes")) as usize;
+        assert_eq!(length, framed.len() - 4, "the prefix is the body's length");
+        serde_json::from_slice(&framed[4..]).expect("the body is JSON")
+    }
+
+    /// §4.6 step 2 / §4.8: the document is version 1, one entry per `(route,
+    /// proxy)` the new manifest declares or grants, the crate's own member names,
+    /// and neither `fd` nor `uid`.
+    #[test]
+    fn the_policy_document_is_the_new_manifest_s_pairs_and_nothing_else() {
+        let document = document();
+        assert_eq!(document["version"], 1, "{document}");
+        let policies = document["route_policies"]
+            .as_array()
+            .expect("`route_policies` is an array");
+        assert_eq!(policies.len(), 2, "two declared pairs: {document}");
+
+        let cart = &policies[0];
+        assert_eq!(cart["route"], "cart");
+        assert_eq!(cart["proxy"], "db");
+        assert_eq!(cart["queries"], serde_json::json!(["SELECT 1"]));
+        assert_eq!(cart["transaction_control"], false);
+        assert_eq!(cart["unrestricted"], false);
+        assert!(cart["tables"].is_object(), "{cart}");
+
+        let locked = &policies[1];
+        assert_eq!(locked["route"], "locked");
+        assert_eq!(locked["proxy"], "db");
+        assert!(
+            locked.get("queries").is_none(),
+            "an empty grant is present and allows nothing: {locked}"
+        );
+
+        for policy in policies {
+            assert!(policy.get("fd").is_none(), "no `fd` member: {policy}");
+            assert!(policy.get("uid").is_none(), "no `uid` member: {policy}");
+        }
+        assert!(
+            !document.to_string().contains("plain"),
+            "a route that names no proxy has no entry: {document}"
+        );
+    }
+
+    /// The whole exchange over a real socketpair: the document reaches the peer
+    /// framed, and the one-byte ack is what decides success (§4.6 step 2).
+    #[test]
+    fn the_policy_exchange_writes_the_document_and_reads_one_ack() {
+        /// `hold` keeps the peer's socket open past the write, so the *deadline*
+        /// arm is exercised instead of the peer-gone arm.
+        fn exchange(answer: Option<u8>, hold: bool) -> (PolicyOutcome, serde_json::Value) {
+            let (init, mut dbproxy) = UnixStream::pair().expect("a socketpair");
+            init.set_nonblocking(true).expect("non-blocking");
+            let (manifest, _warnings) =
+                Manifest::parse_blastfile(MANIFEST, 20_000).expect("parses");
+            let framed = policy_document(&manifest).expect("a document");
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let peer = std::thread::spawn(move || {
+                let mut header = [0u8; 4];
+                dbproxy.read_exact(&mut header).expect("the header");
+                let length = u32::from_le_bytes(header) as usize;
+                let mut body = vec![0u8; length];
+                dbproxy.read_exact(&mut body).expect("the body");
+                if let Some(byte) = answer {
+                    dbproxy.write_all(&[byte]).expect("the ack");
+                }
+                if hold {
+                    let _ = wait.recv();
+                }
+                serde_json::from_slice(&body).expect("JSON")
+            });
+            let outcome =
+                exchange_policy(init.as_fd(), &framed, Deadline::after(POLICY_ACK_TIMEOUT));
+            let _ = release.send(());
+            let seen = peer.join().expect("the peer");
+            (outcome, seen)
+        }
+
+        let (swapped, seen) = exchange(Some(ACK_SWAPPED), false);
+        assert!(matches!(swapped, PolicyOutcome::Swapped), "0x00 is a swap");
+        assert_eq!(seen["version"], 1, "the peer read the same document");
+
+        let (refused, _) = exchange(Some(ACK_REFUSED), false);
+        let PolicyOutcome::Refused(cause) = refused else {
+            panic!("0x01 is a refusal, in step");
+        };
+        assert!(cause.contains("refused the document"), "{cause}");
+
+        let (silent, _) = exchange(None, true);
+        let PolicyOutcome::Broken(cause) = silent else {
+            panic!("no ack is a broken exchange, not a refusal");
+        };
+        assert!(
+            cause.contains("did not acknowledge within 100 ms"),
+            "the deadline is the design's 100 ms: {cause}"
+        );
+
+        let (gone, _) = exchange(None, false);
+        let PolicyOutcome::Broken(cause) = gone else {
+            panic!("a closed channel is a broken exchange");
+        };
+        assert!(cause.contains("closed the policy channel"), "{cause}");
+    }
+
+    /// §4.6 step 2, acceptance 5: a byte left on the socket by an earlier save
+    /// is **never** taken as this document's answer.
+    ///
+    /// The stray byte is consumed and reported, and nothing is written — so a
+    /// document dbproxy refused (or never acked) can never be reported as a
+    /// silent success by the next save.
+    #[test]
+    fn a_stray_policy_answer_is_reported_and_never_answered_as_this_document_s() {
+        let (init, mut peer) = UnixStream::pair().expect("a socketpair");
+        init.set_nonblocking(true).expect("non-blocking");
+        peer.write_all(&[ACK_REFUSED]).expect("the late ack");
+
+        let outcome = exchange_policy(
+            init.as_fd(),
+            &[0, 0, 0, 0],
+            Deadline::after(POLICY_ACK_TIMEOUT),
+        );
+        let PolicyOutcome::Broken(cause) = outcome else {
+            panic!("a pre-existing answer is out of step, not this save's ack");
+        };
+        assert!(cause.contains("still unread"), "{cause}");
+        assert!(
+            cause.contains("0x01"),
+            "the cause names the stray byte: {cause}"
+        );
+
+        // The stray byte is gone, so the channel is back in step …
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            rustix::io::read(&init, &mut byte).unwrap_err(),
+            rustix::io::Errno::AGAIN,
+            "the stray answer was consumed"
+        );
+        // … and nothing was written to the peer, so dbproxy never saw this
+        // document and cannot have applied it.
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .expect("a read timeout");
+        let mut written = [0u8; 4];
+        assert!(
+            peer.read(&mut written).is_err(),
+            "a save that found a stray answer must not send its document"
+        );
+    }
+
+    /// §4.6 step 2 / acceptance 5: a refused document is **one**
+    /// `manifest.warning` naming the cause and the restart — and a swapped one
+    /// warns nothing. The caller is the real [`Supervisor::refresh_policy`], over
+    /// a real adopted channel, so the guard "no dbproxy, no warning" is
+    /// witnessed too.
+    #[test]
+    fn a_refused_policy_document_is_one_warning_and_a_swap_is_silent() {
+        use super::*;
+        use std::io::Read as _;
+
+        /// Puts the thread's signal mask back even if the test panics.
+        struct RestoreMask(blastit_sys::SignalMask);
+        impl Drop for RestoreMask {
+            fn drop(&mut self) {
+                let _ = blastit_sys::restore_signal_mask_in_child(self.0);
+            }
+        }
+
+        fn component_pipes() -> ComponentPipes {
+            let (events, _ev) = pipe().expect("a pipe");
+            let (stdout, _out) = pipe().expect("a pipe");
+            let (stderr, _err) = pipe().expect("a pipe");
+            ComponentPipes {
+                events,
+                stdout,
+                stderr,
+            }
+        }
+
+        let (manifest, _warnings) = Manifest::parse_blastfile(MANIFEST, 20_000).expect("parses");
+        // `answer: None` is a peer that reads the document and never acks, which
+        // is the worst case the measured bound below covers: the save waits out
+        // [`POLICY_ACK_TIMEOUT`] and reports a timeout.
+        let run = |answer: Option<u8>, with_dbproxy: bool| -> (String, std::time::Duration) {
+            let signals = SignalFd::new(&[Signal::CHILD, Signal::TERM, Signal::INT, Signal::HUP])
+                .expect("signalfd");
+            let mask = signals.previous_mask();
+            let _restore = RestoreMask(mask);
+            let (ctl, _ctl_peer) = UnixStream::pair().expect("a socketpair");
+            let (chan, _chan_peer) = UnixStream::pair().expect("a socketpair");
+            let (policy, mut dbproxy_end) = UnixStream::pair().expect("a socketpair");
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            // Only a boot that forked dbproxy has a reader: the other case must
+            // see no write at all, so its end is dropped instead of watched.
+            let peer = with_dbproxy.then(|| {
+                std::thread::spawn(move || {
+                    let mut header = [0u8; 4];
+                    dbproxy_end.read_exact(&mut header).expect("the header");
+                    let length = u32::from_le_bytes(header) as usize;
+                    let mut body = vec![0u8; length];
+                    dbproxy_end.read_exact(&mut body).expect("the body");
+                    match answer {
+                        Some(byte) => dbproxy_end.write_all(&[byte]).expect("the ack"),
+                        // Hold the socket open so the *deadline* arm, not a
+                        // peer-gone arm, is what the supervisor sees.
+                        None => {
+                            let _ = wait.recv();
+                        }
+                    }
+                })
+            });
+
+            let mut components = BTreeMap::new();
+            components.insert(100_001, (Component::Http, component_pipes()));
+            if with_dbproxy {
+                components.insert(100_002, (Component::Dbproxy, component_pipes()));
+            }
+
+            Python::initialize();
+            let app = Python::attach(|py| py.None());
+            let (read, write) = std::io::pipe().expect("a pipe");
+            let emitter = Emitter::new(
+                write.as_raw_fd(),
+                crate::config::LogFormat::Json,
+                Level::Info,
+                false,
+            );
+            let supervisor = Supervisor::new(
+                Parts {
+                    cfg: Config::default(),
+                    limits: Limits::new(64 * 1024).expect("frame limits"),
+                    routes: vec![RouteInfo::new("cart", false, 0)],
+                    #[cfg(feature = "php")]
+                    php: Vec::new(),
+                    egress: vec![false],
+                    app,
+                    ctl: OwnedFd::from(ctl),
+                    signals,
+                    mask,
+                    components,
+                    dev: None,
+                    learn: None,
+                    reload: None,
+                    reload_source: Some(ReloadSource {
+                        config: Vec::new(),
+                        program: Vec::new(),
+                        dev_root: PathBuf::from("/nonexistent"),
+                        dev_host: "127.0.0.1".to_string(),
+                    }),
+                    chan: Some(OwnedFd::from(chan)),
+                    policy: Some(OwnedFd::from(policy)),
+                    boot_pairs: policy_pairs(&manifest).into_iter().collect(),
+                    learn_fds: None,
+                },
+                &emitter,
+            );
+            assert!(supervisor.adoption.is_some(), "the channel is adopted");
+            let started = Instant::now();
+            supervisor.refresh_policy(&manifest);
+            let elapsed = started.elapsed();
+            let _ = release.send(());
+            if let Some(peer) = peer {
+                peer.join().expect("the peer");
+            }
+            drop(supervisor);
+            drop(write);
+            let mut text = String::new();
+            std::io::BufReader::new(read)
+                .read_to_string(&mut text)
+                .expect("the warning");
+            (text, elapsed)
+        };
+
+        let (swapped, _) = run(Some(blastit_dbproxy::ACK_SWAPPED), true);
+        assert!(
+            swapped.trim().is_empty(),
+            "a swap warns nothing: {swapped:?}"
+        );
+
+        let (refused, _) = run(Some(blastit_dbproxy::ACK_REFUSED), true);
+        let lines: Vec<&str> = refused.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "exactly one warning: {refused:?}");
+        assert!(lines[0].contains("manifest.warning"), "{refused}");
+        assert!(
+            lines[0].contains("the new grants were not applied; restart blastit dev"),
+            "{refused}"
+        );
+        assert!(lines[0].contains("refused the document"), "{refused}");
+
+        // The measured worst case (FIX 3): a peer that reads the document and
+        // never answers. The save waits the design's 100 ms and no more, which
+        // is the whole stall a synchronous exchange can add to the loop.
+        let (silent, elapsed) = run(None, true);
+        let lines: Vec<&str> = silent.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "one warning for the timeout: {silent:?}");
+        assert!(
+            lines[0].contains("did not acknowledge within 100 ms"),
+            "{silent}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(90),
+            "the wait really happened: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "and is bounded by the design's deadline, measured {elapsed:?}"
+        );
+        println!("policy ack worst case measured: {elapsed:?} (design cap 100 ms)");
+
+        // A boot that forked no dbproxy has no reader and must not warn.
+        let (absent, absent_elapsed) = run(Some(blastit_dbproxy::ACK_REFUSED), false);
+        assert!(
+            absent.trim().is_empty(),
+            "no dbproxy means nothing to refresh and no warning: {absent:?}"
+        );
+        assert!(
+            absent_elapsed < std::time::Duration::from_millis(50),
+            "and no wait at all when there is nothing to send: {absent_elapsed:?}"
+        );
+    }
+
+    /// §4.8 / acceptance 7: a save that adds or removes a store is **one**
+    /// `manifest.warning` naming what changed and the restart.
+    #[test]
+    fn a_store_added_or_removed_is_one_warning_naming_the_restart() {
+        use super::{policy_pairs, store_set_warning};
+        use std::collections::BTreeSet;
+
+        let (manifest, _warnings) = Manifest::parse_blastfile(MANIFEST, 20_000).expect("parses");
+        let boot: BTreeSet<(String, String)> = policy_pairs(&manifest).into_iter().collect();
+        assert_eq!(boot.len(), 2, "two declared pairs: {boot:?}");
+        assert!(
+            store_set_warning(&boot, &manifest).is_none(),
+            "a save that changes no pair warns nothing"
+        );
+
+        // Removing the store (and its grants) is the documented "keep :8080 up,
+        // edit the Blastfile" edit that cannot bind a new socket.
+        let (without, _warnings) = Manifest::parse_blastfile(
+            "view cart regex '/cart/.*' {\n}\n\nview locked regex '/locked/.*' {\n}\n",
+            20_000,
+        )
+        .expect("parses");
+        let warning = store_set_warning(&boot, &without).expect("the set changed");
+        assert!(warning.contains("removed"), "{warning}");
+        assert!(warning.contains("cart→db"), "{warning}");
+        assert!(warning.contains("locked→db"), "{warning}");
+        assert!(warning.contains("restart blastit dev"), "{warning}");
+
+        // And adding one is the other direction.
+        let added = store_set_warning(&BTreeSet::new(), &manifest).expect("the set changed");
+        assert!(added.contains("added"), "{added}");
+        assert!(added.contains("cart→db"), "{added}");
+        assert!(added.contains("locked→db"), "{added}");
+        assert!(added.contains("restart blastit dev"), "{added}");
+    }
+
+    /// §4.6 step 2 / acceptance 5: a save whose ack never arrived must not let
+    /// the *next* save report the late byte as its own success.
+    ///
+    /// The peer reads the first document, holds its ack past the deadline, then
+    /// answers `0x01` — the exact sequence that used to be silently accepted by
+    /// the second save. Both saves warn, and the second names the out-of-step
+    /// channel instead of staying silent.
+    #[test]
+    fn a_late_ack_leaves_the_channel_out_of_step_and_the_next_save_warns() {
+        use super::*;
+        use std::io::Read as _;
+
+        struct RestoreMask(blastit_sys::SignalMask);
+        impl Drop for RestoreMask {
+            fn drop(&mut self) {
+                let _ = blastit_sys::restore_signal_mask_in_child(self.0);
+            }
+        }
+        fn component_pipes() -> ComponentPipes {
+            let (events, _ev) = pipe().expect("a pipe");
+            let (stdout, _out) = pipe().expect("a pipe");
+            let (stderr, _err) = pipe().expect("a pipe");
+            ComponentPipes {
+                events,
+                stdout,
+                stderr,
+            }
+        }
+
+        let (manifest, _warnings) = Manifest::parse_blastfile(MANIFEST, 20_000).expect("parses");
+        let signals = SignalFd::new(&[Signal::CHILD, Signal::TERM, Signal::INT, Signal::HUP])
+            .expect("signalfd");
+        let mask = signals.previous_mask();
+        let _restore = RestoreMask(mask);
+        let (ctl, _ctl_peer) = UnixStream::pair().expect("a socketpair");
+        let (chan, _chan_peer) = UnixStream::pair().expect("a socketpair");
+        let (policy, mut dbproxy_end) = UnixStream::pair().expect("a socketpair");
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+
+        // The peer: read the first document, hold its ack past the deadline,
+        // then answer `0x01` and hold the socket open to the end.
+        let peer = std::thread::spawn(move || {
+            let mut header = [0u8; 4];
+            dbproxy_end.read_exact(&mut header).expect("the header");
+            let length = u32::from_le_bytes(header) as usize;
+            let mut body = vec![0u8; length];
+            dbproxy_end.read_exact(&mut body).expect("the body");
+            wait.recv().expect("the test releases the late ack");
+            dbproxy_end
+                .write_all(&[blastit_dbproxy::ACK_REFUSED])
+                .expect("the late ack");
+            let _ = wait.recv();
+        });
+
+        let mut components = BTreeMap::new();
+        components.insert(100_001, (Component::Http, component_pipes()));
+        components.insert(100_002, (Component::Dbproxy, component_pipes()));
+        Python::initialize();
+        let app = Python::attach(|py| py.None());
+        let (read, write) = std::io::pipe().expect("a pipe");
+        let emitter = Emitter::new(
+            write.as_raw_fd(),
+            crate::config::LogFormat::Json,
+            Level::Info,
+            false,
+        );
+        let supervisor = Supervisor::new(
+            Parts {
+                cfg: Config::default(),
+                limits: Limits::new(64 * 1024).expect("frame limits"),
+                routes: vec![RouteInfo::new("cart", false, 0)],
+                #[cfg(feature = "php")]
+                php: Vec::new(),
+                egress: vec![false],
+                app,
+                ctl: OwnedFd::from(ctl),
+                signals,
+                mask,
+                components,
+                dev: None,
+                learn: None,
+                reload: None,
+                reload_source: Some(ReloadSource {
+                    config: Vec::new(),
+                    program: Vec::new(),
+                    dev_root: PathBuf::from("/nonexistent"),
+                    dev_host: "127.0.0.1".to_string(),
+                }),
+                chan: Some(OwnedFd::from(chan)),
+                policy: Some(OwnedFd::from(policy)),
+                boot_pairs: policy_pairs(&manifest).into_iter().collect(),
+                learn_fds: None,
+            },
+            &emitter,
+        );
+
+        // Save 1: written, never acknowledged inside the 100 ms window.
+        supervisor.refresh_policy(&manifest);
+        // The late `0x01` then lands on the socket.
+        release.send(()).expect("release the ack");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Save 2: the channel is out of step, so it must warn — never read that
+        // byte as this document's answer.
+        supervisor.refresh_policy(&manifest);
+        release.send(()).expect("release the peer");
+        peer.join().expect("the peer");
+        drop(supervisor);
+        drop(write);
+        let mut text = String::new();
+        std::io::BufReader::new(read)
+            .read_to_string(&mut text)
+            .expect("the warnings");
+        let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+        assert_eq!(lines.len(), 2, "one warning per save: {text}");
+        assert!(
+            lines[0].contains("did not acknowledge within 100 ms"),
+            "the first save names the timeout: {text}"
+        );
+        assert!(
+            lines[1].contains("out of step"),
+            "the second save names the unread answer, never a silent success: {text}"
+        );
+        assert!(
+            lines[1].contains("restart blastit dev"),
+            "and the fix it names: {text}"
+        );
     }
 }

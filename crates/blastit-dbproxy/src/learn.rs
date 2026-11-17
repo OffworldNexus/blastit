@@ -54,6 +54,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use crate::config::RoutePolicySpec;
+use crate::policy::PolicyError;
 
 /// How many distinct session-setup statements one session remembers.
 ///
@@ -264,12 +265,18 @@ struct SessionLearn {
 /// `Enforce` builds one too, empty: the hooks never look at it there (the mode
 /// decides), and keeping the field total avoids a second `Shared` shape.
 pub(crate) struct Learning {
-    /// The effective grants of every route, for a wildcard listener.
-    route_policies: HashMap<(String, String), Allowlist>,
+    /// The effective grants of every route, replaced whole by a dev policy
+    /// document (§4.6 step 2).
+    ///
+    /// `Arc` values, not bare [`Allowlist`]s: a swap replaces the map in one
+    /// assignment, and a reader that already cloned its route's `Arc` keeps
+    /// evaluating against the policy it started with, so no statement can ever
+    /// see a half-swapped table.
+    route_policies: Mutex<HashMap<(String, String), Arc<Allowlist>>>,
     /// The declared proxy names, so `set_db` cannot invent one.
     proxies: HashSet<String>,
     /// The allowlist an unknown route evaluates against.
-    empty: Allowlist,
+    empty: Arc<Allowlist>,
     /// The `obs_fd` write end; `None` once it is closed or was never given.
     obs: Mutex<Option<File>>,
     /// The active target stack, top last.
@@ -292,14 +299,14 @@ impl Learning {
             .map(|policy| {
                 (
                     (policy.route.clone(), policy.proxy.clone()),
-                    policy.allowlist(),
+                    Arc::new(policy.allowlist()),
                 )
             })
             .collect();
         Self {
-            route_policies,
+            route_policies: Mutex::new(route_policies),
             proxies: proxies.into_iter().collect(),
-            empty: Allowlist::new(std::iter::empty::<&str>(), false),
+            empty: Arc::new(Allowlist::new(std::iter::empty::<&str>(), false)),
             obs: Mutex::new(obs),
             targets: Mutex::new(Vec::new()),
             sessions: Mutex::new(HashMap::new()),
@@ -307,15 +314,63 @@ impl Learning {
         }
     }
 
+    /// Replaces **every** route's grants with the document a `Blastfile` save
+    /// produced (§4.6 step 2, §4.8).
+    ///
+    /// The new map is built and validated in full before anything is swapped, so
+    /// a refusal leaves the old policy untouched; the swap itself is one
+    /// assignment under the lock, so a reader sees either the old map or the new
+    /// one and never a mixture. It is **authoritative**: a pair the document does
+    /// not name evaluates against the empty allowlist afterwards, which is how a
+    /// route that dropped its `postgres {}` block stops being allowed to do
+    /// anything — a removal can never fail open.
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError`] naming the entry that is not a route policy. Callers
+    /// answer the document with [`crate::policy::ACK_REFUSED`].
+    pub(crate) fn replace_route_policies(
+        &self,
+        policies: impl IntoIterator<Item = RoutePolicySpec>,
+    ) -> Result<(), PolicyError> {
+        let mut next: HashMap<(String, String), Arc<Allowlist>> = HashMap::new();
+        for (index, policy) in policies.into_iter().enumerate() {
+            if policy.route.is_empty() || policy.route == crate::config::WILDCARD_ROUTE {
+                return Err(PolicyError::new(format!(
+                    "route policy {index} names {:?}, which is not a route name",
+                    policy.route
+                )));
+            }
+            if policy.proxy.is_empty() {
+                return Err(PolicyError::new(format!(
+                    "route policy {index} names no proxy"
+                )));
+            }
+            let key = (policy.route.clone(), policy.proxy.clone());
+            if next.contains_key(&key) {
+                return Err(PolicyError::new(format!(
+                    "two route policies cover route {:?} on proxy {:?}",
+                    key.0, key.1
+                )));
+            }
+            next.insert(key, Arc::new(policy.allowlist()));
+        }
+        *lock(&self.route_policies) = next;
+        Ok(())
+    }
+
     /// The allowlist one route's statements are evaluated against.
     ///
     /// A route the configuration does not know evaluates against an empty
     /// allowlist, so it reports `allowed: false` rather than silently widening
-    /// to everything.
-    pub(crate) fn policy(&self, route: &str, proxy: &str) -> &Allowlist {
-        self.route_policies
+    /// to everything. The returned handle is the policy in force when it was
+    /// asked for: a swap after this point is invisible to a statement already
+    /// being checked against it.
+    pub(crate) fn policy(&self, route: &str, proxy: &str) -> Arc<Allowlist> {
+        lock(&self.route_policies)
             .get(&(route.to_string(), proxy.to_string()))
-            .unwrap_or(&self.empty)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.empty))
     }
 
     /// The target new statements belong to, if a request is in flight.
@@ -708,6 +763,95 @@ mod tests {
         assert!(learning.set_database("analytics", "test_shop").is_err());
         assert!(learning.set_database("db", "").is_err());
         assert_eq!(learning.database("analytics"), None);
+    }
+
+    /// `MB.23.5.3`: a dev policy document replaces the map whole, and a policy
+    /// a caller already holds is unaffected by a later swap.
+    #[test]
+    fn a_policy_document_replaces_the_map_whole_and_a_held_policy_is_unchanged() {
+        let learning = learning();
+        let held = learning.policy("product-detail", "db");
+        assert!(held.check("SELECT 1").is_allowed());
+
+        learning
+            .replace_route_policies([
+                policy("product-detail", &["SELECT 2"]),
+                policy("checkout", &[]),
+            ])
+            .expect("a valid document");
+        assert!(
+            learning
+                .policy("product-detail", "db")
+                .check("SELECT 2")
+                .is_allowed(),
+            "the next statement sees the document"
+        );
+        assert!(
+            !learning
+                .policy("product-detail", "db")
+                .check("SELECT 1")
+                .is_allowed(),
+            "the swap is authoritative, not additive"
+        );
+        assert!(
+            held.check("SELECT 1").is_allowed(),
+            "a statement that began under the old policy keeps it"
+        );
+        assert!(
+            !learning
+                .policy("checkout", "db")
+                .check("SELECT 1")
+                .is_allowed(),
+            "a route that emptied its grants allows nothing"
+        );
+        assert!(
+            !learning
+                .policy("nowhere", "db")
+                .check("SELECT 1")
+                .is_allowed(),
+            "an omitted pair fails closed"
+        );
+    }
+
+    /// A refusal leaves the old policy in force: nothing is swapped.
+    #[test]
+    fn a_refused_document_keeps_the_previous_policy() {
+        let learning = learning();
+        for bad in [
+            policy("", &["SELECT 2"]),
+            policy(crate::config::WILDCARD_ROUTE, &["SELECT 2"]),
+            RoutePolicySpec {
+                proxy: String::new(),
+                ..policy("checkout", &[])
+            },
+        ] {
+            let refused = learning
+                .replace_route_policies([bad.clone()])
+                .expect_err("not a route policy");
+            assert!(refused.to_string().contains("route policy 0"), "{refused}");
+            assert!(
+                learning
+                    .policy("product-detail", "db")
+                    .check("SELECT 1")
+                    .is_allowed(),
+                "the previous policy is still in force"
+            );
+        }
+        // Two entries for one pair are refused whole, too.
+        assert!(
+            learning
+                .replace_route_policies([
+                    policy("product-detail", &["SELECT 1"]),
+                    policy("product-detail", &["SELECT 2"]),
+                ])
+                .is_err()
+        );
+        assert!(
+            learning
+                .policy("product-detail", "db")
+                .check("SELECT 1")
+                .is_allowed()
+        );
     }
 
     #[test]

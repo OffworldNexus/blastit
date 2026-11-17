@@ -208,6 +208,15 @@ async fn serve(
         spawn_control(fd, Arc::clone(&shared))?;
     }
 
+    // The dev policy channel (`MB.23.5.3`): dbproxy's end of the socketpair
+    // stage 0 created for a `blastit dev` boot with reload on. It is spawned
+    // only when the configuration carries the descriptor, which
+    // `DbproxyConfig::validate_policy` has already tied to `dev_policy`, so a
+    // production or `check` boot never has a task, a read or a byte here.
+    if let Some(fd) = config.policy_fd {
+        spawn_policy(fd, Arc::clone(&shared))?;
+    }
+
     let mut prepared = Vec::with_capacity(listeners.len());
     for (index, (listener, _spec)) in listeners.into_iter().enumerate() {
         let listener = prepare(listener, index)?;
@@ -273,6 +282,67 @@ fn spawn_control(fd: i32, shared: Arc<Shared>) -> Result<(), DbproxyError> {
     let learning = Arc::clone(shared.learning());
     tokio::spawn(serve_control(stream, learning));
     Ok(())
+}
+
+/// Adopts the dev policy descriptor and replaces the route-policy map on every
+/// document it carries (§4.6 step 2, §4.8).
+///
+/// The descriptor is dbproxy's end of the socketpair stage 0 created for a
+/// `blastit dev` boot with reload on. dbproxy owns it after this call: the task
+/// closes it when the peer goes away, and nothing else refers to it by number.
+///
+/// The task is detached on purpose, like the control channel's: a policy channel
+/// that went away only means the grants can no longer be refreshed, and the
+/// supervisor that owned the other end is what reports that (one
+/// `manifest.warning`; this process never invents an event for it).
+fn spawn_policy(fd: i32, shared: Arc<Shared>) -> Result<(), DbproxyError> {
+    // SAFETY: `fd` was created for dbproxy and handed over exactly once; it is
+    // non-negative and not another handover (both checked by
+    // `DbproxyConfig::validate_policy`) and is not referred to by number
+    // anywhere else. `UnixStream` takes ownership, so the descriptor is closed
+    // when the task ends.
+    let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    stream.set_nonblocking(true)?;
+    let stream = UnixStream::from_std(stream)?;
+    tokio::spawn(serve_policy(stream, shared));
+    Ok(())
+}
+
+/// The policy channel's loop: one document, one ack byte, until the peer is gone.
+///
+/// A **well-framed** document that this build refuses (bad JSON, wrong version,
+/// an entry that is not a route policy) is answered [`ACK_REFUSED`] and the
+/// channel stays open, so the next save can try again — the old policy is still
+/// in force either way. A **framing** failure (an oversize length, a body that
+/// stopped arriving, the deadline) cannot be resynchronised, so it is answered
+/// with one refusal and the channel closes; there is no retry loop.
+///
+/// The refusal's reason is deliberately not logged: every useful sentence
+/// belongs to the supervisor's one `manifest.warning`, and dbproxy has no log
+/// channel of its own (its stdout is init's).
+async fn serve_policy(mut stream: UnixStream, shared: Arc<Shared>) {
+    use crate::policy::{ACK_REFUSED, ACK_SWAPPED, DocumentRead};
+    loop {
+        let ack = match crate::policy::read_document(&mut stream).await {
+            // A clean end-of-file: the supervisor is gone.
+            Ok(None) => return,
+            Ok(Some(DocumentRead::Apply(policies))) => {
+                if shared.replace_route_policies(policies).is_ok() {
+                    ACK_SWAPPED
+                } else {
+                    ACK_REFUSED
+                }
+            }
+            Ok(Some(DocumentRead::Refused(_reason))) => ACK_REFUSED,
+            Err(_reason) => {
+                let _ = crate::policy::write_ack(&mut stream, ACK_REFUSED).await;
+                return;
+            }
+        };
+        if crate::policy::write_ack(&mut stream, ack).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Checks `SO_PASSCRED`, sets it when it is missing, and switches the listener
@@ -1189,5 +1259,120 @@ mod tests {
         };
         let emit: crate::Emit = Arc::new(|_: Event| {});
         Shared::build(&config, &[listener], emit).expect("state")
+    }
+
+    /// `MB.23.5.3`: the policy channel's whole loop over a real socketpair —
+    /// one document in, one ack byte out, the listener's grants replaced, a
+    /// refusal that keeps the old policy, and a peer that leaves ending the
+    /// task.
+    #[tokio::test]
+    async fn the_policy_channel_answers_every_document_with_one_byte() {
+        use crate::policy::{ACK_REFUSED, ACK_SWAPPED};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let shared = state();
+        let listener = shared.listener(0).expect("one listener");
+        assert!(
+            !listener.allowlist.check("SELECT 1").is_allowed(),
+            "the boot's grant allows nothing"
+        );
+
+        let (mut client, server) = tokio::net::UnixStream::pair().expect("a socketpair");
+        let task = tokio::spawn(serve_policy(server, Arc::clone(&shared)));
+
+        let document = serde_json::json!({
+            "version": 1,
+            "route_policies": [{
+                "route": "product-detail",
+                "proxy": "db",
+                "queries": ["SELECT 1"],
+                "transaction_control": false,
+                "unrestricted": false,
+                "tables": {"tables": {}, "functions": []},
+            }],
+        });
+        let body = serde_json::to_vec(&document).expect("serialised");
+        let mut framed = u32::try_from(body.len())
+            .expect("small")
+            .to_le_bytes()
+            .to_vec();
+        framed.extend_from_slice(&body);
+        client.write_all(&framed).await.expect("the document");
+        let mut ack = [0u8; 1];
+        client.read_exact(&mut ack).await.expect("the ack");
+        assert_eq!(ack[0], ACK_SWAPPED, "0x00 is the swap");
+        assert!(
+            listener.allowlist.check("SELECT 1").is_allowed(),
+            "the ack came after the swap, and the next statement sees it"
+        );
+
+        // A well-framed document this build refuses: 0x01, the old policy kept.
+        let body = br#"{"version":2,"route_policies":[]}"#;
+        let mut framed = u32::try_from(body.len())
+            .expect("small")
+            .to_le_bytes()
+            .to_vec();
+        framed.extend_from_slice(body);
+        client
+            .write_all(&framed)
+            .await
+            .expect("the refused document");
+        client.read_exact(&mut ack).await.expect("the second ack");
+        assert_eq!(ack[0], ACK_REFUSED, "0x01 is the refusal");
+        assert!(
+            listener.allowlist.check("SELECT 1").is_allowed(),
+            "a refusal leaves the previous policy in force"
+        );
+
+        // The supervisor going away ends the task; nothing is retried.
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("the task ends with its peer")
+            .expect("it did not panic");
+    }
+
+    /// `MB.23.5.3`: a boot whose configuration carries a policy descriptor
+    /// without `dev_policy` is refused before a listener is adopted, so a
+    /// production dbproxy can never acquire the channel.
+    #[tokio::test]
+    async fn a_policy_descriptor_without_dev_policy_is_refused_at_boot() {
+        use crate::config::{DbproxyConfig, ListenerSpec, ProxySpec};
+        use blastit_sqlpolicy::TableGrants;
+
+        let listener = ListenerSpec {
+            fd: -1,
+            route: "product-detail".to_string(),
+            proxy: "db".to_string(),
+            uid: 21_000,
+            queries: vec![],
+            transaction_control: false,
+            unrestricted: false,
+            tables: TableGrants::default(),
+        };
+        let proxy = ProxySpec {
+            name: "db".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 1,
+            user: "u".to_string(),
+            password: "p".to_string().into(),
+            database: "d".to_string(),
+            sslmode: Some("disable".to_string()),
+            ca_cert: None,
+            options: vec![],
+            max_connections: 4,
+        };
+        let config = DbproxyConfig {
+            proxies: vec![proxy],
+            listeners: vec![listener],
+            policy_fd: Some(14),
+            ..DbproxyConfig::default()
+        };
+        let emit: crate::Emit = Arc::new(|_: blastit_events::Event| {});
+        let error = run(config, emit).await.expect_err("no dev policy");
+        assert!(
+            error.to_string().contains("policy_fd") && error.to_string().contains("dev_policy"),
+            "{error}"
+        );
     }
 }

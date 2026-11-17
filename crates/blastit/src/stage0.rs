@@ -2993,6 +2993,16 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         None
     };
 
+    // The dev policy channel (`MB.23.5.3`, §4.6 step 2): one socketpair, stage
+    // 1's end carried across the `execve` as `--dev-policy-fd` and dbproxy's end
+    // in its configuration document. `--no-reload` creates neither end, exactly
+    // like the watcher, the marks and the report sockets.
+    let policy = if options.no_reload {
+        None
+    } else {
+        Some(dev_policy_channel(&startup, &root))
+    };
+
     let dbproxy = fork_dbproxy_dev(
         &startup,
         &boot,
@@ -3000,7 +3010,17 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         &prepared,
         listeners,
         learn.as_ref().map(|(_, obs)| obs.as_raw_fd()),
+        policy.as_ref().map(|(_, dbproxy)| dbproxy.as_raw_fd()),
     );
+    // dbproxy has its own copy of its end now; the parent must not keep one, or
+    // the channel would stay open after dbproxy exits.
+    let policy = match policy {
+        Some((stage1, dbproxy)) => {
+            drop(dbproxy);
+            Some(stage1)
+        }
+        None => None,
+    };
 
     // The parent keeps the read end only.
     let learn = match learn {
@@ -3073,8 +3093,33 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         prepared.app_env(),
         dbproxy,
         learn,
+        policy,
         options.no_reload,
     )
+}
+
+/// The dev-only dbproxy policy channel (`MB.23.5.3`, `ADR-0014` §4).
+///
+/// One `AF_UNIX`/`SOCK_STREAM` socketpair, created here and nowhere else: stage
+/// 1's end travels across the `execve` as `--dev-policy-fd`, dbproxy's end
+/// travels in its configuration document as `policy_fd` (legal only with
+/// `dev_policy`). Both ends are close-on-exec at birth and switch to
+/// non-blocking, because the supervisor writes its document through its poll set
+/// and treats a short write as "wait for writability", never as a blocking call.
+///
+/// `--no-reload`, production, `check` and `test` never call this: the channel is
+/// as dev-only as the watcher it exists to serve.
+fn dev_policy_channel(emitter: &Emitter, root: &DevRoot) -> (OwnedFd, OwnedFd) {
+    let (stage1, dbproxy) = match blastit_sys::socketpair_stream() {
+        Ok(pair) => pair,
+        Err(err) => fail_with_root(emitter, root, &format!("dev policy socket: {err}")),
+    };
+    for end in [&stage1, &dbproxy] {
+        if let Err(err) = rustix::fs::fcntl_setfl(end, rustix::fs::OFlags::NONBLOCK) {
+            fail_with_root(emitter, root, &format!("dev policy socket: {err}"));
+        }
+    }
+    (stage1, dbproxy)
 }
 
 /// Binds the per-route sockets of a `dev` boot (`R20`).
@@ -3183,6 +3228,7 @@ fn fork_dbproxy_dev(
     prepared: &blastit_env::Prepared,
     listeners: Vec<(UnixListener, ListenerSpec)>,
     obs_fd: Option<std::os::fd::RawFd>,
+    policy_fd: Option<std::os::fd::RawFd>,
 ) -> Option<DbproxyHandover> {
     if listeners.is_empty() {
         return None;
@@ -3217,6 +3263,12 @@ fn fork_dbproxy_dev(
     // when the whole suite runs as root, and then it *is* the view's uid.
     document.allow_root_listener = uid == 0;
     document.obs_fd = obs_fd;
+    // The dev policy channel's dbproxy end (`MB.23.5.3`): the document is the
+    // only way dbproxy learns the descriptor, and `dev_policy` is what makes it
+    // legal. Both are `None`/`false` on every boot this function is not called
+    // for, which is what keeps a production dbproxy unable to acquire it.
+    document.policy_fd = policy_fd;
+    document.dev_policy = policy_fd.is_some();
 
     let (secrets_read, secrets_write) = pipe_dev(emitter, boot.root, "secrets.pipe");
     let (events_read, events_write) = pipe_dev(emitter, boot.root, "dbproxy events pipe");
@@ -3232,6 +3284,9 @@ fn fork_dbproxy_dev(
     keep.extend(listeners.iter().map(|(listener, _)| listener.as_raw_fd()));
     if let Some(obs) = obs_fd {
         keep.push(obs);
+    }
+    if let Some(policy) = policy_fd {
+        keep.push(policy);
     }
 
     let child = ChildIo {
@@ -3316,6 +3371,7 @@ fn exec_stage1_dev(
     app_env: &BTreeMap<String, String>,
     dbproxy: Option<DbproxyHandover>,
     learn: Option<OwnedFd>,
+    policy: Option<OwnedFd>,
     no_reload: bool,
 ) -> ! {
     let stage1 = boot.host.stage1();
@@ -3393,6 +3449,16 @@ fn exec_stage1_dev(
             format!("--dev-obs-fd={}", obs.as_raw_fd()),
         ));
         keep.push(obs.as_raw_fd());
+    }
+    // The dev policy channel's stage-1 end (`MB.23.5.3`): the supervisor writes
+    // the document a `Blastfile` save produced and waits for the one-byte ack,
+    // and carries this descriptor into the reload adoption document.
+    if let Some(policy) = &policy {
+        argv.push(cstring_dev(
+            boot.root,
+            format!("--dev-policy-fd={}", policy.as_raw_fd()),
+        ));
+        keep.push(policy.as_raw_fd());
     }
     // `--no-reload` is the user's flag and stage 1 is where the watcher would be
     // built, so this is the one token that carries it across the `execve`
@@ -3527,7 +3593,7 @@ fn bind_view_sockets(
 /// every statement"), so the *declaration* is what decides the socket. A route
 /// with no `[route.<proxy>]` and no group that names the proxy still gets no
 /// listener, which is the other half of that page.
-fn route_declares_proxy(manifest: &Manifest, index: usize, proxy: &ProxyName) -> bool {
+pub(crate) fn route_declares_proxy(manifest: &Manifest, index: usize, proxy: &ProxyName) -> bool {
     let Some(route) = manifest.routes().get(index) else {
         return false;
     };
@@ -4264,6 +4330,34 @@ view ungranted regex '/ungranted/.*' {}
             !manifest.effective_grants(0).contains_key(&db),
             "the manifest model still calls an empty grant empty"
         );
+    }
+
+    /// `MB.23.5.3`: the dev policy channel is one `AF_UNIX`/`SOCK_STREAM`
+    /// socketpair, both ends close-on-exec and non-blocking, and the two ends
+    /// really are one connected pair.
+    #[test]
+    fn the_dev_policy_channel_is_one_nonblocking_socketpair() {
+        let emitter = Emitter::new(2, LogFormat::Json, Level::Info, false);
+        let root = DevRoot::create().expect("a runtime root");
+        let (stage1, dbproxy) = dev_policy_channel(&emitter, &root);
+        for (name, end) in [("stage 1", &stage1), ("dbproxy", &dbproxy)] {
+            let status = rustix::fs::fcntl_getfl(end).expect("the status flags");
+            assert!(
+                status.contains(rustix::fs::OFlags::NONBLOCK),
+                "the {name} end is non-blocking: the supervisor writes through its poll set"
+            );
+            let flags = rustix::io::fcntl_getfd(end).expect("the descriptor flags");
+            assert!(
+                flags.contains(rustix::io::FdFlags::CLOEXEC),
+                "the {name} end is close-on-exec at birth"
+            );
+        }
+        // One connected pair: a byte written on one end is readable on the other.
+        rustix::io::write(&stage1, b"x").expect("written");
+        let mut byte = [0u8; 1];
+        assert_eq!(rustix::io::read(&dbproxy, &mut byte).expect("read"), 1);
+        assert_eq!(byte[0], b'x');
+        root.cleanup();
     }
 }
 

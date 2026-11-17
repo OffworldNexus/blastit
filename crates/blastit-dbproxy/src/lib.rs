@@ -107,7 +107,242 @@ pub use config::{
 };
 pub use error::DbproxyError;
 pub use learn::{ObsTarget, ObsVerdict, WireSqlObs};
+pub use policy::{ACK_REFUSED, ACK_SWAPPED, MAX_POLICY_DOCUMENT};
 pub use server::{run, run_with_listeners, run_with_ready};
+
+/// The dev-only policy channel: one document per save, one ack byte back
+/// (`docs/design/dev-fanotify-reload.md` §4.6 step 2, §4.8, `ADR-0014` §4).
+///
+/// A `blastit dev` boot with live reload on creates one
+/// `AF_UNIX`/`SOCK_STREAM` socketpair in stage 0. init's end travels to stage 1
+/// (`--dev-policy-fd`) and is what the supervisor writes a document on; dbproxy's
+/// end arrives in its configuration document (`policy_fd`, legal only with
+/// `dev_policy`). After a `Blastfile` save the supervisor writes
+/// `u32 length | JSON bytes` (both little-endian, at most
+/// [`MAX_POLICY_DOCUMENT`]) naming the **new** manifest's whole route-policy set,
+/// and dbproxy replaces its map in one step and answers with one byte:
+/// [`ACK_SWAPPED`] or [`ACK_REFUSED`]. Nothing here is reachable on a production
+/// or `check` boot, which never create the socketpair and never carry
+/// `policy_fd`.
+pub(crate) mod policy {
+    use std::fmt;
+    use std::time::Duration;
+
+    use serde::Deserialize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+
+    use crate::config::{RoutePolicySpec, WILDCARD_ROUTE};
+
+    /// The largest policy document accepted, in bytes.
+    ///
+    /// A manifest's route policies are its grants, one entry per `(route,
+    /// proxy)`; 1 MiB is far above any real manifest and, unlike the boot's
+    /// configuration, it is a per-save message, so the bound is also what keeps
+    /// a bogus length prefix from allocating wildly.
+    pub const MAX_POLICY_DOCUMENT: usize = 1024 * 1024;
+
+    /// How long one document (and its ack) may take before the channel is
+    /// treated as wedged.
+    ///
+    /// The supervisor's own deadline is 100 ms (§4.6 step 2); this is the
+    /// reader's backstop for a peer that wrote a length and then stopped, so a
+    /// half-written document cannot hold the task (or the descriptor) for ever.
+    pub(crate) const POLICY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// The one-byte answer: the whole map was replaced.
+    pub const ACK_SWAPPED: u8 = 0x00;
+
+    /// The one-byte answer: the document was refused whole, the old map is in
+    /// force.
+    pub const ACK_REFUSED: u8 = 0x01;
+
+    /// The only document version this build understands.
+    const VERSION: u32 = 1;
+
+    /// Why a document or the channel itself was refused.
+    ///
+    /// No message ever carries a statement, a literal or a credential: the
+    /// document holds grants (already the manifest's public text) and the
+    /// refusals name shapes and counts, never SQL.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct PolicyError(String);
+
+    impl PolicyError {
+        /// A refusal with a one-line reason.
+        pub(crate) fn new(reason: impl Into<String>) -> Self {
+            Self(reason.into())
+        }
+    }
+
+    impl fmt::Display for PolicyError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(&self.0)
+        }
+    }
+
+    /// The wire document, exactly as the design freezes it.
+    ///
+    /// `deny_unknown_fields` is what makes an unknown member — a `fd`, a stray
+    /// key a future version invented — a refusal instead of something silently
+    /// dropped, and [`RoutePolicySpec`] carries the same rule for its own
+    /// members.
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Document {
+        /// Must be [`VERSION`].
+        version: u32,
+        /// One entry per `(route, proxy)` the new manifest declares or grants.
+        route_policies: Vec<RoutePolicySpec>,
+    }
+
+    /// What one read produced.
+    #[derive(Debug)]
+    pub(crate) enum DocumentRead {
+        /// A well-formed document, to be applied whole.
+        Apply(Vec<RoutePolicySpec>),
+        /// A document that is refused whole; the old policy stays and the
+        /// channel remains usable for the next save.
+        Refused(PolicyError),
+    }
+
+    /// Reads one length-prefixed document.
+    ///
+    /// `Ok(None)` is a clean end-of-file before a length: the peer is gone, and
+    /// the task ends. `Err` is a framing or transport failure — an oversize
+    /// length, a body that stopped arriving, a deadline — after which the stream
+    /// cannot be resynchronised, so the caller refuses and closes the channel.
+    /// `Ok(Some(DocumentRead::Refused))` is a document whose *framing* was
+    /// intact but whose shape or version this build refuses.
+    ///
+    /// The channel is **idle** between saves, so waiting for the first header
+    /// byte is unbounded: a dev boot may serve for hours before its first
+    /// `Blastfile` save, and a deadline there would close a channel nobody has
+    /// used yet. [`POLICY_TIMEOUT`] bounds a document that has **started** and
+    /// then stalled, which is the only shape a wedged peer can produce.
+    ///
+    /// # Errors
+    ///
+    /// A one-line reason naming the length, the limit or the deadline — never a
+    /// byte of the document.
+    pub(crate) async fn read_document(
+        stream: &mut UnixStream,
+    ) -> Result<Option<DocumentRead>, PolicyError> {
+        read_document_within(stream, POLICY_TIMEOUT).await
+    }
+
+    /// [`read_document`] with an injectable deadline, so the stall rule is
+    /// asserted in milliseconds instead of seconds.
+    pub(crate) async fn read_document_within(
+        stream: &mut UnixStream,
+        deadline: Duration,
+    ) -> Result<Option<DocumentRead>, PolicyError> {
+        let mut header = [0u8; 4];
+        let mut filled = 0;
+        while filled < 4 {
+            let read = if filled == 0 {
+                stream.read(&mut header[filled..]).await
+            } else {
+                match tokio::time::timeout(deadline, stream.read(&mut header[filled..])).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => {
+                        return Err(PolicyError::new(format!(
+                            "a half-written policy header stalled for more than {} ms",
+                            deadline.as_millis()
+                        )));
+                    }
+                }
+            };
+            match read {
+                Ok(0) if filled == 0 => return Ok(None),
+                Ok(0) => {
+                    return Err(PolicyError::new(
+                        "the policy header was cut short before its fourth byte",
+                    ));
+                }
+                Ok(read) => filled += read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(PolicyError::new(format!(
+                        "reading the policy header: {error}"
+                    )));
+                }
+            }
+        }
+        let length = u32::from_le_bytes(header) as usize;
+        if length == 0 {
+            return Err(PolicyError::new("the policy document is empty"));
+        }
+        if length > MAX_POLICY_DOCUMENT {
+            return Err(PolicyError::new(format!(
+                "the policy document is {length} bytes, more than the \
+                 {MAX_POLICY_DOCUMENT}-byte limit"
+            )));
+        }
+        let mut body = vec![0u8; length];
+        match tokio::time::timeout(deadline, stream.read_exact(&mut body)).await {
+            Err(_elapsed) => {
+                return Err(PolicyError::new(format!(
+                    "the policy document stopped arriving for more than {} ms",
+                    deadline.as_millis()
+                )));
+            }
+            Ok(Err(error)) => {
+                return Err(PolicyError::new(format!(
+                    "reading the policy document: {error}"
+                )));
+            }
+            Ok(Ok(_read)) => {}
+        }
+        let document: Document = match serde_json::from_slice(&body) {
+            Ok(document) => document,
+            Err(error) => {
+                return Ok(Some(DocumentRead::Refused(PolicyError::new(format!(
+                    "the policy document is not the documented shape: {error}"
+                )))));
+            }
+        };
+        if document.version != VERSION {
+            return Ok(Some(DocumentRead::Refused(PolicyError::new(format!(
+                "the policy document says version {}, not {VERSION}",
+                document.version
+            )))));
+        }
+        for (index, policy) in document.route_policies.iter().enumerate() {
+            if policy.route.is_empty() || policy.route == WILDCARD_ROUTE {
+                return Ok(Some(DocumentRead::Refused(PolicyError::new(format!(
+                    "route policy {index} names {:?}, which is not a route name",
+                    policy.route
+                )))));
+            }
+            if policy.proxy.is_empty() {
+                return Ok(Some(DocumentRead::Refused(PolicyError::new(format!(
+                    "route policy {index} names no proxy"
+                )))));
+            }
+            if document.route_policies[..index]
+                .iter()
+                .any(|other| other.route == policy.route && other.proxy == policy.proxy)
+            {
+                return Ok(Some(DocumentRead::Refused(PolicyError::new(format!(
+                    "two route policies cover route {:?} on proxy {:?}",
+                    policy.route, policy.proxy
+                )))));
+            }
+        }
+        Ok(Some(DocumentRead::Apply(document.route_policies)))
+    }
+
+    /// Writes the one-byte ack.
+    ///
+    /// # Errors
+    ///
+    /// The transport error, when the peer is gone: an ack nobody waits for any
+    /// more is not a reason to keep the channel.
+    pub(crate) async fn write_ack(stream: &mut UnixStream, byte: u8) -> std::io::Result<()> {
+        stream.write_all(&[byte]).await
+    }
+}
 
 /// Where dbproxy sends its events.
 ///
@@ -115,3 +350,171 @@ pub use server::{run, run_with_listeners, run_with_ready};
 /// on, so dbproxy only ever calls this closure; it never writes a log line
 /// anywhere else, and installs no `tracing` subscriber.
 pub type Emit = Arc<dyn Fn(Event) + Send + Sync>;
+
+#[cfg(test)]
+mod policy_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::policy::{DocumentRead, MAX_POLICY_DOCUMENT, PolicyError, read_document, write_ack};
+
+    /// Reads one document whose bytes `body` are the payload, framed by the
+    /// caller.
+    async fn read(body: &[u8]) -> Result<Option<DocumentRead>, PolicyError> {
+        let (mut writer, mut reader) = tokio::net::UnixStream::pair().expect("a socketpair");
+        let mut framed = u32::try_from(body.len())
+            .expect("a test document is small")
+            .to_le_bytes()
+            .to_vec();
+        framed.extend_from_slice(body);
+        writer.write_all(&framed).await.expect("written");
+        drop(writer);
+        read_document(&mut reader).await
+    }
+
+    /// A document with `length` in its header and no body, so the framing is
+    /// tested without a valid shape.
+    async fn framed_length(length: u32) -> Result<Option<DocumentRead>, PolicyError> {
+        let (mut writer, mut reader) = tokio::net::UnixStream::pair().expect("a socketpair");
+        writer
+            .write_all(&length.to_le_bytes())
+            .await
+            .expect("the header");
+        drop(writer);
+        read_document(&mut reader).await
+    }
+
+    #[tokio::test]
+    async fn a_document_is_version_one_over_the_crate_s_member_names() {
+        let body = br#"{"version":1,"route_policies":[{"route":"cart","proxy":"db","queries":["SELECT 1"],"transaction_control":false,"unrestricted":false,"tables":{"tables":{},"functions":[]}}]}"#;
+        let document = read(body).await.expect("read").expect("a document");
+        let DocumentRead::Apply(policies) = document else {
+            panic!("a version-1 document is applied, not refused");
+        };
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].route, "cart");
+        assert_eq!(policies[0].proxy, "db");
+        assert_eq!(policies[0].queries, vec!["SELECT 1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_wrong_version_is_refused_whole() {
+        let body = br#"{"version":2,"route_policies":[]}"#;
+        let document = read(body).await.expect("read").expect("a document");
+        let DocumentRead::Refused(reason) = document else {
+            panic!("version 2 is refused, not applied");
+        };
+        assert!(reason.to_string().contains("version 2"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_member_is_refused_rather_than_dropped() {
+        // The document's own members, and the spec's: `fd`/`uid` are never
+        // members, so a document carrying one is not the documented shape.
+        for body in [
+            br#"{"version":1,"route_policies":[],"fd":3}"#.as_slice(),
+            br#"{"version":1,"route_policies":[{"route":"cart","proxy":"db","uid":21000}]}"#
+                .as_slice(),
+        ] {
+            let document = read(body).await.expect("read").expect("a document");
+            assert!(
+                matches!(document, DocumentRead::Refused(_)),
+                "an unknown member is a refusal: {document:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wildcard_or_duplicate_entry_is_refused_whole() {
+        for body in [
+            br#"{"version":1,"route_policies":[{"route":"*","proxy":"db"}]}"#.as_slice(),
+            br#"{"version":1,"route_policies":[{"route":"cart","proxy":"db"},{"route":"cart","proxy":"db"}]}"#
+                .as_slice(),
+            br#"{"version":1,"route_policies":[{"route":"cart","proxy":""}]}"#.as_slice(),
+        ] {
+            let document = read(body).await.expect("read").expect("a document");
+            assert!(
+                matches!(document, DocumentRead::Refused(_)),
+                "refused whole: {document:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_length_prefix_is_enforced_before_a_byte_is_read() {
+        let empty = framed_length(0).await.expect_err("an empty document");
+        assert!(empty.to_string().contains("empty"), "{empty}");
+
+        let oversize = framed_length(u32::try_from(MAX_POLICY_DOCUMENT + 1).expect("fits"))
+            .await
+            .expect_err("an oversize document");
+        assert!(oversize.to_string().contains("more than the"), "{oversize}");
+    }
+
+    #[tokio::test]
+    async fn a_truncated_body_is_a_framing_error_not_a_half_document() {
+        let (mut writer, mut reader) = tokio::net::UnixStream::pair().expect("a socketpair");
+        writer
+            .write_all(&64u32.to_le_bytes())
+            .await
+            .expect("header");
+        writer.write_all(b"{\"version\":1").await.expect("half");
+        drop(writer);
+        let error = read_document(&mut reader).await.expect_err("truncated");
+        assert!(
+            error.to_string().contains("reading the policy document"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_channel_waits_but_a_started_document_is_bounded() {
+        use std::time::Duration;
+
+        use super::policy::read_document_within;
+
+        // Nothing has been written yet: the channel is idle, and no deadline
+        // may close it — a dev boot can serve for hours before its first save.
+        let (mut writer, mut reader) = tokio::net::UnixStream::pair().expect("a socketpair");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                read_document_within(&mut reader, Duration::from_millis(20)),
+            )
+            .await
+            .is_err(),
+            "an idle channel must wait, not time out"
+        );
+
+        // A document that started and then stalled is bounded, and the reason
+        // says so in milliseconds.
+        writer.write_all(&[0x01]).await.expect("one header byte");
+        let error = read_document_within(&mut reader, Duration::from_millis(20))
+            .await
+            .expect_err("a stalled header");
+        assert!(error.to_string().contains("20 ms"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_closed_peer_is_a_clean_end_and_the_ack_is_one_byte() {
+        let (writer, mut reader) = tokio::net::UnixStream::pair().expect("a socketpair");
+        drop(writer);
+        assert!(
+            read_document(&mut reader)
+                .await
+                .expect("clean end")
+                .is_none(),
+            "an empty stream is the supervisor going away"
+        );
+
+        let (mut writer, mut reader) = tokio::net::UnixStream::pair().expect("a socketpair");
+        write_ack(&mut reader, super::policy::ACK_SWAPPED)
+            .await
+            .expect("the ack");
+        let mut byte = [0u8; 2];
+        let read = writer.read(&mut byte).await.expect("one byte");
+        assert_eq!(read, 1, "the ack is exactly one byte");
+        assert_eq!(byte[0], super::policy::ACK_SWAPPED);
+    }
+}

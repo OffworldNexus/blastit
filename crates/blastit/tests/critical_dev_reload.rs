@@ -118,6 +118,20 @@ def _append(path, text):
     except OSError:
         pass
 
+def _sockets():
+    # The inodes of every AF_UNIX socket this process holds. A view is
+    # `PR_SET_DUMPABLE(0)`, so no other process may read /proc/<pid>/fd; the
+    # worker's own report is the only witness of its descriptor table.
+    inodes = []
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            link = os.readlink("/proc/self/fd/" + name)
+        except OSError:
+            continue
+        if link.startswith("socket:["):
+            inodes.append(link[8:-1])
+    return ",".join(sorted(inodes))
+
 def app(environ, start_response):
     if OUTSIDE not in sys.path:
         sys.path.insert(0, OUTSIDE)
@@ -134,8 +148,9 @@ def app(environ, start_response):
     view = importlib.import_module("views." + name)
     _append(os.path.join(HERE, "app.log"), "request\n")
     _append(cache, "<p>%d</p>\n" % os.getpid())
-    body = ("%s|%d|%s|%s|%d" % (view.render(), os.getpid(), template, outside,
-                                 len(os.listdir("/proc/self/fd")))).encode()
+    body = ("%s|%d|%s|%s|%d|%s" % (view.render(), os.getpid(), template, outside,
+                                    len(os.listdir("/proc/self/fd")),
+                                    _sockets())).encode()
     start_response("200 OK", [("Content-Type", "text/plain"),
                               ("Content-Length", str(len(body)))])
     return [body]
@@ -808,6 +823,31 @@ impl Dev {
             .count()
     }
 
+    /// The dev policy channel's stage-1 end (`MB.23.5.3`): its descriptor number
+    /// and the socket inode `/proc/<pid>/fd/<n>` names, or `None` when this boot
+    /// has no channel (`--no-reload`, and every non-`dev` boot).
+    ///
+    /// init is the one process that is readable from here (the forked roles keep
+    /// `PR_SET_DUMPABLE(0)`), and its `--dev-policy-fd` argument is what stage 0
+    /// handed stage 1 across the `execve`.
+    fn policy_channel(&self) -> Option<(i32, u64)> {
+        let cmdline = fs::read(format!("/proc/{}/cmdline", self.pid())).ok()?;
+        let text = String::from_utf8_lossy(&cmdline);
+        let number = text
+            .split('\0')
+            .find_map(|argument| argument.strip_prefix("--dev-policy-fd="))?
+            .parse::<i32>()
+            .ok()?;
+        let link = fs::read_link(format!("/proc/{}/fd/{number}", self.pid())).ok()?;
+        let inode = link
+            .to_str()?
+            .strip_prefix("socket:[")?
+            .strip_suffix(']')?
+            .parse::<u64>()
+            .ok()?;
+        Some((number, inode))
+    }
+
     /// `SIGTERM`, wait for the exit, and return the whole transcript.
     fn stop(&mut self) -> Vec<String> {
         // SAFETY: `kill` takes a pid this process owns and a signal number.
@@ -932,10 +972,13 @@ fn read_one_response(stream: &mut TcpStream, path: &str) -> Option<String> {
 }
 
 /// The body an answer carries:
-/// `"<tag>:<version>|<pid>|<template>|<outside>|<open descriptors>"`.
+/// `"<tag>:<version>|<pid>|<template>|<outside>|<open descriptors>|<socket inodes>"`.
 ///
 /// The descriptor count is how `--no-reload` is witnessed: the view that got no
-/// report socket (and so no audit hook, §5 `S3`) holds exactly one fewer.
+/// report socket (and so no audit hook, §5 `S3`) holds exactly one fewer. The
+/// socket inodes are how the view's own fd table witnesses that it holds no end
+/// of the dev policy channel (§4.6 step 2): a view is non-dumpable, so no other
+/// process may read its `/proc/<pid>/fd`.
 #[derive(Debug, PartialEq, Eq)]
 struct Body {
     tag: String,
@@ -944,6 +987,7 @@ struct Body {
     template: String,
     outside: String,
     fds: usize,
+    sockets: Vec<u64>,
 }
 
 fn body_of(text: &str) -> Body {
@@ -968,6 +1012,17 @@ fn body_of(text: &str) -> Body {
             .next()
             .and_then(|fds| fds.trim().parse().ok())
             .unwrap_or_else(|| panic!("no descriptor count in {trimmed:?}")),
+        sockets: fields
+            .next()
+            .unwrap_or_default()
+            .split(',')
+            .filter(|inode| !inode.is_empty())
+            .map(|inode| {
+                inode
+                    .parse()
+                    .unwrap_or_else(|_| panic!("no socket inode in {inode:?}"))
+            })
+            .collect(),
     }
 }
 
@@ -1417,6 +1472,10 @@ fn no_reload_watches_nothing_and_serves_the_old_body() {
     let watched_cart = body_of(&watched.get("/cart/x"));
     assert_eq!(watched_cart.tag, "cart-1");
     assert_eq!(body_of(&watched.get("/products/x")).tag, "products-1");
+    assert!(
+        watched.policy_channel().is_some(),
+        "a reload-on boot creates the dev policy channel and hands it to stage 1"
+    );
     watched.stop();
 
     let mut dev = fixture.start_with("no-reload", "json", &["--no-reload"]);
@@ -1424,6 +1483,10 @@ fn no_reload_watches_nothing_and_serves_the_old_body() {
     let products = body_of(&dev.get("/products/x"));
     assert_eq!(cart.tag, "cart-1", "{cart:?}");
     assert_eq!(products.tag, "products-1", "{products:?}");
+    assert!(
+        dev.policy_channel().is_none(),
+        "`--no-reload` creates no policy channel: stage 1 gets no `--dev-policy-fd`"
+    );
     assert_eq!(
         dev.fanotify_fds(),
         0,
@@ -2216,5 +2279,569 @@ fn learn_skips_the_manifest_cycle_and_still_reloads_views() {
     assert_eq!(reloads[0]["reason"], "loaded", "{reloads:?}");
     let fresh = dev.wait_body_containing("/products/x", "products-2");
     assert!(fresh.contains("products-2"), "{fresh:?}");
+    dev.stop();
+}
+
+// ------------------------------- the dev policy channel (`MB.23.5.3`, §4.6/§4.8)
+
+/// §4.6 step 2 / §4.8: a dev boot with reload on hands stage 1 one end of a
+/// `socket`-pair and dbproxy the other, and **no view holds either end**.
+///
+/// What is witnessed, and how:
+///
+/// * stage 1's `/proc/<pid>/cmdline` carries `--dev-policy-fd=N` and
+///   `/proc/<pid>/fd/N` is a socket — stage 0 created the channel and passed it
+///   across the `execve` exactly once;
+/// * the answering view's own report (`/proc/self/fd`, the only readable fd
+///   table: a view is non-dumpable) holds no socket inode equal to that end;
+/// * a view born after a reload holds none either;
+/// * the channel never moves: the same descriptor number and inode after the
+///   reload that replaced every view, because the supervisor is not replaced and
+///   the socket is never re-bound (§4.8);
+/// * dbproxy's end cannot be in a view: stage 0 drops the parent's copy of it
+///   once dbproxy has its own (`run_dev`'s `drop(dbproxy)`), so the only process
+///   a fork could inherit it from never holds it.
+#[test]
+fn the_policy_channel_reaches_stage_one_and_no_view_holds_it() {
+    let fixture = Fixture::new("policy-fd");
+    let mut dev = fixture.start("policy-fd", "json");
+    let first = body_of(&dev.get("/products/x"));
+    let (number, inode) = dev
+        .policy_channel()
+        .expect("a reload-on dev boot hands stage 1 a policy descriptor");
+    assert!(number >= 0, "the descriptor number is a real fd: {number}");
+    assert!(
+        !first.sockets.contains(&inode),
+        "the answering view holds no end of the policy channel: its sockets are {:?}, \
+         the channel is {inode}",
+        first.sockets
+    );
+
+    // A reload replaces every view; the replacement still inherits nothing.
+    // The view's report is what puts `views/products.py` in the watched set, so
+    // the mark is the state — not a sleep — that says the save can be seen.
+    dev.wait_marked(&[fixture.path("views")]);
+    fs::write(fixture.path("views/products.py"), view_source("products-2")).expect("the save");
+    dev.wait_reloads(1);
+    let fresh = body_of(&dev.wait_body_containing("/products/x", "products-2"));
+    assert_ne!(fresh.pid, first.pid, "the reload replaced the view");
+    assert!(
+        !fresh.sockets.contains(&inode),
+        "the replacement view holds no end either: {:?}",
+        fresh.sockets
+    );
+    assert_eq!(
+        dev.policy_channel(),
+        Some((number, inode)),
+        "one channel per boot image: the descriptor and the socket are never re-created"
+    );
+    dev.stop();
+}
+
+// ------------------------------------------- row 10: PHP live reload (§4.4, §4.6)
+
+/// The `Blastfile` row 10 uses: two routes, one embeddable PHP front controller
+/// — the shape `docs/frameworks/php.md` documents (`entrypoint php`, no app).
+#[cfg(feature = "php")]
+const PHP_BLASTFILE: &str = "\
+entrypoint php \"public/index.php\"
+
+view app regex '/app/.*' {
+}
+
+view api regex '/api/.*' {
+}
+";
+
+/// The front controller: it echoes the tag an **included** file carries, its own
+/// pid, and the content of a **compiled template artefact** the framework reads
+/// and revalidates (`file_get_contents`, never `include`) — so a save of the
+/// artefact is not a loaded-file change and must not reload anything.
+#[cfg(feature = "php")]
+const PHP_ENTRY: &str = r#"<?php
+header('Content-Type: text/plain');
+require __DIR__ . '/version.php';
+$compiled = @file_get_contents(__DIR__ . '/../storage/framework/views/compiled.php');
+echo $TAG . ':' . getmypid() . ':' . trim((string) $compiled) . "\n";
+"#;
+
+/// The included file row 10 saves.
+#[cfg(feature = "php")]
+fn php_version_source(tag: &str) -> String {
+    format!("<?php\n$TAG = '{tag}';\n")
+}
+
+/// A two-route PHP fixture: the manifest, the front controller and the included
+/// file, under a fresh temporary directory.
+#[cfg(feature = "php")]
+struct PhpFixture {
+    dir: PathBuf,
+}
+
+#[cfg(feature = "php")]
+impl PhpFixture {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "blastit-php-reload-{tag}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("public")).expect("the fixture tree");
+        fs::create_dir_all(dir.join("storage/framework/views")).expect("the cache tree");
+        fs::write(dir.join("Blastfile"), PHP_BLASTFILE).expect("the manifest");
+        fs::write(dir.join("public/index.php"), PHP_ENTRY).expect("the front controller");
+        fs::write(dir.join("public/version.php"), php_version_source("v1")).expect("the include");
+        fs::write(
+            dir.join("storage/framework/views/compiled.php"),
+            "compiled-v1",
+        )
+        .expect("the warm compiled artefact");
+        Self { dir }
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        self.dir.join(relative)
+    }
+}
+
+#[cfg(feature = "php")]
+impl Drop for PhpFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The host's embeddable PHP: the NTS `libphp` and the shim for its minor.
+#[cfg(feature = "php")]
+struct HostPhp {
+    libphp: PathBuf,
+    shim: PathBuf,
+}
+
+/// The host probe `crates/blastit/tests/critical_php_embed.rs` established,
+/// copied small: raw `std` file access and the `ADR-0010` §4.1 names, never the
+/// code under test. The library's bytes must name `executor_globals` and
+/// `php_version\0` and must not name `tsrm_startup` (a ZTS build, which the boot
+/// refuses), and the shim for the same minor must exist next to the test binary.
+#[cfg(feature = "php")]
+fn host_php() -> Option<HostPhp> {
+    fn names(bytes: &[u8], needle: &[u8]) -> bool {
+        bytes.windows(needle.len()).any(|window| window == needle)
+    }
+    let libphp = php_libphp()?;
+    let bytes = fs::read(&libphp).ok()?;
+    if !names(&bytes, b"executor_globals")
+        || !names(&bytes, b"php_version\0")
+        || names(&bytes, b"tsrm_startup")
+    {
+        return None;
+    }
+    let (major, minor) = php_minor(&libphp)?;
+    let shim = php_shim(major, minor)?;
+    Some(HostPhp { libphp, shim })
+}
+
+/// `BLASTIT_LIBPHP`, else the probe order stage 0 walks: minor first, spelling
+/// second, so a host with two embed packages serves the newest.
+#[cfg(feature = "php")]
+fn php_libphp() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("BLASTIT_LIBPHP") {
+        let path = PathBuf::from(path);
+        return path.is_file().then(|| path.canonicalize().ok()).flatten();
+    }
+    let libc = if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "gnu"
+    };
+    let triplet = format!("{}-linux-{libc}", std::env::consts::ARCH);
+    let dirs = [
+        format!("/usr/lib/{triplet}"),
+        "/usr/lib64".to_string(),
+        "/usr/lib".to_string(),
+    ];
+    for minor in [85u32, 84, 83] {
+        let dotted = minor % 10;
+        for name in [
+            format!("libphp8.{dotted}.so"),
+            format!("libphp-8.{dotted}.so"),
+            format!("libphp{minor}.so"),
+        ] {
+            for dir in &dirs {
+                let path = Path::new(dir).join(&name);
+                if path.is_file() {
+                    return path.canonicalize().ok();
+                }
+            }
+        }
+        let path = Path::new("/usr/lib")
+            .join(format!("php{minor}"))
+            .join("libphp.so");
+        if path.is_file() {
+            return path.canonicalize().ok();
+        }
+    }
+    None
+}
+
+/// `(major, minor)` from the file name (`libphp8.4.so`, `libphp84.so`,
+/// `libphp-8.4.so`) or from the per-minor directory (`…/php84/libphp.so`).
+#[cfg(feature = "php")]
+fn php_minor(path: &Path) -> Option<(u32, u32)> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_prefix("libphp")?.strip_suffix(".so")?;
+    let stem = stem.strip_prefix('-').unwrap_or(stem);
+    if let Some((major, minor)) = stem.split_once('.') {
+        return Some((major.parse().ok()?, minor.parse().ok()?));
+    }
+    let packed = |digits: &str| -> Option<(u32, u32)> {
+        let bytes = digits.as_bytes();
+        (bytes.len() == 2 && bytes.iter().all(u8::is_ascii_digit))
+            .then(|| (u32::from(bytes[0] - b'0'), u32::from(bytes[1] - b'0')))
+    };
+    if let Some(minor) = packed(stem) {
+        return Some(minor);
+    }
+    packed(path.parent()?.file_name()?.to_str()?.strip_prefix("php")?)
+}
+
+/// The shim for `(major, minor)`, from `BLASTIT_PHP_SHIM_DIR`, beside the test
+/// binary, or the `target/php-sapi` directory `make php-sapi` writes.
+#[cfg(feature = "php")]
+fn php_shim(major: u32, minor: u32) -> Option<PathBuf> {
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        std::env::consts::ARCH
+    };
+    let libc = if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "gnu"
+    };
+    let name = format!("libblastit_php{major}{minor}-{arch}-{libc}.so");
+    let exe = PathBuf::from(env!("CARGO_BIN_EXE_blastit"));
+    let mut dirs = Vec::new();
+    if let Some(dir) = std::env::var_os("BLASTIT_PHP_SHIM_DIR") {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Some(dir) = exe.parent() {
+        dirs.push(dir.to_path_buf());
+    }
+    if let Some(target) = exe
+        .ancestors()
+        .find(|dir| dir.file_name() == Some(std::ffi::OsStr::new("target")))
+    {
+        dirs.push(target.join("php-sapi"));
+    }
+    dirs.into_iter()
+        .map(|dir| dir.join(&name))
+        .find(|path| path.is_file())
+        .and_then(|path| path.canonicalize().ok())
+}
+
+/// Boots `blastit dev` once and waits for it to exit, bounded: the refusal
+/// branch's boot must not be allowed to serve for ever if the probe was wrong.
+#[cfg(feature = "php")]
+fn boot_refusal(dir: &Path) -> (Option<i32>, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
+    command
+        .args(["dev", "--port", &free_port().to_string()])
+        .env_clear()
+        .env("BLASTIT_MEM_HIGH_WATERMARK", "100")
+        .env("BLASTIT_MAX_VIEW_PROCESSES", "8")
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in ["LD_LIBRARY_PATH", "PYTHONHOME"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let mut child = command.spawn().expect("blastit dev starts");
+    let deadline = Instant::now() + EVENT_TIMEOUT;
+    let mut exited = false;
+    while Instant::now() < deadline {
+        if child.try_wait().expect("waiting for the boot").is_some() {
+            exited = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !exited {
+        let _ = child.kill();
+    }
+    let output = child.wait_with_output().expect("the boot's output");
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.code(), text)
+}
+
+/// Row 10: editing an included `.php` file reloads **every** view together, and
+/// the next request on each route returns the new body.
+///
+/// The row runs in the PHP-enabled configuration (`--features php`) and needs the
+/// host's NTS `libphp` + shim. [`host_php`] is that oracle, independent of the
+/// code under test: a host without the pair has its boot refuse with the
+/// documented package sentence (asserted here, never skipped), and the test says
+/// so in one line. On a host with the pair — this one: `/usr/lib/libphp8.4.so`
+/// and `target/php-sapi/` — the served branch runs.
+#[cfg(feature = "php")]
+#[test]
+fn editing_an_included_php_file_reloads_every_view_once_and_serves_the_new_body() {
+    let fixture = PhpFixture::new("php-reload");
+    let Some(host) = host_php() else {
+        // No pair on this host: `blastit dev` must refuse the PHP entrypoint
+        // with the package sentence, and that is what is asserted.
+        let (code, text) = boot_refusal(&fixture.dir);
+        assert_eq!(
+            code,
+            Some(1),
+            "a PHP boot without libphp must refuse: {text}"
+        );
+        assert!(
+            text.contains("install the PHP embed package"),
+            "the refusal names the distro package: {text}"
+        );
+        assert!(
+            text.contains("public/index.php"),
+            "and the entry it could not serve: {text}"
+        );
+        println!("refused (no usable libphp + shim on this host): {text}");
+        return;
+    };
+
+    let libphp = host.libphp.to_string_lossy().into_owned();
+    let shim_dir = host
+        .shim
+        .parent()
+        .expect("the shim has a directory")
+        .to_string_lossy()
+        .into_owned();
+    let mut dev = Dev::start_with_env(
+        &fixture.dir,
+        "php-reload",
+        "json",
+        &[],
+        &[
+            ("BLASTIT_LIBPHP", &libphp),
+            ("BLASTIT_PHP_SHIM_DIR", &shim_dir),
+        ],
+    );
+    let app = dev.get("/app/x");
+    assert!(
+        app.contains("v1:"),
+        "the PHP front controller answers: {app}"
+    );
+    let api = dev.get("/api/x");
+    assert!(api.contains("v1:"), "both routes answer: {api}");
+
+    // The workers' own reports are what put the *included* file in the watched
+    // set: the mark on `public/` is the state that says the batch was absorbed
+    // (the same wait the WSGI rows use, not a sleep).
+    dev.wait_marked(&[fixture.path("public")]);
+    fs::write(fixture.path("public/version.php"), php_version_source("v2")).expect("the save");
+
+    let reloads = dev.wait_reloads(1);
+    assert_eq!(
+        reloads.len(),
+        1,
+        "exactly one reload for the save: {reloads:?}"
+    );
+    assert_eq!(
+        routes_of(&reloads[0]),
+        vec!["app".to_string(), "api".to_string()],
+        "every PHP view reloads together, in manifest order: {reloads:?}"
+    );
+    assert!(
+        files_of(&reloads[0])
+            .iter()
+            .any(|file| file.ends_with("public/version.php")),
+        "the event names the included file that changed: {reloads:?}"
+    );
+
+    // The next request on each route is served by a view that included the new
+    // file — a saved `$_TAG` is what a real application's include looks like.
+    let app = dev.wait_body_containing("/app/x", "v2:");
+    assert!(
+        app.contains("v2:"),
+        "the app route serves the new include: {app}"
+    );
+    let api = dev.wait_body_containing("/api/x", "v2:");
+    assert!(
+        api.contains("v2:"),
+        "the api route serves the new include: {api}"
+    );
+
+    // Acceptance 8's second half: a **warm compiled template artefact** needs no
+    // restart. The framework reads and revalidates it (`file_get_contents`, never
+    // `include`), so it is not in the workers' loaded-file report and a save of
+    // it must produce **no** `dev.reload` — the next request picks it up by
+    // itself. A reporting regression that put cache artefacts in the watched set
+    // turns this into a reload storm, and this row goes red.
+    fs::write(
+        fixture.path("storage/framework/views/compiled.php"),
+        "compiled-v2",
+    )
+    .expect("the warm artefact save");
+    std::thread::sleep(SETTLE);
+    assert_eq!(
+        dev.reloads().len(),
+        1,
+        "a warm compiled artefact is revalidated, not reloaded: {:?}",
+        dev.reloads()
+    );
+    let warm = dev.wait_body_containing("/app/x", "compiled-v2");
+    assert!(
+        warm.contains("compiled-v2"),
+        "the framework revalidated the artefact with no restart: {warm}"
+    );
+
+    println!(
+        "reloaded (php, {} + {}): {} view(s), {} file(s), both routes serve v2; \
+         a warm compiled artefact needs no reload",
+        host.libphp.display(),
+        host.shim.display(),
+        routes_of(&reloads[0]).len(),
+        files_of(&reloads[0]).len()
+    );
+    dev.stop();
+}
+
+// ---------------------------------- row 7: a store added or removed (§4.8)
+
+/// The manifest row 7 boots with: one `postgresql` store and one route that
+/// grants a query on it. The `DATABASE_URL` the test sets is never dialled — a
+/// dev boot binds the listener and stops there — so no database is needed.
+const STORE_BLASTFILE: &str = "\
+app \"shop\"
+
+entrypoint python \"app:app\"
+
+postgres $DATABASE_URL
+
+view products regex '/products/.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+
+view cart regex '/cart/.*' {
+}
+";
+
+/// Row 7 (acceptance 7): a save that **removes** the store is one
+/// `manifest.warning` naming the change and the restart, and `:8080` keeps
+/// serving through it.
+///
+/// The sockets are bound at boot and never re-bound (§4.8), so a save can change
+/// the grants of the listeners that exist but cannot create or destroy one. The
+/// document is still applied afterwards, which is why the removed store fails
+/// closed rather than lingering: dbproxy's listener for it is replaced by the
+/// empty allowlist.
+#[test]
+fn removing_a_store_is_one_warning_and_the_run_keeps_serving() {
+    let fixture = Fixture::new("stores");
+    fs::write(fixture.path("Blastfile"), STORE_BLASTFILE).expect("the store manifest");
+    let mut dev = Dev::start_with_env(
+        &fixture.dir,
+        "stores",
+        "json",
+        &[],
+        &[("DATABASE_URL", "postgres://shop:secret@127.0.0.1:5433/shop")],
+    );
+    assert_eq!(body_of(&dev.get("/products/x")).tag, "products-1");
+    // `scheduler_pid()` assumes two components; this fixture forks dbproxy too,
+    // so the replacement is found by watching the component list instead.
+    let before = dev.component_pids();
+    assert_eq!(
+        before.len(),
+        3,
+        "dbproxy, http and the scheduler: {before:?}"
+    );
+
+    // The save drops the store and its grant. No new socket can be bound, so the
+    // documented answer is one warning saying exactly that.
+    fs::write(fixture.path("Blastfile"), BLASTFILE).expect("the save");
+    let warning = dev.wait_warning("listener set changed");
+    assert_eq!(warning["level"], "warn", "{warning}");
+    let message = warning["message"].as_str().unwrap_or_default().to_string();
+    assert!(
+        message.contains("products→db"),
+        "the warning names the pair that went away: {message}"
+    );
+    assert!(
+        message.contains("restart blastit dev"),
+        "and the fix it needs: {message}"
+    );
+
+    // `:8080` never drops: the cycle replaces the scheduler behind the same
+    // listener, and the run keeps answering. Waiting for the replacement first
+    // keeps the request out of the drain window, where a refused `SPAWN` would
+    // add its own (unrelated) warning.
+    let deadline = Instant::now() + EVENT_TIMEOUT;
+    let mut after = before.clone();
+    while Instant::now() < deadline {
+        after = dev.component_pids();
+        if after.len() == before.len() && after != before {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_ne!(
+        after, before,
+        "the cycle replaced the scheduler, not `http` or dbproxy: {before:?} -> {after:?}"
+    );
+    let body = body_of(&dev.wait_answers("/products/x"));
+    assert_eq!(body.tag, "products-1", "the run keeps serving: {body:?}");
+    assert_eq!(body.tag, "products-1", "the run keeps serving: {body:?}");
+    assert_eq!(
+        dev.events()
+            .iter()
+            .filter(|event| event["event"] == "manifest.warning")
+            .filter(|event| event["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("listener set changed")))
+            .count(),
+        1,
+        "one warning for the save, not one per attempt: {}",
+        dev.diagnostic()
+    );
+    dev.stop();
+}
+
+/// Row 7's other direction, in the same process family: the fixture's boot has
+/// no store at all, and a save that **adds** one warns too. It is a separate boot
+/// because adding a store needs a `DATABASE_URL` the first one never had.
+#[test]
+fn adding_a_store_is_one_warning_naming_the_restart() {
+    let fixture = Fixture::new("stores-add");
+    let mut dev = Dev::start_with_env(
+        &fixture.dir,
+        "stores-add",
+        "json",
+        &[],
+        &[("DATABASE_URL", "postgres://shop:secret@127.0.0.1:5433/shop")],
+    );
+    assert_eq!(body_of(&dev.get("/products/x")).tag, "products-1");
+    fs::write(fixture.path("Blastfile"), STORE_BLASTFILE).expect("the save");
+    let warning = dev.wait_warning("listener set changed");
+    let message = warning["message"].as_str().unwrap_or_default().to_string();
+    assert!(
+        message.contains("added") && message.contains("products→db"),
+        "the warning names the pair that appeared: {message}"
+    );
+    assert!(
+        message.contains("restart blastit dev"),
+        "and the fix it needs: {message}"
+    );
+    assert_eq!(body_of(&dev.wait_answers("/products/x")).tag, "products-1");
     dev.stop();
 }

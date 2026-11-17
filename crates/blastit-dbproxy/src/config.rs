@@ -87,6 +87,7 @@ impl ListenerMode {
 /// entry its current [`crate::ObsTarget`] names, and against an empty allowlist
 /// when the name is unknown.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoutePolicySpec {
     /// Route name, exactly as the manifest writes it.
     pub route: String,
@@ -157,6 +158,23 @@ pub struct DbproxyConfig {
     /// dbproxy owns the descriptor after the handover.
     #[serde(default)]
     pub check_ctl_fd: Option<i32>,
+    /// The dbproxy end of the dev-only policy socket (`§4.6` step 2).
+    ///
+    /// One document per `Blastfile` save replaces the whole route-policy map,
+    /// and dbproxy answers with one ack byte. `None` is every production boot,
+    /// `check`, and a `dev` boot with reload off: the handler is then never
+    /// spawned and the descriptor number is never touched.
+    #[serde(default)]
+    pub policy_fd: Option<i32>,
+    /// Whether this boot was started by `blastit dev` with live reload on.
+    ///
+    /// Set only on stage 0's `dev` path. It is what makes [`Self::policy_fd`]
+    /// legal: a document can only arrive over a socket stage 0 created for it,
+    /// and a production dbproxy must never acquire one, so a `policy_fd`
+    /// without this member is a configuration error (see
+    /// [`Self::validate_policy`]).
+    #[serde(default)]
+    pub dev_policy: bool,
 }
 
 impl DbproxyConfig {
@@ -180,7 +198,45 @@ impl DbproxyConfig {
     pub fn validate(&self) -> Result<(), DbproxyError> {
         self.validate_proxies()?;
         self.validate_serving(&self.listeners)?;
-        self.validate_learning()
+        self.validate_learning()?;
+        self.validate_policy()
+    }
+
+    /// Checks the dev-only policy channel's two members.
+    ///
+    /// The channel exists only so a `blastit dev` save can replace the grants of
+    /// the listeners init already bound (§4.6 step 2, §4.8). Two invariants keep
+    /// that dev-only:
+    ///
+    /// * a `policy_fd` on a boot that is not `dev_policy` is a configuration
+    ///   error, so a production or `check` dbproxy can never acquire the
+    ///   channel even if a descriptor is forced into its configuration;
+    /// * the descriptor is a real fd number and is not one of the other
+    ///   handovers, so adopting it cannot close a pipe or a listener.
+    pub fn validate_policy(&self) -> Result<(), DbproxyError> {
+        let Some(fd) = self.policy_fd else {
+            return Ok(());
+        };
+        if fd < 0 {
+            return Err(DbproxyError::Config(format!(
+                "policy_fd is the negative descriptor {fd}"
+            )));
+        }
+        if !self.dev_policy {
+            return Err(DbproxyError::Config(format!(
+                "policy_fd is {fd} but `dev_policy` is false in the configuration document: \
+                 the dev policy channel exists only on a `blastit dev` boot with live reload \
+                 on, so a production or `check` dbproxy can never acquire it"
+            )));
+        }
+        for (name, other) in [("obs_fd", self.obs_fd), ("check_ctl_fd", self.check_ctl_fd)] {
+            if other == Some(fd) {
+                return Err(DbproxyError::Config(format!(
+                    "policy_fd and {name} are the same descriptor ({fd})"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Checks the listeners that are actually served.
@@ -952,6 +1008,58 @@ mod tests {
                 .to_string()
                 .contains("negative")
         );
+    }
+
+    /// `MB.23.5.3`: the dev policy channel is dev-only, and it can never adopt
+    /// another handover's descriptor.
+    #[test]
+    fn the_policy_channel_is_refused_outside_a_dev_boot() {
+        let mut config = config();
+        assert!(config.validate_policy().is_ok(), "no fd is no channel");
+
+        config.policy_fd = Some(14);
+        let error = config.validate_policy().expect_err("a production boot");
+        let sentence = error.to_string();
+        assert!(
+            sentence.contains("policy_fd") && sentence.contains("dev_policy"),
+            "the sentence names the member and the missing field, not a token no role accepts: {sentence}"
+        );
+
+        config.dev_policy = true;
+        assert!(
+            config.validate_policy().is_ok(),
+            "a dev boot may acquire the channel"
+        );
+
+        let mut negative = config.clone();
+        negative.policy_fd = Some(-1);
+        assert!(
+            negative
+                .validate_policy()
+                .expect_err("a negative descriptor")
+                .to_string()
+                .contains("negative")
+        );
+
+        let mut shared = config.clone();
+        shared.obs_fd = Some(14);
+        shared.mode = ListenerMode::Learn;
+        assert!(
+            shared
+                .validate_policy()
+                .expect_err("one number, two handovers")
+                .to_string()
+                .contains("same descriptor")
+        );
+    }
+
+    /// The document's members are the crate's own names, and nothing else: a
+    /// `fd` or `uid` member must be refused rather than silently ignored.
+    #[test]
+    fn a_route_policy_spec_refuses_a_member_the_document_does_not_have() {
+        let json = r#"{"route":"cart","proxy":"db","queries":["SELECT 1"],"uid":21000}"#;
+        let error = serde_json::from_str::<RoutePolicySpec>(json).expect_err("a stray member");
+        assert!(error.to_string().contains("uid"), "{error}");
     }
 
     #[test]
