@@ -152,6 +152,30 @@ const PACKAGES: &str = "install the PHP embed package";
 /// How long a boot may take to bind, refuse, or answer.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// The `BLASTIT_PROBE_TIMEOUT_MS` the two hanging-probe legs apply.
+///
+/// 250 ms was too tight for this host under load: before the stub can write the
+/// shape these legs read, the probe child has to fork, run `ChildIo::prepare`,
+/// `setpgid`, drop to the route's uid, install the seccomp filter, `dlopen` the
+/// pair and enter `worker_init`. A loaded box can spend longer than 250 ms
+/// getting there, and the knob then killed the child *before* the shape existed
+/// (the "no probe shape was written" panic) even though the timeout had done
+/// exactly what the leg proves. 2 s keeps the proof — a hang is still killed at
+/// the knob's value and the boot refuses naming it — and removes the race.
+const HANG_PROBE_TIMEOUT_MS: u32 = 2_000;
+
+/// How long the two hanging-probe legs let the boot refuse.
+///
+/// [`BOOT_TIMEOUT`] is the harness's hang oracle for every other leg; these two
+/// get 30 s because the probe deliberately sleeps out [`HANG_PROBE_TIMEOUT_MS`]
+/// first. They assert a refusal inside [`HANG_REFUSAL_BOUND`] — comfortably under
+/// this, far above the knob — so a boot the timeout failed to bound still fails
+/// on its own sentence instead of only timing out in the harness.
+const HANG_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The "the probe timeout bounded the boot" bound the two hanging legs assert.
+const HANG_REFUSAL_BOUND: Duration = Duration::from_secs(20);
+
 /// How long one request may take once the port accepts connections.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -1223,7 +1247,17 @@ impl Boot {
     /// refusing boot read as served (`MB.3.40` follow-up 4), and a boot that
     /// serves is the one that has the standing to say so (`MB.3.48`).
     fn await_boot(&mut self) -> Option<Option<i32>> {
-        let deadline = Instant::now() + BOOT_TIMEOUT;
+        self.await_boot_within(BOOT_TIMEOUT)
+    }
+
+    /// [`Boot::await_boot`] with a caller-chosen hang bound.
+    ///
+    /// Only the two hanging-probe legs pass one: their probe sleeps out
+    /// [`HANG_PROBE_TIMEOUT_MS`] before the boot can refuse, so the harness's
+    /// ordinary 20 s is the wrong oracle for them. The message names the bound
+    /// it applied, so a real hang still reads as a hang.
+    fn await_boot_within(&mut self, bound: Duration) -> Option<Option<i32>> {
+        let deadline = Instant::now() + bound;
         loop {
             if let Some(status) = self.child.try_wait().expect("waiting for the boot") {
                 return Some(status.code());
@@ -1233,7 +1267,7 @@ impl Boot {
             }
             assert!(
                 Instant::now() < deadline,
-                "`blastit dev` neither served nor refused within {BOOT_TIMEOUT:?}:\n{}\n{}",
+                "`blastit dev` neither served nor refused within {bound:?}:\n{}\n{}",
                 self.stderr_text(),
                 self.stdout_text()
             );
@@ -1460,6 +1494,15 @@ fn assert_no_serving_surface(boot: &mut Boot, what: &str) {
             boot.stdout_text()
         );
     }
+    // `MB.25.2`: a boot that resolved no runtime says so by staying silent. The
+    // line is emitted only after the probe loaded and started the pair, so
+    // every refusal above it — the package sentence, a ZTS object, a minor this
+    // build does not ship, an inode that moved — has none.
+    assert!(
+        !events.iter().any(|event| event["event"] == "runtime"),
+        "{what}: a refused boot resolved no runtime, so it emits no `runtime` line: {}",
+        boot.stdout_text()
+    );
     assert!(
         TcpStream::connect(("127.0.0.1", boot.port)).is_err(),
         "{what}: a refused boot left something listening on port {}",
@@ -1899,12 +1942,15 @@ fn a_probe_that_hangs_is_killed_and_refuses_the_boot() {
         &[
             ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
             ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
-            ("BLASTIT_PROBE_TIMEOUT_MS", "250"),
+            (
+                "BLASTIT_PROBE_TIMEOUT_MS",
+                &HANG_PROBE_TIMEOUT_MS.to_string(),
+            ),
         ],
     );
     let init = boot.pid();
     let code = boot
-        .await_boot()
+        .await_boot_within(HANG_BOOT_TIMEOUT)
         .expect("a probe that never returns must refuse the boot, not hang it");
     let elapsed = started.elapsed();
     boot.stop();
@@ -1914,14 +1960,15 @@ fn a_probe_that_hangs_is_killed_and_refuses_the_boot() {
 
     assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
     assert!(
-        elapsed < Duration::from_secs(10),
-        "the 250 ms probe timeout did not bound the boot: it took {elapsed:?}:\n{all}"
+        elapsed < HANG_REFUSAL_BOUND,
+        "the {HANG_PROBE_TIMEOUT_MS} ms probe timeout did not bound the boot: it took \
+         {elapsed:?}:\n{all}"
     );
     let refusal = refusal_text(&boot);
     assert_package_sentence(&refusal, "probe timeout");
     assert_no_fallback_recipe(&refusal);
     assert!(
-        all.contains("250 ms"),
+        all.contains(&format!("{HANG_PROBE_TIMEOUT_MS} ms")),
         "the refusal names the timeout it applied: {all}"
     );
     assert!(
@@ -1938,8 +1985,8 @@ fn a_probe_that_hangs_is_killed_and_refuses_the_boot() {
         "`EmbeddedView` must answer `socket(AF_INET)` with EPERM (1) before `worker_init`: {shape}"
     );
     println!(
-        "killed at BLASTIT_PROBE_TIMEOUT_MS=250 after {elapsed:?}; probe pid {pid} ppid {} \
-         pgid {} uid {} seccomp EPERM, gone from /proc\n{refusal}",
+        "killed at BLASTIT_PROBE_TIMEOUT_MS={HANG_PROBE_TIMEOUT_MS} after {elapsed:?}; probe pid \
+         {pid} ppid {} pgid {} uid {} seccomp EPERM, gone from /proc\n{refusal}",
         fields["ppid"], fields["pgid"], fields["uid"]
     );
 }
@@ -1976,12 +2023,15 @@ fn an_egress_route_lets_the_probe_open_a_socket() {
         &[
             ("BLASTIT_LIBPHP", &libphp.to_string_lossy()),
             ("BLASTIT_PHP_SHIM_DIR", &scratch.dir.to_string_lossy()),
-            ("BLASTIT_PROBE_TIMEOUT_MS", "250"),
+            (
+                "BLASTIT_PROBE_TIMEOUT_MS",
+                &HANG_PROBE_TIMEOUT_MS.to_string(),
+            ),
         ],
     );
     let init = boot.pid();
     let code = boot
-        .await_boot()
+        .await_boot_within(HANG_BOOT_TIMEOUT)
         .expect("a probe that never returns must refuse the boot, not hang it");
     let elapsed = started.elapsed();
     boot.stop();
@@ -1991,14 +2041,15 @@ fn an_egress_route_lets_the_probe_open_a_socket() {
 
     assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
     assert!(
-        elapsed < Duration::from_secs(10),
-        "the 250 ms probe timeout did not bound the egress boot either: it took {elapsed:?}:\n{all}"
+        elapsed < HANG_REFUSAL_BOUND,
+        "the {HANG_PROBE_TIMEOUT_MS} ms probe timeout did not bound the egress boot either: it \
+         took {elapsed:?}:\n{all}"
     );
     let refusal = refusal_text(&boot);
     assert_package_sentence(&refusal, "egress probe timeout");
     assert_no_fallback_recipe(&refusal);
     assert!(
-        all.contains("250 ms"),
+        all.contains(&format!("{HANG_PROBE_TIMEOUT_MS} ms")),
         "the refusal names the timeout it applied: {all}"
     );
     assert!(
@@ -2019,8 +2070,8 @@ fn an_egress_route_lets_the_probe_open_a_socket() {
          filter and the route's INI cannot disagree: {shape}"
     );
     println!(
-        "killed at BLASTIT_PROBE_TIMEOUT_MS=250 after {elapsed:?}; probe pid {pid} ppid {} \
-         pgid {} uid {} egress socket allowed (inet 0), gone from /proc\n{refusal}",
+        "killed at BLASTIT_PROBE_TIMEOUT_MS={HANG_PROBE_TIMEOUT_MS} after {elapsed:?}; probe pid \
+         {pid} ppid {} pgid {} uid {} egress socket allowed (inet 0), gone from /proc\n{refusal}",
         fields["ppid"], fields["pgid"], fields["uid"]
     );
 }
@@ -2298,12 +2349,35 @@ fn no_libphp_is_mapped_above_the_view_worker() {
         response.starts_with("HTTP/1.1 200") && response.contains(BODY),
         "the embedded worker did not answer: {response}"
     );
-    // The boot names the pair it opened, so the served leg and the probe agree.
-    let stderr = boot.stderr_text();
+    // The boot names the library it opened, so the served leg and the probe
+    // agree; the shim it also loaded is internal and is never named in normal
+    // output (`MB.25.2`).
+    let runtime = boot
+        .events()
+        .into_iter()
+        .find(|event| event["event"] == "runtime")
+        .unwrap_or_else(|| panic!("no `runtime` event before `ready`: {}", boot.stdout_text()));
+    assert_eq!(runtime["level"], "info", "{runtime}");
+    assert_eq!(runtime["component"], "init", "{runtime}");
+    assert_eq!(runtime["entrypoint"], "php", "{runtime}");
+    assert_eq!(
+        runtime["libphp"],
+        host.libphp.display().to_string(),
+        "the line names the library the probe found: {runtime}"
+    );
     assert!(
-        stderr.contains(&host.libphp.display().to_string())
-            && stderr.contains(&host.shim.display().to_string()),
-        "the boot must name the pair the probe found: {stderr}"
+        runtime["php_ini"].is_string() || runtime["php_ini"].is_null(),
+        "`php_ini` is a path or null, never absent: {runtime}"
+    );
+    let all = format!("{}\n{}", boot.stdout_text(), boot.stderr_text());
+    assert!(
+        !all.contains(&host.shim.display().to_string()),
+        "normal output must not name the internal shim ({}): {all}",
+        host.shim.display()
+    );
+    assert!(
+        !all.contains("manifest.warning"),
+        "a resolved runtime is `info`, not a warning: {all}"
     );
 
     let init = boot.pid();

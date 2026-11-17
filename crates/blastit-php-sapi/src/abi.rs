@@ -133,6 +133,14 @@ pub type AbiVersionFn = unsafe extern "C" fn() -> u32;
 /// `uint32_t blastit_php_minor(void)`.
 pub type MinorFn = unsafe extern "C" fn() -> u32;
 
+/// `const char *blastit_php_ini_opened_path(void)`.
+///
+/// **Optional and additive**, like [`FileSinkInstallFn`]: a shim that does not
+/// export it reports no path, and `BLASTIT_PHP_ABI_VERSION` stays 1. The
+/// returned pointer is PHP's own `php_ini_opened_path`, valid until
+/// `worker_shutdown`, and `NULL` when PHP opened no file.
+pub type IniOpenedPathFn = unsafe extern "C" fn() -> *const c_char;
+
 /// `int32_t blastit_php_worker_init(const blastit_php_config_v1 *)`.
 pub type WorkerInitFn = unsafe extern "C" fn(cfg: *const ConfigV1) -> i32;
 

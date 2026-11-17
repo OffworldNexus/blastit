@@ -596,6 +596,18 @@ impl Dev {
         }
     }
 
+    /// The `runtime` event the boot announced before `ready`, if one is there.
+    ///
+    /// §8.1 emits it while the entrypoint resolves, which is before the
+    /// listener binds, so [`Dev::await_boot`] has already taken it out of the
+    /// channel and left it in `stdout_seen`.
+    fn runtime_event(&self) -> Option<serde_json::Value> {
+        self.stdout_seen.iter().find_map(|line| {
+            let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+            (value["event"] == "runtime").then_some(value)
+        })
+    }
+
     /// Everything stdout has said so far, for a failure message.
     fn drain_stdout(&mut self) -> String {
         let mut text = String::new();
@@ -682,7 +694,9 @@ fn assert_no_fallback_recipe(text: &str) {
 
 /// A boot that served the PHP route would print the dev banner and, at the
 /// first spawn, a `view …` line. Neither may exist on a refusal: it happens
-/// before the listener and before any fork.
+/// before the listener and before any fork. §8.1's `runtime` line is the same
+/// partition: it is emitted only once the probe loaded and started the pair, so
+/// a refused boot carries none.
 fn assert_no_wsgi_surface(stdout: &str, stderr: &str) {
     let all = format!("{stdout}{stderr}");
     assert!(
@@ -695,6 +709,10 @@ fn assert_no_wsgi_surface(stdout: &str, stderr: &str) {
             .chain(stderr.lines())
             .any(|line| line.trim_start().starts_with("view")),
         "a view line means a worker was forked for the PHP route: {all}"
+    );
+    assert!(
+        !all.contains(r#""event":"runtime""#),
+        "a refused boot resolved no runtime, so it emits no `runtime` line: {all}"
     );
 }
 
@@ -778,21 +796,49 @@ fn a_php_route_is_served_or_the_boot_refuses_naming_the_package() {
                 "a `.php` file under the static root must never be served: {source}"
             );
 
-            // The boot line (`MB.3.35`) must name **the pair the probe found**:
-            // the boot was handed exactly those two paths, so a boot that
-            // loaded anything else means the two halves of this test disagree
-            // about what "this host can embed PHP" means.
-            let stderr = dev.stderr();
+            // §8.1's `runtime` line (`MB.25.2`) must name **the library the
+            // probe found**: the boot was handed exactly that path, so a boot
+            // that loaded anything else means the two halves of this test
+            // disagree about what "this host can embed PHP" means. It is one
+            // `info` line from `init`, it carries the version the library
+            // reports and the `php.ini` PHP opened (a path, or `null`), and it
+            // names no internal shim — normal output never does.
+            let runtime = dev.runtime_event().unwrap_or_else(|| {
+                panic!("no `runtime` event before `ready`: {}", dev.drain_stdout())
+            });
+            assert_eq!(runtime["level"], "info", "{runtime}");
+            assert_eq!(runtime["component"], "init", "{runtime}");
+            assert_eq!(runtime["entrypoint"], "php", "{runtime}");
+            assert_eq!(
+                runtime["libphp"],
+                host.libphp.display().to_string(),
+                "the line names the library the probe found: {runtime}"
+            );
+            let version = runtime["version"]
+                .as_str()
+                .unwrap_or_else(|| panic!("the line reports the PHP version: {runtime}"));
+            let (major, minor) = minor_of(&host.libphp).expect("the library states its minor");
             assert!(
-                stderr.contains(&format!("libphp {}", host.libphp.display())),
-                "the boot must load the library the probe found ({}): {stderr}",
-                host.libphp.display()
+                version.starts_with(&format!("{major}.{minor}")),
+                "the version is the loaded library's ({version} vs {major}.{minor}): {runtime}"
             );
             assert!(
-                stderr.contains(&format!("shim {}", host.shim.display())),
-                "and the shim the probe found ({}): {stderr}",
+                runtime["php_ini"].is_string() || runtime["php_ini"].is_null(),
+                "`php_ini` is a path or null, never absent: {runtime}"
+            );
+            // A resolved runtime is not a problem, so no `manifest.warning` may
+            // carry it, and the internal shim is not part of normal output.
+            let all = format!("{}\n{}", dev.stdout_seen.join("\n"), dev.stderr());
+            assert!(
+                !all.contains("manifest.warning"),
+                "a resolved runtime is `info`, not a warning: {all}"
+            );
+            assert!(
+                !all.contains(&host.shim.display().to_string()),
+                "normal output must not name the internal shim ({}): {all}",
                 host.shim.display()
             );
+            assert_no_fallback_recipe(&all);
 
             let event = dev.request_event("/php-probe").unwrap_or_else(|| {
                 panic!(
@@ -944,17 +990,22 @@ fn a_symlinked_blastit_libphp_is_resolved_before_it_is_served() {
         response.starts_with("HTTP/1.1 200") && response.contains(BODY),
         "the symlinked library did not serve: {response}"
     );
-    // The boot line names the **resolved** file, which is what the workers load
-    // and what an operator has to check against their package.
-    let stderr = dev.stderr();
-    assert!(
-        stderr.contains(&host.libphp.display().to_string()),
-        "the boot names the resolved library {}: {stderr}",
+    // The `runtime` line names the **resolved** file, which is what the workers
+    // load and what an operator has to check against their package (`MB.25.2`:
+    // the line is the probe's, on stdout, and never names the shim).
+    let runtime = dev
+        .runtime_event()
+        .unwrap_or_else(|| panic!("no `runtime` event before `ready`: {}", dev.drain_stdout()));
+    assert_eq!(
+        runtime["libphp"],
+        host.libphp.display().to_string(),
+        "the line names the resolved library {}: {runtime}",
         host.libphp.display()
     );
+    let all = format!("{}\n{}", dev.stdout_seen.join("\n"), dev.stderr());
     assert!(
-        !stderr.contains("Too many levels of symbolic links"),
-        "the link was resolved, not handed to dlopen: {stderr}"
+        !all.contains("Too many levels of symbolic links"),
+        "the link was resolved, not handed to dlopen: {all}"
     );
     println!(
         "symlinked {} -> {}  served: {}",

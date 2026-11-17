@@ -608,6 +608,42 @@ fn the_c_shim_is_self_contained_and_guarded() {
     ] {
         assert!(C_HEADER.contains(entry), "the header is missing {entry}");
     }
+
+    // `MB.25.2`: the boot reports the `php.ini` PHP actually opened, through one
+    // additive accessor beside the version pair. Three properties are the whole
+    // contract, and each is a different way to get it wrong:
+    //
+    // 1. the value is PHP's own global, never a path this shim derives (a
+    //    `PHP_CONFIG_FILE_PATH`, `PHPRC` or cwd substitute would be a guess);
+    // 2. the accessor returns exactly it;
+    // 3. it is *optional and additive* — the header keeps ABI version 1, so a
+    //    shim built before the addition still loads and simply reports no path.
+    assert!(
+        C_SHIM.contains("extern char *php_ini_opened_path;"),
+        "the shim does not name PHP's own `php_ini_opened_path` global"
+    );
+    assert!(
+        C_SHIM.contains("return php_ini_opened_path;"),
+        "the accessor does not return PHP's own global"
+    );
+    assert!(
+        C_SHIM.contains("const char *blastit_php_ini_opened_path(void)"),
+        "the accessor is missing from the shim"
+    );
+    assert!(
+        C_HEADER.contains("const char *blastit_php_ini_opened_path(void);"),
+        "the accessor is missing from the header"
+    );
+    assert!(
+        !C_HEADER.contains("PHP_CONFIG_FILE_PATH"),
+        "the header must not offer a derived ini path: only PHP's own report is honest"
+    );
+    // And the Rust mirror the probe resolves it through.
+    let _accessor_shape: Option<blastit_php_sapi::abi::IniOpenedPathFn> = None;
+    assert!(
+        !C_SHIM.contains("blastit_php_ini_opened_path ="),
+        "the shim must report the global, not assign one"
+    );
 }
 
 #[test]

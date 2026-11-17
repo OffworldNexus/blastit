@@ -1302,6 +1302,130 @@ impl ManifestWarning {
     }
 }
 
+/// Which entrypoint a boot resolved, and therefore which fields its `runtime`
+/// line carries (§8.1 `runtime`).
+///
+/// A closed set: the three words `docs/reference/log-events.md` freezes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum RuntimeEntrypoint {
+    /// `entrypoint php`: one embedded `libphp` front controller.
+    Php,
+    /// `entrypoint python`: the WSGI callable a view forwards to.
+    Python,
+    /// Static mounts and nothing else: no language runtime is loaded.
+    Static,
+}
+
+impl RuntimeEntrypoint {
+    /// The name used in the JSON stream, and the first word of the pretty line.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Php => "php",
+            Self::Python => "python",
+            Self::Static => "static",
+        }
+    }
+}
+
+/// What an `entrypoint php` resolved to (§8.1 `runtime`).
+///
+/// `libphp` is the host library the workers `dlopen`, which is public
+/// knowledge; the internal shim that carries the SAPI is never part of it.
+/// `php_ini` is the file PHP actually opened — `None` when it opened none, so
+/// a host running on PHP's built-in defaults says so instead of naming a path
+/// nobody read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhpRuntime {
+    version: String,
+    libphp: String,
+    php_ini: Option<String>,
+}
+
+impl PhpRuntime {
+    /// The PHP version the library reports, e.g. `"8.5.4"`.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The resolved `libphp` the workers load.
+    pub fn libphp(&self) -> &str {
+        &self.libphp
+    }
+
+    /// The `php.ini` PHP opened, or `None` when it opened none.
+    pub fn php_ini(&self) -> Option<&str> {
+        self.php_ini.as_deref()
+    }
+}
+
+/// What an `entrypoint python` resolved to (§8.1 `runtime`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonRuntime {
+    version: String,
+    environment: String,
+}
+
+impl PythonRuntime {
+    /// The interpreter's version, e.g. `"3.14.0"`.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// The environment it serves from: `VIRTUAL_ENV` when set, else
+    /// `sys.prefix`.
+    pub fn environment(&self) -> &str {
+        &self.environment
+    }
+}
+
+/// What the entrypoint resolved to, at boot and after a change that alters it
+/// (§8.1 `runtime`).
+///
+/// The variant *is* the field set: a row that does not list a field cannot
+/// carry it, so a `python` line can never grow a `libphp` and a `static` line
+/// can never carry a version. That is the frozen table expressed as a type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Runtime {
+    /// `entrypoint php` resolved a library.
+    Php(PhpRuntime),
+    /// `entrypoint python` resolved an interpreter.
+    Python(PythonRuntime),
+    /// Static mounts only: no language runtime is loaded.
+    Static,
+}
+
+impl Runtime {
+    /// A resolved `entrypoint php`.
+    pub fn php(
+        version: impl Into<String>,
+        libphp: impl Into<String>,
+        php_ini: Option<String>,
+    ) -> Self {
+        Self::Php(PhpRuntime {
+            version: version.into(),
+            libphp: libphp.into(),
+            php_ini,
+        })
+    }
+
+    /// A resolved `entrypoint python`.
+    pub fn python(version: impl Into<String>, environment: impl Into<String>) -> Self {
+        Self::Python(PythonRuntime {
+            version: version.into(),
+            environment: environment.into(),
+        })
+    }
+
+    /// Which entrypoint this line reports.
+    pub fn entrypoint(&self) -> RuntimeEntrypoint {
+        match self {
+            Self::Php(_) => RuntimeEntrypoint::Php,
+            Self::Python(_) => RuntimeEntrypoint::Python,
+            Self::Static => RuntimeEntrypoint::Static,
+        }
+    }
+}
+
 /// What changed in `blastit dev`, and therefore why every view was reloaded
 /// (§4.9 `dev.reload`).
 ///
@@ -1433,6 +1557,8 @@ pub enum EventKind {
     Shutdown(Lifecycle),
     /// The manifest is usable but has a problem worth reporting.
     ManifestWarning(ManifestWarning),
+    /// What the entrypoint resolved to, at boot (§8.1 `runtime`).
+    Runtime(Runtime),
     /// `blastit dev` reloaded every view together (`ADR-0014`).
     DevReload(DevReload),
     /// `blastit dev` could not watch anything at boot and serves without live
@@ -1457,6 +1583,7 @@ impl EventKind {
             Self::Ready(_) => "ready",
             Self::Shutdown(_) => "shutdown",
             Self::ManifestWarning(_) => "manifest.warning",
+            Self::Runtime(_) => "runtime",
             Self::DevReload(_) => "dev.reload",
             Self::DevReloadUnavailable(_) => "dev.reload.unavailable",
         }
@@ -1495,6 +1622,7 @@ impl EventKind {
             | Self::Boot(_)
             | Self::Ready(_)
             | Self::Shutdown(_)
+            | Self::Runtime(_)
             | Self::DevReload(_) => Level::Info,
         }
     }
@@ -1761,6 +1889,7 @@ mod tests {
                 EventKind::ManifestWarning(ManifestWarning::new("unattached group")),
                 Level::Warn,
             ),
+            (EventKind::Runtime(Runtime::Static), Level::Info),
             (
                 EventKind::DevReload(DevReload::new(
                     vec!["cart".to_owned()],
@@ -1826,6 +1955,7 @@ mod tests {
             "ready",
             "shutdown",
             "manifest.warning",
+            "runtime",
         ] {
             assert!(names.contains(&expected), "missing event name {expected}");
         }

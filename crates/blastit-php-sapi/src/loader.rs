@@ -46,8 +46,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::abi::{
-    AbiVersionFn, ConfigV1, FileSinkInstallFn, MinorFn, OUTCOME_BAILOUT, OUTCOME_OK, RequestFn,
-    RequestV1, ResultV1, SinkV1, WorkerInitFn, WorkerShutdownFn,
+    AbiVersionFn, ConfigV1, FileSinkInstallFn, IniOpenedPathFn, MinorFn, OUTCOME_BAILOUT,
+    OUTCOME_OK, RequestFn, RequestV1, ResultV1, SinkV1, WorkerInitFn, WorkerShutdownFn,
 };
 use crate::toolchain::{Minor, SUPPORTED_MINORS};
 
@@ -556,6 +556,63 @@ impl Loaded {
     #[must_use]
     pub fn minor(&self) -> Minor {
         self.minor
+    }
+
+    /// The `php.ini` PHP actually opened in this process, or `None`.
+    ///
+    /// [`crate::abi::IniOpenedPathFn`] is **optional and additive**, like the
+    /// file sink: a shim built before the addition exports no
+    /// `blastit_php_ini_opened_path`, and this answers `None` for it instead of
+    /// failing the load. `None` is also the honest answer for the two cases PHP
+    /// itself distinguishes with a `NULL` (`PHP` is running on its built-in
+    /// defaults) and for a value this crate cannot represent (a path that is not
+    /// UTF-8): the boot reports a file it actually opened, never a path it
+    /// guessed, so a caller must not substitute `PHP_CONFIG_FILE_PATH` here.
+    ///
+    /// Only meaningful after [`Loaded::worker_init`] — `php_init_config()` is
+    /// what sets the global — and before [`Loaded::worker_shutdown`].
+    #[must_use]
+    pub fn ini_opened_path(&self) -> Option<String> {
+        if self.shim.is_null() || !self.initialized {
+            return None;
+        }
+        let path = self.ini_opened_path_symbol()?;
+        // SAFETY: `path` came from this load's live shim handle and the symbol's
+        // contract (the header, and PHP's own global) is a `char *` that stays
+        // valid until `worker_shutdown`; `self.initialized` is the proof that one
+        // ran. A `NULL` is refused before `CStr::from_ptr`.
+        let pointer = unsafe { path() };
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: non-null, and PHP's contract is a NUL-terminated string in
+        // this process's memory. A path that is not UTF-8 is reported as absent
+        // rather than lossily rewritten.
+        unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+
+    /// Resolves `blastit_php_ini_opened_path` on **this** shim's handle.
+    ///
+    /// `None` is the documented absence — a shim from before the addition — and
+    /// consumes `dlerror`'s state so a later real lookup failure is not reported
+    /// as this one.
+    fn ini_opened_path_symbol(&self) -> Option<IniOpenedPathFn> {
+        if self.shim.is_null() {
+            return None;
+        }
+        // SAFETY: `self.shim` is a live `dlopen` handle until `Drop`, and the
+        // name is a `c"…"` literal.
+        let symbol = unsafe { dlsym(self.shim, c"blastit_php_ini_opened_path".as_ptr()) };
+        if symbol.is_null() {
+            let _ = dl_error();
+            return None;
+        }
+        // SAFETY: the pointer comes from the shim's own `dlsym`, and its
+        // signature is the one `abi::IniOpenedPathFn` mirrors from the header.
+        Some(unsafe { core::mem::transmute::<*mut c_void, IniOpenedPathFn>(symbol) })
     }
 
     /// The host `libphp`'s version string (`"8.4.27"`).

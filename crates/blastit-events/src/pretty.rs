@@ -2,7 +2,7 @@
 
 use crate::{
     DevReloadUnavailable, Event, EventKind, ExitKind, Level, Lifecycle, MAX_EVENT_BYTES, Outcome,
-    RequestInfo, floor_boundary, format_clock_time,
+    RequestInfo, Runtime, floor_boundary, format_clock_time,
 };
 
 const RESET: &str = "\u{1b}[0m";
@@ -117,6 +117,7 @@ fn summary(event: &Event) -> String {
         | EventKind::Ready(lifecycle)
         | EventKind::Shutdown(lifecycle) => lifecycle_summary(lifecycle),
         EventKind::ManifestWarning(info) => escape_inline(&info.message),
+        EventKind::Runtime(info) => runtime_summary(info),
         // §4.9's frozen shape: the route column (no route, so `-`), then the
         // counts and the reason word.
         EventKind::DevReload(info) => format!(
@@ -153,6 +154,32 @@ fn reload_disabled_summary(info: &DevReloadUnavailable) -> String {
         escape_inline(info.errno()),
         escape_inline(info.filesystem())
     )
+}
+
+/// §8.1's `runtime` text form: the entrypoint and its version, then the
+/// labelled fields two spaces apart, exactly as `docs/local.md` shows them.
+///
+/// A `null` `php_ini` prints `php.ini none` — PHP's built-in defaults — and a
+/// static entrypoint is followed by its one sentence. Every value is escaped,
+/// so the path PHP opened cannot turn the line into two.
+fn runtime_summary(info: &Runtime) -> String {
+    match info {
+        Runtime::Php(php) => format!(
+            "php {}  libphp {}  php.ini {}",
+            escape_inline(php.version()),
+            escape_inline(php.libphp()),
+            match php.php_ini() {
+                Some(path) => escape_inline(path),
+                None => "none".to_owned(),
+            }
+        ),
+        Runtime::Python(py) => format!(
+            "python {}  environment {}",
+            escape_inline(py.version()),
+            escape_inline(py.environment())
+        ),
+        Runtime::Static => "static  serving static assets only".to_owned(),
+    }
 }
 
 fn request_summary(event: &Event, info: &RequestInfo) -> String {
@@ -392,6 +419,21 @@ mod tests {
             fixture::event(EventKind::Ready(Lifecycle::default())),
             fixture::event(EventKind::Shutdown(Lifecycle::default())),
             fixture::event(EventKind::ManifestWarning(ManifestWarning::new("oops"))),
+            fixture::event(EventKind::Runtime(Runtime::php(
+                "8.5.4",
+                "/usr/lib/libphp8.5.so",
+                Some("/etc/php/8.5/embed/php.ini".to_owned()),
+            ))),
+            fixture::event(EventKind::Runtime(Runtime::php(
+                "8.4.27",
+                "/usr/lib/libphp8.4.so",
+                None,
+            ))),
+            fixture::event(EventKind::Runtime(Runtime::python(
+                "3.14.0",
+                "/home/you/shop/.venv",
+            ))),
+            fixture::event(EventKind::Runtime(Runtime::Static)),
             fixture::event(EventKind::DevReload(DevReload::new(
                 vec!["products".to_owned(), "cart".to_owned(), "about".to_owned()],
                 vec![
@@ -628,6 +670,62 @@ mod tests {
             line,
             "14:02:11.384 INFO  dev.reload  -  routes=3  reason=loaded  files=2"
         );
+    }
+
+    /// §8.1's `runtime` text form: the three golden lines `docs/local.md`
+    /// shows, byte for byte, including `php.ini none` and the static sentence.
+    #[test]
+    fn runtime_matches_the_documented_text_form() {
+        let php = fixture::event(EventKind::Runtime(Runtime::php(
+            "8.5.4",
+            "/usr/lib/libphp8.5.so",
+            Some("/etc/php/8.5/embed/php.ini".to_owned()),
+        )));
+        assert_eq!(
+            plain(&php),
+            "14:02:11.384 INFO  runtime     php 8.5.4  libphp /usr/lib/libphp8.5.so  \
+             php.ini /etc/php/8.5/embed/php.ini"
+        );
+
+        // `null` is PHP's built-in defaults, and it says so in one word.
+        let none = fixture::event(EventKind::Runtime(Runtime::php(
+            "8.4.27",
+            "/usr/lib/libphp8.4.so",
+            None,
+        )));
+        assert_eq!(
+            plain(&none),
+            "14:02:11.384 INFO  runtime     php 8.4.27  libphp /usr/lib/libphp8.4.so  \
+             php.ini none"
+        );
+
+        let python = fixture::event(EventKind::Runtime(Runtime::python(
+            "3.14.0",
+            "/home/you/shop/.venv",
+        )));
+        assert_eq!(
+            plain(&python),
+            "14:02:11.384 INFO  runtime     python 3.14.0  environment /home/you/shop/.venv"
+        );
+
+        let static_only = fixture::event(EventKind::Runtime(Runtime::Static));
+        assert_eq!(
+            plain(&static_only),
+            "14:02:11.384 INFO  runtime     static  serving static assets only"
+        );
+    }
+
+    /// A path with a control character cannot turn the runtime line into two.
+    #[test]
+    fn a_runtime_path_is_escaped_to_one_line() {
+        let event = fixture::event(EventKind::Runtime(Runtime::php(
+            "8.5.4",
+            "/usr/lib/libphp8.5.so",
+            Some("/etc/php/8.5/em\nbed/php.ini".to_owned()),
+        )));
+        let line = plain(&event);
+        assert!(!line.contains('\n'), "{line}");
+        assert!(line.contains("em\\nbed"), "{line}");
     }
 
     /// §4.7's one sentence, with the cause clause for each ladder row and a

@@ -2993,3 +2993,28 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T21:09 [MB.23.15] (lead) status proposed -> superseded
 - 2026-11-17T21:09 [MB.23] (lead) status ready -> done
 - 2026-11-17T21:09 [MB.23] (lead) closed with the audit's five MAJOR and thirteen MINOR gaps filed as MB.23.7..MB.23.15 and deferred to the next milestone (superseded, each with a log line). pla
+- 2026-11-17T21:09 [MB.25.2] (lead) status ready -> active
+- 2026-11-17T21:09 [MB.25.2] (lead) attempt 1/3 started
+- 2026-11-17T21:09 [MB.25.2] (lead) base 4ee740d
+- 2026-11-17T21:11 [MB.26.15] (planner) created (task) Carry the out-of-step dev policy taint across the reload exec
+- 2026-11-17T21:11 [MB.26.16] (planner) created (task) Prove T31: a save during a reload cycle is not lost, and reconcile closes the gap
+- 2026-11-17T21:11 [MB.26.17] (planner) created (task) Prove T18's 200 half: a grant edit applies on save under the real PostgreSQL CI job
+- 2026-11-17T21:11 [MB.26.18] (planner) created (task) Close accepted rows T17, T20 and T23: production/check hold no hook, and keep-alive survives an all-views and a preload reload
+- 2026-11-17T21:11 [MB.26.19] (planner) created (task) Prove epic item 4 in a container: Docker's default seccomp gives one dev.reload.unavailable and 200s
+- 2026-11-17T21:11 [MB.26.20] (planner) created (task) Kill the dev_reload mutation survivors: create/delete trigger legs, pre_fork ordering, path boundary, EAGAIN, weak oracles
+- 2026-11-17T21:11 [MB.26.21] (planner) created (task) Triage the unread critical_dev_reload panic and remove the sleep-decided verdicts
+- 2026-11-17T21:11 [MB.26.22] (planner) created (task) Repair MB.23.6's acceptance evidence commands (scripts/noop and the wheel .so path)
+- 2026-11-17T21:11 [MB.26.23] (planner) created (task) Prove the reload transaction is idempotent and a payload-carrying 0x45 is refused by the streaming Decoder
+- 2026-11-17T21:11 [MB.23.7] (planner) re-filed as MB.26.15 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.8] (planner) re-filed as MB.26.16 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.9] (planner) re-filed as MB.26.17 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.10] (planner) re-filed as MB.26.18 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.11] (planner) re-filed as MB.26.19 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.12] (planner) re-filed as MB.26.20 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.13] (planner) re-filed as MB.26.21 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.14] (planner) re-filed as MB.26.22 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:11 [MB.23.15] (planner) re-filed as MB.26.23 under MB.26 — superseded means re-filed here, not dropped
+- 2026-11-17T21:47 [MB.25.2] (lead) implementer done: closed Runtime enum (php/python/static) on all four surfaces, the WARN abuse and php_runtime_line deleted, php_ini_opened_path surfaced throug
+- 2026-11-17T21:47 [MB.25.2] (lead) status active -> review
+- 2026-11-17T22:11 [MB.25.2] (lead) polish: hang-probe legs widened (250->2000 ms, 20->30 s wait, 20 s refusal bound) with every containment assertion kept -- that flake reproduced at the base com
+- 2026-11-17T22:11 [MB.25.2] (lead) status review -> done

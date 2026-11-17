@@ -54,6 +54,7 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use blastit_events::{Component, Event, EventKind, Runtime};
 use blastit_frame::Limits;
 use blastit_manifest::Manifest;
 use blastit_php_sapi::{Egress, IniPolicy, SharedObject};
@@ -66,6 +67,7 @@ use rustix::fs::{Mode, OFlags};
 
 use crate::child::{ChildIo, child_exit, install_filter, wait_readable};
 use crate::config::Config;
+use crate::logs::Emitter;
 
 /// How many extra processes a view's uid may have beyond its workers (§7.2:
 /// gVisor leaves out the main thread, so one unit of margin).
@@ -603,6 +605,7 @@ const PROBE_MESSAGE_MAX: usize = 512;
 /// The refusal sentence: the route, `(PHP X.Y, <arch>-<libc>)`, the distro
 /// package and `BLASTIT_LIBPHP`, plus what the child said (or that it hung).
 pub fn probe_bindings(probe: PhpProbeBoot<'_>) -> Result<(), String> {
+    let mut opened: Option<(String, Option<String>)> = None;
     for (slot, binding) in probe.bindings.iter().enumerate() {
         let Some(binding) = binding else {
             continue;
@@ -614,31 +617,85 @@ pub fn probe_bindings(probe: PhpProbeBoot<'_>) -> Result<(), String> {
             ));
         };
         let egress = probe.egress.get(slot).copied().unwrap_or(false);
-        probe_route(&probe, info, binding, egress)?;
+        let reported = probe_route(&probe, info, binding, egress)?;
+        // §12.2 is one `entrypoint php` for the whole file: every slot loads the
+        // same library, so the first slot's report is the file's.
+        if let Some(reported) = reported {
+            opened.get_or_insert(reported);
+        }
+    }
+    if let Some((version, php_ini)) = opened {
+        emit_runtime(&probe, version, php_ini);
     }
     Ok(())
 }
 
-/// Forks `info`'s probe child and reads the verdict.
+/// §8.1's `runtime` line for a resolved `entrypoint php`, emitted by the process
+/// that *knows* it: the probe below the fork ran `php_module_startup`, so the
+/// `php.ini` it reports is the one PHP opened, not a search path re-derived from
+/// `PHPRC` (stripped), the cwd (`php_ini_ignore_cwd = 1`) or a guessed
+/// `PHP_CONFIG_FILE_PATH`. The version is the same child's `php_version()`, so
+/// the line carries the full `"8.4.27"` rather than the major.minor the
+/// discovery record states.
+///
+/// One line per resolution, so the latest line names what is serving. The
+/// library is public knowledge; the shim that carries the SAPI is internal and
+/// is never named here (`critical_php_backend`'s whole-boot scan keeps that
+/// true).
+fn emit_runtime(probe: &PhpProbeBoot<'_>, version: String, php_ini: Option<String>) {
+    let Some(record) = probe.cfg.php.as_ref() else {
+        return;
+    };
+    let emitter = Emitter::stdout(probe.cfg.log_format, probe.cfg.log_level);
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::Runtime(Runtime::php(
+            version,
+            record.libphp.display().to_string(),
+            php_ini,
+        )),
+    ));
+}
+
+/// The marker a probe child prefixes to the one report it sends back on its own
+/// pipe: the `php_version()` it loaded and the `php.ini` PHP opened, as
+/// `["8.4.27","/etc/php/8.4/embed/php.ini"]` (`null` when it opened none).
+const RUNTIME_REPORT_PREFIX: &str = "blastit-probe runtime=";
+
+/// Forks `info`'s probe child and reads the verdict, plus what the child's
+/// `php_module_startup` proved: the version it loaded and the `php.ini` it
+/// opened.
 fn probe_route(
     probe: &PhpProbeBoot<'_>,
     info: &RouteInfo,
     binding: &PhpBinding,
     egress: bool,
-) -> Result<(), String> {
+) -> Result<Option<(String, Option<String>)>, String> {
     let (message, message_write) = pipe().map_err(|err| {
         format!(
             "route {:?}: the entrypoint php probe child's diagnostic pipe: {err}",
             info.name
         )
     })?;
+    // Verdict and ini travel on different pipes: PHP's own startup log can be
+    // long, and [`PROBE_MESSAGE_MAX`] deliberately keeps only its head for a
+    // refusal — a report at the tail of that buffer would be the first thing
+    // lost.
+    let (report, report_write) = pipe().map_err(|err| {
+        format!(
+            "route {:?}: the entrypoint php probe child's runtime pipe: {err}",
+            info.name
+        )
+    })?;
+    let mut keep = binding.pinned_fds();
+    keep.push(report_write.as_raw_fd());
     // The child keeps the pinned descriptors and nothing else: no channel, no
     // config pipe, no listener. Its stdout is `/dev/null`; its stderr is the
     // pipe this reads, so the reason a load failed comes back with the verdict.
     let child = ChildIo {
         stdout: None,
         stderr: Some(message_write),
-        keep: binding.pinned_fds(),
+        keep,
         limits: Rlimits {
             nproc: probe.drop_privileges.then(|| {
                 probe
@@ -662,9 +719,18 @@ fn probe_route(
             // The write end is the child's alone: holding a copy here would make
             // the read below wait for a writer that never closes.
             drop(child);
+            drop(report_write);
             pid
         }
-        Fork::Child => probe_child(probe, info, binding, egress, child, message),
+        Fork::Child => probe_child(
+            probe,
+            info,
+            binding,
+            egress,
+            child,
+            message,
+            report_write.as_raw_fd(),
+        ),
     };
     // Best effort, and the child asks for the same group a moment later: this
     // closes the window in which the timeout's `kill(-pid)` would name a group
@@ -685,8 +751,32 @@ fn probe_route(
                 probe.cfg.php.as_ref().map(|record| record.version),
             ))
         },
-        |()| Ok(()),
+        |()| {
+            // The child is gone, so it holds no writer: this reads to end of
+            // file instead of blocking on a live process.
+            let mut text = Vec::new();
+            drain_to_end(&report, &mut text);
+            // A missing or malformed report costs the log line, never the boot:
+            // the probe itself succeeded, and an invented version would be worse
+            // than saying nothing.
+            Ok(parse_report(&text))
+        },
     )
+}
+
+/// What a probe child reported, or `None`.
+///
+/// The child sends one line, `blastit-probe runtime=["8.4.27", <ini or null>]`;
+/// anything else — no line, a malformed one, a value that is not the documented
+/// shape — is "this build cannot say", never a guessed version or path. The JSON
+/// keeps a path with a newline from splitting the line.
+fn parse_report(text: &[u8]) -> Option<(String, Option<String>)> {
+    let text = String::from_utf8_lossy(text);
+    let line = text
+        .lines()
+        .find(|line| line.starts_with(RUNTIME_REPORT_PREFIX))?;
+    let value = line.get(RUNTIME_REPORT_PREFIX.len()..)?;
+    serde_json::from_str::<(String, Option<String>)>(value).ok()
 }
 
 /// Everything the probe child does after the fork. Never returns.
@@ -697,6 +787,7 @@ fn probe_child(
     egress: bool,
     child: ChildIo,
     message: OwnedFd,
+    report_fd: RawFd,
 ) -> ! {
     // `ChildIo::prepare` closes every descriptor that is not in `keep`, this one
     // included; the `OwnedFd` must not drop afterwards or it would close a
@@ -726,7 +817,23 @@ fn probe_child(
         fail(&format!("HOME/TMPDIR: {err}"));
     }
     match load_and_shut_down(binding) {
-        Ok(()) => child_exit("", 0),
+        Ok((version, ini)) => {
+            // The one report this child sends back, after the module started and
+            // before it exits: the version it loaded and the `php.ini` PHP
+            // opened, or `null`. The parent reads it on its own pipe, so PHP's
+            // startup log can never push it out of the verdict.
+            if let Ok(line) = serde_json::to_string(&(version, ini)) {
+                let text = format!("{RUNTIME_REPORT_PREFIX}{line}\n");
+                // SAFETY: `report_fd` was in the child's `keep` list, so
+                // `ChildIo::prepare` left it open; nothing else in this child
+                // owns it.
+                let _ = rustix::io::write(
+                    unsafe { std::os::fd::BorrowedFd::borrow_raw(report_fd) },
+                    text.as_bytes(),
+                );
+            }
+            child_exit("", 0)
+        }
         Err(message) => fail(&message),
     }
 }
@@ -739,7 +846,13 @@ fn probe_child(
 /// (`blastit_php_minor()` against the host's `php_version()`), so a pair that
 /// disagrees never reaches `worker_init`; `worker_init` is what proves the
 /// module and the INI lockdown actually start on this host.
-fn load_and_shut_down(binding: &PhpBinding) -> Result<(), String> {
+///
+/// The `php.ini` is read between `worker_init` and `worker_shutdown`, which is
+/// the only window in which PHP's own global is meaningful: it is the file
+/// `php_init_config()` opened, and `None` when it opened none (`MB.25.2`). The
+/// version is the loaded library's own `php_version()`, the full `"8.4.27"` the
+/// line reports.
+fn load_and_shut_down(binding: &PhpBinding) -> Result<(String, Option<String>), String> {
     let mut loaded = blastit_php_sapi::Loaded::load(
         SharedObject::Fd(binding.libphp.as_raw_fd()),
         SharedObject::Fd(binding.shim.as_raw_fd()),
@@ -748,8 +861,10 @@ fn load_and_shut_down(binding: &PhpBinding) -> Result<(), String> {
     loaded
         .worker_init(&binding.ini, &binding.view_tmp)
         .map_err(|err| err.to_string())?;
+    let version = loaded.php_version().to_owned();
+    let ini = loaded.ini_opened_path();
     loaded.worker_shutdown();
-    Ok(())
+    Ok((version, ini))
 }
 
 /// Makes the calling process the leader of a new process group.

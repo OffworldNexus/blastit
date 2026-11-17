@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use blastit_dbproxy::{DbproxyConfig, ListenerSpec, ProxySpec, write_config};
 use blastit_events::{
-    Component, Event, EventKind, Level, Lifecycle, ManifestWarning as WarningEvent, Stream,
+    Component, Event, EventKind, Level, Lifecycle, ManifestWarning as WarningEvent, Runtime, Stream,
 };
 use blastit_manifest::{Manifest, PgGrant, ProxyName, UidLayout};
 use blastit_sys::{
@@ -45,6 +45,8 @@ use crate::dev_learn::{DevRoot, PRIVILEGE};
 use crate::host::{Claim, EXEC, Host, Install, Placement, Provenance, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 use crate::mem_usage;
+#[cfg(feature = "python")]
+use crate::py::Python;
 
 /// How long stage 0 waits for dbproxy's ready byte before giving up (§4).
 pub const DBPROXY_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -2335,24 +2337,88 @@ fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(slice))
 }
 
-/// The one line a boot emits when `entrypoint php` discovery resolved a runtime
-/// (`MB.3.35`): the *resolved* `libphp`, the shim and this build's
-/// `<arch>-<libc>` tuple.
+/// §8.1's `runtime` line for a boot whose entrypoint is **not** PHP (`MB.25.2`).
 ///
-/// It is what makes the native DX observable — a `dev` boot that found
-/// `target/php-sapi/libblastit_php84-x86_64-gnu.so` must not read like one that
-/// did not — and a `libphp8.so -> libphp8.4.so` symlink has to be visible as
-/// the real file the workers will load. It names no alternative transport, so
-/// `critical_php_backend.rs`'s "no fallback recipe" contract still holds for the
-/// whole boot output.
-fn php_runtime_line(runtime: &PhpRuntime) -> String {
-    format!(
-        "the entrypoint php runtime is libphp {} and shim {} (PHP {}, {})",
-        runtime.libphp.display(),
-        runtime.shim.display(),
-        runtime.version.dotted(),
-        target_tuple()
-    )
+/// PHP's own line is emitted by the probe below the fork
+/// ([`crate::php_view::probe_bindings`]): only a process that ran
+/// `php_module_startup` can report the `php.ini` PHP actually opened, and a path
+/// derived here from `PHPRC`, the cwd or `PHP_CONFIG_FILE_PATH` would be a
+/// guess. The other two shapes are stage 0's to name, because it is the first
+/// place that knows which of them the file resolved to.
+///
+/// `config.php` is `Some` only when the discovery gate resolved a library, and
+/// `config.app` covers both `entrypoint python` (the model fills it from the
+/// file when `BLASTIT_APP` is unset) and a `BLASTIT_APP` on a view. Neither set
+/// means static mounts and no language runtime — including an `entrypoint php`
+/// that no view reaches, which loads nothing and is already warned about.
+///
+/// A build that embeds CPython in stage 1 (`cargo` development builds, where
+/// `interpreter` is `false`) has no interpreter *here*: the facts exist one
+/// stage later, and inventing a version would be worse than saying nothing.
+fn emit_runtime(emitter: &Emitter, config: &Config, interpreter: bool) {
+    if let Some(runtime) = runtime_shape(config.php.is_some(), config.app.is_some(), interpreter) {
+        emitter.emit(&Event::now(Component::Init, EventKind::Runtime(runtime)));
+    }
+}
+
+/// The decision table behind [`emit_runtime`], as a value: which shape a boot
+/// resolved, or `None` when the line is not this stage's to emit.
+///
+/// The three inputs are what actually decides it — a resolved library, a
+/// callable, and an interpreter live in *this* process — so the table is one
+/// testable function rather than three conditions spread over two boot paths.
+fn runtime_shape(entrypoint_php: bool, has_app: bool, interpreter: bool) -> Option<Runtime> {
+    if entrypoint_php {
+        // The probe reports it, after `php_module_startup` (`php_view`).
+        return None;
+    }
+    if has_app {
+        python_runtime(interpreter)
+    } else {
+        Some(Runtime::Static)
+    }
+}
+
+/// What `entrypoint python` resolved to, from the interpreter that is already
+/// running in this process (`MB.25.2`).
+///
+/// A wheel install is the only install where that is true: `blastit._blastit`
+/// is called from the interpreter the wheel was installed into, so stage 0 can
+/// ask it for `sys.version_info` and `sys.prefix` before anything is forked —
+/// the earliest point the interpreter exists. `VIRTUAL_ENV` wins over
+/// `sys.prefix` because that is the environment a developer named.
+#[cfg(feature = "python")]
+fn python_runtime(interpreter: bool) -> Option<Runtime> {
+    use pyo3::prelude::PyAnyMethods as _;
+
+    if !interpreter {
+        return None;
+    }
+    // `try_attach`, not `attach`: a caller that said "an interpreter is live"
+    // and is wrong gets no line, never a panic before the fork.
+    Python::try_attach(|py| {
+        let version = py.version_info();
+        let environment = std::env::var("VIRTUAL_ENV")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                py.import("sys")
+                    .and_then(|sys| sys.getattr("prefix"))
+                    .and_then(|prefix| prefix.extract::<String>())
+                    .ok()
+            })?;
+        Some(Runtime::python(
+            format!("{}.{}.{}", version.major, version.minor, version.patch),
+            environment,
+        ))
+    })
+    .flatten()
+}
+
+/// A build with no interpreter has no `python` shape to report.
+#[cfg(not(feature = "python"))]
+fn python_runtime(_interpreter: bool) -> Option<Runtime> {
+    None
 }
 
 /// `R13` step 5: the first declared static root the responder's uid could not
@@ -2623,13 +2689,12 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
         PhpBoot::Absent => {}
         PhpBoot::Refused(message) => fail(&emitter, &message),
         PhpBoot::Proceed(runtime) => {
-            // One line naming what was resolved (`MB.3.35`): the same
-            // sentence `dev` prints, so a boot log names the library and the
-            // shim it selected instead of leaving discovery invisible.
-            emitter.emit(&Event::now(
-                Component::Init,
-                EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(&runtime))),
-            ));
+            // The line naming what was resolved is the probe's
+            // (`php_view::probe_bindings`, `MB.25.2`): it is the process that
+            // runs `php_module_startup`, so it is the only one that can say
+            // which `php.ini` the workers will read. Stage 0 records the pair
+            // here and says nothing about it in the log.
+            //
             // The `(path, st_dev, st_ino)` record stage 1 re-opens and every
             // PHP worker's fork is built from (`ADR-0010` §3). A host without
             // a usable library never reaches here: the gate refused above.
@@ -2679,6 +2744,10 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
             EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
         ));
     }
+    // §8.1: one `runtime` line saying what this boot will run. PHP's is the
+    // probe's (below the fork, after `php_module_startup`); the other two are
+    // decided here.
+    emit_runtime(&emitter, &config, interpreter);
 
     let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
         Ok(prepared) => prepared,
@@ -2913,14 +2982,13 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
         PhpBoot::Absent => {}
         PhpBoot::Refused(message) => dev_fail(&message),
         PhpBoot::Proceed(runtime) => {
-            // Descriptor 2, like every pre-banner line: stdout stays empty
-            // until the boot is known-good (§1.1). Without this line `dev`
-            // reads byte-identically with and without the built shim
-            // (`MB.3.35`).
-            startup.emit(&Event::now(
-                Component::Init,
-                EventKind::ManifestWarning(WarningEvent::new(php_runtime_line(&runtime))),
-            ));
+            // The line naming what was resolved is the probe's
+            // (`php_view::probe_bindings`, `MB.25.2`): only the process that ran
+            // `php_module_startup` can say which `php.ini` the workers read, and
+            // it says so once the boot is known-good. A pre-banner lane would
+            // have to keep that sentence on descriptor 2 and still could not
+            // name the ini.
+            //
             // Stage 1 re-opens these and every PHP worker is forked from the
             // binding built there (`ADR-0010` §3).
             config.php = Some(runtime);
@@ -3054,6 +3122,10 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
             EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
         ));
     }
+    // §8.1: one `runtime` line saying what this boot will run, now that the boot
+    // is known-good (the banner and `boot` are already on stdout). PHP's line
+    // comes from the probe below the fork; the other two are decided here.
+    emit_runtime(&emitter, &config, interpreter);
     // A boot above the documented default is the operator's call once they
     // raised the knob, and it is also the state in which a view's first spawn
     // may have to wait for memory: say so once, with the reading and the cache
@@ -4358,6 +4430,30 @@ view ungranted regex '/ungranted/.*' {}
         assert_eq!(rustix::io::read(&dbproxy, &mut byte).expect("read"), 1);
         assert_eq!(byte[0], b'x');
         root.cleanup();
+    }
+
+    /// `MB.25.2`: the `runtime` line's decision table. A resolved library is the
+    /// probe's to report (only it ran `php_module_startup`), no callable means
+    /// static mounts and no language runtime, and a callable is only nameable
+    /// where an interpreter is already live — a wrong "yes" answers no line, not
+    /// a panic, and never an invented version.
+    #[test]
+    fn the_runtime_shape_is_decided_by_what_the_boot_loads() {
+        assert_eq!(
+            runtime_shape(true, true, true),
+            None,
+            "PHP's line is the probe's, never stage 0's"
+        );
+        assert_eq!(
+            runtime_shape(false, false, false),
+            Some(Runtime::Static),
+            "no library and no callable is a static-only file"
+        );
+        assert_eq!(
+            runtime_shape(false, true, false),
+            None,
+            "no interpreter here: there is nothing honest to say"
+        );
     }
 }
 

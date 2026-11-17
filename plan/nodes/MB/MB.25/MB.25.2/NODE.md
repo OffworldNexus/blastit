@@ -2,7 +2,7 @@
 id: MB.25.2
 title: "Emit the INFO runtime event: PHP version + php_ini_opened_path via the C SAPI, Python version + environment, static-only summary; retire the WARN line"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.25.1]
@@ -18,11 +18,11 @@ paths:
   - crates/blastit/tests/critical_php_backend.rs
   - crates/blastit/tests/critical_php_embed.rs
   - "docs/design/runtime-diagnostics.md"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:30"
-updated: "2026-11-17T01:30"
+updated: "2026-11-17T22:11"
 ---
 
 # Goal

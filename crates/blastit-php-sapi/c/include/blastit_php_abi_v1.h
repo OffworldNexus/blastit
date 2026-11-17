@@ -137,6 +137,28 @@ uint32_t blastit_php_abi_version(void);
 /** The PHP minor this shim was compiled against: 802, 803 or 804. */
 uint32_t blastit_php_minor(void);
 
+/**
+ * Optional, additive: the `php.ini` PHP actually opened, or `NULL`.
+ *
+ * The value is PHP's own `php_ini_opened_path` global, read after
+ * `php_module_startup` ran in this process: the file `php_init_config()` opened,
+ * or `NULL` when PHP is running on its built-in defaults. A caller must not
+ * derive this path itself — `PHPRC` and `PHP_INI_SCAN_DIR` are stripped from the
+ * view environment and the SAPI sets `php_ini_ignore_cwd = 1`, so the one honest
+ * answer is the one PHP opened.
+ *
+ * This is **additive**, so `BLASTIT_PHP_ABI_VERSION` stays 1: the boot's probe
+ * resolves it with `dlsym` through this shared object's handle and treats a
+ * missing symbol, a `NULL`, or a value it cannot read as "no file opened". Only
+ * a **shim** built before the addition degrades that way; the shim itself
+ * refers to `php_ini_opened_path`, so a `libphp` that does not export it fails
+ * this shim's `RTLD_NOW` load (which every 8.x `libphp` exports it prevents).
+ *
+ * The returned pointer is valid until `blastit_php_worker_shutdown`; it is
+ * `NULL` before `blastit_php_worker_init`.
+ */
+const char *blastit_php_ini_opened_path(void);
+
 /** `sapi_startup` + `php_module_startup`. 0 on success. */
 int32_t blastit_php_worker_init(const blastit_php_config_v1 *cfg);
 

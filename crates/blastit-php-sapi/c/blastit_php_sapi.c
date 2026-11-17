@@ -452,6 +452,37 @@ uint32_t blastit_php_minor(void)
     return (uint32_t)(PHP_MAJOR_VERSION * 100 + PHP_MINOR_VERSION);
 }
 
+/* `main/php_ini.h` stopped declaring this pair in 8.x's *public* headers, but
+ * the `libphp` ABI still exports them (`nm -D libphp8.4.so`: `B
+ * php_ini_opened_path`, `B php_ini_scanned_files`). Declaring the one symbol
+ * here is what lets the boot report the file PHP actually opened instead of
+ * re-deriving a search path that `PHPRC`, the cwd and the scan dir all move.
+ * It is a full definition in `main/php_ini.c` since PHP 5, so the reference
+ * resolves from the `RTLD_GLOBAL` libphp the worker loaded first — this shim
+ * keeps no `DT_NEEDED` on it. */
+extern char *php_ini_opened_path;
+
+/* Additive and optional, so it does not move `BLASTIT_PHP_ABI_VERSION`: the
+ * boot's probe resolves this symbol with `dlsym` on this object's own handle,
+ * and a *shim* built before the addition reports no path instead of failing —
+ * that is the only degradation, and it is a property of this file's age, not of
+ * the host. A `libphp` without the global is a different matter: the reference
+ * above stays undefined, and because the worker `dlopen`s this shim
+ * `RTLD_NOW` a library that does not export it fails the whole load (loudly,
+ * naming the symbol) rather than silently reporting nothing. Every 8.x `libphp`
+ * exports it, so no supported host takes that path.
+ *
+ * The value is PHP's own: `php_init_config()` sets it to the `php.ini` it
+ * opened, or leaves it NULL when PHP runs on its built-in defaults. That is
+ * what makes this a *report*: no caller derives it from `PHPRC` (stripped from
+ * the view environment), the cwd (`php_ini_ignore_cwd = 1`) or a scan dir.
+ * The pointer stays valid until `blastit_php_worker_shutdown`; it is NULL
+ * before `blastit_php_worker_init`. */
+const char *blastit_php_ini_opened_path(void)
+{
+    return php_ini_opened_path;
+}
+
 /* Additive and optional, so it does not move `BLASTIT_PHP_ABI_VERSION`: the
  * worker resolves this symbol with `dlsym` on this object's own handle, and a
  * shim (or PHP build) without it reports no files instead of failing. The

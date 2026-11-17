@@ -11,7 +11,7 @@ use crate::{
     AppOutput, Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind,
     HttpRejected, Level, Lifecycle, MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason,
     PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason,
-    ReloadReason, RequestInfo, RetireReason, SqlDenied, SqlKind, Stream, floor_boundary,
+    ReloadReason, RequestInfo, RetireReason, Runtime, SqlDenied, SqlKind, Stream, floor_boundary,
 };
 
 /// Encode one event as a single JSON object, without a trailing newline.
@@ -219,6 +219,29 @@ fn encode_into_with(out: &mut Vec<u8>, event: &Event, truncated: &[&'static str]
         }
         EventKind::ManifestWarning(info) => {
             push_str_member(out, "message", &info.message);
+        }
+        EventKind::Runtime(info) => {
+            // §8.1's `runtime` rows: the entrypoint, then only the fields that
+            // row lists. `php_ini` is the one nullable field, written as `null`
+            // when PHP opened no file — absent would read as "this build does
+            // not know the field".
+            match info {
+                Runtime::Php(php) => {
+                    push_str_member(out, "entrypoint", "php");
+                    push_str_member(out, "version", &php.version);
+                    push_str_member(out, "libphp", &php.libphp);
+                    match &php.php_ini {
+                        Some(path) => push_str_member(out, "php_ini", path),
+                        None => push_raw_member(out, "php_ini", b"null"),
+                    }
+                }
+                Runtime::Python(py) => {
+                    push_str_member(out, "entrypoint", "python");
+                    push_str_member(out, "version", &py.version);
+                    push_str_member(out, "environment", &py.environment);
+                }
+                Runtime::Static => push_str_member(out, "entrypoint", "static"),
+            }
         }
         EventKind::DevReload(info) => {
             // §4.9's order: `routes`, `files`, `reason`. Both arrays are always
@@ -811,6 +834,7 @@ fn decode_kind(name: &str, object: &Map<String, Value>) -> Option<EventKind> {
         "manifest.warning" => {
             EventKind::ManifestWarning(ManifestWarning::new(text(object, "message")?))
         }
+        "runtime" => EventKind::Runtime(decode_runtime(object)?),
         "dev.reload" => EventKind::DevReload(DevReload::new(
             string_array(object, "routes")?,
             string_array(object, "files")?,
@@ -823,6 +847,25 @@ fn decode_kind(name: &str, object: &Map<String, Value>) -> Option<EventKind> {
         _ => return None,
     };
     Some(kind)
+}
+
+/// A `runtime` line: the entrypoint it names decides which fields it has.
+///
+/// An entrypoint outside the frozen three words, or a required field missing,
+/// makes the line undecodable rather than inventing a runtime. `php_ini` is
+/// nullable, and absent reads as `None` for a line written before the field
+/// existed — never as a path.
+fn decode_runtime(object: &Map<String, Value>) -> Option<Runtime> {
+    Some(match text(object, "entrypoint")? {
+        "php" => Runtime::php(
+            text(object, "version")?,
+            text(object, "libphp")?,
+            optional_text(object, "php_ini")?.map(str::to_owned),
+        ),
+        "python" => Runtime::python(text(object, "version")?, text(object, "environment")?),
+        "static" => Runtime::Static,
+        _ => return None,
+    })
 }
 
 /// The lifecycle fields of a `boot`, `ready` or `shutdown` line.
@@ -1218,6 +1261,21 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
         EventKind::ManifestWarning(info) => {
             slots.push(("message", &mut info.message));
         }
+        EventKind::Runtime(info) => match info {
+            Runtime::Php(php) => {
+                slots.push(("version", &mut php.version));
+                slots.push(("libphp", &mut php.libphp));
+                if let Some(path) = php.php_ini.as_mut() {
+                    slots.push(("php_ini", path));
+                }
+            }
+            Runtime::Python(py) => {
+                slots.push(("version", &mut py.version));
+                slots.push(("environment", &mut py.environment));
+            }
+            // `static` carries one fixed word and nothing else.
+            Runtime::Static => {}
+        },
         // `dev.reload`'s only variable-size fields are its arrays, which are cut
         // whole by `drop_reload_entry` before any string is touched; its
         // `reason` is a fixed word.
@@ -1488,6 +1546,21 @@ mod tests {
             fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
                 "the group `session` is attached to no route",
             ))),
+            fixture::event(EventKind::Runtime(Runtime::php(
+                "8.5.4",
+                "/usr/lib/libphp8.5.so",
+                Some("/etc/php/8.5/embed/php.ini".to_owned()),
+            ))),
+            fixture::event(EventKind::Runtime(Runtime::php(
+                "8.4.27",
+                "/usr/lib/libphp8.4.so",
+                None,
+            ))),
+            fixture::event(EventKind::Runtime(Runtime::python(
+                "3.14.0",
+                "/home/you/shop/.venv",
+            ))),
+            fixture::event(EventKind::Runtime(Runtime::Static)),
             fixture::event(EventKind::DevReload(DevReload::new(
                 vec!["products".to_owned(), "cart".to_owned()],
                 vec!["/srv/shop/app/views/cart.py".to_owned()],
@@ -2777,6 +2850,131 @@ mod tests {
         assert_eq!(parsed["errno"], "EPERM");
         assert_eq!(parsed["filesystem"], "overlayfs");
         assert_eq!(decode_json(&json), Some(event), "{json}");
+    }
+
+    /// §8.1's `runtime` rows: only the fields the row lists, in that order, and
+    /// `php_ini` present as `null` when PHP opened no file.
+    #[test]
+    fn runtime_php_has_the_documented_shape_and_round_trips() {
+        let event = fixture::event(EventKind::Runtime(Runtime::php(
+            "8.5.4",
+            "/usr/lib/libphp8.5.so",
+            Some("/etc/php/8.5/embed/php.ini".to_owned()),
+        )));
+        let json = encode_json(&event);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "entrypoint",
+                "version",
+                "libphp",
+                "php_ini"
+            ],
+            "{json}"
+        );
+        let parsed = parse(&json);
+        assert_eq!(parsed["event"], "runtime");
+        assert_eq!(parsed["level"], "info");
+        assert_eq!(parsed["entrypoint"], "php");
+        assert_eq!(parsed["version"], "8.5.4");
+        assert_eq!(parsed["libphp"], "/usr/lib/libphp8.5.so");
+        assert_eq!(parsed["php_ini"], "/etc/php/8.5/embed/php.ini");
+        assert_eq!(decode_json(&json), Some(event), "{json}");
+
+        // The same line on a host that opened no file: `php_ini` is `null`, and
+        // the key is still there.
+        let none = fixture::event(EventKind::Runtime(Runtime::php(
+            "8.4.27",
+            "/usr/lib/libphp8.4.so",
+            None,
+        )));
+        let json = encode_json(&none);
+        assert!(json.contains(r#""php_ini":null"#), "{json}");
+        assert_eq!(decode_json(&json), Some(none), "{json}");
+    }
+
+    /// A `python` line carries the version and the environment, and nothing
+    /// from the `php` row — the variant is the field set.
+    #[test]
+    fn runtime_python_and_static_have_the_documented_shape() {
+        let event = fixture::event(EventKind::Runtime(Runtime::python(
+            "3.14.0",
+            "/home/you/shop/.venv",
+        )));
+        let json = encode_json(&event);
+        assert_eq!(
+            top_level_keys(&json),
+            [
+                "ts",
+                "level",
+                "event",
+                "component",
+                "entrypoint",
+                "version",
+                "environment"
+            ],
+            "{json}"
+        );
+        let parsed = parse(&json);
+        assert_eq!(parsed["entrypoint"], "python");
+        assert_eq!(parsed["environment"], "/home/you/shop/.venv");
+        assert!(parsed.get("libphp").is_none(), "{json}");
+        assert_eq!(decode_json(&json), Some(event), "{json}");
+
+        let static_only = fixture::event(EventKind::Runtime(Runtime::Static));
+        let json = encode_json(&static_only);
+        assert_eq!(
+            top_level_keys(&json),
+            ["ts", "level", "event", "component", "entrypoint"],
+            "{json}"
+        );
+        let parsed = parse(&json);
+        assert_eq!(parsed["entrypoint"], "static");
+        assert!(parsed.get("version").is_none(), "{json}");
+        assert!(parsed.get("php_ini").is_none(), "{json}");
+        assert_eq!(decode_json(&json), Some(static_only), "{json}");
+    }
+
+    /// An entrypoint outside the frozen three words decodes into nothing, so a
+    /// `runtime` line cannot invent a fourth shape.
+    #[test]
+    fn an_unknown_runtime_entrypoint_is_not_an_event() {
+        for entrypoint in ["", "PHP", "perl", "node", "php8.5"] {
+            let line = format!(
+                r#"{{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"runtime","component":"init","entrypoint":"{entrypoint}","version":"8.5.4","libphp":"/usr/lib/libphp8.5.so","php_ini":null}}"#
+            );
+            assert!(decode_json(&line).is_none(), "{line} decoded");
+        }
+    }
+
+    /// A `runtime` line whose path is long enough to matter is still one event
+    /// under [`MAX_EVENT_BYTES`], and the cut is named in `truncated`.
+    #[test]
+    fn a_long_runtime_path_is_cut_and_stays_under_the_bound() {
+        let event = fixture::event(EventKind::Runtime(Runtime::php(
+            "8.5.4",
+            format!("/{}/libphp.so", "d".repeat(4096)),
+            Some(format!("/{}/php.ini", "e".repeat(4096))),
+        )));
+        let json = encode_json(&event);
+        assert!(
+            json.len() <= MAX_EVENT_BYTES,
+            "line is {} bytes",
+            json.len()
+        );
+        let parsed = check_fits(&event, &json);
+        assert_eq!(parsed["event"], "runtime");
+        let truncated = parsed["truncated"].as_array().expect("a truncated list");
+        assert!(
+            truncated
+                .iter()
+                .any(|name| name == "libphp" || name == "php_ini"),
+            "{json}"
+        );
     }
 
     /// `reason` is a closed four-word set: a line naming anything else is not
