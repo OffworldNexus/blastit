@@ -2499,3 +2499,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T05:04 [MB.22.2] (lead) base 7062ded22d6eb68ab74e764d719112894eaf6360
 - 2026-11-17T05:06 [MB.22.1] (doc-writer) Final polish: cli.md diagnostic prefix scoped to the Blastfile: prefix (position-less refusals are one sentence), formatting links reference/blastfile.md#format
 - 2026-11-17T05:09 [MB.22.1] (lead) status review -> done
+- 2026-11-17T05:09 [MB.22.1] (lead) committed 8f538ae
+- 2026-11-17T05:10 [MB.24.1] (planner) edited fields
+- 2026-11-17T05:10 [MB.24.1] (conductor) Note: MB.20 moved docs/frameworks/php.md to docs/frameworks/php/index.md; edit docs/frameworks/php/index.md.
+- 2026-11-17T05:11 [MB.24.1] (lead) status ready -> active
+- 2026-11-17T05:11 [MB.24.1] (lead) attempt 1/3 started
+- 2026-11-17T05:11 [MB.24.1] (lead) base 8f538ae43fa6e79ba97b1b26150d92525d33b9c9
+- 2026-11-17T05:11 [MB.24.1] (lead) edited fields
+- 2026-11-17T05:11 [MB.24.1] (lead) corrected paths: the task edits docs/how-it-works.md + docs/frameworks/php/index.md (moved by MB.20) and writes the two review files; docs_fences.rs kept
+- 2026-11-17T05:15 [MB.21.5.5] (lead) status active -> review
+- 2026-11-17T05:16 [MB.21.5.7] (lead) status active -> review
+- 2026-11-17T05:16 [MB.23.1] (lead) status ready -> active
+- 2026-11-17T05:16 [MB.23.1] (lead) attempt 1/3 started
+- 2026-11-17T05:16 [MB.23.1] (lead) base 8f538ae43fa6e79ba97b1b26150d92525d33b9c9; lead dispatch doc-writer for DX docs. Parallel: MB.22.2 in flight in this worktree (manifest parser + ADR-0013) —
+- 2026-11-17T05:17 [MB.24.1] (lead) status active -> review
+- 2026-11-17T05:21 [MB.21] (lead) EXTERNAL BLOCKER for the epic gate: uncommitted MB.23.1 docs (docs/reference/cli.md:20,28 and docs/local.md:19,32) document 'blastit dev --no-reload' while crat
+- 2026-11-17T05:24 [MB.21.5.7] (lead) accepted on its own acceptance (33 crate suites ok, docs-unit 107, anti-vacuity by deletion, critical_guard authorized for its own file). Its full make check ro
+- 2026-11-17T05:24 [MB.21.5.7] (lead) status review -> done

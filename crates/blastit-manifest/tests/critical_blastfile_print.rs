@@ -1,15 +1,27 @@
 //! Protected suite for the canonical printer (`R5`–`R7`, `R25`;
 //! `docs/design/blastfile-dsl.md` §14.2, §14.3).
 //!
-//! Three properties, each over **every** fixture in `tests/fixtures/` and over
-//! a hand-written document that uses every production, so a layout rule cannot
-//! be right for one shape and wrong for the next:
+//! Four properties, each over §20's **round-trip corpus** — the fixtures in
+//! `tests/fixtures/` **plus every document the pages publish** — and over a
+//! hand-written document that uses every production, so a layout rule cannot be
+//! right for one shape and wrong for the next:
 //!
+//! * **P1**: no token and no comment of the source is dropped, duplicated,
+//!   reordered or rewritten (the byte-level `print_lossless` oracle is a module
+//!   test in `syntax.rs`, §14.3.1, because it is `pub(crate)`);
 //! * **P2**: `fmt(fmt(t)) == fmt(t)`, and a canonical file is returned byte for
 //!   byte;
 //! * **P2b**: the ordered list of comment texts is identical before and after,
-//!   and every comment keeps the directive or block it was written against;
+//!   and every comment keeps the node it was written against;
 //! * **P3**: `lower(fmt(t))` equals `lower(t)`, warnings included.
+//!
+//! The corpus is **derived**, never a literal: `common::round_trip_corpus`
+//! enumerates the fixture directory and reads every `text title="Blastfile"`
+//! fence off `README.md` and `docs/**`, and asserts §20's floor of 20, so a
+//! page whose example does not round-trip fails this gate instead of shrinking
+//! the corpus silently (`MB.21.5.7`). The documented **fragments** — the
+//! keyword-led plain `text` fences that are statement lists, not files — are
+//! classified and round-tripped as fragments rather than skipped.
 //!
 //! The comment oracle is a scanner over the text, independent of the lexer: a
 //! formatter that drops every comment cannot pass by agreeing with itself.
@@ -103,6 +115,17 @@ fn raw_string_end(text: &str) -> usize {
         .find(|(_, character)| *character == '\'')
         .map(|(at, _)| at.saturating_add(1))
         .unwrap_or(text.len())
+}
+
+/// Every token of a document, in source order (P1's half of the scan).
+fn tokens(text: &str) -> Vec<String> {
+    items(text)
+        .into_iter()
+        .filter_map(|item| match item {
+            Item::Token(token) => Some(token),
+            Item::Comment(_) => None,
+        })
+        .collect()
 }
 
 /// Every comment of a document, in source order (P2b's first half).
@@ -309,13 +332,52 @@ const COMMENTED_MESSY: &str = concat!(
     "# the last line, no newline",
 );
 
+/// P1 (lossless) over the corpus, at the public boundary: the canonical text
+/// carries **every** token and **every** comment of the source, in the same
+/// order — formatting moves layout and rewrites nothing.
+///
+/// §14.3.1 states P1 as `print_lossless(parse(text)?) == text`, which is a
+/// module test inside `syntax.rs` because `print_lossless` is `pub(crate)` and
+/// an integration suite cannot call it. What a caller can observe, and what
+/// this test pins over the whole corpus, is that nothing significant is lost:
+/// a token or a comment the source had is a token or a comment the canonical
+/// text still has, once, in the same place in the sequence.
+#[test]
+fn p1_no_token_or_comment_is_dropped() {
+    let corpus = common::round_trip_corpus();
+    for (name, source) in &corpus {
+        let formatted = blastfile::fmt(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(
+            tokens(&formatted),
+            tokens(source),
+            "{name} lost, duplicated or reordered a token"
+        );
+        assert_eq!(
+            comment_texts(&formatted),
+            comment_texts(source),
+            "{name} lost, duplicated or reordered a comment"
+        );
+    }
+}
+
 /// P2 over the corpus: formatting twice is formatting once, and the canonical
 /// text ends with exactly one newline.
 #[test]
 fn p2_fixed_point_over_the_corpus() {
-    let corpus = common::corpus();
+    // The fixture set keeps its own pinned size (§20's 15 rows); the
+    // round-trip corpus is that set plus the documented documents.
     assert_eq!(common::CORPUS_SIZE, 15, "the corpus contract");
-    assert_eq!(corpus.len(), common::CORPUS_SIZE, "the fixture count");
+    assert_eq!(
+        common::corpus().len(),
+        common::CORPUS_SIZE,
+        "the fixture count"
+    );
+    let corpus = common::round_trip_corpus();
+    assert!(
+        corpus.len() >= 20,
+        "§20's floor is 20 documents; the corpus holds {}",
+        corpus.len()
+    );
     for (name, source) in &corpus {
         let once = blastfile::fmt(source).unwrap_or_else(|error| panic!("{name}: {error}"));
         let twice = blastfile::fmt(&once).unwrap_or_else(|error| panic!("{name} twice: {error}"));
@@ -360,19 +422,26 @@ fn the_corpus_is_canonical() {
 }
 
 /// P2b: the ordered comment texts are identical before and after `fmt`, over
-/// the corpus and over a document with a comment in every position.
+/// the corpus, over the documented fragments, and over a document with a
+/// comment in every position.
 #[test]
 fn p2b_comments_survive() {
-    for (name, source) in common::corpus() {
-        let formatted = blastfile::fmt(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
+    let mut corpus = common::round_trip_corpus();
+    corpus.extend(
+        common::documented_fragments()
+            .into_iter()
+            .map(|fence| (fence.label(), fence.source)),
+    );
+    for (name, source) in &corpus {
+        let formatted = blastfile::fmt(source).unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(
             comment_texts(&formatted),
-            comment_texts(&source),
+            comment_texts(source),
             "{name} lost or reordered a comment"
         );
         assert_eq!(
             comment_anchors(&formatted),
-            comment_anchors(&source),
+            comment_anchors(source),
             "{name} moved a comment away from the directive it describes"
         );
     }
@@ -430,10 +499,11 @@ fn a_comment_inside_a_list_is_kept_above_its_statement() {
 /// same warnings.
 #[test]
 fn p3_over_the_corpus() {
-    for (name, source) in common::corpus() {
-        let (before, before_warnings) = Manifest::parse_blastfile(&source, UidLayout::DEFAULT_BASE)
+    let corpus = common::round_trip_corpus();
+    for (name, source) in &corpus {
+        let (before, before_warnings) = Manifest::parse_blastfile(source, UidLayout::DEFAULT_BASE)
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        let formatted = blastfile::fmt(&source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let formatted = blastfile::fmt(source).unwrap_or_else(|error| panic!("{name}: {error}"));
         let (after, after_warnings) =
             Manifest::parse_blastfile(&formatted, UidLayout::DEFAULT_BASE)
                 .unwrap_or_else(|error| panic!("{name} formatted: {error}"));
@@ -442,6 +512,112 @@ fn p3_over_the_corpus() {
             "{name} changed meaning when formatted"
         );
         assert_eq!(after_warnings, before_warnings, "{name} changed warnings");
+    }
+}
+
+// ---- the documented fragments, classified rather than skipped -----------
+
+/// Every fence on every published page is classified (§16.1), and the ones
+/// that are **fragments** — a keyword-led plain `text` fence, i.e. a statement
+/// list that is not a complete file — are named, classified and checked rather
+/// than silently skipped.
+///
+/// This is the "no silent skip" rule for §20's corpus. The corpus itself is
+/// complete documents only (a fragment binds no `app` and has no listener to
+/// describe), so a page whose example is a statement list has to be accounted
+/// for here or the gate quietly shrinks.
+///
+/// A statement list is not always a file: `docs/reference/blastfile.md` shows
+/// the three store spellings as one fence, and two unnamed stores are a
+/// refusal on purpose. So the fragment class splits into the ones that lower
+/// (`from_blastfile_str` succeeds) and the ones that show alternatives
+/// (lowering refuses), and **the split is derived per fragment**, never a
+/// table; the second group is still checked — formatting never turns a refused
+/// statement list into an accepted file, or the other way round — and printed
+/// by page and line so a reader sees what the branch covers.
+#[test]
+fn the_documented_fragments_are_classified_and_checked() {
+    let all = common::documented_fences();
+    let documents = common::documented_documents();
+    let fragments = common::documented_fragments();
+    assert!(
+        !fragments.is_empty(),
+        "the pages carry statement lists; none was classified as a fragment"
+    );
+    // The three filters are exhaustive over the scanned fences: every fence the
+    // reader returns is counted by exactly one of the three independent passes,
+    // so a fence that fell out of all three would show up as a short sum.
+    let illustrations = all
+        .iter()
+        .filter(|fence| fence.class == common::FenceClass::Illustration)
+        .count();
+    assert_eq!(
+        documents.len() + fragments.len() + illustrations,
+        all.len(),
+        "the three filters are exhaustive over the scanned fences: {} document(s) + \
+         {} fragment(s) + {} illustration(s) != {} fence(s)",
+        documents.len(),
+        fragments.len(),
+        illustrations,
+        all.len()
+    );
+    assert!(
+        illustrations > 0,
+        "the illustration class has no subject: the classification is not doing work"
+    );
+    let mut alternatives = Vec::new();
+    for fence in &fragments {
+        let name = fence.label();
+        let formatted = blastfile::fmt(&fence.source)
+            .unwrap_or_else(|error| panic!("{name} is a statement list: {error}"));
+        assert_eq!(
+            blastfile::fmt(&formatted).unwrap_or_else(|error| panic!("{name} twice: {error}")),
+            formatted,
+            "{name} is not a fixed point"
+        );
+        assert_eq!(
+            tokens(&formatted),
+            tokens(&fence.source),
+            "{name} lost, duplicated or reordered a token"
+        );
+        assert_eq!(
+            comment_texts(&formatted),
+            comment_texts(&fence.source),
+            "{name} lost, duplicated or reordered a comment"
+        );
+        // A fragment is a statement list of top-level sections, so it lowers
+        // to the model like a document — unless it is a menu of alternative
+        // spellings, which a page may show in one fence. Either way formatting
+        // cannot change which of the two it is.
+        let before = Manifest::from_blastfile_str(&fence.source);
+        let after = Manifest::from_blastfile_str(&formatted);
+        match (before, after) {
+            (Ok(before), Ok(after)) => assert!(
+                after.equivalent(&before),
+                "{name} changed meaning when formatted"
+            ),
+            (Err(_), Err(_)) => alternatives.push(name),
+            (before, after) => panic!(
+                "{name} is {} before formatting and {} after: the layout changed whether \
+                 the statement list is a file",
+                outcome(&before),
+                outcome(&after)
+            ),
+        }
+    }
+    // Reported by page and line, not counted: a reader can see which fragments
+    // are illustrations of alternative spellings without a second table.
+    for name in &alternatives {
+        println!("statement list of alternatives: {name}");
+    }
+}
+
+/// `Ok`/`Err`, for a panic message about a fragment.
+fn outcome<T, E>(result: &Result<T, E>) -> &'static str {
+    if result.is_ok() {
+        "a file"
+    } else {
+        "alternatives"
     }
 }
 

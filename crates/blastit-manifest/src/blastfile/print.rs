@@ -838,6 +838,11 @@ mod tests {
              # above the grant\n    postgres {\n        select t\n    } # after the block\n}\n\
              # the last line\n"
                 .to_owned(),
+            // §1.3 nit 7: a comment written inside a grant list the layout
+            // unwraps. It has no line of its own to keep, so `fmt` hoists it
+            // above the statement — and its owner has to be that statement's
+            // node, not the file and not a neighbouring statement's.
+            HOISTED_OUT_OF_A_LIST.to_owned(),
         ];
         documents.extend(fixtures());
         for source in &documents {
@@ -846,6 +851,68 @@ mod tests {
             assert_eq!(after, before, "a comment moved into another node");
             assert!(!before.is_empty() || !source.contains('#'), "{source:?}");
         }
+
+        // The hoisted comment's node is the node that owns the statement it
+        // was moved above: the comment and the `select` keyword are children
+        // of the same `grant_block`.
+        let canonical = formatted(HOISTED_OUT_OF_A_LIST);
+        assert_eq!(canonical, HOISTED_OUT_OF_A_LIST_CANONICAL);
+        let cst = super::parse(&canonical).expect("the canonical text parses");
+        let owner = owner_of_comment(&cst, "# and the categories")
+            .expect("the hoisted comment is still in the tree");
+        assert_eq!(
+            cst.kind(owner),
+            Some(NodeKind::GrantBlock),
+            "the hoisted comment left the node that owns its statement"
+        );
+        assert!(
+            cst.child_tokens(owner)
+                .any(|token| cst.token_text(token) == "select"),
+            "the hoisted comment's node is not the node that owns the `select` statement"
+        );
+    }
+
+    /// A comment written between two table grants of an unwrapped list.
+    const HOISTED_OUT_OF_A_LIST: &str = concat!(
+        "view v \"/x\" {\n",
+        "    postgres {\n",
+        "        select products(id),\n",
+        "            # and the categories\n",
+        "            categories\n",
+        "    }\n",
+        "}\n",
+    );
+
+    /// Its canonical form: the comment hoisted above the statement, the list
+    /// on one line.
+    const HOISTED_OUT_OF_A_LIST_CANONICAL: &str = concat!(
+        "view v \"/x\" {\n",
+        "    postgres {\n",
+        "        # and the categories\n",
+        "        select products(id), categories\n",
+        "    }\n",
+        "}\n",
+    );
+
+    /// The node a comment is a direct child of.
+    fn owner_of_comment(cst: &Cst, comment: &str) -> Option<NodeId> {
+        fn walk(cst: &Cst, node: NodeId, comment: &str, found: &mut Option<NodeId>) {
+            for (child, element) in cst.child_elements(node) {
+                match element {
+                    Element::Trivia(id)
+                        if cst.trivia_kind(id) == Some(TriviaKind::Comment)
+                            && cst.trivia_text(id).trim() == comment =>
+                    {
+                        *found = Some(node);
+                    }
+                    Element::Node { .. } => walk(cst, child, comment, found),
+                    _ => {}
+                }
+            }
+        }
+        let mut found = None;
+        walk(cst, cst.root(), comment, &mut found);
+        found
     }
 
     /// The kind of the node each comment is a child of, in source order.

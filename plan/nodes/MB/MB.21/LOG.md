@@ -55,3 +55,11 @@ CONCURRENCY (epic gate): a sibling session (MB.22 / docs/research) is now writin
 ## 2026-11-17T04:53 [lead]
 
 CONCURRENCY HAZARD confirmed: another session's uncommitted MB.22.1 edit to docs/local.md adds a 7th illustration, so docs_fences::every_documented_document_parses_and_validates fails on the shared tree and blocks any full make check here. The MB.21 epic gate must either wait for MB.22.1 to commit its docs_fences count or be measured on a tree where that node's files are committed. Do not update their count from MB.21
+
+## 2026-11-17T05:01 [lead]
+
+5.1-5.4 done and committed (809143d, 6bfd1cc, 6d2bd41, 06874ae). Post-0.2.0 follow-ups filed and prioritised: 5.6, 5.8-5.14. Pre-gate: 5.5 (purity gate nested-use evasion) and 5.7 (>=20-document corpus floor), both in flight with 5.11 (coverage pin). Epic gate after those three.
+
+## 2026-11-17T05:21 [lead]
+
+EXTERNAL BLOCKER for the epic gate: uncommitted MB.23.1 docs (docs/reference/cli.md:20,28 and docs/local.md:19,32) document 'blastit dev --no-reload' while crates/blastit/src/cli.rs has no such flag, so make docs-test fails fence 1 in docs/reference/cli.md. MB.21.5.7's reviewer proved this is not MB.21 work. The MB.21 epic gate cannot pass make check until MB.23 lands the flag (MB.23.2) or those four lines are dropped

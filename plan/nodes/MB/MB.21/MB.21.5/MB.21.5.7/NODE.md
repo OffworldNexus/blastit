@@ -2,7 +2,7 @@
 id: MB.21.5.7
 title: "Land the design's >= 20-document round-trip corpus floor and the hoisted-comment owner case"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 3
 depends_on: []
@@ -14,7 +14,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:03"
-updated: "2026-11-17T04:58"
+updated: "2026-11-17T05:24"
 ---
 
 # Goal
