@@ -2533,3 +2533,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T05:32 [MB.21.5.5] (lead) attempt 3/4 started
 - 2026-11-17T05:32 [MB.21.5.5] (lead) round 4: reviewer found a glob bypass (use std::*; use env as e) and a cross-file pub-use re-export bypass. Three rounds each found a NEW class, so enumeration 
 - 2026-11-17T05:32 [MB.21.5.11] (lead) status review -> done
+- 2026-11-17T05:36 [MB.21.5.5] (lead) attempt 4/4 started
+- 2026-11-17T05:36 [MB.21.5.5] (lead) status review -> review
+- 2026-11-17T05:39 [MB.21.5.5] (lead) status review -> done

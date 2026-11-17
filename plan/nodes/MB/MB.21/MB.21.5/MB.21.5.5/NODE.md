@@ -2,16 +2,16 @@
 id: MB.21.5.5
 title: "Close the purity gate's nested-use evasion (R24) and prove it in both directions"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 2
 depends_on: []
 paths: [scripts/check_manifest_purity.py, scripts/test_manifest_purity.py]
-attempts: 1
-max_attempts: 3
+attempts: 4
+max_attempts: 4
 escalation: none
 created: "2026-11-16T23:03"
-updated: "2026-11-17T04:53"
+updated: "2026-11-17T05:39"
 ---
 
 # Goal
