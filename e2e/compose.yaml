@@ -130,5 +130,5 @@ services:
     volumes:
       - ./php2shell.py:/opt/e2e/php2shell.py:ro
       - ./php/probes.md:/opt/e2e/probes.md:ro
-      - ../docs/frameworks/php.md:/opt/e2e/php.md:ro
+      - ../docs/frameworks/php/index.md:/opt/e2e/php.md:ro
     command: ["sleep", "infinity"]

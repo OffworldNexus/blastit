@@ -1,6 +1,6 @@
 # The PHP leg: a real `libphp` and the `php2shell` matrix
 
-Proves on a live runtime what `docs/frameworks/php.md` promises and what
+Proves on a live runtime what `docs/frameworks/php/index.md` promises and what
 `ADR-0010` claims: a Symfony/Laravel-shaped `public/index.php` runs embedded
 under `blastit dev` with zero `sudo`, and every `php2shell` row fails
 harmlessly. `make e2e` runs it (the `php` service in `e2e/compose.yaml`, driven
@@ -24,7 +24,8 @@ e2e/php/
 `libphp` is not in upstream's `php` docker images (they are built without
 `--enable-embed`), so the runtime comes from **Debian trixie's
 `libphp8.4-embed` 8.4.27**, exactly what a host installs with
-`apt install libphp-embed` (`docs/frameworks/php.md` §1). The base image is
+`apt install libphp-embed` (`docs/frameworks/php/index.md` § Install the host
+library). The base image is
 pinned by digest (`python:3.14-slim-trixie@sha256:9aaa…`, the CPython the
 prebuilt wheel targets) and the package by version, so the run is reproducible.
 
@@ -71,7 +72,7 @@ Inside an image you already built, the driver is its own entry point — it star
 ```console
 $ docker run --rm -v "$PWD/e2e/php2shell.py:/opt/e2e/php2shell.py:ro" \
     -v "$PWD/e2e/php/probes.md:/opt/e2e/probes.md:ro" \
-    -v "$PWD/docs/frameworks/php.md:/opt/e2e/php.md:ro" blastit-e2e-php \
+    -v "$PWD/docs/frameworks/php/index.md:/opt/e2e/php.md:ro" blastit-e2e-php \
     python /opt/e2e/php2shell.py --fixture /fixture --site /tmp/site \
     --page /opt/e2e/php.md --matrix /opt/e2e/probes.md
 ```
@@ -87,6 +88,6 @@ and that the same check asserts, is that the manifest directory is not writable
 by the route's uid (`ADR-0010` §2): `chmod`/`O_CREAT`/`unlink` all answer
 `EPERM`/`EACCES`.
 
-The three commands on `docs/frameworks/php.md`: one is executed verbatim
-(`blastit dev --learn`) and two are explained (a published-wheel install and a
-production preset owned by `e2e/rootless`).
+The two commands on `docs/frameworks/php/index.md` are both executed verbatim in
+the container: `blastit dev --learn` (the learn pass the page presents) and
+`blastit fmt --check` (the gate the page calls the only CI proof in 0.2.0).

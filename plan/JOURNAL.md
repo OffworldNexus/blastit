@@ -2570,3 +2570,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T06:03 [MB.22.2] (lead) committed 7c2e9ca; docs/decisions/README.md row left uncommitted (ADR-0014/0015 rows from MB.23 are untracked) and will be staged at the MB.22 epic gate
 - 2026-11-17T06:03 [MB.22.4] (lead) status review -> done
 - 2026-11-17T06:03 [MB.22.4] (lead) make check: only docs/reference/cli.md fence 1 (dev-flags) fails, on MB.23.1's --no-reload page before MB.23 lands the flag; every other target green
+- 2026-11-17T06:03 [MB.22.4] (lead) grammar rev pin target = 053b56e (this commit); commit body's last sentence meant: no root Cargo.toml/Cargo.lock change
+- 2026-11-17T06:03 [MB.22.3] (lead) status ready -> active
+- 2026-11-17T06:03 [MB.22.3] (lead) attempt 1/3 started
+- 2026-11-17T06:03 [MB.22.3] (lead) base 053b56e
+- 2026-11-17T06:05 [MB.24.2] (lead) status active -> review
+- 2026-11-17T06:08 [MB.21.7] (planner) created (task) Repoint the e2e harness at the moved PHP page and replay its two commands
+- 2026-11-17T06:08 [MB.21.8] (planner) created (task) A queued request must never be handed to a retired PHP view (502 view_died under 8-way concurrency)
+- 2026-11-17T06:09 [MB.21.8] (planner) edited fields
+- 2026-11-17T06:09 [MB.21.7] (planner) status ready -> active
+- 2026-11-17T06:09 [MB.21.7] (planner) base 053b56e1770f81a5856e17a0b8b68004d9e67069

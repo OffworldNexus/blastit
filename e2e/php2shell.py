@@ -4,7 +4,7 @@
     php2shell.py --fixture /fixture --site /site --page /opt/e2e/php.md \
         --matrix /opt/e2e/probes.md
 
-`docs/frameworks/php.md` is the page of record and `e2e/php/probes.md` is the
+`docs/frameworks/php/index.md` is the page of record and `e2e/php/probes.md` is the
 refusal matrix of record (a verbatim copy of the accepted §4.7 table, kept
 because the design corpus it lived in was deleted with `ADR-0010`). This driver
 is what turns both into evidence on the runtime a host actually installs.
@@ -72,12 +72,12 @@ from pathlib import Path
 from typing import Self
 
 ROOT = Path(__file__).resolve().parents[1]
-PAGE = ROOT / "docs" / "frameworks" / "php.md"
+PAGE = ROOT / "docs" / "frameworks" / "php" / "index.md"
 MATRIX = ROOT / "e2e" / "php" / "probes.md"
 FIXTURE = ROOT / "e2e" / "php" / "fixture"
 
 PORT = 8080
-#: The hashed stylesheet `docs/frameworks/php.md` §2 promises the static
+#: The hashed stylesheet `docs/frameworks/php/index.md` promises the static
 #: responder answers for a file under `public/`.
 ASSET = "/assets/app.4f1c2a9b7d3e.css"
 ASSET_NAME = ASSET.rsplit("/", 1)[-1]
@@ -159,6 +159,8 @@ def command_kind(command: str) -> str | None:
         return "install"
     if command in ("blastit dev --learn", "uv run blastit dev --learn"):
         return "dev-learn"
+    if command in ("blastit fmt --check", "uv run blastit fmt --check"):
+        return "fmt-check"
     if command in SKIPS:
         return "skip"
     return None
@@ -1052,6 +1054,34 @@ def check_check(checks: Checks, site: Path) -> None:
     )
 
 
+def check_fmt(checks: Checks, site: Path) -> None:
+    """The page's §What CI can prove: `blastit fmt --check` passes on the fixture.
+
+    The page calls this gate the only CI proof in 0.2.0, so the leg runs it on
+    the manifest the probes served from rather than trusting the prose. The
+    file is read before and after because `--check` promises to name a file,
+    never rewrite one.
+    """
+    before = (site / "Blastfile").read_bytes()
+    completed = subprocess.run(
+        ["blastit", "fmt", "--check"],
+        cwd=site,
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    output = (completed.stdout + completed.stderr).strip()
+    checks.that(
+        completed.returncode == 0,
+        f"`blastit fmt --check` accepts the page's fixture ({completed.returncode}: {output[:200]!r})",
+    )
+    checks.that(
+        (site / "Blastfile").read_bytes() == before,
+        "and `--check` changed nothing (it names a file, never rewrites one)",
+    )
+
+
 def replay(checks: Checks, page: str, matrix: str, site: Path) -> None:
     commands = console_commands(page)
     checks.that(
@@ -1065,6 +1095,11 @@ def replay(checks: Checks, page: str, matrix: str, site: Path) -> None:
     for command, _ in commands:
         if command_kind(command) == "skip":
             print(f"SKIP: {command} ({SKIPS[command]})", flush=True)
+
+    # Before `--learn`: the gate is about the file as committed, and the page
+    # presents `fmt --check` as the CI proof a clean tree passes.
+    if any(command_kind(command) == "fmt-check" for command, _ in commands):
+        check_fmt(checks, site)
 
     rows = matrix_rows(matrix)
     checks.that(
@@ -1172,13 +1207,12 @@ def self_test(page: Path, matrix: Path) -> int:
         f"every `$ ` command on the page is replayed or explained ({kinds})",
     )
     checks.that(
-        kinds.count("install") == 1, "the page still shows `uv tool install blastit`"
+        kinds == ["dev-learn", "fmt-check"],
+        f"the page's console commands are the two this leg replays ({kinds})",
     )
     checks.that(
-        kinds.count("dev-learn") == 1, "the page still shows `blastit dev --learn`"
-    )
-    checks.that(
-        kinds.count("skip") == 1, "the page still shows the deploy preset command"
+        "unknown-linux" in text and "PyPI wheel ships none" in text,
+        "the page still says where the binary comes from: a release tarball, not the wheel",
     )
     checks.that(
         "blastit check" in text and "pytest" in text,
@@ -1251,7 +1285,7 @@ def main() -> int:
         print(f"FAIL: {len(checks.failed)} of {total} promises failed", flush=True)
         return 1
     print(
-        f"PASS: the php2shell matrix and docs/frameworks/php.md replayed against a "
+        f"PASS: the php2shell matrix and docs/frameworks/php/index.md replayed against a "
         f"real blastit dev ({total} checks)",
         flush=True,
     )

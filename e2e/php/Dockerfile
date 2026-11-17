@@ -11,7 +11,7 @@
 # `php` docker-library images are built without `--enable-embed` and carry no
 # `libphp.so` at all (`docs/research/php-embed-sapi.md` §4) — so the runtime is
 # the package a host installs with `apt install libphp-embed`
-# (`docs/frameworks/php.md` §1), version-pinned with the base.
+# (`docs/frameworks/php/index.md`), version-pinned with the base.
 #
 # # What this suite claims, and what it does not
 #

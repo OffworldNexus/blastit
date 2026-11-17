@@ -1,4 +1,4 @@
-# The PHP page's fixture (`docs/frameworks/php.md` §1), with a second view so
+# The PHP page's fixture (`docs/frameworks/php/index.md`), with a second view so
 # the e2e can prove the first match wins and that a path no file answers is the
 # front controller's.
 #

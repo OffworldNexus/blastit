@@ -125,7 +125,7 @@ def php_self_test():
 
 
 def php_checks():
-    """Replay the `php2shell` matrix and `docs/frameworks/php.md` in the `php` leg.
+    """Replay the `php2shell` matrix and `docs/frameworks/php/index.md` in the `php` leg.
 
     The driver runs in that container and starts `blastit dev` itself: the
     page's commands say `127.0.0.1:8080`, which is verbatim inside the
