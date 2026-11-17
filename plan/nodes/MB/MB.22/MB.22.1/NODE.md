@@ -2,10 +2,10 @@
 id: MB.22.1
 title: "Write the editor setup and blastit lsp DX docs (Zed extension, diagnostics, format-on-save) with dx + ai-ergonomics critics"
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
-depends_on: [MB.21]
+depends_on: [MB.20]
 paths:
   - docs/local.md
   - docs/editors.md
@@ -14,11 +14,12 @@ paths:
   - python/tests/runnable_docs/inventory.toml
   - "docs/design/blastfile-editor.review-dx.md"
   - "docs/design/blastfile-editor.review-ai-ergonomics.md"
-attempts: 0
+  - "crates/blastit-manifest/tests/docs_fences.rs"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:16"
-updated: "2026-11-16T09:16"
+updated: "2026-11-17T05:09"
 ---
 
 # Goal

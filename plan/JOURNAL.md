@@ -2492,3 +2492,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T04:59 [MB.21.5.3] (lead) attempt 3/3 started
 - 2026-11-17T04:59 [MB.21.5.3] (lead) status review -> review
 - 2026-11-17T05:00 [MB.21.5.3] (lead) status review -> done
+- 2026-11-17T05:01 [MB.21] (lead) 5.1-5.4 done and committed (809143d, 6bfd1cc, 6d2bd41, 06874ae). Post-0.2.0 follow-ups filed and prioritised: 5.6, 5.8-5.14. Pre-gate: 5.5 (purity gate nested-u
+- 2026-11-17T05:04 [MB.22.1] (lead) reviewer PASS; 7 MINOR: 3 text fixes dispatched, .zed/settings.json + editors/ existence become MB.22.4 obligations
+- 2026-11-17T05:04 [MB.22.2] (lead) status ready -> active
+- 2026-11-17T05:04 [MB.22.2] (lead) attempt 1/3 started
+- 2026-11-17T05:04 [MB.22.2] (lead) base 7062ded22d6eb68ab74e764d719112894eaf6360
+- 2026-11-17T05:06 [MB.22.1] (doc-writer) Final polish: cli.md diagnostic prefix scoped to the Blastfile: prefix (position-less refusals are one sentence), formatting links reference/blastfile.md#format
+- 2026-11-17T05:09 [MB.22.1] (lead) status review -> done

@@ -4,6 +4,7 @@
 |---|---|
 | `blastit dev` | your machine, no root |
 | `blastit check` | CI (`blastit test` is an alias) |
+| `blastit lsp` | your editor |
 | `blastit` | production |
 | `blastit-manifest fold` | grants from a log |
 
@@ -62,6 +63,21 @@ failed (`pytest` exit `5`, no tests collected, is `3`). An all-static file
 stops at `0` or `2`, with nothing run. [What it checks](../ci.md#what-it-fails-on)
 and [the `--json` contract](../ci.md#for-agents-json) are on the CI page.
 `blastit test` is the same command under its other name.
+
+## `blastit lsp`
+
+An editor spawns it; you never run it by hand. Start it with no arguments —
+`blastit lsp`, or `uv run blastit lsp` when the CLI is not installed (that needs
+`uv add blastit`) — and register the extensionless file name `Blastfile` for the
+buffers it serves. It speaks the Language Server Protocol on stdin/stdout: the
+editor sends each document, so it reads no `./Blastfile`, no config and no network,
+and needs no privileges. Logs go to stderr, so stdout stays the protocol. An error
+carries the sentence `blastit check` prints after the `Blastfile:` prefix, and a
+refusal with no position is already one sentence; grants, queries and coverage stay
+with [`blastit check`](#blastit-check). Formatting rewrites the file to the
+[canonical layout](blastfile.md#formatting). It exits `0` after the client's
+`shutdown`, and `1` only if the client disappears without one — never because a
+document is broken.
 
 ## `blastit`
 

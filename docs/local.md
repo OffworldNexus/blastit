@@ -137,6 +137,27 @@ from a statement nobody listed. Two answers:
 Do not reach for `unrestricted` first: it gives away every statement on that
 store, including the ones reading password hashes.
 
+## Editors
+
+1. Zed ≥ 0.205: `zed: extensions`, install **Blastfile**. Not listed yet: from a
+   Blastit checkout, `zed: install dev extension` on `editors/zed` — building the
+   extension there is the only step here that needs `cargo`.
+2. Open `./Blastfile`: colours, bracket matching, an outline, and a squiggle for each
+   syntax error, in the words `blastit check` prints, at the same line and column.
+   The extension starts `blastit lsp` itself, from `PATH` or through `uv run`.
+3. Merge this into `.zed/settings.json` to turn format-on-save on: Zed's default is
+   `off` and an extension cannot set it. Blastit's repo commits that file; save a
+   mis-indented line and it snaps back.
+
+```json
+{ "languages": { "Blastfile": { "format_on_save": "on" } } }
+```
+
+Another editor registers the extensionless `Blastfile` and starts
+[`blastit lsp`](reference/cli.md#blastit-lsp) on stdin/stdout — using it needs
+no `npm`, Tree-sitter CLI, `cargo` or `wasi-sdk`. CI checks the file with
+`blastit check`, and production never runs `blastit lsp`.
+
 ## Before you deploy
 
 Production refuses to start on one uid. To exercise the real uid and capability
