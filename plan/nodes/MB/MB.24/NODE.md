@@ -2,7 +2,7 @@
 id: MB.24
 title: "Parallel PHP workers: several view processes per route under the scheduler's max_workers (matching Python's on-demand threads)"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.21.5.2]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:23"
-updated: "2026-11-17T01:23"
+updated: "2026-11-17T10:18"
 ---
 
 # Goal

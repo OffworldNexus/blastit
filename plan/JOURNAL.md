@@ -2731,3 +2731,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T09:47 [MB.26.8] (lead) status active -> review
 - 2026-11-17T10:11 [MB.26.8] (lead) make check on the polished tree: only the known docs/reference/cli.md fence 1 (--no-reload, MB.23.5); 169 test targets ok. Committing.
 - 2026-11-17T10:11 [MB.26.8] (lead) status review -> done
+- 2026-11-17T10:18 [MB.24] (lead) gate passed: all four children done; plan validate OK; blastit-scheduler + critical_parallel_views green; make check exit 2 only on the MB.23.5-owned --no-reloa
+- 2026-11-17T10:18 [MB.24] (lead) status ready -> done
