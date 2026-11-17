@@ -2,7 +2,7 @@
 id: MB.31
 title: "One pattern grammar for static immutable: bare immutable, view-syntax patterns and regex '...' (kill the six-glob staircase)"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.25.2]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:33"
-updated: "2026-11-17T12:33"
+updated: "2026-11-18T00:37"
 ---
 
 # Goal

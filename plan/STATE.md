@@ -17,10 +17,10 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.31 One pattern grammar for static immutable: bare immutable, view-syntax patterns and regex '...' (kill the six-glob staircase)
 - execute: MB.6 Static files beside a Python/PHP app + the hashed-asset caching contract
 - execute: MB.11 Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 - execute: MB.13 Rewrite the deployments index page for scannability
+- execute: MB.34.1 Document SQL template validation, the exact squiggle, the Parameterize Quick Fix and $?/... hover on the reference, local, CI and troubleshooting pages
 - execute: MB.3.5.2 Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]
 - execute: MB.3.15 Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
 - execute: MB.3.22 Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field
@@ -36,8 +36,6 @@
 
 ## Recent journal
 
-- 2026-11-17T23:39 [MB.31.3] (lead) attempt 1/3 started
-- 2026-11-17T23:39 [MB.31.3] (lead) edited fields
 - 2026-11-17T23:39 [MB.31.3] (lead) base 942cb16; model.rs added to paths for the StaticPattern PartialEq spelling fix
 - 2026-11-18T00:06 [MB.31.3] (lead) done: ImmutableGlob/glob/MAX_IMMUTABLE_PATTERN_BYTES deleted, cache_control == StaticImmutable::matches (one matcher, no per-request compile), StaticPattern Par
 - 2026-11-18T00:06 [MB.31.3] (lead) status active -> review
@@ -51,3 +49,5 @@
 - 2026-11-18T00:30 [MB.31.4] (lead) status active -> review
 - 2026-11-18T00:37 [MB.31.4] (lead) reviewer VERDICT PASS (3 MINOR, none blocking): the design doc's R5 sentence should be past tense, the NODE Goal should name the design-doc amendment, and zed-c
 - 2026-11-18T00:37 [MB.31.4] (lead) status review -> done
+- 2026-11-18T00:37 [MB.31] (lead) gate passed: 31.1 docs (dx+ai-ergonomics accept), 31.2 lowering through pattern.rs with the 32-cap at the 33rd node and Spelling so a regex is never read as a g
+- 2026-11-18T00:37 [MB.31] (lead) status ready -> done

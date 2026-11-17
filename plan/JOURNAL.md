@@ -3060,3 +3060,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T00:30 [MB.31.4] (lead) status active -> review
 - 2026-11-18T00:37 [MB.31.4] (lead) reviewer VERDICT PASS (3 MINOR, none blocking): the design doc's R5 sentence should be past tense, the NODE Goal should name the design-doc amendment, and zed-c
 - 2026-11-18T00:37 [MB.31.4] (lead) status review -> done
+- 2026-11-18T00:37 [MB.31] (lead) gate passed: 31.1 docs (dx+ai-ergonomics accept), 31.2 lowering through pattern.rs with the 32-cap at the 33rd node and Spelling so a regex is never read as a g
+- 2026-11-18T00:37 [MB.31] (lead) status ready -> done
