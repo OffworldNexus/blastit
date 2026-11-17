@@ -2,7 +2,7 @@
 id: MB.21.5.11
 title: "Pin the named-store grant guard (coverage; a regression would accept a typo'd grant)"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 4
 depends_on: []
@@ -14,7 +14,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:13"
-updated: "2026-11-17T04:54"
+updated: "2026-11-17T05:32"
 ---
 
 # Goal

@@ -2116,6 +2116,38 @@ mod tests {
                 "postgres unrestricted\n",
                 "1:10: `unrestricted` is a grant keyword, not a store name; write `postgres unrestricted` for the default store",
             ),
+            // §6.1 `grant_body`: after a store name only `unrestricted` or a
+            // grant block follows, so a second bare word is refused at that
+            // word. The shipped parser always refused it; this row exists so
+            // the `parser.rs:1270:36` mutant (guard -> `true`, which lowered
+            // `postgres db bogus` to an empty grant) is caught (`MB.21.5.11`).
+            (
+                "view v {\n  postgres db bogus\n}\n",
+                "2:15: expected `unrestricted` or `{`, found `bogus`",
+            ),
+            (
+                "view v {\n  postgres db select\n}\n",
+                "2:15: expected `unrestricted` or `{`, found `select`",
+            ),
+            // The same shape in a trait, where a grant is not per view.
+            (
+                "trait t {\n  postgres db bogus\n}\n",
+                "2:15: expected `unrestricted` or `{`, found `bogus`",
+            ),
+            // A stray word after a grant list, and after `transactions`, ends
+            // the statement at that word instead of being dropped.
+            (
+                "view v {\n  postgres {\n    select products bogus\n  }\n}\n",
+                "3:21: expected a newline, `;` or `}`, found `bogus`",
+            ),
+            (
+                "view v {\n  postgres {\n    transactions bogus\n  }\n}\n",
+                "3:18: expected a newline, `;` or `}`, found `bogus`",
+            ),
+            (
+                "trait t {\n  postgres {\n    select t(id) bogus\n  }\n}\n",
+                "3:18: expected a newline, `;` or `}`, found `bogus`",
+            ),
             (
                 "view v {\n  GET regex \"x\"\n}\n",
                 "2:13: `regex` takes a raw string: write `regex '/v[0-9]+/items'`",

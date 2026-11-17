@@ -2516,3 +2516,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T05:21 [MB.21] (lead) EXTERNAL BLOCKER for the epic gate: uncommitted MB.23.1 docs (docs/reference/cli.md:20,28 and docs/local.md:19,32) document 'blastit dev --no-reload' while crat
 - 2026-11-17T05:24 [MB.21.5.7] (lead) accepted on its own acceptance (33 crate suites ok, docs-unit 107, anti-vacuity by deletion, critical_guard authorized for its own file). Its full make check ro
 - 2026-11-17T05:24 [MB.21.5.7] (lead) status review -> done
+- 2026-11-17T05:26 [MB.23.1] (lead) edited fields
+- 2026-11-17T05:26 [MB.23.1] (lead) lead: widened paths to docs/blastfile.md + docs/frameworks/python/index.md — both still say 'read once / restart after an edit', contradicting the shipped reloa
+- 2026-11-17T05:26 [MB.21.5.5] (lead) attempt 2/3 started
+- 2026-11-17T05:26 [MB.21.5.5] (lead) status review -> review
+- 2026-11-17T05:27 [MB.23.1] (lead) status active -> review
+- 2026-11-17T05:27 [MB.23.1] (lead) STATUS done from doc-writer (attempt 1) + widened-scope sweep: both critics PASS, 0 BLOCKER/MAJOR; stale 'read once' removed from blastfile.md and frameworks/py
+- 2026-11-17T05:27 [MB.23.2] (lead) edited fields
+- 2026-11-17T05:27 [MB.23.2] (lead) status ready -> active
+- 2026-11-17T05:27 [MB.23.2] (lead) attempt 1/3 started
+- 2026-11-17T05:27 [MB.23.2] (lead) base 9c56183; lead dispatch designer. Paths widened with docs/decisions/README.md + docs/design/README.md for the index rows (MB.22.2 owns decisions/README.md a
+- 2026-11-17T05:28 [MB.22.2] (designer) design + ADR-0013 drafted; four lenses reviewed twice (3 BLOCKER, 2 BLOCKER and 9/18 MAJOR classes resolved: capability drop, uv --no-sync, sites.rs instead of 
+- 2026-11-17T05:29 HUMAN H-014 opened by designer
+- 2026-11-17T05:31 [MB.21.5.11] (lead) status active -> review
+- 2026-11-17T05:32 [MB.21.5.5] (lead) edited fields
+- 2026-11-17T05:32 [MB.21.5.5] (lead) attempt 3/4 started
+- 2026-11-17T05:32 [MB.21.5.5] (lead) round 4: reviewer found a glob bypass (use std::*; use env as e) and a cross-file pub-use re-export bypass. Three rounds each found a NEW class, so enumeration 
+- 2026-11-17T05:32 [MB.21.5.11] (lead) status review -> done

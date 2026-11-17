@@ -38,6 +38,24 @@ fn depth_two_is_the_limit() {
     );
 }
 
+/// §6.1's legal continuations after a store name still parse — the unnamed
+/// store, `unrestricted`, a named grant block, a trait's block, and the
+/// one-line store — so the second-bare-word refusal is the only hole closed
+/// (`MB.21.5.11`).
+#[test]
+fn every_legal_store_and_grant_form_parses() {
+    for source in [
+        "postgres $DATABASE_URL\n\nview v \"/v\" {\n  postgres db { transactions; query 'SELECT 1'; select t(id) }\n}\n",
+        "postgres $DATABASE_URL\n\nview v \"/v\" {\n  postgres { transactions; query 'SELECT 1'; select t(id) }\n}\n",
+        "postgres $DATABASE_URL\n\nview v \"/v\" {\n  postgres unrestricted\n}\n",
+        "postgres $DATABASE_URL\n\nview v \"/v\" {\n  postgres db unrestricted\n}\n",
+        "postgres $DATABASE_URL\n\ntrait t {\n  postgres {\n    transactions\n    select t(id)\n  }\n}\n\nview v \"/v\" {\n  use t\n}\n",
+        "postgres analytics $ANALYTICS_URL\n\nview v \"/v\" {\n  postgres analytics unrestricted\n}\n",
+    ] {
+        assert!(Manifest::from_blastfile_str(source).is_ok(), "{source:?}");
+    }
+}
+
 /// A wall of braces is refused at the first token that cannot start a section,
 /// without recursion (`R4`).
 #[test]
@@ -212,6 +230,16 @@ fn the_refusal_matrix() {
         (
             "postgres unrestricted\n",
             "1:10: `unrestricted` is a grant keyword, not a store name; write `postgres unrestricted` for the default store",
+        ),
+        // §6.1 `grant_body`: a second bare word after a named store is a
+        // refusal at that word, not an empty grant (`MB.21.5.11`).
+        (
+            "view v {\n  postgres db bogus\n}\n",
+            "2:15: expected `unrestricted` or `{`, found `bogus`",
+        ),
+        (
+            "view v {\n  postgres db select\n}\n",
+            "2:15: expected `unrestricted` or `{`, found `select`",
         ),
         (
             "view v {\n  body = \"json\"\n}\n",

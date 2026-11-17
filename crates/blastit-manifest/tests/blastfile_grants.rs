@@ -49,6 +49,16 @@ fn refusal(body: &str) -> String {
         .unwrap_or_else(|| "no error".to_owned())
 }
 
+/// The first refusal of a whole `source`, rendered as the user sees it.
+fn document_refusal(source: &str) -> String {
+    let errors = Manifest::parse_blastfile(source, 20_000).expect_err("the document is refused");
+    errors
+        .errors()
+        .first()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "no error".to_owned())
+}
+
 /// `transactions` turns transaction control on, and nothing else.
 #[test]
 fn transactions_is_transaction_control() {
@@ -286,6 +296,80 @@ fn unrestricted_takes_no_block() {
         Manifest::from_blastfile_str(&document("postgres unrestricted { select products }"))
             .is_err()
     );
+}
+
+/// §6.1 `grant_body`: after a named store only `unrestricted` or a grant block
+/// follows, so a second bare word is refused at that word. The mutant that
+/// erased the guard accepted it and lowered an empty grant, so a typo booted
+/// with a dead grant (`MB.21.5.11`).
+#[test]
+fn a_second_bare_word_after_a_store_name_is_refused() {
+    for (body, word) in [
+        ("postgres db bogus", "bogus"),
+        // A near miss for the one grant keyword is still not it.
+        ("postgres db unlimited", "unlimited"),
+        // A next grant's keyword is still not a continuation of this grant.
+        ("postgres db select", "select"),
+    ] {
+        assert_eq!(
+            refusal(body),
+            format!("4:13: expected `unrestricted` or `{{`, found `{word}`")
+        );
+    }
+    // A named grant with no body at all is refused at the end of the line.
+    assert_eq!(
+        refusal("postgres bogus"),
+        "4:15: expected `unrestricted` or `{`, found a newline"
+    );
+}
+
+/// A stray word after a grant list, after `transactions`, after a `query`, and
+/// inside a trait's block is refused at that word instead of being dropped
+/// (`MB.21.5.11`).
+#[test]
+fn a_stray_word_inside_a_grant_block_is_refused() {
+    for (body, at) in [
+        ("postgres { transactions bogus }", "4:25"),
+        ("postgres { query 'SELECT 1' bogus }", "4:29"),
+        ("postgres db { select products bogus }", "4:31"),
+    ] {
+        assert_eq!(
+            refusal(body),
+            format!("{at}: expected a newline, `;` or `}}`, found `bogus`")
+        );
+    }
+    assert_eq!(
+        document_refusal("trait t {\n  postgres {\n    select t(id) bogus\n  }\n}\n"),
+        "3:18: expected a newline, `;` or `}`, found `bogus`"
+    );
+}
+
+/// The refusal above is the only hole closed: every legal continuation after a
+/// store name still parses and lowers — a named grant block, the unnamed store,
+/// `unrestricted`, the one-line store, and a trait's block (`MB.21.5.11`).
+#[test]
+fn a_named_store_grant_keeps_its_legal_forms() {
+    let named = grant("postgres db { transactions; query 'SELECT 1'; select t(id) }");
+    assert!(named.transaction_control());
+    assert_eq!(named.queries(), ["SELECT 1"]);
+    assert!(named.tables().tables().contains_key("t"));
+
+    let unnamed = grant("postgres { transactions }");
+    assert!(unnamed.transaction_control());
+
+    let unrestricted = grant("postgres unrestricted");
+    assert!(unrestricted.is_unrestricted());
+
+    let document = "postgres $DATABASE_URL\n\ntrait t {\n  postgres {\n    transactions\n  }\n}\n\n\
+                    view v \"/v\" {\n  use t\n}\n";
+    let manifest = Manifest::from_blastfile_str(document).expect("a trait's grant lowers");
+    let group = manifest.group("t").expect("the trait");
+    let grant = group
+        .grant(&ProxyName::from(STORE))
+        .expect("the trait's grant")
+        .as_postgresql()
+        .expect("a postgresql grant");
+    assert!(grant.transaction_control());
 }
 
 /// The grant survives `effective_grants` unchanged: one proxy, one grant.
