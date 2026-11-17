@@ -2,7 +2,7 @@
 id: MB.22.5
 title: "Pin the grammar rev, guard editors/**, and prove blastit lsp live in the standalone and console-script paths"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.22.3, MB.22.4]
@@ -12,11 +12,11 @@ paths:
   - scripts/test_check_zed_extension.py
   - Makefile
   - python/tests/critical/test_lsp_stdio.py
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:16"
-updated: "2026-11-16T09:16"
+updated: "2026-11-17T07:02"
 ---
 
 # Goal
@@ -42,7 +42,8 @@ and prove `blastit lsp` end to end from both distribution paths.
    `languages = ["Blastfile"]` and `language_ids` mapping; `config.toml` name/grammar/
    `path_suffixes` exact; `parser.c`/`tree_sitter/parser.h`/`grammar.json`/
    `node-types.json` present and `tree_sitter_blastfile` exported; every `@capture` in the
-   45-theme allowlist (the `@variable.special @variable` pair is the one dotted exception);
+   fifteen-name allowlist the design pins (the `@variable.special @variable` pair is the one
+   dotted exception);
    `outline.scm` has `@item` + `@name`, `indents.scm` `@indent`, `brackets.scm`
    `@open`/`@close`; empty `[workspace]` and `crate-type = ["cdylib"]`; `LICENSE` resolves
    inside the extension dir; no committed `extension.wasm`, `target/` or `grammars/`.
@@ -59,7 +60,9 @@ and prove `blastit lsp` end to end from both distribution paths.
    set, the same test runs that command instead (a shell-split string), so one protected
    suite proves the standalone binary and the console-script route. This protects the route
    Zed uses when `blastit` is installed through `uv`.
-6. **Guard and docs.** `tools/guard.py` passes on every committed path under `editors/**`;
+6. **Guard and docs.** `scripts/check_zed_extension.py` (`make zed-check`) is what keeps
+   `editors/**` honest, and `tools/guard.py` still passes on the tree — it checks
+   big/stray/binary files, not the extension's shape;
    `make docs-unit`, `make docs-check` and the exact `python/tests/test_docs_assets.py`
    command stay green; the documented `.zed/settings.json` line parses.
 

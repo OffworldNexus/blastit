@@ -2652,3 +2652,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T06:39 [MB.22.3] (lead) paths widened to crates/blastit/src/lsp/** so the 940-line lsp.rs can split its hover data out (§1's 750-line bound)
 - 2026-11-17T06:43 [MB.22.3] (implementer) minor round: removed the masking empty-body frames (over-cap and junk-header firings now each read their own -32700); Session::drain_stdout + empty-after-exit a
 - 2026-11-17T06:43 [MB.22.3] (lead) status review -> done
+- 2026-11-17T06:43 [MB.22.3] (lead) committed 7f0b1b6
+- 2026-11-17T06:43 [MB.22.5] (lead) status ready -> active
+- 2026-11-17T06:43 [MB.22.5] (lead) attempt 1/3 started
+- 2026-11-17T06:43 [MB.22.5] (lead) base 7f0b1b6; grammar rev target 053b56e
+- 2026-11-17T06:54 [MB.22.5] (implementer) Pinned the grammar rev to 053b56e, added scripts/check_zed_extension.py + 19 negative self-tests wired as make zed-check (a check: prerequisite), and added the 
+- 2026-11-17T06:54 [MB.22.5] (lead) status active -> review
+- 2026-11-17T07:00 [MB.22.5] (lead) NODE.md item 6 reworded: scripts/check_zed_extension.py is the editors/** guard (design §12.8), guard.py only checks big/stray/binary files
+- 2026-11-17T07:00 [MB.22.5] (lead) NODE.md item 3: 45-theme renamed to the design's fifteen-name allowlist (design §12.8)
+- 2026-11-17T07:02 [MB.22.5] (lead) status review -> done
