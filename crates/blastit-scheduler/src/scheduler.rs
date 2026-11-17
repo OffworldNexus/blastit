@@ -72,9 +72,10 @@
 //! * Spawning is also refused while aggregate usage is above
 //!   `BLASTIT_MEM_HIGH_WATERMARK` unless an evictable view can be retired
 //!   first, so memory pressure never becomes retire-then-respawn thrash. A view
-//!   retired for memory pressure cools its route down for
-//!   [`SchedulerConfig::spawn_backoff`], as does one retired for the cap before
-//!   it ever served anything.
+//!   retired for memory pressure cools its route's growth down for
+//!   [`SchedulerConfig::spawn_backoff`]; no other retirement reason does, so a
+//!   reload or a `max_requests` recycle never freezes a route that has requests
+//!   waiting.
 //! * Two settings exist that §8.2 does not name, because §2.4 asks for the
 //!   behaviour without giving it a variable: [`SchedulerConfig::spawn_backoff`]
 //!   ("don't spin") and the per-peer byte caps in this module.
@@ -125,7 +126,7 @@
 //! scheduler's own answer, a cancellation, or release).
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
@@ -134,7 +135,8 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use blastit_events::{
-    Component, Event, EventKind, Outcome, ProcessCap, ProcessRetired, RequestInfo, RetireReason,
+    Component, Event, EventKind, ManifestWarning, Outcome, ProcessCap, ProcessRetired, RequestInfo,
+    RetireReason,
 };
 use blastit_frame::{
     Ctl, DoneOutcome, Frame, FrameError, INITIAL_WINDOW, Limits, RawFrame, ReqHead, ReqHeadView,
@@ -182,6 +184,13 @@ const CTL_OUTBOUND_CAP: usize = 1024 * 1024;
 /// The `reason` a view is retired with when it breaks flow control, or when
 /// its outbound queue overflows (§8.1's reasons are init's).
 const CREDIT_OVERFLOW: &str = "credit_overflow";
+/// The `reason` a view is retired with when a reload invalidated the code it
+/// runs (`ADR-0014` decision 3, `MB.23.1`'s frozen vocabulary).
+///
+/// It is a [`RetireReason::Other`] rather than a typed variant because
+/// `crates/blastit-events` is another leaf's; it serialises as the string
+/// `reload`, which is the reason `MB.23.1` froze.
+const RELOAD: &str = "reload";
 /// How many finished static reads may wait for the scheduler before a blocking
 /// task waits. At most one read per admission slot can ever be outstanding, so
 /// this is a handful of windows rather than a queue.
@@ -257,13 +266,16 @@ enum CtlIn {
     Failed(SchedulerError),
 }
 
-/// One live view process (or one whose `SPAWNED` has not arrived yet).
+/// One live view process of one route.
+///
+/// A route holds a pool of these ([`ViewSet`]): the pid init reported is the
+/// identity, so two workers of one route are told apart exactly the way a
+/// replaced instance used to be.
+#[derive(Debug)]
 struct View {
     key: ViewKey,
     /// The view sent `READY`; only then may it be dispatched to (§4).
     ready: bool,
-    /// `SPAWN` was sent and `SPAWNED` has not arrived.
-    spawning: bool,
     /// `BLASTIT_VIEW_MAX_REQUESTS` is reached: dispatch nothing more to it.
     stopping: bool,
     /// Request threads currently alive in this process (§2.4: the budget counts
@@ -290,24 +302,31 @@ struct View {
     /// failed. Nothing new is dispatched to an exited view, and
     /// [`Scheduler::expire_exited_views`] bounds the wait.
     exited: Option<Instant>,
+    /// A reload arrived while this worker was busy: nothing new reaches it
+    /// (`View::admits`), and [`Scheduler::retire_finished_views`] retires it
+    /// with this reason as soon as its last request is `DONE` (§4.6).
+    stale: Option<RetireReason>,
+    /// The `reload_epoch` current when this worker's `SPAWN` was sent: one
+    /// whose birth predates the last reload holds the old code and is retired
+    /// before it ever serves (§4.6).
+    spawned_epoch: u64,
 }
 
 impl View {
-    /// A placeholder for a route whose `SPAWN` is in flight.
-    fn spawning(route: usize) -> Self {
-        Self {
-            key: ViewKey { route, pid: 0 },
-            ready: false,
-            spawning: true,
-            stopping: false,
-            inflight: 0,
-            sent: 0,
-            next_request_id: 0,
-            idle_since: None,
-            last_used: 0,
-            out: None,
-            exited: None,
-        }
+    /// Whether this worker may take a request now.
+    ///
+    /// Ready, below its route's per-process ceiling, not stopping, not stale
+    /// (a reload invalidated it), not exited, and with its channel open. It
+    /// borrows nothing from the [`Scheduler`] but the cap, so the selection in
+    /// [`Scheduler::reserve`] can filter over the pool and take one entry
+    /// mutably afterwards.
+    fn admits(&self, per_process_cap: u32) -> bool {
+        self.ready
+            && !self.stopping
+            && self.stale.is_none()
+            && self.exited.is_none()
+            && self.inflight < per_process_cap
+            && self.out.as_ref().is_some_and(Outbound::is_open)
     }
 
     /// The next free request id for this view.
@@ -317,6 +336,40 @@ impl View {
             self.next_request_id = 1;
         }
         self.next_request_id
+    }
+}
+
+/// Every worker of one route: the processes the scheduler dispatches into.
+///
+/// One route owns one of these, and only while it has a worker or a `SPAWN` in
+/// flight ([`Scheduler::forget_if_idle`]). The membership is the whole point of
+/// `ADR-0015`: a route's concurrency is its processes' ceilings, and the pool is
+/// what lets a request-per-process provider serve two requests at once.
+#[derive(Debug, Default)]
+struct ViewSet {
+    /// One entry per worker init reported, by the pid it gave.
+    views: BTreeMap<u32, View>,
+    /// The route's one outstanding `SPAWN`: the [`Scheduler::reload_epoch`] it
+    /// was sent in, and when it stops being believable (§4.3's
+    /// [`Scheduler::expire_spawns`]).
+    spawning: Option<(u64, Instant)>,
+    /// Workers forked but not yet `READY`: they already hold a heap copy, which
+    /// is why growth waits for them before the first memory measurement.
+    pending_ready: u32,
+}
+
+impl ViewSet {
+    /// Workers plus the fork already promised; a `SPAWNED` worker is already in
+    /// `views`, so nothing is counted twice.
+    fn len(&self) -> u32 {
+        u32::try_from(self.views.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(u32::from(self.spawning.is_some()))
+    }
+
+    /// Whether this route holds no worker and owes no fork.
+    fn is_empty(&self) -> bool {
+        self.views.is_empty() && self.spawning.is_none()
     }
 }
 
@@ -779,8 +832,13 @@ struct Scheduler {
     learn_fallback_busy: bool,
     /// Unrouted `--learn` requests waiting for that one slot, oldest first.
     learn_fallback_queue: VecDeque<u32>,
-    /// The live view per route: at most one (§2.4).
-    views: HashMap<usize, View>,
+    /// The live workers of each route: a pool, at most one `SPAWN` in flight
+    /// (`ADR-0015`).
+    pools: HashMap<usize, ViewSet>,
+    /// The reload generation: bumped by every [`Ctl::Reload`], stamped on every
+    /// `SPAWN` and on every worker a `SPAWNED` creates, so a worker born before
+    /// the last reload is retired before it serves (§4.6).
+    reload_epoch: u64,
     /// `(view, request id)` to http stream id: what a frame from a view means.
     dispatch: HashMap<(ViewKey, u32), u32>,
     /// Worker slots in use: dispatched requests whose `DONE` has not arrived.
@@ -869,7 +927,8 @@ impl Scheduler {
             queue,
             learn_fallback_busy: false,
             learn_fallback_queue: VecDeque::new(),
-            views: HashMap::new(),
+            pools: HashMap::new(),
+            reload_epoch: 0,
             dispatch: HashMap::new(),
             slots: 0,
             backoff: HashMap::new(),
@@ -919,7 +978,7 @@ impl Scheduler {
             .filter(|route| self.spawnable(*route))
             .collect();
         for route in wanted {
-            self.try_spawn(route)?;
+            self.grow(route, 1)?;
         }
         Ok(())
     }
@@ -998,13 +1057,19 @@ impl Scheduler {
         }
         // A view init reported gone whose `view.chan` has not closed yet is
         // failed when this elapses (`MB.3.45`).
-        for view in self.views.values() {
-            if let Some(exited) = view.exited {
-                take(exited + self.cfg.request_timeout);
+        for pool in self.pools.values() {
+            if let Some((_, deadline)) = pool.spawning {
+                // A `SPAWN` nobody answers is freed when this elapses (§4.7).
+                take(deadline);
+            }
+            for view in pool.views.values() {
+                if let Some(exited) = view.exited {
+                    take(exited + self.cfg.request_timeout);
+                }
             }
         }
         if !self.cfg.idle_timeout.is_zero() {
-            for view in self.views.values() {
+            for view in self.pools.values().flat_map(|pool| pool.views.values()) {
                 if view.ready
                     && view.inflight == 0
                     && let Some(since) = view.idle_since
@@ -1039,6 +1104,7 @@ impl Scheduler {
     fn pump(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
         self.backoff.retain(|_, until| *until > now);
+        self.expire_spawns();
         self.expire_queue()?;
         self.pump_learn_fallback()?;
         self.dispatch_queued()?;
@@ -1125,10 +1191,7 @@ impl Scheduler {
             ViewIn::Frame { key, id, frame } => (key, id, frame),
         };
         match frame {
-            Frame::Ready => {
-                self.view_ready(key);
-                Ok(())
-            }
+            Frame::Ready => self.view_ready(key),
             Frame::Done { outcome } => self.view_done(key, id, outcome),
             Frame::RespEnd => self.view_end(key, id, None),
             Frame::RespEndCost { cost } => self.view_end(key, id, Some(cost)),
@@ -1160,6 +1223,8 @@ impl Scheduler {
                 self.drain_deadline = Some(Instant::now() + self.cfg.request_timeout);
                 Ok(())
             }
+            // One save, one transaction over every pool (§4.6).
+            Ctl::Reload => self.reload(),
             // The scheduler is the only sender of these.
             other => Err(SchedulerError::protocol(format!(
                 "unexpected {} on ctl.chan",
@@ -1813,8 +1878,11 @@ impl Scheduler {
             );
         };
         if !self.can_dispatch(route) {
-            if !self.views.contains_key(&route) && !self.draining {
-                self.try_spawn(route)?;
+            if !self.has_dispatchable(route) && !self.draining {
+                // Its request waits in `learn_fallback_queue`, not in `queue`,
+                // so `needed_processes` would be 0 and the one fallback slot
+                // would never get a process (§4.3).
+                self.grow(route, 1)?;
             }
             return Ok(());
         }
@@ -2211,28 +2279,169 @@ impl Scheduler {
         self.http_push(stream_id, Frame::Cancel)
     }
 
+    // ------------------------------------------------------------------ pool
+
+    /// The per-process request ceiling in force for `route`: boot data, never a
+    /// runtime question (§4.1).
+    ///
+    /// `None` on the route means `BLASTIT_VIEW_MAX_WORKERS`, and the result is
+    /// clamped into `1..=that` so no route can be configured to admit nothing
+    /// or more than one process may run.
+    fn per_process_cap(&self, route: usize) -> u32 {
+        let ceiling = self.cfg.view_worker_cap().max(1);
+        self.routes
+            .get(route)
+            .and_then(|info| info.per_process_cap)
+            .map_or(ceiling, |cap| cap.clamp(1, ceiling))
+    }
+
+    /// Whether `route` may own more than one process: boot data (`ADR-0015`
+    /// decision 1).
+    fn process_pool(&self, route: usize) -> bool {
+        self.routes.get(route).is_some_and(|info| info.process_pool)
+    }
+
+    /// How many processes `route` may own.
+    ///
+    /// A pooled (request-per-process) route may own as many as the budget, which
+    /// is what the accepted DX promises a route; a threaded route owns exactly
+    /// one, because a second copy of the preloaded heap would buy no concurrency
+    /// its threads do not already give. Never inferred from a value: with
+    /// `BLASTIT_VIEW_MAX_WORKERS=1` a threaded route still owns one process.
+    fn process_limit(&self, route: usize) -> u32 {
+        if self.process_pool(route) {
+            self.cfg.max_workers.max(1)
+        } else {
+            1
+        }
+    }
+
+    /// The processes `route`'s requests need at its per-process ceiling (§4.3).
+    fn needed_processes(&self, route: usize) -> u32 {
+        self.route_requests(route)
+            .div_ceil(self.per_process_cap(route))
+    }
+
+    /// Requests `route` has now: in flight plus waiting in the admission queue.
+    fn route_requests(&self, route: usize) -> u32 {
+        let inflight = self.pools.get(&route).map_or(0u32, |pool| {
+            pool.views
+                .values()
+                .map(|view| view.inflight)
+                .fold(0u32, u32::saturating_add)
+        });
+        inflight.saturating_add(u32::try_from(self.queued_for(route)).unwrap_or(u32::MAX))
+    }
+
+    /// How many requests are waiting in the admission queue for `route`.
+    fn queued_for(&self, route: usize) -> usize {
+        self.queued_for_streams(route).count()
+    }
+
+    /// The admission-queue stream ids routed to `route`.
+    ///
+    /// [`Admission::routes`] is empty for the FIFO queue, so this reads the
+    /// routes off the requests — the same walk [`Scheduler::route_waiting`]
+    /// uses, which is why it works for both queue modes.
+    fn queued_for_streams(&self, route: usize) -> impl Iterator<Item = u32> + '_ {
+        self.queue.ids().into_iter().filter(move |stream_id| {
+            self.requests
+                .get(stream_id)
+                .and_then(|request| request.route)
+                == Some(route)
+        })
+    }
+
+    /// Every route with at least one request in the admission queue, in index
+    /// order and without repeats.
+    fn queued_routes(&self) -> Vec<usize> {
+        let mut routes: Vec<usize> = self
+            .queue
+            .ids()
+            .into_iter()
+            .filter_map(|stream_id| {
+                self.requests
+                    .get(&stream_id)
+                    .and_then(|request| request.route)
+            })
+            .collect();
+        routes.sort_unstable();
+        routes.dedup();
+        routes
+    }
+
+    /// Whether some other route has requests and no process at all (§4.4).
+    ///
+    /// Deliberately narrow: a route that already owns a worker — busy or not —
+    /// can serve from it, so it never holds up another route's growth, or two
+    /// busy routes would freeze each other. A route already being forked or one
+    /// in backoff is excluded too: nothing this route refuses to do would help
+    /// it. `other < route` is the tie-break that keeps two cold routes from
+    /// deferring to each other for ever: within one pump the lowest-indexed cold
+    /// route forks first, which ends every other route's deferral next time.
+    fn other_route_starved(&self, route: usize) -> bool {
+        self.queued_routes().into_iter().any(|other| {
+            other < route
+                && self.pools.get(&other).is_none_or(ViewSet::is_empty)
+                && !self.backoff.contains_key(&other)
+        })
+    }
+
+    /// The live view processes: every worker init reported, plus the fork each
+    /// route has already been promised (§4.4).
+    ///
+    /// The derived cap counts **processes**, not routes: the number exists to
+    /// bound heap copies, and a copy is per process.
+    fn live_processes(&self) -> u32 {
+        self.pools
+            .values()
+            .map(ViewSet::len)
+            .fold(0u32, u32::saturating_add)
+    }
+
+    /// The live worker named by `key`, if the pool still holds it.
+    fn view_mut(&mut self, key: ViewKey) -> Option<&mut View> {
+        self.pools
+            .get_mut(&key.route)?
+            .views
+            .get_mut(&key.pid)
+            .filter(|view| view.key == key)
+    }
+
+    /// Drops a route's pool once it holds neither a worker nor a promise.
+    ///
+    /// That is the invariant [`ViewSet`] states, and the reason a route that
+    /// served nothing keeps no state.
+    fn forget_if_idle(&mut self, route: usize) {
+        if self.pools.get(&route).is_some_and(ViewSet::is_empty) {
+            self.pools.remove(&route);
+        }
+    }
+
+    /// Emits one `manifest.warning` for the scheduler's own bookkeeping.
+    ///
+    /// The sentence names a route index or a fixed reason and never a request,
+    /// a header or a body value.
+    fn emit_warning(&mut self, message: String) {
+        (self.emit)(Event::now(
+            Component::Scheduler,
+            EventKind::ManifestWarning(ManifestWarning::new(message)),
+        ));
+    }
+
     // -------------------------------------------------------------- dispatch
 
     /// Whether a route can take a request right now.
     fn can_dispatch(&self, route: usize) -> bool {
-        if self.slots >= self.cfg.max_workers {
-            return false;
-        }
-        match self.views.get(&route) {
-            Some(view) => {
-                view.ready
-                    && !view.spawning
-                    && !view.stopping
-                    // A process init reported gone cannot take one: its frames
-                    // are still being read, and its close is what frees the
-                    // slot (a new spawn waits for it, so a request is never
-                    // queued against a channel nobody reads).
-                    && view.exited.is_none()
-                    && view.inflight < self.cfg.view_worker_cap()
-                    && view.out.as_ref().map(Outbound::is_open).unwrap_or(false)
-            }
-            None => false,
-        }
+        self.slots < self.cfg.max_workers && self.has_dispatchable(route)
+    }
+
+    /// Whether some worker of `route` admits a request now (§4.2).
+    fn has_dispatchable(&self, route: usize) -> bool {
+        let cap = self.per_process_cap(route);
+        self.pools
+            .get(&route)
+            .is_some_and(|pool| pool.views.values().any(|view| view.admits(cap)))
     }
 
     /// Dispatches every queued request it can, spawning views as needed.
@@ -2282,8 +2491,11 @@ impl Scheduler {
                 self.dispatch(stream_id)?;
                 continue;
             }
-            if !self.views.contains_key(&route) && !self.draining {
-                self.try_spawn(route)?;
+            if !self.has_dispatchable(route) && !self.draining {
+                // The route has requests no worker of it can take: grow it by
+                // what they need (§4.3). A route that is merely busy keeps its
+                // workers and this does nothing.
+                self.grow(route, self.needed_processes(route))?;
             }
         }
         Ok(())
@@ -2322,8 +2534,8 @@ impl Scheduler {
             let mut best: Option<(NextFlow, u32)> = None;
             for route in self.queue.routes() {
                 if !self.can_dispatch(route as usize) {
-                    if !self.views.contains_key(&(route as usize)) && !self.draining {
-                        self.try_spawn(route as usize)?;
+                    if !self.has_dispatchable(route as usize) && !self.draining {
+                        self.grow(route as usize, self.needed_processes(route as usize))?;
                     }
                     continue;
                 }
@@ -2435,20 +2647,26 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Takes a worker slot and a request id for `stream_id`, if its view can
-    /// take one.
+    /// Takes a worker slot and a request id for `stream_id`, from the LRU worker
+    /// of its route that admits one (§4.2).
+    ///
+    /// The least-recently-used admitting worker wins, ties by ascending pid: a
+    /// request never queues behind a busy sibling while an idle one exists, and
+    /// `last_used` stays the scheduler's one notion of recency, shared with
+    /// eviction.
     fn reserve(&mut self, stream_id: u32) -> Option<(ViewKey, u32, Outbound)> {
         let route = self.requests.get(&stream_id)?.route?;
-        let cap = self.cfg.view_worker_cap();
+        let cap = self.per_process_cap(route);
         let last_used = self.lru;
-        let view = self.views.get_mut(&route)?;
-        if !view.ready || view.spawning || view.stopping || view.inflight >= cap {
-            return None;
-        }
+        let pool = self.pools.get_mut(&route)?;
+        let pid = pool
+            .views
+            .values()
+            .filter(|view| view.admits(cap))
+            .min_by_key(|view| (view.last_used, view.key.pid))
+            .map(|view| view.key.pid)?;
+        let view = pool.views.get_mut(&pid)?;
         let out = view.out.clone()?;
-        if !out.is_open() {
-            return None;
-        }
         let id = view.allocate_request_id();
         view.inflight += 1;
         view.sent += 1;
@@ -2461,10 +2679,16 @@ impl Scheduler {
         Some((view.key, id, out))
     }
 
-    /// The queue towards a view, if that view is still the live one.
+    /// The queue towards one worker, if that worker is still the live one of its
+    /// route.
+    ///
+    /// The `key` filter is what keeps a frame from reaching whichever sibling
+    /// shares the route: `(route, pid)` is the only identity a `view.chan` frame
+    /// has.
     fn view_out(&self, key: ViewKey) -> Option<Outbound> {
-        self.views
+        self.pools
             .get(&key.route)
+            .and_then(|pool| pool.views.get(&key.pid))
             .filter(|view| view.key == key)
             .and_then(|view| view.out.clone())
     }
@@ -3136,17 +3360,27 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Retires what is finished: a view over `BLASTIT_VIEW_MAX_REQUESTS` with
-    /// nothing in flight, or one idle for `BLASTIT_VIEW_IDLE_TIMEOUT` (§2.4).
+    /// Retires what is finished: a worker over `BLASTIT_VIEW_MAX_REQUESTS` with
+    /// nothing in flight, one a reload marked stale, or one idle for
+    /// `BLASTIT_VIEW_IDLE_TIMEOUT` (§2.4).
+    ///
+    /// Every rule is per process now, so a burst's extras are the ones that go
+    /// and a route keeps whatever its load needs.
     fn retire_finished_views(&mut self) -> Result<(), SchedulerError> {
         let now = Instant::now();
         let mut victims: Vec<(ViewKey, RetireReason)> = Vec::new();
-        for view in self.views.values() {
+        for view in self.pools.values().flat_map(|pool| pool.views.values()) {
             if !view.ready || view.inflight > 0 {
                 continue;
             }
             if view.stopping {
                 victims.push((view.key, RetireReason::MaxRequests));
+                continue;
+            }
+            if let Some(reason) = view.stale.clone() {
+                // A reload arrived while this worker was busy: its last request
+                // is `DONE`, so it can go now (§4.6).
+                victims.push((view.key, reason));
                 continue;
             }
             if !self.cfg.idle_timeout.is_zero()
@@ -3198,12 +3432,13 @@ impl Scheduler {
     /// The idle view that has gone unused the longest, which is the one memory
     /// pressure retires first (§8 Sizing: "oldest-first").
     ///
-    /// A view with a request in flight is never a candidate, and neither is one
-    /// whose process has not been forked yet.
+    /// A view with a request in flight is never a candidate; every worker of
+    /// every route is, so a burst gives one process back at a time.
     fn oldest_idle_view(&self) -> Option<ViewKey> {
-        self.views
+        self.pools
             .values()
-            .filter(|view| view.ready && !view.spawning && view.key.pid != 0 && view.inflight == 0)
+            .flat_map(|pool| pool.views.values())
+            .filter(|view| view.ready && view.inflight == 0)
             .min_by_key(|view| view.last_used)
             .map(|view| view.key)
     }
@@ -3337,8 +3572,20 @@ impl Scheduler {
     }
 
     /// The views that have sent `READY`, which is how many heap copies exist.
+    ///
+    /// Kept as the denominator of the measurement on purpose: a worker forked
+    /// but not yet `READY` is not counted, so the rise it caused is attributed
+    /// to the next sample and the per-view cost is *over*-estimated — the cap
+    /// lands lower than it could, never higher.
     fn ready_view_count(&self) -> u32 {
-        u32::try_from(self.views.values().filter(|view| view.ready).count()).unwrap_or(u32::MAX)
+        u32::try_from(
+            self.pools
+                .values()
+                .flat_map(|pool| pool.views.values())
+                .filter(|view| view.ready)
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
     }
 
     /// Re-derives §8 Sizing's cap from the measured cost per view, and reports
@@ -3378,30 +3625,59 @@ impl Scheduler {
 
     // ------------------------------------------------------------- lifecycle
 
-    /// Asks init for a view process, respecting the LRU cap and the memory high
-    /// watermark (§2.4, §8 Sizing).
+    /// Forks one more worker for `route` until it has `wanted` processes (§4.3).
     ///
-    /// When the cap is full, or usage is above the watermark, a view has to be
-    /// retired first. Only [`Scheduler::evictable_view`] qualifies for that,
-    /// and with no evictable view the spawn does not happen at all: the request
-    /// that wanted it waits in the admission queue, where
-    /// `BLASTIT_QUEUE_TIMEOUT` bounds the wait, instead of the cap forking and
-    /// killing in a loop.
-    fn try_spawn(&mut self, route: usize) -> Result<(), SchedulerError> {
-        if self.views.contains_key(&route) {
-            return Ok(());
-        }
-        if !self.spawnable(route) {
+    /// Callers: a queued request's route ([`Scheduler::dispatch_queued`],
+    /// `wanted = needed_processes`), or [`Scheduler::start`] for a
+    /// preforked/eager route (`wanted = 1`). One call sends at most one `SPAWN`,
+    /// and every bound below is independent of `slots`: the budget bounds
+    /// requests in flight, and a worker with nothing to do is what `wanted`
+    /// prevents.
+    ///
+    /// * one `SPAWN` in flight per route, because init forks sequentially and
+    ///   buys nothing from a queue of them;
+    /// * until the first real memory measurement, growth waits for
+    ///   `pending_ready == 0`, so the derived cap is re-derived between two
+    ///   forks instead of being priced from the estimate it is known to
+    ///   understate (unless the operator pinned the cap);
+    /// * never more than the requests need, nor more than the route may own,
+    ///   nor more than the backoff, the starving neighbour, the eviction rule
+    ///   and the live-process cap allow.
+    fn grow(&mut self, route: usize, wanted: u32) -> Result<(), SchedulerError> {
+        if self.draining || !self.spawnable(route) {
             // A route the responder answers on its own never gets a view
             // (design §4.6): asking init for one would fork a process no
             // request could ever be dispatched to.
             return Ok(());
         }
-        if let Some(until) = self.backoff.get(&route).copied() {
-            if Instant::now() < until {
-                return Ok(());
-            }
-            self.backoff.remove(&route);
+        let pool = self.pools.get(&route);
+        if pool.is_some_and(|pool| pool.spawning.is_some()) {
+            return Ok(());
+        }
+        if self.measured_view_mem.is_none()
+            && self.cfg.max_view_processes.is_none()
+            && pool.is_some_and(|pool| pool.pending_ready > 0)
+        {
+            // Wait for the sample. With `BLASTIT_MAX_VIEW_PROCESSES` set there
+            // is nothing to measure, so the gate would only serialize forks
+            // for ever.
+            return Ok(());
+        }
+        let owned = pool.map_or(0, ViewSet::len);
+        if owned >= wanted {
+            return Ok(());
+        }
+        if owned >= self.process_limit(route) {
+            return Ok(());
+        }
+        if let Some(until) = self.backoff.get(&route).copied()
+            && Instant::now() < until
+        {
+            // R9: a failed fork cools this route's *growth*, never its siblings.
+            return Ok(());
+        }
+        if self.other_route_starved(route) {
+            return Ok(());
         }
         if !self.make_room(route)? {
             return Ok(());
@@ -3411,17 +3687,63 @@ impl Scheduler {
         // processes that are already live. Then the spawn waits for the next
         // round of shedding rather than adding to the overshoot.
         if let Some(cap) = self.view_cap()
-            && self.views.len() as u32 >= cap
+            && self.live_processes() >= cap
         {
             return Ok(());
         }
-        self.views.insert(route, View::spawning(route));
+        let epoch = self.reload_epoch;
         let route_id = u32::try_from(route).unwrap_or(u32::MAX);
+        // The slot is the deadline `expire_spawns` bounds: a `SPAWN` init never
+        // answers must not hold the route's growth for ever.
+        self.pools.entry(route).or_default().spawning =
+            Some((epoch, Instant::now() + self.cfg.request_timeout));
         if let Err(error) = self.ctl_push(Ctl::Spawn { route: route_id }) {
-            self.views.remove(&route);
+            if let Some(pool) = self.pools.get_mut(&route) {
+                pool.spawning = None;
+            }
             return Err(error);
         }
         Ok(())
+    }
+
+    /// A `SPAWN` that will not be answered: free the slot, cool the route's
+    /// growth, leave every sibling and every queued request alone (§4.7).
+    ///
+    /// Reached from `EXITED { pid: 0 }` (init could not fork) and from
+    /// [`Scheduler::expire_spawns`] (no answer at all). A message for a route
+    /// with nothing outstanding is stale and does nothing.
+    fn spawn_failed(&mut self, route: usize) {
+        let Some(pool) = self.pools.get_mut(&route) else {
+            return;
+        };
+        if pool.spawning.take().is_none() {
+            return;
+        }
+        self.backoff
+            .insert(route, Instant::now() + self.cfg.spawn_backoff);
+        // One `manifest.warning`, naming the route and nothing from any request.
+        self.emit_warning(format!(
+            "route {route}: the view process could not be started"
+        ));
+        self.forget_if_idle(route);
+    }
+
+    /// Frees every spawn slot whose `SPAWN` was never answered (§4.7).
+    ///
+    /// The slot is booked with `request_timeout` when the `SPAWN` is sent, so a
+    /// message that never comes costs the route one backoff instead of holding
+    /// its growth until the process exits.
+    fn expire_spawns(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<usize> = self
+            .pools
+            .iter()
+            .filter(|(_, pool)| pool.spawning.is_some_and(|(_, deadline)| now >= deadline))
+            .map(|(route, _)| *route)
+            .collect();
+        for route in expired {
+            self.spawn_failed(route);
+        }
     }
 
     /// Makes room for a new view process for `route`, or says the spawn has to
@@ -3439,7 +3761,7 @@ impl Scheduler {
     fn make_room(&mut self, route: usize) -> Result<bool, SchedulerError> {
         let cap_full = self
             .view_cap()
-            .is_some_and(|cap| self.views.len() as u32 >= cap);
+            .is_some_and(|cap| self.live_processes() >= cap);
         let over_watermark = self.above_watermark();
         if !cap_full && !over_watermark {
             return Ok(true);
@@ -3464,15 +3786,16 @@ impl Scheduler {
     /// for its first `READY` — is never the victim: choosing one would kill the
     /// answer to a request that is about to be dispatched, and doing that once
     /// per pump is exactly the livelock this predicate exists to stop. The
-    /// least recently used of the candidates wins.
+    /// least recently used of the candidates wins, across every route but the
+    /// asking one: a burst's coldest process goes before a route's only worker
+    /// is ever considered.
     fn evictable_view(&self, route: usize) -> Option<ViewKey> {
-        self.views
+        self.pools
             .values()
+            .flat_map(|pool| pool.views.values())
             .filter(|view| {
                 view.key.route != route
                     && view.ready
-                    && !view.spawning
-                    && view.key.pid != 0
                     && view.inflight == 0
                     && !self.route_waiting(view.key.route)
             })
@@ -3495,13 +3818,19 @@ impl Scheduler {
 
     /// Retires one view process: fail what it owes, ask init to kill it, and
     /// keep its slots until it is gone (§2.4).
+    ///
+    /// A key the pool no longer holds is a no-op: a retired worker's channel
+    /// closes too, and that is not a second retirement. `pending_ready` is
+    /// released here for a worker that never became `READY`, so a pool that
+    /// retires a fork before its `READY` does not keep the route's growth
+    /// waiting for a heap copy that no longer exists (§4.6).
     fn retire(&mut self, key: ViewKey, reason: RetireReason) -> Result<(), SchedulerError> {
-        if self
-            .views
+        let held = self
+            .pools
             .get(&key.route)
-            .map(|view| view.key != key)
-            .unwrap_or(true)
-        {
+            .and_then(|pool| pool.views.get(&key.pid))
+            .is_some_and(|view| view.key == key);
+        if !held {
             return Ok(());
         }
         let affected: Vec<u32> = self
@@ -3513,23 +3842,30 @@ impl Scheduler {
         for stream_id in &affected {
             self.fail_request(*stream_id, Outcome::ViewDied, 502)?;
         }
-        let Some(view) = self.views.remove(&key.route) else {
+        let removed = self
+            .pools
+            .get_mut(&key.route)
+            .and_then(|pool| pool.views.remove(&key.pid));
+        let Some(view) = removed else {
             return Ok(());
         };
+        if !view.ready
+            && let Some(pool) = self.pools.get_mut(&key.route)
+        {
+            pool.pending_ready = pool.pending_ready.saturating_sub(1);
+        }
         // Dropping the queue ends the writer task, which closes the
         // scheduler's end of this view's channel.
         drop(view.out);
         // §2.4/§8 Sizing: a route must not be forked again immediately after a
-        // retirement that was not about its own work. A view retired for the
-        // cap before it ever served anything is a fork that bought nothing, so
-        // its route waits `spawn_backoff` like a route whose spawn failed; one
-        // retired for memory pressure would otherwise be respawned by the very
-        // next request and copy the same heap back, which is the
-        // retire-then-respawn thrash §8 Sizing warns about. Retiring a view
-        // that has served is not rate-limited: that is ordinary LRU work.
-        if matches!(reason, RetireReason::MemoryPressure)
-            || (matches!(reason, RetireReason::LruCap) && view.sent == 0)
-        {
+        // retirement that was not about its own work. A worker retired for
+        // memory pressure would otherwise be respawned by the very next request
+        // and copy the same heap back, which is the retire-then-respawn thrash
+        // §8 Sizing warns about. Retiring a worker that has served, or one a
+        // reload invalidated, is not rate-limited: the first is ordinary LRU
+        // work, and the second is what grows a fresh worker for the requests
+        // already waiting (§4.7).
+        if matches!(reason, RetireReason::MemoryPressure) {
             self.backoff
                 .insert(key.route, Instant::now() + self.cfg.spawn_backoff);
         }
@@ -3540,6 +3876,59 @@ impl Scheduler {
             reason: reason.as_str().to_string(),
         })?;
         self.emit_retired(key, &reason);
+        self.forget_if_idle(key.route);
+        Ok(())
+    }
+
+    /// Kills a pid the pool does not hold.
+    ///
+    /// [`Scheduler::retire`] cannot: it is a no-op for a key with no live
+    /// `View`, and this process must be killed or it keeps its route's uid and
+    /// socket directory. No `process.retired` event is emitted: the decision was
+    /// not about a worker the scheduler owns, and the `Exited` that follows is
+    /// the event.
+    fn retire_unheld(&mut self, key: ViewKey, reason: RetireReason) -> Result<(), SchedulerError> {
+        let live = self
+            .pools
+            .get(&key.route)
+            .and_then(|pool| pool.views.get(&key.pid))
+            .is_some_and(|view| view.key == key);
+        if live {
+            return self.retire(key, reason);
+        }
+        self.ctl_push(Ctl::Retire {
+            route: u32::try_from(key.route).unwrap_or(u32::MAX),
+            pid: key.pid,
+            reason: reason.as_str().to_string(),
+        })
+    }
+
+    /// `RELOAD`: retire every idle (or not-yet-ready) worker of every route,
+    /// mark the busy ones stale, and make each route's in-flight `SPAWN` stale
+    /// by epoch (§4.6).
+    ///
+    /// One transaction over every pool: a save must never leave one worker of a
+    /// route serving the old code beside a fresh one. `admits` already refuses a
+    /// stale worker, so a busy one takes no new request; it retires at `DONE`
+    /// through [`Scheduler::retire_finished_views`]. Nothing here cools a route
+    /// down, so the queued requests stay queued and the next pump's `grow` forks
+    /// a fresh worker for them.
+    fn reload(&mut self) -> Result<(), SchedulerError> {
+        self.reload_epoch = self.reload_epoch.wrapping_add(1);
+        let keys: Vec<(ViewKey, bool)> = self
+            .pools
+            .values()
+            .flat_map(|pool| pool.views.values())
+            .filter(|view| view.stale.is_none())
+            .map(|view| (view.key, view.ready && view.inflight > 0))
+            .collect();
+        for (key, busy) in keys {
+            if !busy {
+                self.retire(key, RetireReason::Other(RELOAD.to_string()))?;
+            } else if let Some(view) = self.view_mut(key) {
+                view.stale = Some(RetireReason::Other(RELOAD.to_string()));
+            }
+        }
         Ok(())
     }
 
@@ -3558,23 +3947,37 @@ impl Scheduler {
                 "SPAWNED arrived without a view.chan descriptor",
             ));
         };
-        let expecting = self
-            .views
-            .get(&route)
-            .map(|view| view.spawning)
-            .unwrap_or(false);
-        if !expecting {
-            // Nothing asked for this process: close our end and have init reap
+        let slot = self
+            .pools
+            .get_mut(&route)
+            .and_then(|pool| pool.spawning.take());
+        let Some((sent_epoch, _deadline)) = slot else {
+            // Nothing waits for this process: close our end and have init reap
             // it, so an unknown view cannot linger holding a uid.
             drop(fd);
             self.dropped += 1;
-            return self.ctl_push(Ctl::Retire {
-                route: u32::try_from(route).unwrap_or(u32::MAX),
-                pid,
-                reason: RetireReason::Other("unexpected_spawn".to_string())
-                    .as_str()
-                    .to_string(),
-            });
+            return self.retire_unheld(
+                ViewKey { route, pid },
+                RetireReason::Other("unexpected_spawn".to_string()),
+            );
+        };
+        let key = ViewKey { route, pid };
+        // A `bool` so the pool borrow ends before the retirement below.
+        let duplicate = self
+            .pools
+            .get(&route)
+            .is_some_and(|pool| pool.views.contains_key(&pid));
+        if duplicate {
+            // The kernel does not hand a live child's pid to a second child, so
+            // the entry the pool holds was already gone and its `Exited` was
+            // lost. Two processes must never share one `ViewKey`: retire the
+            // pid — which kills the *newcomer* that now owns it, and fails the
+            // dead entry's requests, drops its queue and emits its event
+            // through the one path that does all four — then close our end of
+            // the newcomer's channel.
+            self.dropped += 1;
+            drop(fd);
+            return self.retire(key, RetireReason::Other("duplicate_pid".to_string()));
         }
         let std_stream = std::os::unix::net::UnixStream::from(fd);
         std_stream
@@ -3582,7 +3985,6 @@ impl Scheduler {
             .map_err(SchedulerError::io)?;
         let stream = UnixStream::from_std(std_stream).map_err(SchedulerError::io)?;
         let (read, write) = stream.into_split();
-        let key = ViewKey { route, pid };
         let (out, outgoing, pending) = Outbound::new(self.cfg.frame_limits, VIEW_OUTBOUND_CAP);
         let limits = self.cfg.frame_limits;
         tokio::spawn(read_frames(
@@ -3593,27 +3995,61 @@ impl Scheduler {
             move |_| ViewIn::Closed { key },
         ));
         tokio::spawn(write_peer(write, limits, outgoing, pending));
-        if let Some(view) = self.views.get_mut(&route) {
-            view.key = key;
-            view.spawning = false;
-            view.out = Some(out);
+        let pool = self.pools.entry(route).or_default();
+        pool.views.insert(
+            pid,
+            View {
+                key,
+                ready: false,
+                stopping: false,
+                inflight: 0,
+                sent: 0,
+                next_request_id: 0,
+                idle_since: None,
+                last_used: 0,
+                out: Some(out),
+                exited: None,
+                stale: None,
+                spawned_epoch: sent_epoch,
+            },
+        );
+        pool.pending_ready = pool.pending_ready.saturating_add(1);
+        if sent_epoch < self.reload_epoch {
+            // A worker forked for a `SPAWN` sent before the last reload is stale
+            // from birth: retire it now rather than let it serve old code
+            // (§4.6).
+            self.retire(key, RetireReason::Other(RELOAD.to_string()))?;
         }
         Ok(())
     }
 
     /// A view is ready to serve (§4).
-    fn view_ready(&mut self, key: ViewKey) {
+    ///
+    /// A worker whose `SPAWN` predates the last reload holds the old code, so
+    /// it is retired here instead of being made usable (§4.6). Either way this
+    /// is where the worker stops being a `pending_ready` heap copy — the one
+    /// decrement a worker gets, because the removal paths release it only for a
+    /// worker that never became ready.
+    fn view_ready(&mut self, key: ViewKey) -> Result<(), SchedulerError> {
+        let epoch = self.reload_epoch;
+        let birth_stale = self
+            .view_mut(key)
+            .is_some_and(|view| view.spawned_epoch < epoch);
+        if birth_stale {
+            return self.retire(key, RetireReason::Other(RELOAD.to_string()));
+        }
         let mut marked = false;
-        if let Some(view) = self.views.get_mut(&key.route)
-            && view.key == key
-        {
+        if let Some(view) = self.view_mut(key) {
+            let pending = !view.ready;
             view.ready = true;
-            view.spawning = false;
             // A view that has never served anything is idle from now on, so
             // even a preforked process that nobody asked for is retired by
             // `BLASTIT_VIEW_IDLE_TIMEOUT` (§2.4).
             if view.inflight == 0 {
                 view.idle_since = Some(Instant::now());
+            }
+            if pending && let Some(pool) = self.pools.get_mut(&key.route) {
+                pool.pending_ready = pool.pending_ready.saturating_sub(1);
             }
             marked = true;
         }
@@ -3622,6 +4058,7 @@ impl Scheduler {
             // preloaded heap exists in the aggregate reading.
             self.measure_view_memory();
         }
+        Ok(())
     }
 
     /// init reported a view process gone (§4).
@@ -3642,21 +4079,23 @@ impl Scheduler {
     /// A process with no channel to wait for — one retired already, or one
     /// whose `SPAWNED` never arrived — is handled immediately.
     fn view_exited(&mut self, key: ViewKey) {
-        let live = self
-            .views
-            .get(&key.route)
-            .map(|view| view.key == key)
-            .unwrap_or(false);
+        if key.pid == 0 {
+            // No process exists: the `SPAWN` was refused or its fork failed
+            // (§4.7).
+            return self.spawn_failed(key.route);
+        }
+        let live = self.view_mut(key).is_some();
         let channel = live
             && self
-                .views
+                .pools
                 .get(&key.route)
+                .and_then(|pool| pool.views.get(&key.pid))
                 .is_some_and(|view| view.out.is_some());
         if !channel {
             self.view_gone(key);
             return;
         }
-        if let Some(view) = self.views.get_mut(&key.route)
+        if let Some(view) = self.view_mut(key)
             && view.exited.is_none()
         {
             view.exited = Some(Instant::now());
@@ -3672,8 +4111,9 @@ impl Scheduler {
     fn expire_exited_views(&mut self) {
         let now = Instant::now();
         let overdue: Vec<ViewKey> = self
-            .views
+            .pools
             .values()
+            .flat_map(|pool| pool.views.values())
             .filter(|view| {
                 view.exited
                     .is_some_and(|exited| now >= exited + self.cfg.request_timeout)
@@ -3686,23 +4126,26 @@ impl Scheduler {
     }
 
     /// A view process is gone: fail its requests, free their slots, and let
-    /// the next request for its route spawn a new one (§2.4).
+    /// the next request for its route grow a new one (§2.4).
+    ///
+    /// The requests are failed and released whether or not the pool still holds
+    /// the worker — a retired worker's channel closes too, and that close is
+    /// what frees the slots its requests were holding. The route's queue is
+    /// failed only when the fork that died never served **and** the route has no
+    /// worker and no `SPAWN` left: a sibling that can answer must keep its
+    /// requests (§4.7).
     fn view_gone(&mut self, key: ViewKey) {
-        // Whether this was still the live process for its route. A retired
-        // view's channel also closes, and that is not a spawn failure.
-        let live = self
-            .views
-            .get(&key.route)
-            .map(|view| view.key == key)
-            .unwrap_or(false);
-        let ready = live
-            && self
-                .views
-                .get(&key.route)
-                .map(|view| view.ready)
-                .unwrap_or(false);
-        if live {
-            self.views.remove(&key.route);
+        let removed = self
+            .pools
+            .get_mut(&key.route)
+            .filter(|pool| pool.views.get(&key.pid).is_some_and(|view| view.key == key))
+            .and_then(|pool| pool.views.remove(&key.pid));
+        let ready = removed.as_ref().is_some_and(|view| view.ready);
+        if removed.is_some()
+            && !ready
+            && let Some(pool) = self.pools.get_mut(&key.route)
+        {
+            pool.pending_ready = pool.pending_ready.saturating_sub(1);
         }
         let affected: Vec<u32> = self
             .dispatch
@@ -3716,28 +4159,25 @@ impl Scheduler {
             // though no `DONE` will ever arrive.
             self.release(stream_id);
         }
-        if live && !ready {
-            // It never served anything: whatever was waiting for it gets a
-            // `502`, and the route backs off before it is spawned again.
-            let waiting: Vec<u32> = self
-                .queue
-                .ids()
-                .into_iter()
-                .filter(|stream_id| {
-                    self.requests
-                        .get(stream_id)
-                        .and_then(|request| request.route)
-                        == Some(key.route)
-                })
-                .collect();
-            for stream_id in waiting {
-                self.queue.remove(stream_id);
-                let _ = self.fail_request(stream_id, Outcome::ViewDied, 502);
-                self.release(stream_id);
-            }
+        if removed.is_some() && !ready {
+            // A worker that never served anything: cool the route's *growth*
+            // down. Its siblings keep serving, and their requests are untouched.
             self.backoff
                 .insert(key.route, Instant::now() + self.cfg.spawn_backoff);
+            let empty = self.pools.get(&key.route).is_none_or(ViewSet::is_empty);
+            if empty {
+                // No process left at all and no fork owed: the route's queue is
+                // answered now, as it always was. The ids are collected first:
+                // the iterator holds `&self` and the body takes `&mut self`.
+                let waiting: Vec<u32> = self.queued_for_streams(key.route).collect();
+                for stream_id in waiting {
+                    self.queue.remove(stream_id);
+                    let _ = self.fail_request(stream_id, Outcome::ViewDied, 502);
+                    self.release(stream_id);
+                }
+            }
         }
+        self.forget_if_idle(key.route);
     }
 
     // --------------------------------------------------------------- replies
@@ -3943,9 +4383,7 @@ impl Scheduler {
         };
         if let Some((key, id)) = request.view {
             self.dispatch.remove(&(key, id));
-            if let Some(view) = self.views.get_mut(&key.route)
-                && view.key == key
-            {
+            if let Some(view) = self.view_mut(key) {
                 view.inflight = view.inflight.saturating_sub(1);
                 if view.inflight == 0 {
                     view.idle_since = Some(Instant::now());

@@ -2,16 +2,16 @@
 id: MB.24.3
 title: "Multi-instance per-route view pool in blastit-scheduler and (route, pid) supervision, with scheduler concurrency tests"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.24.2]
 paths: ["crates/blastit-scheduler/**", "crates/blastit-frame/**", crates/blastit/src/supervise.rs]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:26"
-updated: "2026-11-17T07:22"
+updated: "2026-11-17T08:16"
 ---
 
 # Goal

@@ -51,7 +51,7 @@ pub(crate) enum PushError {
 }
 
 /// The sending half of one peer's channel.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Outbound {
     tx: mpsc::UnboundedSender<OutFrame>,
     pending: Arc<AtomicUsize>,

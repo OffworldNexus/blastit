@@ -9,8 +9,10 @@ use blastit_events::Outcome;
 use blastit_frame::{Ctl, Frame};
 use common::{Options, Script, World, body_of, head, route, status_of};
 use std::os::fd::OwnedFd;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
+use tokio::sync::Semaphore;
 
 fn two_routes() -> String {
     format!("{}{}", route("a", "/a/"), route("b", "/b/"))
@@ -58,25 +60,53 @@ async fn frames_for_unknown_request_ids_are_dropped() {
     assert_eq!(world.log.lock().unwrap().request_ids(1), vec![1]);
 }
 
+/// R10: a threaded route owns exactly **one** process, however many concurrent
+/// requests it is given — `per_process_cap` is not a request-per-process
+/// provider's, so the pool never grows a second copy of the preloaded heap.
 #[tokio::test]
 async fn one_route_never_gets_a_second_process_while_the_first_lives() {
     tokio::time::pause();
-    let mut world = World::start(Options::new().blastfile(&two_routes()).script(
+    let hold = Arc::new(Semaphore::new(0));
+    let mut options = Options::new().blastfile(&two_routes()).script(
         0,
-        Script::Answer {
+        Script::Hold {
             body: b"a".to_vec(),
+            gate: hold.clone(),
         },
-    ));
+    );
+    // The one setting that would turn a *value*-derived pool on: a per-process
+    // ceiling far below the budget. The threaded shape must ignore it.
+    options.cfg.view_max_workers = Some(1);
+    options.cfg.max_workers = 8;
+    let mut world = World::start(options);
+
+    // Four concurrent requests, all held by the one worker in turn.
     for stream in 1..=4u32 {
         world
             .http
             .send_request(stream, head("GET", "/a/"), b"")
             .await;
-        assert_eq!(body_of(&world.http.response(stream).await), b"a");
     }
-    assert_eq!(world.log.lock().unwrap().spawns, vec![0]);
+    world
+        .until(|world| world.log.lock().unwrap().request_ids(0).len() == 1)
+        .await;
+    for _ in 0..64 {
+        tokio::task::yield_now().await;
+    }
+    {
+        let log = world.log.lock().unwrap();
+        assert_eq!(log.spawns, vec![0], "one process, never a sibling");
+        assert_eq!(log.pids.len(), 1);
+    }
+
+    hold.add_permits(4);
+    for stream in 1..=4u32 {
+        assert_eq!(status_of(&world.http.response(stream).await), 200);
+    }
+    let log = world.log.lock().unwrap();
+    assert_eq!(log.spawns, vec![0]);
     assert_eq!(
-        world.log.lock().unwrap().request_ids(0),
+        log.request_ids(0),
         vec![1, 2, 3, 4],
         "each request gets its own id on the same view"
     );

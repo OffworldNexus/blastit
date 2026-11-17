@@ -25,22 +25,58 @@ pub struct RouteInfo {
     /// The route's `body` policy (§4.2 A), or `None` when the view declared
     /// none — which is fail-closed exactly like `body none`.
     pub ingress: Option<IngressPolicy>,
+    /// Requests one process of this route runs at once; `None` means
+    /// `BLASTIT_VIEW_MAX_WORKERS` (or the global budget when unset).
+    ///
+    /// Boot data written by the composition root from the provider it admitted
+    /// (`ADR-0009`, `ADR-0015` decision 1): an NTS `libphp` worker runs one
+    /// request, so its route says `Some(1)`. The scheduler never asks what
+    /// runtime a route is.
+    pub per_process_cap: Option<u32>,
+    /// Whether this route may own more than one view process — a
+    /// request-per-process provider. `false` is the threaded shape: one process,
+    /// however many requests it runs at once (`ADR-0015` decision 1).
+    ///
+    /// Boot data, never inferred from a value: with
+    /// `BLASTIT_VIEW_MAX_WORKERS=1` a threaded route still owns one process.
+    pub process_pool: bool,
 }
 
 impl RouteInfo {
     /// A route with this name, prefork flag and uid, and no declared ingress.
+    ///
+    /// The concurrency facts default to the threaded shape: one process per
+    /// route, admitting `BLASTIT_VIEW_MAX_WORKERS` requests at once.
     pub fn new(name: impl Into<String>, prefork: bool, uid: u32) -> Self {
         Self {
             name: name.into(),
             prefork,
             uid,
             ingress: None,
+            per_process_cap: None,
+            process_pool: false,
         }
     }
 
     /// This route with the `body` policy the manifest declared (§4.2 A).
     pub fn with_ingress(mut self, ingress: Option<IngressPolicy>) -> Self {
         self.ingress = ingress;
+        self
+    }
+
+    /// This route with the request ceiling one of its processes runs at once.
+    ///
+    /// `None` — the threaded default — means `BLASTIT_VIEW_MAX_WORKERS`.
+    #[must_use]
+    pub fn with_per_process_cap(mut self, cap: u32) -> Self {
+        self.per_process_cap = Some(cap);
+        self
+    }
+
+    /// This route as a request-per-process provider, which may own a pool.
+    #[must_use]
+    pub fn with_process_pool(mut self, pooled: bool) -> Self {
+        self.process_pool = pooled;
         self
     }
 

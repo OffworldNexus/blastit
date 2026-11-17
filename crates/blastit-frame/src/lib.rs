@@ -200,6 +200,7 @@ mod tests {
                 status: ExitStatus::Signal(9),
             }),
             Frame::Ctl(Ctl::Drain),
+            Frame::Ctl(Ctl::Reload),
         ]
     }
 

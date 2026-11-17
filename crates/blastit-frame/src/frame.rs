@@ -91,7 +91,7 @@ use crate::wire::{Reader, Sink, len_u16};
 /// The discriminant *is* the wire type code; [`TypeCode::code`] and
 /// [`TypeCode::from_code`] convert in both directions. Codes `0x01`–`0x0A` are
 /// the request/response family shared by `http.chan` and `view.chan`; codes
-/// `0x40`–`0x44` are the `ctl.chan` messages. The two ranges are disjoint on
+/// `0x40`–`0x45` are the `ctl.chan` messages. The two ranges are disjoint on
 /// purpose, so a frame forwarded between channels can never be mistaken for a
 /// control message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -134,6 +134,8 @@ pub enum TypeCode {
     Exited = 0x43,
     /// Finish in-flight work and stop spawning.
     Drain = 0x44,
+    /// Reload every view process: retire the idle ones, stale the busy ones.
+    Reload = 0x45,
 }
 
 impl TypeCode {
@@ -166,6 +168,7 @@ impl TypeCode {
             0x42 => Ok(Self::Retire),
             0x43 => Ok(Self::Exited),
             0x44 => Ok(Self::Drain),
+            0x45 => Ok(Self::Reload),
             _ => Err(FrameError::UnknownType { ty: code }),
         }
     }
@@ -177,7 +180,7 @@ impl TypeCode {
     pub const fn is_ctl(self) -> bool {
         matches!(
             self,
-            Self::Spawn | Self::Spawned | Self::Retire | Self::Exited | Self::Drain
+            Self::Spawn | Self::Spawned | Self::Retire | Self::Exited | Self::Drain | Self::Reload
         )
     }
 
@@ -209,6 +212,7 @@ impl TypeCode {
             Self::Retire => "RETIRE",
             Self::Exited => "EXITED",
             Self::Drain => "DRAIN",
+            Self::Reload => "RELOAD",
         }
     }
 }
@@ -758,7 +762,8 @@ impl Frame {
             | TypeCode::Spawned
             | TypeCode::Retire
             | TypeCode::Exited
-            | TypeCode::Drain => Self::Ctl(Ctl::decode(code, &mut reader)?),
+            | TypeCode::Drain
+            | TypeCode::Reload => Self::Ctl(Ctl::decode(code, &mut reader)?),
         };
         reader.finish()?;
         Ok(frame)

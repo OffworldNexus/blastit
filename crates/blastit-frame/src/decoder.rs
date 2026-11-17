@@ -559,6 +559,7 @@ mod tests {
                 status: ExitStatus::Signal(9),
             },
             Ctl::Drain,
+            Ctl::Reload,
         ];
         let mut stream = Vec::new();
         for message in &messages {

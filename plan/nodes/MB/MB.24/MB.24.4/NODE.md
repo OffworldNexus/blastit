@@ -10,11 +10,12 @@ paths:
   - crates/blastit/src/stage1.rs
   - crates/blastit/tests/critical_parallel_views.rs
   - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
+  - Makefile
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:27"
-updated: "2026-11-17T07:22"
+updated: "2026-11-17T08:10"
 ---
 
 # Goal

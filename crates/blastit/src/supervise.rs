@@ -25,7 +25,7 @@
 //! init is single-threaded and holds the GIL for the whole loop: nothing else
 //! could want it, and the zygote needs it to fork.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
@@ -67,10 +67,85 @@ struct Source {
     lines: LineBuffer,
 }
 
+/// How many extra processes a view's uid may have beyond its workers.
+///
+/// `ARCHITECTURE.md` §7.2 allows one unit of margin because gVisor leaves the
+/// main thread out of the count; sixteen keeps the same headroom
+/// `crates/blastit/src/php_view.rs` installs in `RLIMIT_NPROC`. Unifying the two
+/// constants is a follow-up: that module is `php`-gated and private.
+const VIEW_PROCESS_MARGIN: u32 = 16;
+
 /// A live view process.
+#[derive(Debug)]
 struct ViewChild {
     route: usize,
     uid: u32,
+}
+
+/// Every supervised view child, by pid.
+///
+/// Its `route` is the one init forked it for, and the only route it may be
+/// retired or reported as (`ADR-0015` decision 6). The pid is the key because a
+/// route owns a pool now: the pid is what the kernel, the scheduler and the
+/// events all name, and it is the one fact that tells a route's workers apart.
+#[derive(Debug, Default)]
+struct ChildTable {
+    by_pid: HashMap<i32, ViewChild>,
+}
+
+impl ChildTable {
+    /// Records a child init just forked.
+    fn insert(&mut self, pid: i32, child: ViewChild) {
+        self.by_pid.insert(pid, child);
+    }
+
+    /// Forgets a child that was reaped, giving back the record its exit needs.
+    fn remove(&mut self, pid: i32) -> Option<ViewChild> {
+        self.by_pid.remove(&pid)
+    }
+
+    /// The route init forked `pid` for, if it is still a live child.
+    fn route_of(&self, pid: i32) -> Option<usize> {
+        self.by_pid.get(&pid).map(|child| child.route)
+    }
+
+    /// How many children `route` owns right now.
+    fn count_for(&self, route: usize) -> u32 {
+        u32::try_from(
+            self.by_pid
+                .values()
+                .filter(|child| child.route == route)
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
+    }
+
+    /// The `(route, pid)` check `RETIRE` makes: only a pid this boot forked for
+    /// *that* route may be signalled.
+    fn may_retire(&self, route: usize, pid: i32) -> bool {
+        self.route_of(pid) == Some(route)
+    }
+
+    /// Every live child's pid.
+    fn pids(&self) -> impl Iterator<Item = i32> + '_ {
+        self.by_pid.keys().copied()
+    }
+
+    /// Whether init currently supervises no view at all.
+    fn is_empty(&self) -> bool {
+        self.by_pid.is_empty()
+    }
+}
+
+/// Whether init may fork one more worker for `route` (§4.5).
+///
+/// `ceiling` is `view_worker_cap() + VIEW_PROCESS_MARGIN`: init is the process
+/// holding root or `CAP_KILL`, so it keeps a bound of its own rather than
+/// forking purely on a less-privileged component's accounting. The scheduler
+/// never legitimately asks for more, and `RLIMIT_NPROC` is absent under
+/// `blastit dev`.
+fn may_fork(children: &ChildTable, route: usize, ceiling: u32) -> bool {
+    children.count_for(route) < ceiling
 }
 
 /// A freshly forked worker of either runtime, as the parent sees it.
@@ -233,15 +308,9 @@ pub struct Supervisor<'a> {
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     mask: SignalMask,
     components: BTreeMap<i32, Component>,
-    views: HashMap<i32, ViewChild>,
-    route_pids: HashMap<usize, i32>,
-    /// SPAWNs for routes whose previous view is killed but not yet reaped.
-    ///
-    /// The scheduler sends SPAWN at most once per route and does not ask
-    /// again, so one that arrives while the old process is still a zombie has
-    /// to be remembered and served as soon as it is reaped: dropping it would
-    /// leave that route without a process for good.
-    pending_spawns: BTreeSet<usize>,
+    /// Every supervised view child, by pid: the one authority for which route
+    /// owns a pid (`ADR-0015` decision 6).
+    children: ChildTable,
     shutting_down: bool,
     shutdown: Shutdown,
     /// Where the sources start in the poll set: two when `ctl.chan` is polled.
@@ -307,9 +376,7 @@ impl<'a> Supervisor<'a> {
             signals: parts.signals,
             mask: parts.mask,
             components,
-            views: HashMap::new(),
-            route_pids: HashMap::new(),
-            pending_spawns: BTreeSet::new(),
+            children: ChildTable::default(),
             shutting_down: false,
             shutdown: Shutdown::Serving,
             source_base: 2,
@@ -322,8 +389,8 @@ impl<'a> Supervisor<'a> {
     pub fn run(&mut self, py: Python<'_>) -> ! {
         loop {
             self.poll_once(py);
-            self.reap_children(py);
-            self.progress_shutdown(py);
+            self.reap_children();
+            self.progress_shutdown();
         }
     }
 
@@ -514,10 +581,10 @@ impl<'a> Supervisor<'a> {
         match message {
             Ctl::Spawn { route } => self.spawn(py, route),
             Ctl::Retire { route, pid, .. } => self.retire(route, pid),
-            // init is the sender of SPAWNED, EXITED and DRAIN; a scheduler that
-            // sends one back has broken the protocol, but that is not worth
-            // killing a process over.
-            Ctl::Drain | Ctl::Exited { .. } | Ctl::Spawned { .. } => {
+            // init is the sender of SPAWNED, EXITED, DRAIN and RELOAD; a
+            // scheduler that sends one back has broken the protocol, but that
+            // is not worth killing a process over.
+            Ctl::Drain | Ctl::Reload | Ctl::Exited { .. } | Ctl::Spawned { .. } => {
                 self.emitter.emit(&Event::now(
                     Component::Init,
                     EventKind::ManifestWarning(ManifestWarning::new(
@@ -530,19 +597,28 @@ impl<'a> Supervisor<'a> {
 
     /// `SPAWN`: fork a view process for `route` and answer `SPAWNED` (§4).
     ///
-    /// A route whose previous view has been killed but not yet reaped cannot be
-    /// forked twice: two processes for one uid would share a socket directory
-    /// and a `view.chan` the scheduler only has one end for. The SPAWN is held
-    /// instead, and [`Supervisor::service_pending_spawns`] forks it the moment
-    /// the old pid is reaped. The scheduler sends SPAWN once per route and does
-    /// not repeat it, so dropping it here would leave the route dead for good.
+    /// Each worker gets its own `view.chan` from its own `socketpair`, and
+    /// sharing the route's scratch directory is the pool's design, so a route
+    /// may own several processes: there is no held `SPAWN` any more. What is
+    /// kept is init's own fork bound — see [`may_fork`] — because the scheduler
+    /// must not be the only thing deciding how many processes init holds.
     fn spawn(&mut self, py: Python<'_>, route: u32) {
         let index = route as usize;
         let Some(info) = self.routes.get(index).cloned() else {
             self.fail(&format!("ctl.chan: SPAWN for unknown route {route}"));
         };
-        if self.route_pids.contains_key(&index) {
-            self.pending_spawns.insert(index);
+        let ceiling = self
+            .cfg
+            .view_worker_cap()
+            .saturating_add(VIEW_PROCESS_MARGIN);
+        if !may_fork(&self.children, index, ceiling) {
+            self.emitter.emit(&Event::now(
+                Component::Init,
+                EventKind::ManifestWarning(ManifestWarning::new(format!(
+                    "SPAWN for route {route} refused: {ceiling} processes already live for it"
+                ))),
+            ));
+            self.send_spawn_refused(route);
             return;
         }
         self.spawn_now(py, index, &info);
@@ -566,9 +642,32 @@ impl<'a> Supervisor<'a> {
         };
         let child = match self.fork_view(py, index, info, egress, &dir, drop_privileges) {
             Ok(child) => child,
-            Err(err) => self.fail(&err.to_string()),
+            Err(err) => {
+                // Never `fail`: one route's resource exhaustion is not the
+                // tree's. The SPAWN is still owed an answer, so the scheduler
+                // frees the slot and backs this route's growth off (§4.7).
+                self.emitter.emit(&Event::now(
+                    Component::Init,
+                    EventKind::ManifestWarning(ManifestWarning::new(format!(
+                        "forking a view for route {:?}: {err}",
+                        info.name
+                    ))),
+                ));
+                self.send_spawn_refused(index as u32);
+                return;
+            }
         };
         self.record_view(index, info, child);
+    }
+
+    /// `SPAWNED` with pid 0 is the one answer that names no process: this
+    /// `SPAWN` could not be honoured (`ADR-0015` decision 8).
+    fn send_spawn_refused(&mut self, route: u32) {
+        self.send_ctl(&Ctl::Exited {
+            route,
+            pid: 0,
+            status: blastit_frame::ExitStatus::Code(1),
+        });
     }
 
     /// Forks the worker this slot was assigned at boot (§4.3).
@@ -678,14 +777,13 @@ impl<'a> Supervisor<'a> {
             },
             lines: LineBuffer::new(),
         });
-        self.views.insert(
+        self.children.insert(
             child.pid.as_raw(),
             ViewChild {
                 route: index,
                 uid: info.uid,
             },
         );
-        self.route_pids.insert(index, child.pid.as_raw());
 
         let event = Event::now(
             Component::Init,
@@ -699,33 +797,6 @@ impl<'a> Supervisor<'a> {
         self.emitter.emit(&event);
     }
 
-    /// Forks the views of every route whose SPAWN had to wait.
-    ///
-    /// Called after the reap loop, so a route that just lost its process gets
-    /// its new one in the same wakeup.
-    fn service_pending_spawns(&mut self, py: Python<'_>) {
-        if self.pending_spawns.is_empty() {
-            return;
-        }
-        if self.shutting_down {
-            // The drain is over for new work: the scheduler has stopped
-            // dispatching, so there is nothing for a fresh process to serve.
-            self.pending_spawns.clear();
-            return;
-        }
-        let waiting: Vec<usize> = self.pending_spawns.iter().copied().collect();
-        for index in waiting {
-            if self.route_pids.contains_key(&index) {
-                continue;
-            }
-            self.pending_spawns.remove(&index);
-            let Some(info) = self.routes.get(index).cloned() else {
-                continue;
-            };
-            self.spawn_now(py, index, &info);
-        }
-    }
-
     /// `RETIRE`: kill the view the scheduler no longer wants (§2.4).
     ///
     /// Views are retired when the scheduler finds them idle, over their request
@@ -735,7 +806,7 @@ impl<'a> Supervisor<'a> {
     /// signalling an arbitrary pid.
     fn retire(&mut self, route: u32, pid: u32) {
         let raw = pid as i32;
-        if self.views.get(&raw).map(|view| view.route) != Some(route as usize) {
+        if !self.children.may_retire(route as usize, raw) {
             self.emitter.emit(&Event::now(
                 Component::Init,
                 EventKind::ManifestWarning(ManifestWarning::new(format!(
@@ -760,10 +831,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Reaps every child that has exited, and reports each one (§4, §8).
-    ///
-    /// A route that lost its process is served its waiting SPAWN in the same
-    /// wakeup, so the scheduler's requests never wait for a second one.
-    fn reap_children(&mut self, py: Python<'_>) {
+    fn reap_children(&mut self) {
         let reaped = match reap() {
             Ok(reaped) => reaped,
             Err(err) => self.fail(&format!("reaping: {err}")),
@@ -775,15 +843,13 @@ impl<'a> Supervisor<'a> {
                 self.component_exit(component, pid, status);
                 continue;
             }
-            let Some(view) = self.views.remove(&raw) else {
+            let Some(view) = self.children.remove(raw) else {
                 // An orphan PID 1 inherited: blastit did not fork it, so there
                 // is nothing to report.
                 continue;
             };
-            self.route_pids.remove(&view.route);
             self.view_exit(view, pid, status);
         }
-        self.service_pending_spawns(py);
     }
 
     /// Reports a view's exit to the scheduler and to the log (§4).
@@ -857,7 +923,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Moves the shutdown along as the deadline passes or children leave.
-    fn progress_shutdown(&mut self, py: Python<'_>) {
+    fn progress_shutdown(&mut self) {
         match self.shutdown {
             Shutdown::Serving => {}
             Shutdown::Drain(deadline) => {
@@ -868,12 +934,12 @@ impl<'a> Supervisor<'a> {
                 }
             }
             Shutdown::Terminate(deadline) => {
-                if self.views.is_empty() && self.components.is_empty() {
+                if self.children.is_empty() && self.components.is_empty() {
                     self.finish();
                 }
                 if deadline.expired() {
                     self.kill_all();
-                    self.reap_until(py, TERMINATE_GRACE);
+                    self.reap_until(TERMINATE_GRACE);
                     self.finish();
                 }
             }
@@ -908,8 +974,8 @@ impl<'a> Supervisor<'a> {
 
     /// `signal` to every live child.
     fn signal_all(&self, signal: Signal) {
-        for raw in self.views.keys().chain(self.components.keys()) {
-            if let Some(pid) = Pid::from_raw(*raw) {
+        for raw in self.children.pids().chain(self.components.keys().copied()) {
+            if let Some(pid) = Pid::from_raw(raw) {
                 let _ = kill(pid, signal);
             }
         }
@@ -921,11 +987,11 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Reaps for at most `budget`, so a killed child is gone before init exits.
-    fn reap_until(&mut self, py: Python<'_>, budget: Duration) {
+    fn reap_until(&mut self, budget: Duration) {
         let deadline = Deadline::after(budget);
         while !deadline.expired() {
-            self.reap_children(py);
-            if self.views.is_empty() && self.components.is_empty() {
+            self.reap_children();
+            if self.children.is_empty() && self.components.is_empty() {
                 return;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -1268,5 +1334,100 @@ mod tests {
         assert!(!ctl_read_lost_peer(&std::io::Error::from_raw_os_error(
             libc::EINVAL
         )));
+    }
+
+    /// A child record carries the route init forked it for, so `EXITED` names
+    /// that route and never the one a scheduler message happened to mention
+    /// (`ADR-0015` decision 6, R7).
+    #[test]
+    fn exited_names_the_childs_own_route() {
+        let mut children = ChildTable::default();
+        children.insert(
+            41,
+            ViewChild {
+                route: 0,
+                uid: 21_000,
+            },
+        );
+        children.insert(
+            42,
+            ViewChild {
+                route: 1,
+                uid: 21_001,
+            },
+        );
+        children.insert(
+            43,
+            ViewChild {
+                route: 1,
+                uid: 21_001,
+            },
+        );
+
+        // Two workers of one route, told apart by pid alone.
+        assert_eq!(children.route_of(42), Some(1));
+        assert_eq!(children.route_of(43), Some(1));
+
+        let reaped = children
+            .remove(42)
+            .expect("a reaped child gives back its record");
+        assert_eq!(reaped.route, 1, "EXITED must carry the child's own route");
+        assert_eq!(children.route_of(42), None);
+        assert_eq!(children.route_of(41), Some(0), "the sibling is untouched");
+        assert_eq!(children.count_for(1), 1);
+    }
+
+    /// `RETIRE` may only signal a pid init itself forked for *that* route: a
+    /// sibling route naming it is refused, which is the check the supervisor
+    /// makes before any `kill(2)` (R7).
+    #[test]
+    fn retire_refuses_a_sibling_routes_pid() {
+        let mut children = ChildTable::default();
+        children.insert(
+            41,
+            ViewChild {
+                route: 0,
+                uid: 21_000,
+            },
+        );
+
+        assert!(children.may_retire(0, 41));
+        assert!(
+            !children.may_retire(1, 41),
+            "a pid forked for route 0 must never be retired as route 1's"
+        );
+        assert!(!children.may_retire(0, 99), "an unknown pid is refused too");
+        // A pid that has been reaped is no longer a child of any route.
+        children.remove(41);
+        assert!(!children.may_retire(0, 41));
+    }
+
+    /// init keeps its own per-route fork bound, independent of the scheduler's
+    /// accounting: one route cannot make the privileged process fork past
+    /// `view_worker_cap() + VIEW_PROCESS_MARGIN` (R7).
+    #[test]
+    fn a_route_cannot_be_forked_past_its_ceiling() {
+        let ceiling = 4u32.saturating_add(VIEW_PROCESS_MARGIN);
+        let mut children = ChildTable::default();
+        for pid in 0..ceiling {
+            assert!(
+                may_fork(&children, 0, ceiling),
+                "fork {pid} is below the ceiling"
+            );
+            children.insert(
+                i32::try_from(pid).expect("a small pid"),
+                ViewChild {
+                    route: 0,
+                    uid: 21_000,
+                },
+            );
+        }
+        assert_eq!(children.count_for(0), ceiling);
+        assert!(
+            !may_fork(&children, 0, ceiling),
+            "the ceiling is a ceiling, not a suggestion"
+        );
+        // Another route is unaffected: the bound is per route, not global.
+        assert!(may_fork(&children, 1, ceiling));
     }
 }
