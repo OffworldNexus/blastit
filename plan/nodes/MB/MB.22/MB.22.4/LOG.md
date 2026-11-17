@@ -35,3 +35,7 @@ status review -> done
 ## 2026-11-17T06:03 [lead]
 
 make check: only docs/reference/cli.md fence 1 (dev-flags) fails, on MB.23.1's --no-reload page before MB.23 lands the flag; every other target green
+
+## 2026-11-17T06:03 [lead]
+
+grammar rev pin target = 053b56e (this commit); commit body's last sentence meant: no root Cargo.toml/Cargo.lock change

@@ -6,16 +6,12 @@ status: ready
 owner: implementer
 priority: 1
 depends_on: [MB.24.2]
-paths:
-  - "crates/blastit-scheduler/src/**"
-  - "crates/blastit-scheduler/tests/**"
-  - "crates/blastit-frame/src/ctl.rs"
-  - crates/blastit/src/supervise.rs
+paths: ["crates/blastit-scheduler/**", "crates/blastit-frame/**", crates/blastit/src/supervise.rs]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:26"
-updated: "2026-11-17T01:26"
+updated: "2026-11-17T07:22"
 ---
 
 # Goal

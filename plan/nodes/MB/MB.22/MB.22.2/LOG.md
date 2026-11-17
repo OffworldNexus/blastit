@@ -31,3 +31,7 @@ fix round closed: section 9.2 now byte-identical to the MB.22.4 grammar.js (13 c
 ## 2026-11-17T06:00 [lead]
 
 status active -> done
+
+## 2026-11-17T06:03 [lead]
+
+committed 7c2e9ca; docs/decisions/README.md row left uncommitted (ADR-0014/0015 rows from MB.23 are untracked) and will be staged at the MB.22 epic gate

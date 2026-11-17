@@ -2,7 +2,7 @@
 id: MB.22
 title: "Ship blastit lsp and a ready-to-install Zed extension for Blastfile (highlighting, diagnostics, formatting)"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.21.5.2]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:16"
-updated: "2026-11-17T00:47"
+updated: "2026-11-17T07:23"
 ---
 
 # Goal

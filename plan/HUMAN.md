@@ -129,11 +129,19 @@ MB.21.3.2 (design gap, implemented and reported): §6.7 pins a sentence for ever
 
 **Answer:**
 
-## H-013 [open] (node MB.21.3.3)
+## H-013 [closed] (node MB.21.3.3)
 
 - asked: 2026-11-16T04:51 by implementer
 
 MB.21.3.3 needs one path added: crates/blastit-manifest/src/error.rs. The node's paths are blastfile/**, model.rs and routing.rs, but §8.3's nine pattern rows and §8.4's CONNECT/TRACE row are ManifestError variants and §18 puts them in error.rs — every sibling leaf (3.0, 3.1, 3.2, 3.7) lists it. Without it pattern.rs cannot raise a refusal and the parser hook cannot be wired, so acceptance items 1/3/5 cannot be met. pattern.rs is landed and green with a pub(crate) Refusal seam that renders exactly §18's '<line>:<col>: <message>'; the ten variants (PatternParameterUnclosed, PatternParameterUnnamed, PatternParameterName, PatternParameterType, PatternStarPosition, PatternParameterDuplicate, PatternNotAnchored, PatternTooLong, PatternRegex, MethodCannotReachView) are listed with their exact #[error] strings in plan/nodes/MB/MB.21/MB.21.3/MB.21.3.3/RESULT.md, ready to paste. Please widen the paths and re-dispatch (or tell the lead to).
+
+**Answer:**
+
+## H-014 [closed]
+
+- asked: 2026-11-17T05:29 by designer
+
+MB.22.2 design hand-offs (recorded in docs/design/blastfile-lsp-zed.md §12.8): MB.22.3 needs a stdout-asserting smoke, the position() wildcard grep, the Location/NONE acceptance rewording and single-change didChange; MB.22.4 needs uv --frozen --no-sync, npm ci --no-install, the three query greps and the fixture loop; MB.22.5 needs the zed-check prerequisite grep, no fetch fallback, and one docs row for lsp exit 2 (docs/reference/cli.md is MB.22.1's, already done).
 
 **Answer:**
 

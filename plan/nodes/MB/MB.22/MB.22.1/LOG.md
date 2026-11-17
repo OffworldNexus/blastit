@@ -59,3 +59,7 @@ Final polish: cli.md diagnostic prefix scoped to the Blastfile: prefix (position
 ## 2026-11-17T05:09 [lead]
 
 status review -> done
+
+## 2026-11-17T05:09 [lead]
+
+committed 8f538ae

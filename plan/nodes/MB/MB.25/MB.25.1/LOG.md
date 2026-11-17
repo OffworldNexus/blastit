@@ -23,3 +23,7 @@ base 055607b; lead dispatch doc-writer. Paths widened with docs_fences.rs + inve
 ## 2026-11-17T06:13 [lead]
 
 status active -> done
+
+## 2026-11-17T06:13 [lead]
+
+committed ee8bfb7 on release/0.2.0 (critics dx + ai-ergonomics PASS; docs_fences.rs and inventory.toml untouched).

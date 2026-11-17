@@ -15,3 +15,11 @@ edited fields
 ## 2026-11-17T00:47 [planner]
 
 edited fields
+
+## 2026-11-17T06:20 [lead]
+
+lead: 23.1+23.2 done (055607b, 0c2c117). Final gate: validate/guard green and every make check target green EXCEPT rs-doc, which fails on another node's uncommitted crates/blastit-manifest/src/error.rs:1523 (/ intra-doc links) — no Rust changed in 23.1/23.2/25.1. docs-test stays red on the new --no-reload fence until 23.5; 23.6 owns that run.
+
+## 2026-11-17T06:20 [lead]
+
+lead: correction to the line above — the rs-doc failure is two broken intra-doc links on `prefix` and `Display` at `crates/blastit-manifest/src/error.rs:1523`, in another node's uncommitted edit.

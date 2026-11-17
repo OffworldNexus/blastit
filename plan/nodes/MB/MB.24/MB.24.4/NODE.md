@@ -9,14 +9,12 @@ depends_on: [MB.24.3]
 paths:
   - crates/blastit/src/stage1.rs
   - crates/blastit/tests/critical_parallel_views.rs
-  - "crates/blastit/tests/common/**"
-  - crates/blastit/tests/critical_php_backend.rs
-  - crates/blastit/tests/critical_php_embed.rs
+  - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T01:27"
-updated: "2026-11-17T01:27"
+updated: "2026-11-17T07:22"
 ---
 
 # Goal

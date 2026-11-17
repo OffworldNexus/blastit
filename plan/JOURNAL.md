@@ -2695,3 +2695,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T07:23 [MB.26.14] (planner) created (task) Locate an endpoint-level body raw warning (sites.rs raw_body's endpoint chain is untested)
 - 2026-11-17T07:23 [MB.22.12] (planner) status ready -> superseded: Moved to MB.26.14 (post-0.2.0).
 - 2026-11-17T07:23 [MB.22] (planner) status ready -> done
+- 2026-11-17T07:30 [MB.22] (lead) gate checks: plan OK, guard OK, docs-check OK, docs-assets 35 passed, rev+metadata+lsp smoke OK, root Cargo.* byte-identical, make check red only on MB.23.1's -

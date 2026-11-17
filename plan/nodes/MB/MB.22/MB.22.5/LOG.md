@@ -35,3 +35,7 @@ NODE.md item 3: 45-theme renamed to the design's fifteen-name allowlist (design 
 ## 2026-11-17T07:02 [lead]
 
 status review -> done
+
+## 2026-11-17T07:02 [lead]
+
+committed d08d04c
