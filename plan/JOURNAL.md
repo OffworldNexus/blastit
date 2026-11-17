@@ -2580,3 +2580,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T06:09 [MB.21.8] (planner) edited fields
 - 2026-11-17T06:09 [MB.21.7] (planner) status ready -> active
 - 2026-11-17T06:09 [MB.21.7] (planner) base 053b56e1770f81a5856e17a0b8b68004d9e67069
+- 2026-11-17T06:09 [MB.24.2] (lead) REVIEW FAIL (attempt 1): MAJOR parallel-views.md:100-103 + :1187-1193 — "on a preloaded image each fork is milliseconds" is false for PHP: the child dlopens lib
+- 2026-11-17T06:09 [MB.24.2] (lead) status review -> ready
+- 2026-11-17T06:09 [MB.24.2] (lead) status ready -> active
+- 2026-11-17T06:09 [MB.24.2] (lead) attempt 2/3 started
+- 2026-11-17T06:13 [MB.21] (lead) GATE STATUS: make e2e PASS (single clean run on an idle host: EXIT=0, 311 PASS/ok, 0 FAIL). make check BLOCKED BY EXTERNAL with three proven causes, none in MB.
+- 2026-11-17T06:13 [MB.21.7] (lead) verified: grep empty, only docs/frameworks/php/ dir, ONE clean make e2e on an idle host -> EXIT=0, 311 PASS/ok, 0 FAIL; make doc-tone ok; make docs-check No iss
+- 2026-11-17T06:13 [MB.21.7] (lead) status active -> done
+- 2026-11-17T06:13 [MB.23.2] (lead) status review -> done

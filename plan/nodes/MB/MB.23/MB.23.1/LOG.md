@@ -43,3 +43,7 @@ STATUS done from doc-writer (attempt 1) + widened-scope sweep: both critics PASS
 ## 2026-11-17T06:02 [lead]
 
 status review -> done
+
+## 2026-11-17T06:03 [lead]
+
+committed 055607b on release/0.2.0 (gates: validate/guard + every make check target green except the documented docs-test exception on the new --no-reload fence).
