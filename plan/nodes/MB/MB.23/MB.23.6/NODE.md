@@ -2,16 +2,16 @@
 id: MB.23.6
 title: "Verify MB.23 live: runnable-docs --no-reload fence, zero-inotify guard on standalone + wheel, production strace, all-worker reload determinism and dev_reload mutation audit"
 kind: task
-status: ready
+status: done
 owner: "test-curator"
 priority: 1
 depends_on: [MB.23.5]
 paths: ["docs/testing/AUDIT-MB.23.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T23:13"
-updated: "2026-11-16T23:21"
+updated: "2026-11-17T21:09"
 ---
 
 # Goal

@@ -2947,3 +2947,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-17T19:48 [MB.23.5.3] (lead) status review -> done
 - 2026-11-17T19:48 [MB.23.5] (lead) gate passed: four descendants done (54ad5d9, 83c6bb9, bdd23c5, 81e603f); 23 critical reload legs x3 configs, lib 289, dbproxy 120, php_embed 27, make check EXIT
 - 2026-11-17T19:48 [MB.23.5] (lead) status ready -> done
+- 2026-11-17T19:49 [MB.23.6] (lead) status ready -> active
+- 2026-11-17T19:49 [MB.23.6] (lead) attempt 1/3 started
+- 2026-11-17T19:49 [MB.23.6] (lead) base 695e40a
+- 2026-11-17T20:59 [MB.23.7] (test-curator) created (task) Carry the out-of-step dev policy taint across the reload exec
+- 2026-11-17T20:59 [MB.23.8] (test-curator) created (task) Prove T31: a save during a reload cycle is not lost, and reconcile closes the gap
+- 2026-11-17T20:59 [MB.23.9] (test-curator) created (task) Prove T18's 200 half: a grant edit applies on save under the real PostgreSQL CI job
+- 2026-11-17T20:59 [MB.23.10] (test-curator) created (task) Close accepted rows T17, T20 and T23: production/check hold no hook, and keep-alive survives an all-views and a preload reload
+- 2026-11-17T20:59 [MB.23.11] (test-curator) created (task) Prove epic item 4 in a container: Docker's default seccomp gives one dev.reload.unavailable and 200s
+- 2026-11-17T20:59 [MB.23.12] (test-curator) created (task) Kill the dev_reload mutation survivors: create/delete trigger legs, pre_fork ordering, path boundary, EAGAIN, weak oracles
+- 2026-11-17T20:59 [MB.23.13] (test-curator) created (task) Triage the unread critical_dev_reload panic and remove the sleep-decided verdicts
+- 2026-11-17T20:59 [MB.23.14] (test-curator) created (task) Repair MB.23.6's acceptance evidence commands (scripts/noop and the wheel .so path)
+- 2026-11-17T20:59 [MB.23.15] (test-curator) created (task) Prove the reload transaction is idempotent and a payload-carrying 0x45 is refused by the streaming Decoder
+- 2026-11-17T21:02 [MB.23.6] (lead) audit written: 0 BLOCKER / 5 MAJOR / 13 MINOR; gates green, dropped behaviour absent, mutation 84.8% killed (123/180 caught, 22 missed, 35 unviable), guards on 
+- 2026-11-17T21:02 [MB.23.6] (lead) status active -> review
+- 2026-11-17T21:09 [MB.23.6] (lead) reviewer VERDICT PASS (3 MINOR accuracy fixes applied: test count 22->16, five->eight unprotected requirements, the docs-test PASS row as primary evidence). Com
+- 2026-11-17T21:09 [MB.23.6] (lead) status review -> done
