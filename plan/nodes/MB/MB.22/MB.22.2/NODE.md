@@ -2,7 +2,7 @@
 id: MB.22.2
 title: "Design blastit lsp and the Zed extension (ADR-0013) with security/implementability/testability/consistency critics"
 kind: task
-status: ready
+status: done
 owner: designer
 priority: 2
 depends_on: [MB.22.1]
@@ -14,11 +14,11 @@ paths:
   - "docs/design/blastfile-lsp-zed.review-consistency.md"
   - "docs/decisions/ADR-0013-blastfile-lsp-and-zed.md"
   - docs/decisions/README.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-16T09:16"
-updated: "2026-11-16T09:16"
+updated: "2026-11-17T06:00"
 ---
 
 # Goal
