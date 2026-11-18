@@ -7,11 +7,11 @@ owner: "visual-checker"
 priority: 2
 depends_on: [MB.32.1]
 paths: ["docs/testing/VISUAL-MB.32.md"]
-attempts: 0
-max_attempts: 3
+attempts: 4
+max_attempts: 4
 escalation: none
 created: "2026-11-17T12:46"
-updated: "2026-11-17T12:46"
+updated: "2026-11-18T03:59"
 ---
 
 # Goal
