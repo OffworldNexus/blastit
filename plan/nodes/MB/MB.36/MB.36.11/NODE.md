@@ -2,16 +2,16 @@
 id: MB.36.11
 title: "Guard the artifacts: the wheel's DT_NEEDED set (R12) and the deleted transport trait names (R3)"
 kind: task
-status: proposed
+status: done
 owner: implementer
 priority: 3
 depends_on: []
-paths: ["crates/blastit/tests/**", "scripts/**"]
-attempts: 0
+paths: ["crates/blastit/tests/**", "scripts/**", "docs/design/view-crates-architecture.md"]
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-18T18:05"
-updated: "2026-11-18T18:05"
+updated: "2026-11-18T19:54"
 ---
 
 # Goal

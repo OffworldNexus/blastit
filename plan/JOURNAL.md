@@ -3428,3 +3428,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T18:35 [MB.36] (lead) JOURNAL CORRECTION: the 18:05 lines recording `MB.36.7.1`-`.4` creations name nodes that do not exist. The test-curator created them under the *task* `MB.36.7`,
 - 2026-11-18T18:51 [MB.26.27] (lead) edited fields
 - 2026-11-18T18:54 [MB.36.7] (lead) status review -> done
+- 2026-11-18T18:54 [MB.36.11] (lead) status proposed -> active
+- 2026-11-18T18:54 [MB.36.11] (lead) attempt 1/3 started
+- 2026-11-18T18:54 [MB.36.11] (lead) attempt 1/3 started; base 6f722ea
+- 2026-11-18T19:07 [MB.36.11] (lead) status active -> review
+- 2026-11-18T19:20 [MB.36.11] (lead) edited fields
+- 2026-11-18T19:20 [MB.36.11] (lead) REVIEW FAIL (round 1): MAJOR - the R3 exemption's authority is fabricated (design §4.2.3 does not authorise moving RequestIo/RequestEnd/flush_response; §4.2.1 s
+- 2026-11-18T19:20 [MB.36.11] (lead) status review -> active
+- 2026-11-18T19:20 [MB.36.11] (lead) attempt 2/3 started
+- 2026-11-18T19:54 [MB.36.11] (lead) status active -> done

@@ -170,6 +170,18 @@ and **7** with `--features python` (3 helper cases + 4 own, one of which is
    `decode_x86_64`, `decode_aarch64`, `library_dirs`, `target_tuple`,
    `php_refusal_message` — imported, never respelled, so a fixture cannot drift
    from the table it feeds.
+10. **`RequestIo`, `RequestEnd` and `flush_response` moved to
+    `blastit-view-php/src/worker.rs` instead of being deleted** (errata, added by
+    the lead during the `MB.36.11` review). `ADR-0016` decision 2's title is
+    "**The worker trait is deleted, not re-homed.**", and design §4.2.1 says this
+    leaf deletes those three along with the trait: the tree did not. They survive
+    because this crate is their only implementer and its worker still needs a
+    write contract, but that is a **recorded deviation from R3**, not design
+    §4.2.3's split — the citation this file originally carried was wrong, and
+    §4.2.1/§4.2.3/§7 of the design have since been corrected to say so.
+    `crates/blastit/tests/critical_artifacts.rs` (`MB.36.11`) is the guard: it
+    refuses the three names everywhere except those files and pins the exemption
+    positively, so a stale one goes red.
 
 ## Acceptance (command + tail)
 
