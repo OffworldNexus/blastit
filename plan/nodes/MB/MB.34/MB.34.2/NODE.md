@@ -11,11 +11,11 @@ paths:
   - "docs/design/blastfile-dsl.md"
   - "docs/decisions/ADR-0013-blastfile-lsp-and-zed.md"
   - "docs/decisions/ADR-0003-wire-learn-and-literal-redaction.md"
-attempts: 0
-max_attempts: 3
+attempts: 5
+max_attempts: 5
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T02:04"
 ---
 
 # Goal

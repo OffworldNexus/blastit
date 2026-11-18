@@ -125,6 +125,19 @@ Docker/CI harness, `gate` = a lint/script in `make check`).
 | R29 | One repository guard fails if the retired name or the retired dependency reappears: a pytest in `python/tests/test_docs_assets.py` (already run by `make docs-unit`, so **no new file and no new Makefile target**), with a negative self-test function beside it. | `gate` |
 | R30 | Two new boot decisions are requirements, not footnotes: `entrypoint php` that no view reaches is a **boot warning** (`EntrypointNotReached`), and a request whose path a view's pattern matched but whose method no view declares is a **`405`** with `Allow` listing the declared methods. Each has a named test in §20. | unit + critical |
 
+**Added by the `MB.34.2` amendment (2026-11-18), §13.4.** The five rows below are the
+`query` template's contract; the design that states them is §13.4–§13.5 and §18.1, and
+the user-facing sentences they serve are `docs/reference/blastfile.md`'s (MB.34.1).
+
+| Id | Requirement | Tier |
+|---|---|---|
+| R31 | `blastit_sqlpolicy::check_template(&str) -> Result<(), TemplateError>` validates the **raw decoded** statement with exactly the rewrite of §13.4's expansion table, parses it with `pg_query::parse` (PostgreSQL 17.7, §13.4.1), and requires `stmts.len() == 1`. It performs no policy: no table, column, function or literal rule, so `COPY … PROGRAM` and `pg_read_file(…)` are legal here. | unit + critical |
+| R32 | The rewrite is **total and deterministic**: same input, same output, no map iteration, no locale, no re-spacing and no case folding; `$?` numbering is `u32` with `checked_add` and is refused (not wrapped) past `MAX_TEMPLATE_PARAMS`, and the output is refused (not grown) past `4 × MAX_TEMPLATE_CHARS + 8`. | unit + critical |
+| R33 | `TemplateError` carries a 0-based **char** offset into the decoded text and one `kind` whose `Display` is one fixed sentence and carries no message at all (`Syntax` included: pg_query's message quotes the offending lexeme, so it is never rendered — §13.4.4). `Display` never contains the statement. `Syntax`'s offset is the **first non-trivia code character** (space, newlines and comments skipped, so `0` for a statement that starts with code) because `pg_query 6.2.1` does not expose `cursorpos` (§13.4.4): a `query '\nSELECT id FROM'` squiggles on the `S`, never on the newline, and never `Position::NONE`, never `0:0`. | unit + critical |
+| R34 | `PgGrant` carries `query_sites(): &[QuerySite]` parallel to `queries()`: the origin `Position` (the first character **inside** the opening quote), the interior's source byte range, and the decoded→source map that makes an inner char offset a `Line:Col` — for the `'…'` spelling (no escapes) and the `"…"` spelling (four escapes, multi-line). | unit + **critical** (`tests/critical_query_sites.rs`, §18.1) |
+| R35 | Two spellings that normalise alike are one entry with the **first** site: one diagnostic, no second squiggle, no hover and no Quick Fix at the duplicate. A programmatic grant (`PgGrant::new`) still has one entry, whose `at` is `Position::NONE` (§13.4.5); one test pins that boundary. | unit + **critical** (`tests/critical_query_sites.rs`, §18.1) |
+| R36 | `blastit_sqlpolicy::parameterize(&str) -> Option<String>` is the Quick Fix's rewrite and the **only** implementation of it: literals → `$?`, `$n` → `$?`, and `normalize`'s shape rules, so the result is the canonical grant text `--learn` writes. It returns `None` when there is nothing to change and when the text is one of `KNOWN_STATIC_SETUP_SQL`. | unit + critical |
+
 ## 4. Architecture & Data Flow
 
 ### 4.1 Where the code lives
@@ -215,6 +228,10 @@ the design says so here, and no file spelling exists for either.
 | `blastfile::lower` | `pub(crate) fn lower(cst: &Cst, source: &str) -> Result<Manifest, ManifestErrors>` | `lower.rs` |
 | `blastfile::print_lossless` | `pub(crate) fn print_lossless(cst: &Cst, source: &str) -> String` | `syntax.rs` |
 | `blastfile::fmt` | `fn fmt(text: &str) -> Result<String, ManifestErrors>` | `print.rs` |
+| `blastit_sqlpolicy::check_template` | `fn check_template(sql: &str) -> Result<(), TemplateError>` (the `query` template, §13.4) | `blastit-sqlpolicy/src/template.rs` |
+| `blastit_sqlpolicy::parameterize` | `fn parameterize(sql: &str) -> Option<String>` (the Quick Fix's rewrite, §13.4, R36) | `blastit-sqlpolicy/src/template.rs` |
+| `blastit_sqlpolicy::literal_offset` | `fn literal_offset(sql: &str) -> Option<u32>` (the first quoted literal's char offset, for `LiteralQuery`'s `at`) | `blastit-sqlpolicy/src/literals.rs` |
+| `PgGrant::query_sites` | `fn query_sites(&self) -> &[QuerySite]` (`len == queries().len()`, §13.4) | `model.rs` |
 | `Manifest::equivalent` | `fn equivalent(&self, other: &Self) -> bool` (every field except `route_lines`) | `model.rs` |
 | `ManifestEdits::apply_to` | `fn apply_to(&self, manifest: &Manifest) -> Manifest` | `edit.rs` |
 
@@ -230,6 +247,9 @@ the design says so here, and no file spelling exists for either.
 | `MAX_PATTERN_BYTES` | `4_096` (4 KiB) | `pattern.rs`, both the quoted form and `regex '…'`; the compiled program stays bounded by `REGEX_SIZE_LIMIT` (`1 << 20`) and `REGEX_NEST_LIMIT` | `<path>:<l>:<c>: a pattern holds at most 4096 bytes` |
 | `MAX_APP_NAME_CHARS` | `256` | `lower::app` | ``<path>:<l>:<c>: an `app` name is 1 to 256 characters with no control byte`` |
 | `MAX_QUOTED_CHARS` | `120` (existing) | `error::quoted` | value cut with `…`, control bytes escaped |
+| `MAX_TEMPLATE_CHARS` | `65_536` (64 Ki chars) | `template.rs`, before the rewrite | ``<path>:<l>:<c>: a `query` is 65536 characters at most; split it, or grant the tables and columns instead`` (§13.4) |
+| `MAX_TEMPLATE_PARAMS` | `1_024` | `template.rs`, while numbering `$?` | ``<path>:<l>:<c>: a `query` holds 1024 bind placeholders at most; grant the tables and columns instead`` (§13.4) |
+| `MAX_TEMPLATE_PARSES` | `4_096` | `validate.rs`'s `check_queries`, per file | ``<path>:<l>:<c>: a `Blastfile` validates 4096 `query` entries at most; fold the shared statements into a `trait` that many views `use` `` (§13.4) |
 
 The file-size refusal is the answer to "the exact refusal for an unbounded
 input": a hostile or generated `Blastfile` can hold millions of `view` blocks, and
@@ -1148,6 +1168,398 @@ log tool must not be forced to discover a file), and (c) keeps its statement pol
 unchanged (never `unrestricted`, never a literal, never twice). Until that leaf
 lands, `fold.py` is the one other writer in the tree, and the design names it so no
 leaf can claim "one serialiser" while it exists.
+
+### 13.4 The `query` template: expansion, refusals, and the span contract
+
+**Added by `MB.34.2` (2026-11-18).** Code site: `crates/blastit-sqlpolicy/src/template.rs`
+(engine), `crates/blastit-manifest/src/{blastfile/lower,validate,error,model}.rs` (site and
+rendering). Proved by `crates/blastit-sqlpolicy/tests/critical_query_template.rs` and
+`crates/blastit-manifest/tests/validate.rs` (§20, R31–R36). The accepted user sentences are
+`docs/reference/blastfile.md`'s (`query` section, MB.34.1) and are **transcribed here**, not
+re-invented: the page is the contract, this section is its implementation.
+
+#### 13.4.1 What is validated, and what is deliberately not
+
+One question, asked of one text: **is this one parseable statement in the grammar `pg_query 6.2.1`
+vendors — **PostgreSQL 17.7** (`PG_VERSION "17.7"` at `libpg_query/pg_query.h:166`;
+`PG_VERSION_STR "PostgreSQL 17.7 (libpg_query)"` at
+`libpg_query/src/postgres/include/pg_config.h:639`), not 18 — once Blastit's placeholders
+are expanded?** Nothing else.
+
+* The input is the **raw decoded** statement — `raw_value` for `'…'`, `str_value` for `"…"`
+  (`tokens.rs:97,130`) — *not* `normalize`'s output. `normalize` collapses whitespace,
+  removes comments and rewrites `IN`/`VALUES` shapes (`normalize.rs:1-30`), so its offsets are
+  not the file's; validating it and mapping back is the trap this section exists to close.
+* It is **a parse, not a policy**. `analyze`/`TableGrants` stays the table-grant gate
+  (§17.5), `has_quoted_literal` stays the literal gate (§13.1), and the redacted `…` stays
+  its own refusal. A template that is parseable but dangerous —
+  `COPY x FROM PROGRAM 'sh'`, `pg_read_file($?)`, `dblink(…)`, `lo_import($?)` — is
+  **legal here** (`FROM PROGRAM` takes a string constant, not a parameter, so the literal
+  form is the parseable one; `LiteralQuery` is what refuses it, not this check), exactly as `docs/reference/blastfile.md` says an exact `query` "gets no table or
+  column analysis" and is the author's to read before pasting. A validator that started
+  refusing them would be a second allowlist, which `ADR-0003` and §17 forbid.
+* It parses the text **once per distinct entry**, in `check_queries`
+  (`validate.rs:262`), and only when neither the redacted-`…` nor the inline-literal
+  refusal fired for that entry: one entry yields at most one sentence (§13.4.3).
+* It never prints the statement, never `panic`s, never `unwrap`s; the input is bounded by
+  `MAX_TEMPLATE_CHARS` before the rewrite. Every `pg_query::Error` variant — not only
+  `Parse`, but `Conversion` (an interior NUL), `Decode`, `InvalidJson` and
+  `InvalidPointer` — is the same `Syntax` refusal, so no arm is left to `unwrap` (S13).
+* **Cost, honestly.** One `pg_query::parse` per distinct entry, and the entries' texts are
+  disjoint slices of one file, so the total parse input is ≤ its decoded statements and the
+  count is bounded by `MAX_TOKENS` (§4.5: a `query` line needs at least three tokens). No
+  per-entry cap is added: it would be a new user-visible limit with no sentence on the
+  reference page, and the pathological file it would protect against — tens of thousands of
+  `query` lines — is the generated file `MAX_SOURCE_BYTES`/`MAX_TOKENS` already refuse and
+  the reference's own "fold the shared grants into a `trait`" advice already addresses. If a
+  boot measurement ever shows the parse dominating, the answer is a cap that *refuses*
+  (never one that skips silently), recorded as a follow-up rather than hidden here.
+
+#### 13.4.2 The expansion table (total, deterministic, one pass)
+
+Implemented as: tokenise the raw decoded text with the crate's own **lexer**, then copy it
+through, applying only the rows below. The seam is named, because it is the one thing a
+cheap implementer would otherwise re-decide: `template.rs` scans `&[char]` with
+`lexer::{lex, code_token_end, placeholder_end, is_ident_start, is_space}` (all
+`pub(crate)`; `lex` yields the quoted/comment regions so a `'`-literal holding `$?` is
+data), producing `(kind, start, end)` **char offsets** — the same outer loop
+`normalize.rs:125-160` runs. The frame stack over those offsets (`open`/`)`/`,`, a
+`values` word not preceded by `.`, the row list) is ~30 lines; `normalize`'s
+`reshape`/`Piece`/`Kind` are private and carry no offsets, so this is a *sibling* walk of
+the same shape, not an inversion of that function. No new scanner, no regex.
+
+The output is the input's characters, in order, with exactly two deletions and the
+numbering; **no re-spacing, no case folding, no comment removal**.
+
+The walk is the same shape as `normalize`'s `reshape` (`normalize.rs:484-620`) with its two
+shape rules inverted: `open`/`)`/`,` become a frame stack, the word `values` (not preceded
+by `.`) sets `after_values`, a group opening right after it starts the row list, and where
+`normalize` *collapses* an `IN` list or a repeated row, this walk *deletes* the `, ...` it
+finds.
+
+A deleted `, ...` span is **exact**: from the first character of the comma through the last
+of the three dots, inclusive — any whitespace or comment inside that span goes with it, and
+nothing else. The `...` is a token of its own, so the span can never contain a code `;`, a
+quote or a bracket; and rules 6–8 (`StrayEllipsis`, `Empty`, `MultipleStatements`) are
+decided on the token stream **before** any deletion, so a malformed text is refused as
+written, never rewritten into a different one (security S4).
+
+| # | Written (in code, outside quotes and comments) | Expanded | Rule |
+|---|---|---|---|
+| 1 | `$?` | the next `$N` | `N = 1, 2, 3, …` in statement order, counting **only** `$?` |
+| 2 | `$1` … `$n` (digits) | copied unchanged | PostgreSQL's own numbering is legal as written, so nothing is renumbered |
+| 3 | `IN ($?, ...)` | `IN ($1)` **for the parse** | the `, ...` is **deleted** and the surviving placeholder keeps its number; a one-element list is valid SQL, so the parse needs no list length. The **wire** form is the page's — `IN ($1, $2, …, $n)`, one `$n` per value at any length; the app numbers its own parameters, and the grant only has to parse |
+| 4 | `NOT IN ($?, ...)` | `NOT IN ($1)` **for the parse** | row 3's rule; the reference promises `NOT IN` too |
+| 5 | `(<row>), ...` after the keyword `VALUES` | `(<row>)` **for the parse** | the `, ...` is **deleted**; every repeated row still reaches PostgreSQL at run time, as the page says, because the rows are the app's and the `...` is Blastit's |
+| 6 | an item that is exactly `...` in any other position (a longer run of dots included) | — | refusal `StrayEllipsis` at its first `.` |
+| 7 | nothing outside space, comments and one trailing `;` | — | refusal `Empty` at offset `0` (`query ';'` is no statement) |
+| 8 | a second statement (a code `;` that is not the text's last code character) | — | refusal `MultipleStatements` |
+| 9 | the expanded text does not parse | — | refusal `Syntax` at the **first non-trivia code character** (`0` when the text opens with code), with the **fixed** sentence of §13.4.3; pg_query's message is never rendered (§13.4.4) |
+| 10 | a decoded statement over `MAX_TEMPLATE_CHARS`, or more than `MAX_TEMPLATE_PARAMS` `$?` | — | refusals `TooLong` / `TooManyParameters` at `0` / at the offending `$?` |
+
+Rules 1–5 are the reference's three template rows seen from the **parse** side. The page
+says what PostgreSQL receives (`IN ($1, $2, $n)`, every repeated row); the rewrite produces
+a *validation* text in which the variadic marker — which is not SQL — has to disappear.
+Both describe the same grant: the table above is what the parser sees, the page is what the
+wire sees. Rows 3–5 accept a hand-written `$N` as the one surviving placeholder too
+(`IN ($1, ...)` → `IN ($1)`), because rows 1 and 2 make `$?` and `$N` the same thing.
+
+The two `...` positions are **syntactic and minimal**: the last item of an `IN`/`NOT IN`
+list holding exactly one placeholder and then `...`, or the item directly after a `VALUES`
+row. Whether the rows are identical is `normalize`'s business (it collapses repeats,
+`normalize.rs:484-586`), not the parse's: a validator that also compared rows would answer a
+second question. Anything else with `...` is row 6, and the sentence names both legal
+positions, so it stays exactly true.
+
+Two consequences worth stating because they are the acceptance cases:
+
+* **A list with no `...` is legal at any length.** `IN ($?, $?)` is `IN ($1, $2)` by rules 1
+  and 2 and needs no row of its own: a developer who deleted the `...` from a two-placeholder
+  list gets a parseable statement, not a refusal.
+* **A second placeholder before the `...` is `StrayEllipsis`.** `IN ($?, $?, ...)` is row 6:
+  the legal shape holds exactly one placeholder, and accepting it would honour a grant that
+  `normalize` can never produce (it only collapses a list of *placeholders*, so this text
+  would stay as written and match nothing on the wire). The sentence says `IN`/`NOT IN
+  ($?, ...)`, which is exactly what this text is not.
+
+**Numbering may reuse a hand-written number.** `WHERE a = $1 AND b = $?` becomes
+`WHERE a = $1 AND b = $1`. That is deliberate: the expanded text is a **validation
+artefact, never executed**, and `normalize` folds `$n` to `$?` (`normalize.rs:140-146`), so
+the rewrite cannot change what grant a statement matches. Numbering is `u32` with
+`checked_add`; the `(MAX_TEMPLATE_PARAMS)`-th `$?` is a refusal, never a wrap.
+
+**Length.** The bound is on **characters**, not bytes. A `$?` grows to at most five
+characters (`$1024`), so a 65 536-character input expands to at most ~98 304 characters;
+the output buffer is **reserved** as `4 × MAX_TEMPLATE_CHARS + 8` **bytes** (the worst case
+is 4 bytes per character) and is never grown for an input under the cap, and there is no
+separate output refusal — `MAX_TEMPLATE_CHARS` and `MAX_TEMPLATE_PARAMS` are the bounds.
+`MAX_TEMPLATE_CHARS` (65 536) is 1/256 of `MAX_SOURCE_BYTES` and ~64× the largest SQL
+statement this repository ships; it bounds the per-keystroke `pg_query` parse the editor
+triggers (`docs/design/blastfile-lsp-zed.md` §4.5 P6) as well as the inspection a boot does.
+
+**Parse count.** The count of parses is capped too, because the per-statement caps do not
+bound it: `MAX_TEMPLATE_PARSES = 4_096` distinct entries per file, and the 4 097th is
+`TooManyQueries` (§13.4.3) at its own `at`. That keeps a 16 MiB file of tiny `query` lines
+from costing 10⁵ parses on every publish; the sentence names the reference's own fix (fold
+them into a `trait`).
+
+After the rewrite: `pg_query::parse(&expanded)`; on `Ok`, `protobuf.stmts.len() == 1` is
+required (`0` ⇒ `Empty`, `> 1` ⇒ `MultipleStatements`; both are unreachable behind rows 7
+and 8 and are asserted anyway, because `pg_query`'s empty-statement handling is not ours to
+inherit). A single trailing `;` stays legal: `normalize`'s own rule (`normalize.rs:758`)
+is "one trailing separator is dropped", and the reference says "a single trailing `;` is
+allowed".
+
+#### 13.4.3 The refusal set, verbatim
+
+One entry, one sentence. The sentences are the page's; the site is the page's own column.
+`at` is a `Position` (1-based line, 1-based **char** column) and is never `Position::NONE`
+for a `query` parsed from a document (§13.4.5). `NONE` is not "no document": it is "this
+refusal has no site of its own" — a whole-file error, a `Location`-only error, or a
+programmatic grant — and that is the only meaning it has anywhere in the crate.
+
+| `kind` | Written | `offset` into the decoded text | The CLI prints |
+|---|---|---|---|
+| `Empty` | `query ''`, `query '  '`, `query '-- x'`, `query '  ;  '` | `0` | ``this `query` is empty; write the one statement it grants`` |
+| `MultipleStatements` | `query 'SELECT 1; SELECT 2'` | the first code character after the first code `;` that is not the text's last code character | ``a `query` is one statement; this one starts a second`` |
+| `StrayEllipsis` | `query 'SELECT id FROM ...'` | the first `.` of the three | ```...` is only valid in `IN`/`NOT IN ($?, ...)` and after a `VALUES` row``` |
+| `Syntax` | `query 'SELCT id FROM t'`, `query 'SELECT id FROM'`, `query '\nSELECT id FROM'` | the first non-trivia code character — `0`, `0`, `1` — pinned, see §13.4.4 | ``the statement does not parse; check it for a typo, a missing `FROM` or a stray `)` `` |
+| `TooLong` | a decoded statement of 65 537 characters | `0` | ``a `query` is 65536 characters at most; split it, or grant the tables and columns instead`` |
+| `TooManyParameters` | a 1 025th `$?` | that `$?` | ``a `query` holds 1024 bind placeholders at most; grant the tables and columns instead`` |
+| `TooManyQueries` | the 4 097th distinct entry in one file | that entry's `at` | ``a `Blastfile` validates 4096 `query` entries at most; fold the shared statements into a `trait` that many views `use` `` |
+
+**`Syntax` never quotes the statement** (S1 of the security review). pg_query's own message
+is `syntax error at or near "<lexeme>"`, and `<lexeme>` is statement text — a mistyped
+literal or a pasted token is exactly what it quotes — so the message is used **only to
+classify** the refusal and is never rendered, stored, or logged. The sentence above is fixed
+and names the three usual causes; the squiggle at the first non-trivia code character is the locator.
+
+The three rows the page already carries are rows 1–3 above and reproduce its sites exactly
+on its own fixtures: `query ''` at 8 spaces of indent is `9:16` (the closing quote, because
+an empty statement has no first character); `SELECT 1; SELECT 2` is `11:26` (`SELECT 1; `
+is 10 decoded characters, so the second statement's `S` is 10 past the origin at col 16);
+`SELECT id FROM ...` is `13:31` (`SELECT id FROM ` is 15 characters). Those three numbers
+are the test oracle for the origin (§13.4.5) and the arithmetic for the whole section.
+
+The reference page now carries all seven sentences, including `TooLong`, `TooManyParameters`
+and `TooManyQueries`, and its `Syntax` row says "the statement's first token"
+(`docs/reference/blastfile.md:277,298-304`) — the page and this table agree.
+
+#### 13.4.4 `pg_query`'s error shape: `cursorpos` is not exposed (pinned)
+
+Read on this host, `pg_query 6.2.1`:
+
+* the Rust error is `Error::Parse(String)` (`src/error.rs:11`), and the string is **only**
+  `(*result.error).message` (`src/query.rs:35`, wrapped at `:36`);
+* the C struct it comes from *does* carry the position — `int cursorpos;` at
+  `libpg_query/pg_query.h:15`, filled from the parser's `ErrorData` at
+  `libpg_query/src/pg_query_parse.c:101` — and the crate's `mod bindings` is private
+  (`src/lib.rs:41`), so there is no FFI escape from a downstream crate;
+* `pg_query::Error` has no other variant that carries a position (`Error::Scan`/`Split`
+  wrap the same message-only string).
+
+Therefore **`cursorpos` is not exposed** and `Syntax`'s offset is **pinned to the first
+non-trivia code character** of the decoded statement — the first character that is neither
+`is_space` nor inside a `RegionKind::Comment` (`lexer.rs:122-155`), so spaces, newlines and
+comments are skipped. That is a
+refinement of the amendment's earlier "first character": multi-line SQL is legal, so a
+`query '\n  SELECT id FROM'` must squiggle on the `SELECT`, not on trivia, and the page's
+"the statement's first token" (`docs/reference/blastfile.md:277`) then matches the squiggle
+exactly. The offset is `0` for every statement that opens with code — the `SELCT …` case
+(`9:16`) and `SELECT id FROM` (`syntax error at end of input`) included — and `1` for the
+leading-newline fixture. None of them reports `Position::NONE`. (The ADR-0013 amendment's
+"first character" is the same rule before trivia is skipped; this paragraph is the
+authority.)
+
+**The message is never rendered** (security S1). pg_query's message is
+`syntax error at or near "<lexeme>"`, and `<lexeme>` is statement text — a mistyped literal
+or a pasted token is exactly what it quotes — so `TemplateKind::Syntax` carries **no
+message**, and the sentence is the fixed one in §13.4.3. The design gives up the token name
+on purpose: `blastit check` output reaches CI logs and the editor's LSP log, and a `query`
+may hold a value (§17.1).
+
+Two alternatives are rejected, and the reason is the same for both: **do not guess.**
+Matching `at or near "TOKEN"` against the text is a heuristic over a message that is data
+(and has no token at all for "at end of input"), and scraping `stderr_buffer`
+(`src/query.rs:39`) is a second, undocumented channel. If a later `pg_query` exposes
+`cursorpos`, the offset becomes precise with no contract change: `TemplateError` already
+carries an offset, and only `template.rs`'s `Syntax` arm moves.
+
+#### 13.4.5 The span contract: origin, map, multi-line, chars
+
+The model carries, per **deduped** query entry, one `QuerySite`:
+
+```rust
+// crates/blastit-manifest/src/model.rs (§4.3); `len == queries().len()`
+pub struct QuerySite {
+    /// The `Position` of the first character *inside* the opening quote, so an
+    /// inner offset of `0` is the first SQL character. For `query ''` it is the
+    /// closing quote — the empty statement's only honest site. `Position::NONE`
+    /// for a grant built by `PgGrant::new` (no token to point at).
+    pub at: Position,
+    /// The interior's source **byte** range: `.0` is `at`'s character, `.1` is
+    /// the closing quote. `'` and `"` are one byte each, so this is
+    /// `token.start + 1 .. token.end - 1` (§5.1).
+    pub interior: std::ops::Range<u32>,
+    /// The **decoded→source map**, in its only compact exact form: the decoded
+    /// character indices whose source spelling is a two-character escape
+    /// (`\"`, `\\`, `\n`, `\t` — `error.rs` `InvalidEscape`'s four). Empty for
+    /// a `'…'` string, which has no escapes.
+    pub escapes: Vec<u32>,
+    /// The raw decoded statement, before `normalize` — the text
+    /// `check_template` and `parameterize` run on.
+    pub raw: String,
+}
+```
+
+**`query_sites()` has exactly one entry per `queries()` entry**, always — that is the
+invariant `check_queries` zips on, and it is what `MB.34.4`'s accessor returns. A grant built
+by `PgGrant::new` gets an entry with `at: Position::NONE`, `interior: 0..0`, `escapes: []`
+and `raw` = the stored (already normalised) text: nothing is sited, nothing hovers, nothing
+gets a Quick Fix, and the template check still runs on the text the grant actually holds. R35
+says the same thing in one sentence; "has no site" always means "its `at` is `NONE`", never
+"the vector is empty".
+
+**`Debug` is manual and redacts `raw`.** `PgGrant` derives `Debug` (`model.rs:164`), so a
+derived `QuerySite` would print a refused, literal-bearing statement from a `{:?}` — the
+discipline `hooks.rs`'s `debug_redacts_passwords_and_cas` already enforces. `QuerySite`
+implements `fmt::Debug` by hand and prints `raw` as `redact_literals(&self.raw)`.
+
+**`PgGrant`'s `PartialEq` excludes `query_sites`.** `model.rs`'s `Manifest::equivalent`
+compares routes with `==`, and `critical_blastfile_parity.rs` builds expected grants with
+`PgGrant::new`; a site-carrying field inside the derived equality would make every parity
+case red. `PgGrant` therefore keeps a hand-written `PartialEq` over `queries`/`tables`/
+`transaction_control` and ignores the sites — they are metadata, not semantics, exactly as
+`route_lines` already is.
+
+**Origin.** `at = position_of(token.start + 1)` (`lower.rs:184-201`), the same walker every
+other `at` in the crate uses, so the units are the crate's: 1-based line, 1-based column
+counted in `char`s (`error.rs:61`, R2). A `Position` derived here is therefore
+interchangeable with a parser's, which is what makes the LSP's `Lines::point`
+(`docs/design/blastfile-lsp-zed.md` §4.2) apply unchanged.
+
+**Inner offset → `Position`** is a method on the site, in `model.rs` where the type
+lives — not a second walker:
+
+```rust
+impl QuerySite {
+    /// The `Position` of a decoded character offset (§13.4.5's walk).
+    pub fn position_at(&self, offset: u32) -> Position;
+}
+```
+
+```text
+let (mut line, mut col) = (self.at.line(), self.at.col());
+let mut next_escape = self.escapes.iter().copied().peekable();   // strictly increasing
+for (i, c) in self.raw.chars().enumerate().take(offset):
+    if next_escape.peek() == Some(&i): next_escape.next(); col += 2   // `\"`: 2 columns
+    elif c == '\n':                    line += 1; col = 1            // a raw newline
+    else:                               col += 1
+Position::at(line, col)
+```
+
+`escapes` is built in increasing order and read with one cursor, so the walk is `O(offset)`
+and never `O(offset × escapes)` — with a 64 KiB statement and thousands of escapes the
+nested search would be quadratic on every refusal.
+
+It is a method on `model.rs`'s type for one structural reason: `blastfile/mod.rs` declares
+`mod lower;` **private** (`crates/blastit-manifest/src/blastfile/mod.rs:46`), so a
+`pub(crate)` free function in `lower.rs` is not reachable from `validate.rs` (a sibling
+module), and `blastfile/mod.rs` is in no MB.34 leaf's `paths`. `model.rs` is, and the method
+needs nothing but the site's own three fields — no source text, no CST.
+
+It is **not** a second `position_of` (`lower.rs:184-201`): that one maps a file **byte**
+offset through `line_starts`, and this one maps a **decoded character index** through the
+escape list, from a `Position` it already has. Neither can express the other (a byte offset
+inside a `\"` is a position the decoded text does not contain, and a decoded index has no
+byte image once the escapes differ), so each stays one function, and `position_at` is what
+both `validate.rs` (a refusal's `at`) and the LSP's diagnostic path consume through
+`error.position()`.
+
+* **Multi-line.** A raw newline inside the string (`'…'` and `"…"` both admit one —
+  `lexer.rs:288-311` ends only at the matching quote) moves the walk to the next line. A
+  `\n` *escape* does **not**: the source has no line break there, so the decoded newline
+  costs two columns on the same line. That distinction is what a multi-line test pins.
+* **Chars, not bytes.** A non-ASCII character is one column and two or more bytes; the walk
+  counts `char`s (matching `error::Position` and every other site in the crate) while
+  `interior` counts bytes (matching `token_span`). The two are never interchanged; a
+  `café` fixture asserts both numbers.
+* **A mapping that cannot be computed is a refusal at the token, not at `0:0`.** If the
+  walk cannot be built (a site whose `escapes` disagree with `raw` — a bug — or a grant
+  built by `PgGrant::new`, which has no token at all), the site falls back to the string's
+  own `Position` (`token.start`, the opening quote) and, for a programmatic grant, to
+  `Position::NONE`. `Position::NONE` therefore means "no site of its own", never "offset
+  zero" (R35); one test pins that boundary and `check_queries` reaches `NONE` for no parsed
+  document.
+* **`at` is a source position and has nothing to do with `base`.** `base` is the
+  `UidLayout` base (`parse_blastfile(source, base)`); it shifts no line or column, and a
+  `Blastfile` embedded with a non-zero base squiggles in the same place.
+* **The `escapes` list is produced in `lower.rs`**, which already holds the token text: it
+  walks the `'…'`/`"…"` spelling itself (`str_value`'s four escapes are three lines) and
+  records the decoded indices, so `tokens.rs` needs no change.
+* **`interior` is not derivable from `raw`.** For `"…"` the source spelling is not
+  recoverable from the decoded text (one decoded `\n` may be a raw newline or two source
+  characters), which is why the site stores `escapes` and the byte range instead of a
+  second text.
+* **Bound.** A grant holds at most `queries()`'s own text twice (raw + normalised) plus one
+  `u32` per escape, and one escape needs two source characters, so the grant is ≤ 2× its
+  own `query` text; the document is capped at `MAX_SOURCE_BYTES` (§4.5) and no new cap is
+  added.
+
+**Dedupe (R35).** `lower.rs:687-689` normalises and pushes only when the normalised text is
+new; the site is recorded on that first push and never again. So two spellings that
+normalise alike are one entry, with the **first** site in source order, and the second gets
+**no second diagnostic** — the manifest is one grant, not two. The same rule governs the
+other two surfaces, so there is one sentence to remember: a deduped duplicate has no site,
+therefore no squiggle, no `$?` hover and no Quick Fix inside it.
+
+#### 13.4.6 `parameterize`: the Quick Fix's one rewrite (R36)
+
+`blastit_sqlpolicy::parameterize(sql: &str) -> Option<String>` is the *inverse* direction of
+`redact_literals`: every quoted literal region becomes `$?` (the region, prefix included —
+`E'x'`, `B'1'`, `$$x$$`, exactly as `redact_literals` replaces it, `literals.rs:82`),
+then `normalize` collapses `$n` → `$?`, `IN (...)` → `IN ($?, ...)` and repeated `VALUES`
+rows → `(row), ...`. The result is therefore **the canonical grant text**: the bytes
+`--learn` writes, the bytes `check` matches, and idempotent because `normalize` is
+(`normalize.rs` `a_collapsed_shape_stays_put_when_it_is_normalised_again`).
+
+* `None` when the statement is exempt, and `None` when there is nothing to change:
+  1. **first**, the exemption — if `normalize(sql)` is one of `KNOWN_STATIC_SETUP_SQL`
+     (`literals.rs:41`) the answer is `None`, because the two protocol statements keep their
+     literals and the Quick Fix must not offer to rewrite them;
+  2. then the change test — at least one quoted literal **or** at least one `$n` placeholder,
+     otherwise `None` (a clean `query` has nothing to parameterise).
+* `None` for a redacted `…`: a `…` is not a literal, so there is nothing to parameterise and
+  the value is gone.
+* `None` for any statement `blastit_sqlpolicy::learn::check_learnable` refuses (`COPY …
+  PROGRAM`, `pg_read_file`, `lo_import`, `dblink`, …). The Quick Fix is a grant producer, and
+  `ADR-0003` promises that every grant producer refuses exactly that set; one call to the
+  existing check is cheaper than a second, drifting list (security S2).
+* **It is gated on its own output.** `parameterize` returns `Some` only when the result
+  passes `check_template`; a paste with a typo (`SELCT …`) or a two-statement query is
+  therefore offered **no** Quick Fix, instead of an edit that swaps one broken statement
+  for another (security S3).
+* The input is capped: a `sql` over `MAX_TEMPLATE_CHARS` returns `None` before any
+  allocation, so the LSP can call it on an untrusted buffer (security S6).
+* It flattens layout (multi-line SQL becomes one line) **on purpose**: a layout-preserving
+  rewrite would be a second implementation of the shape rules and could produce a grant
+  that matches a different set of statements than the one the developer sees. The page
+  already promises the shape (`docs/local.md` `## Editors` step 2), not the layout.
+* One implementation, one caller family: the editor calls it; nothing re-implements it in
+  a regex (§13.5).
+
+### 13.5 Which leaf builds what
+
+| Leaf | Work | Paths | Acceptance |
+|---|---|---|---|
+| `MB.34.3` | `template.rs`: `check_template`, `parameterize`, `TemplateError`/`TemplateKind`, the caps; `literal_offset` in `literals.rs`; re-export from `lib.rs`. `normalize` byte-identical. | `crates/blastit-sqlpolicy/src/{lib,template,literals}.rs`, `tests/critical_query_template.rs` | `cargo test -p blastit-sqlpolicy`; §20's R31–R33, R36 rows |
+| `MB.34.4` | `QuerySite` + `query_sites()` in `model.rs`; the site and `raw` recorded in `lower.rs`'s `Query` arm; `QuerySite::position_at`; `validate.rs`'s `check_queries` order (… → literal → template); variants in `error.rs` (§18.1). | `crates/blastit-manifest/src/{model,validate,error,lib,blastfile/lower}.rs`, `tests/validate.rs`, `tests/critical_manifest_011.rs` (the `at` field only), **`tests/critical_query_sites.rs` (new, protected)** | `cargo test -p blastit-manifest`; §20's R34, R35 rows |
+
+`MB.34.5` and `MB.34.6` are the editor leaves and are planned in
+`docs/design/blastfile-lsp-zed.md` §13.3 (`codeAction`, hover) and §9.2/§10.2
+(`sql_string`, queries) — this section's contract is what they call, not what they
+re-decide.
+
 ## 14. CST, `blastit fmt` and the Surgical `--learn` Editor (item 9)
 
 **Code site:** `blastfile/syntax.rs` (the arena and `print_lossless`),
@@ -1632,6 +2044,62 @@ Every error renders as **one line**, with one spelling:
 The new variants are exactly the rows of §5.3, §6.7, §8.3, §11.3, §12 and §9.1;
 each carries `{ line, col }` (or `NONE`) and a `&'static str` message with at most
 two `{}` slots, both of which are a name or a number, never a literal (S2).
+
+### 18.1 The `MB.34.2` amendment: three sentences that gain a site
+
+**Added 2026-11-18.** Proved by `tests/validate.rs` (the exact `line:col` of §20's R33/R34
+rows) and by `critical_manifest_011.rs` **compiling and passing with one new field per
+literal** — no assertion removed, no sentence changed (ADR-0013's amendment).
+
+| Change | Render | Why the words do not move |
+|---|---|---|
+| `RedactedQueryPlaceholder { …, at }` | `{}{location}: queries[{rule}] holds a redacted …`, with `prefix(*at)` | `prefix(Position::NONE)` is `""` (`error.rs:103-109`), so a programmatic grant renders **byte-identically** and a document gains `<l>:<c>: `. The sentence is ADR-0003's and the reference's. |
+| `LiteralQuery { …, at }` | the same shape: `{}{location}: queries[{rule}] inlines a quoted literal …` | same rule; the site is the first literal's quote (`literal_offset(raw)`, falling back to `0` = the interior origin, never `NONE`) |
+| `QueryTemplate { at, kind }` (new) | `{}{kind}`, with `prefix(*at)` | the page quotes these sentences **whole** (site in its own column), so the variant carries no `location`/`proxy`/`rule`: a line with a `9:16:` prefix and a `view "cart" postgres:` prefix says where twice, and `queries[2]` is a tool's index, not something the author can count. `MB.34.4`'s brief names the wider shape; this row is the authority and the epic owner may re-word the brief. |
+
+`position()` (`error.rs:1406`) returns `at` for all three, so the LSP's
+`error.position()` → `Lines::point` path (`docs/design/blastfile-lsp-zed.md` §5.2) draws
+them where they belong with no LSP change.
+
+**The protected file.** `crates/blastit-manifest/tests/critical_manifest_011.rs:625,640,663,683,709`
+constructs the two older variants. All five fixtures are **parsed from source**, so every
+`at` is a real position and `Position::NONE` appears in none of them — `NONE` is
+unsatisfiable there:
+
+| Site | Fixture | `at` |
+|---|---|---|
+| `:625` | `query "SELECT set_config('application_name', $1, false)"` (line 5 of `route_with_queries`) | `Position::at(5, 34)` — the literal's `'` |
+| `:640` | `query 'SELECT "notes"."body" FROM "notes" WHERE "notes"."id" = …'` | `Position::at(5, 72)` — the `…` |
+| `:663` | `query "SELECT \"notes\".\"name\" … = 'secret'"` (`"…"`, ten escapes) | `Position::at(5, 84)` — the literal's `'`, 10 × 2 source columns |
+| `:683` | the trait fixture's `query "SELECT 'secret'"` | `Position::at(4, 23)` — the literal's `'` |
+| `:709` | the seven literal forms, `SELECT E'x'` … `SELECT U&'x'` | `Position::at(5, 23)` — each region starts at index 7 (the prefix for `E`/`B`/`X`/`N`/`U&`, the `$` for `$$…$$`) |
+
+The only permitted change is that field; no assertion is removed, weakened or reordered,
+and no expected string changes (`prefix(NONE) == ""` already makes a programmatic grant
+render byte-identically). `tools/critical_guard.py --node MB.34.4` gates the edit, and
+`RESULT.md` pastes the diff of exactly those hunks.
+
+**The span oracles are protected too (T1).** The origin rule, the `"…"` escape map, the
+dedupe-first-site rule and the `Syntax`-is-not-`NONE` rule are contract, not unit polish, so
+their four named cases live in a **new protected** file,
+`crates/blastit-manifest/tests/critical_query_sites.rs`:
+
+| Case | Fixture | Assertion |
+|---|---|---|
+| `the_origin_is_the_first_character_inside_the_quote` | `query ''` at 8 spaces, `query 'SELCT …'` at 8 spaces | `9:16` for both (the empty one's origin is the closing quote) |
+| `the_escape_map_survives_a_multiline_double_quoted_query` | `query "SELECT \"id\"\nFROM t\nWHERE price > $?"` with a `...` on line 3 | the `...`'s position counts each `\"` as two source columns and each raw `\n` as a line break: the worked example of `MB.34.2`'s `RESULT.md` (`7:21`) is its second case |
+| `a_duplicate_query_gets_one_site_and_one_sentence` | two spellings that normalise alike | one `queries()` entry, one `query_sites()` entry at the first site, one diagnostic |
+| `a_programmatic_grant_keeps_none` | `PgGrant::new(…)` | one site with `at: Position::NONE`, and `check_queries` renders it with no prefix |
+
+`tests/validate.rs` keeps the broad per-defect cases (one per refusal kind) and the page's
+three sites; the four above are the ones a regression cannot be allowed to lose, so they sit
+behind `critical_guard.py`.
+
+**One sentence per entry.** `check_queries` keeps its `if … else if … else` chain:
+redacted `…`, then inline literal, then the template check. A statement holding a literal
+still parses, so the template check would answer "fine" anyway; a statement holding `…`
+does **not** parse, and running the template check after it would print two sentences for
+one defect. The chain is the rule: one entry, one sentence.
 ## 19. Alternatives Considered
 
 ### 19.1 A parser-generator / combinator crate (`pest`, `chumsky`, `nom`, `logos`)
@@ -1741,6 +2209,12 @@ host (TS-25); a test that needs longer is an e2e test, not a critical one.
 | R26 | `blastfile_errors.rs` (control byte, 121-`char` value, a control byte in the path) | `critical_blastfile_errors.rs` | — |
 | R27–R29 | — | — | `python/tests/test_docs_assets.py::test_the_real_tree_carries_no_retired_toml_manifest` + its negative twin, run by `make docs-unit` |
 | R30 | `validate.rs` `mod tests::entrypoint_not_reached` | `critical_php_manifest.rs::an_unreached_entrypoint_warns`, `critical_rewrite.rs::a_method_mismatch_is_405_with_allow` | — |
+| R31 | `template.rs` `mod tests` (one case per expansion row, per refusal kind) | `crates/blastit-sqlpolicy/tests/critical_query_template.rs` (the rewrite table, the refusal set with offsets, the one-statement property, no printing) | `cargo test -p blastit-sqlpolicy` |
+| R32 | `template.rs::caps` (`MAX_TEMPLATE_CHARS + 1`, the 1 025th `$?`, the `u32` arithmetic) | `critical_query_template.rs::a_statement_over_the_cap_is_refused_not_grown` | — |
+| R33 | `template.rs` `mod tests` (`Syntax` at offset `0` for a leading typo and for `SELECT id FROM`, and at offset `1` for `\nSELECT id FROM`) | `critical_query_template.rs` (the three offsets are `0`, `0`, `1`; none collapses into a case that renders `Position::NONE`; and it asserts no statement-derived string exists on the error) | `validate.rs` (the leading-newline fixture through `check`: the squiggle is on the `S`, not the newline) |
+| R34 | `validate.rs` (the exact `line:col` of a one-line, a multi-line, a `"…"`-escaped and a `café` fixture — §20's amendment rows) | **`crates/blastit-manifest/tests/critical_query_sites.rs`** (protected, new): `the_origin_is_the_first_character_inside_the_quote`, `the_escape_map_survives_a_multiline_double_quoted_query`; `tests/validate.rs` keeps the broad cases; `critical_manifest_011.rs` only the `at` field | `docs/reference/blastfile.md`'s three sites (9:16, 11:26, 13:31) asserted as literals |
+| R35 | `validate.rs::a_duplicate_query_gets_one_sentence`; `model.rs` `mod tests::a_programmatic_grant_keeps_none` | **`crates/blastit-manifest/tests/critical_query_sites.rs`** (protected, new): `a_duplicate_query_gets_one_site_and_one_sentence`, `a_programmatic_grant_keeps_none`; `critical_manifest_011.rs` only the `at` field | `grep -rn 'Position::NONE' src/validate.rs` (no `check_queries` site) |
+| R36 | `template.rs::parameterize` (literal, `$n`, `IN`, `VALUES`, the two exempt statements, the redacted `…`, idempotence) | `critical_query_template.rs::the_quick_fix_rewrite_is_canonical` | `docs/design/blastfile-lsp-zed.md` §13.3's re-parse test |
 
 Beyond the table:
 
@@ -2083,6 +2557,54 @@ was opened and changed in this pass; nothing here is a claim without a diff.
 | testability · M1 | **accepted** -> §14.3/§20: P1 is a `syntax.rs` module test (it needs `print_lossless`), P3's integration form uses `Manifest::from_blastfile_str(fmt(t)).equivalent(..)`; no `tests/` file calls a `pub(crate)` item |
 | testability · M6 | **accepted** -> §21 `MB.21.3.0` lists `crates/blastit-manifest/tests/critical_static_manifest.rs` (manifest crate, not the scheduler's), so its "workspace compiles" acceptance can pass |
 
+## Review Resolution — the `MB.34.2` amendment (2026-11-18)
 
+Four fresh-context goldfish critics read this amendment blind, one lens each, and wrote
+`docs/design/query-template.review-{security,implementability,testability,consistency}.md`.
+Verdicts: security 2 BLOCKER/8 MAJOR/3 MINOR (S1–S2, S3–S10, S11–S13 on disk);
+implementability 4 BLOCKER/6 MAJOR/7 MINOR; testability 2 BLOCKER/8 MAJOR/5 MINOR;
+consistency 3 BLOCKER/7 MAJOR/8 MINOR. Every BLOCKER
+and MAJOR is resolved below — `accepted -> §X` (the text changed), or `deferred -> node`
+(the leaf that must carry it, with the reason). MINORs are folded where they were cheap.
 
+| Finding | Resolution |
+|---|---|
+| security S1 (BLOCKER) | **accepted -> §13.4.6, LSP §7A.2.** `parameterize` returns `None` for anything `learn::check_learnable` refuses, so the Quick Fix can never turn `pg_read_file('/etc/passwd')` into a `$?` grant. |
+| security S2 (BLOCKER) | **accepted -> §13.4.3, §13.4.4, R33.** `TemplateKind::Syntax` carries no message; pg_query's message is classification only and is never rendered, stored or logged (it quotes the offending lexeme, which can be a value). |
+| security S3 (MAJOR) | **accepted -> §13.4.6.** `parameterize` returns `Some` only when its own result passes `check_template`, so a typo or a two-statement paste is offered no Quick Fix. |
+| security S4 (MAJOR) | **accepted -> §13.4.2.** The deleted `, ...` is token-exact and rules 6–8 run before any deletion, so a rewrite cannot swallow a code `;` or hide a second statement; the page's `TooManyQueries` row now exists (`docs/reference/blastfile.md:304`). |
+| security S5 (MAJOR) | **accepted -> §13.4.5.** `escapes` is strictly increasing and read with one cursor; the walk is `O(offset)`, not `O(offset × escapes)`. |
+| security S6 (MAJOR) | **accepted -> §13.4.6.** `parameterize` returns `None` above `MAX_TEMPLATE_CHARS` before any allocation. |
+| security S7 (MAJOR) | **accepted -> §13.4.1, R31.** The grammar is **PostgreSQL 17.7** (`PG_VERSION` at `libpg_query/pg_query.h:166`, `PG_VERSION_STR` at `pg_config.h:639`), not 18; Follow-up 4 corrects the epic prose. |
+| security S8 (MAJOR) | **accepted -> LSP §13.3.** The LSP caches the last `from_blastfile_str` result, one parse per edit rather than per hover/`codeAction`. |
+| security S9 (MAJOR) | **accepted -> LSP §7A.5 C3.** The literal fixture is the `"…"` spelling; a `'…'` literal cannot exist. |
+| security S10 (MAJOR) | **accepted -> §13.4.1.** The parseable dangerous example is `COPY … FROM PROGRAM 'sh'`; `FROM PROGRAM` takes a string constant, not a parameter. |
+| implementability B1 | **accepted -> §13.4.5.** One site per `queries()` entry always; `PgGrant::new` gets `at: NONE`, `interior: 0..0`, `escapes: []`, `raw` = the stored text. |
+| implementability B2 | **accepted -> §13.5.** `crates/blastit-sqlpolicy/src/literals.rs` is in `MB.34.3`'s `paths` (already listed), so no follow-up is needed. |
+| implementability B3 | **accepted -> §13.5.** `crates/blastit-manifest/src/lib.rs` (its explicit `pub use model::{…}` list) is in `MB.34.4`'s `paths` (already listed). |
+| implementability B4 | **accepted -> `blastfile-lsp-zed.md` §9.2a.** The `_statement` splice (`$.query_decl` first) is part of the transcript; without it every `query` is an `ERROR`. |
+| implementability M1 | **accepted -> §13.4.2.** The seam is `lexer::{lex, code_token_end, placeholder_end, is_ident_start, is_space}` over `&[char]`; `reshape` is private and offset-free, so this is a sibling walk, not an inversion. |
+| implementability M2 | **accepted -> `blastfile-lsp-zed.md` §4.6, §7A.3.** Both `Lines::offset` and `Lines::point_at` are defined, and the edit range uses `point_at` for the byte end. |
+| implementability M3 | **accepted -> `blastfile-lsp-zed.md` §7A.2.** The trigger is `parameterize(&site.raw)` being `Some`, not a diagnostics predicate; Follow-up 2 re-words `MB.34.5` bullet 1. |
+| implementability M4 | **accepted -> `blastfile-lsp-zed.md` §7A.5 C3.** The literal fixture is the `"…"` spelling; a `'…'`-spelling literal cannot exist. |
+| implementability M5 | **accepted -> §13.4.2 "Length".** The bound is on characters; `4 × MAX_TEMPLATE_CHARS + 8` is a byte *reservation*, not a refusal threshold. |
+| implementability M6 | **accepted -> `blastfile-lsp-zed.md` §4.6 P7.** Char 20 / UTF-16 21 / byte 24, measured with `grep -bo '='`. |
+| implementability (first pass) B1 | **accepted -> §13.4.5.** `PgGrant`'s `PartialEq` is hand-written and excludes `query_sites`, so `Manifest::equivalent` and `critical_blastfile_parity.rs` stay green. |
+| implementability (first pass) 5 | **accepted -> `blastfile-lsp-zed.md` §9.5.** The `regex '…'` corpus case moves to a `static`/`immutable regex` shape; a grant block refuses `regex`. |
+| implementability (first pass) 7 | **accepted -> §13.4.5.** `lower.rs` builds `escapes` from the token text it already holds; `tokens.rs` is unchanged. |
+| implementability (first pass) 12 | **accepted -> §13.4.5.** `escapes` is strictly increasing and read with one cursor; the walk is `O(offset)`. |
+| implementability (first pass) 13 | **accepted -> §13.4.1, §13.4.6.** The parseable dangerous example is `COPY … FROM PROGRAM 'sh'` (a literal, refused by `LiteralQuery`, not by the template). |
+| implementability (first pass) 9 | **accepted -> §18.1.** The protected fixtures keep their real `at` (computed by the test from the fixture text), never `NONE`. |
+| testability T1 (BLOCKER) | **accepted -> §18.1, §20 R34/R35.** The five exact sites are asserted in the protected `critical_manifest_011.rs`; `tests/validate.rs` keeps the broad cases, so the origin/map/dedupe oracles cannot live only in an unprotected file. |
+| testability T2 (BLOCKER) | **accepted -> §18.1.** The protected fixtures keep their real positions; the only permitted edit is the `at` field, the guard is run with `--node MB.34.4`, and the diff is pasted in `MB.34.4`'s `RESULT.md`. `critical_guard.py` has no add-only rule; the review rule stands in its place and is named as such. |
+| testability T3–T10 (MAJOR) | **accepted -> §20 + `blastfile-lsp-zed.md` §13.2.** The 23-file loop becomes a command in `MB.34.6`'s acceptance (Follow-up 3, quoted there); the corpus expectation names `sql_keyword`/`sql_parameter` children so a reverted mechanism reds `tree-sitter test`; the 9:16/11:26/13:31 oracle is a three-line fixture in `tests/validate.rs` (8-space indent, the page's own entries); the applied-edit oracle is three assertions (`newText == parameterize(raw)`, it differs and holds `$?`, `check` is clean); `Syntax`'s `at` is asserted through `ManifestError`, not the `u32`; R31 gains a positive `pg_read_file($?)` case; the guard gains its `missing` negative twin. |
+| consistency C1 (BLOCKER) | **accepted -> §13.4.3, §13.4.5.** `Position::NONE` means "this refusal has no site of its own", never "no document". |
+| consistency C2 (BLOCKER) | **accepted -> §13.4.2.** Rows 3–5 are labelled the **parse** form and the paragraph says the page's `IN ($1, $2, $n)` is the wire form; both describe one grant. |
+| consistency C3 (BLOCKER) | **accepted -> `blastfile-lsp-zed.md` §1.** Fifteen `Location` variants, the two `query` variants moved to the positioned arm, `StaticImmutablePattern` removed, and the "no wildcard" sentence corrected. |
+| consistency C4–C10 (MAJOR) | **accepted.** C4 -> §13.4.4; the page already says "the statement's first token" (`docs/reference/blastfile.md:277`), and the offset is now pinned to the first non-trivia code character, so the sentence and the squiggle agree; C5 -> LSP §4.6 (`point_at` defined); C6 -> LSP §9.2/§9.3 (the block is the MB.22.4 record, and `method` and `custom-method.txt` landed in MB.22.4 — MB.31.4 only added `prec(1, $.regex_raw_string)` to `_value`); C7 -> LSP §4.2/§5.3 (`StaticImmutableTooManyPatterns` is positioned); C8 -> citations re-pointed (`error.rs:1406`, `validate.rs:262`, `error.rs:1517`); C9 -> LSP §9.5 (`twelve cases`, `custom-method.txt`); C10 -> §18.1 (`RedactedQueryPlaceholder`'s `at` is the `…`'s char). |
+| consistency C11–C18 (MINOR) | folded: C11 -> §20/§13.2 cross-reference noted; C12 -> the ADR's counts and path; C13 -> LSP §2.2 heading; C14 -> LSP §7.6 (H7/H8 assert `hover.rs`; the page row is R68); C15 -> §13.4 notes the name is always crate-qualified (`blastit_sqlpolicy::TemplateError`; `blastit-env` has an unrelated one); C16 -> LSP §7.2 `include_str!` path; C17 -> Follow-up 1; C18 -> §10.1 wording. |
+
+Security S11–S13 (MINOR) are folded: the manual `Debug` (§13.4.5), the offset-0 narrowing
+(the page now says "the statement's first token"), and every `pg_query::Error` variant
+mapping to `Syntax` (§13.4.1).
 

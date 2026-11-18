@@ -58,10 +58,29 @@ first-class Zed language; every one of those facts asserted by a test that fails
 the fact is removed.
 
 **Non-goals (v1).** Completion, `textDocument/definition`, `documentSymbol`,
-`codeAction`, pull diagnostics (`diagnosticProvider`), incremental sync, semantic
-tokens, `injections.scm` for SQL, a formatter for any other language, a VS Code
-extension, a second grammar repository, and any token in a `Blastfile` that the
-lexer of `docs/design/blastfile-dsl.md` does not already accept.
+code-action *kinds* beyond one `quickfix` (§7A), pull diagnostics (`diagnosticProvider`),
+incremental sync, semantic tokens, `injections.scm` for SQL, a formatter for any other
+language, a VS Code extension, a second grammar repository, and any token in a `Blastfile`
+that the lexer of `docs/design/blastfile-dsl.md` does not already accept.
+
+## 0.2 The `MB.34.2` amendment (2026-11-18)
+
+The accepted pages gained one more promise (MB.34.1): a `query` is validated as the
+PostgreSQL statement it claims to be, the squiggle sits on the typo **inside** the string,
+a Quick Fix turns a pasted statement into `$?` form, hover explains `$?`/`...`, and the
+grammar colours the SQL. This document is amended, not rewritten; §8–§12 keep their
+numbers, so every cross-reference still resolves.
+
+| Added | Where | What it decides |
+|---|---|---|
+| the decoded span contract | `blastfile-dsl.md` §13.4.5, §18.1 | origin = the first char inside the opening quote; the `"…"` map is an escape-index list; 1-based chars; dedupe = first site, one diagnostic |
+| `textDocument/codeAction` + `codeActionProvider` | §2.2, §2.3, **§7A** | one Quick Fix, one `TextEdit`, no trust in `context.diagnostics`, no `workspace/applyEdit` |
+| `$?`/`...` hover | **§7.6**, §7.5 H7–H8 | two paragraphs, only inside a `query`, `word_at` untouched |
+| `sql_string` | §9.2, §9.3, §9.5 | seven child nodes, case-insensitive keywords, `query` leaves the shared `keyword` rule, lexical precedence over the `comment` extra |
+| five highlight rules | §10.1, §10.2 | **no new capture name**: the fifteen-name allowlist is unchanged |
+| byte-offset conversion | **§4.6** | `Lines::offset` and its inverse `Lines::point_at` — the two helpers the new ranges need |
+| requirements and proofs | **§13** | R60–R68; the delta to §12's matrix |
+| one gap, stated | §5.3, §9.3 | the `"…"` spelling gets no `sql_string`; a deduped duplicate has no site |
 
 ## 1. Module boundaries
 
@@ -71,7 +90,7 @@ widening**. Nothing else moves.
 
 | # | Code site | Owns | Does **not** own |
 |---|---|---|---|
-| 1 | `crates/blastit/src/lsp.rs` (**new**, ≤ 750 lines) | the frame reader/writer (§3), the lifecycle (§2), dispatch, the `documents` map, UTF-16 conversion (§4), diagnostics assembly (§5), formatting (§6), hover (§7) | manifest syntax, layout, or the meaning of any directive |
+| 1 | `crates/blastit/src/lsp/{mod,hover}.rs` (**new**, ≤ 750 lines) | the frame reader/writer (§3), the lifecycle (§2), dispatch, the `documents` map, UTF-16 conversion (§4), diagnostics assembly (§5), formatting (§6), hover (§7) | manifest syntax, layout, or the meaning of any directive |
 | 2 | `crates/blastit/src/lib.rs` | one line: `pub mod lsp;` | — |
 | 3 | `crates/blastit/src/cli.rs` | `Command::Lsp` (+ `from_argv` arm `Some("lsp")`), `LSP_USAGE`, `parse_lsp`, the `main` arm, one added `USAGE` line, `LSP_FAILURE = 2`, and **one capability line**: the `Lsp` arm calls `blastit_sys::caps::hold_none()` before `lsp::run()` (§11 S3) | the protocol: `run_lsp` is `lsp::run()` and returns `u8` |
 | 4 | `crates/blastit/src/main.rs` | **unchanged** — `cli::main` already dispatches every subcommand | — |
@@ -111,9 +130,11 @@ fn write_message(out: &mut impl Write, value: &serde_json::Value) -> std::io::Re
 fn parse_lsp(arguments: &[String]) -> Result<Subcommand<()>, String>;   // same shape as parse_fmt
 ```
 
-`ManifestError::position()` exists (`error.rs:1403`) but its `match` ends in
-`_ => Position::NONE` (`error.rs:1468`), so a new `at`-carrying variant would compile
-without a decision. `MB.22.3` replaces that one arm with explicit arms for **every**
+`ManifestError::position()` exists (`error.rs:1406`) and its `match` has **no wildcard**
+(the explicit list ends at `error.rs:1517`), so a new variant does not compile until it is
+placed in one arm. The two `query` variants (`RedactedQueryPlaceholder`, `LiteralQuery`)
+moved from the `NONE` arm to the positioned one in this amendment; `StaticImmutableTooManyPatterns`
+was already positioned, and the non-existent `StaticImmutablePattern` is gone from both lists. `MB.22.3` replaces that one arm with explicit arms for **every**
 variant that carries no `at` field — which is two families, both listed in §4.2:
 
 - the whole-file refusals and `InvalidApp` (`TooLarge`, `TooManyTokens`,
@@ -121,12 +142,11 @@ variant that carries no `at` field — which is two families, both listed in §4
   `InvalidApp`), plus the older `Location`-less route/mount refusals
   (`DuplicateRouteName`, `InvalidRouteName`, `EmptyPath`, `InvalidMethod`,
   `EmptyMethods`, …); and
-- the **eighteen `Location`-carrying validation variants** (`UnknownGroup`,
+- the **fifteen `Location`-carrying validation variants** (`UnknownGroup`,
   `GrantOnUnknownProxy`, `UnrestrictedGroup`, `UnrestrictedWithQueries`,
-  `UnrestrictedWithContent`, `UnusableTable`, `RedactedQueryPlaceholder`,
-  `LiteralQuery`, `StaticMountPrefixInvalid`, `StaticFallbackInvalid`,
+  `UnrestrictedWithContent`, `UnusableTable`, `StaticMountPrefixInvalid`, `StaticFallbackInvalid`,
   `StaticRootInvalid`, `StaticRootUnusable`, `StaticIndexInvalid`,
-  `StaticImmutablePattern`, `StaticDeadDeclaration`, `PhpEntryInvalid`,
+  `StaticDeadDeclaration`, `PhpEntryInvalid`,
   `PhpWorkersInvalid`, `PhpDeadDeclaration`).
 
 Every such arm returns `Position::NONE`, so the change is a compile-time guard: a new
@@ -188,7 +208,7 @@ this with a body containing `✓`). No other header is written. The reader accep
 exactly one `Content-Length` line (name compared ASCII case-insensitively, one space,
 value all ASCII digits); every other header line is ignored.
 
-### 2.2 The ten messages, and the three tolerated ones
+### 2.2 The eleven messages, and the three tolerated ones
 
 `id` is kept as `serde_json::Value` for the whole session and echoed **verbatim**:
 a numeric id comes back a number, a string id a string. **The notification rule is one
@@ -214,6 +234,7 @@ Everything else that arrives with a body gets a reply:
 | `textDocument/didClose` | notification | `textDocument.uri` | drops the document, publishes `[]` with **no** `version`; an unknown `uri` is ignored | — |
 | `textDocument/formatting` | request | `textDocument.uri`; `options` ignored (§6.4) | §6 | `[]`, one `TextEdit`, or `null` |
 | `textDocument/hover` | request | `textDocument.uri`, `position` (UTF-16) | §7 | `Hover` or `null` |
+| `textDocument/codeAction` | request | `textDocument.uri`, `range` (UTF-16), `context` **ignored** | §7A: at most one `quickfix` | `[]` or `[CodeAction]` |
 | `textDocument/definition` | request | — | **declined**: not advertised, and a probe is not a protocol violation (§7.4) | `null` |
 | `shutdown` | request | — | sets `shutdown`; later requests answer `-32600` | `null` |
 | `exit` | notification | — | leaves the loop | process exits `0` iff `shutdown` was received, else `1` |
@@ -242,7 +263,7 @@ reason:
 ### 2.3 The capability document, byte for byte
 
 ```json
-{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":1,"save":false},"documentFormattingProvider":true,"hoverProvider":true},"serverInfo":{"name":"blastit","version":"0.2.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"positionEncoding":"utf-16","textDocumentSync":{"openClose":true,"change":1,"save":false},"documentFormattingProvider":true,"hoverProvider":true,"codeActionProvider":true},"serverInfo":{"name":"blastit","version":"0.2.0"}}}
 ```
 
 - `positionEncoding` is `"utf-16"` **explicitly**: Zed offers only that, and the spec
@@ -255,6 +276,10 @@ reason:
   the value equals the crate version and `name` equals `"blastit"`.
 - No `diagnosticProvider` (push only), no `completionProvider`, no
   `definitionProvider`, no `documentSymbolProvider` (§7.4 defers definition).
+- `codeActionProvider` is the **boolean `true`**, not an object: an object would advertise
+  `codeActionKinds`, and a kind list invites a client to filter — the server offers exactly
+  one kind (`quickfix`, §7A) and answers `[]` for everything else. It is the only key this
+  amendment adds.
 - No `initialize` `clientInfo`/`processId` is stored: nothing uses the pid, and
   killing a pid read from stdin would be a privilege this tool never takes (§11).
 
@@ -523,11 +548,13 @@ asserts the timing).
   - variants whose locator is a semantic `Location` (`view "cart"`, `trait "x"`)
     rather than a line and column: `UnknownGroup`, `GrantOnUnknownProxy`,
     `UnrestrictedGroup`, `UnrestrictedWithQueries`, `UnrestrictedWithContent`,
-    `UnusableTable`, `RedactedQueryPlaceholder`, `LiteralQuery`,
-    `StaticMountPrefixInvalid`, `StaticFallbackInvalid`, `StaticRootInvalid`,
-    `StaticRootUnusable`, `StaticIndexInvalid`, `StaticImmutablePattern`,
-    `StaticDeadDeclaration`, `PhpEntryInvalid`, `PhpWorkersInvalid`,
-    `PhpDeadDeclaration`.
+    `UnusableTable`, `StaticMountPrefixInvalid`, `StaticFallbackInvalid`,
+    `StaticRootInvalid`, `StaticRootUnusable`, `StaticIndexInvalid`,
+    `StaticDeadDeclaration`, `PhpEntryInvalid`,
+    `PhpWorkersInvalid`, `PhpDeadDeclaration`.
+    (`RedactedQueryPlaceholder` and `LiteralQuery` left this list when they gained `at`:
+    `blastfile-dsl.md` §18.1. A programmatic grant that has no site still renders at
+    `(0,0)`, which is R35's boundary.)
   Both render `(0,0)-(0,0)`: a zero-width squiggle on the first character, which is
   what "the file as a whole" (and "this named view, somewhere") looks like. Giving a
   `Location` a real span is a follow-up with the same `sites.rs` mechanism (§5.5),
@@ -591,6 +618,58 @@ R-ids: **R14** (the `Lines::point` formula, one line-offset pass per publish, li
 split on `'\n'`, `char::len_utf16`), **R15** (`Position::NONE` → `(0,0)-(0,0)`),
 **R16** (the squiggle width rule, both branches), **R17** (hover's UTF-16 → `char`
 inverse conversion), proven by P1–P6.
+
+### 4.6 The inverse, for the two new ranges (R60)
+
+`textDocument/codeAction` hands the server a `range` in LSP positions, and hover has to
+decide whether the cursor is *inside* a `query` string. Both questions are about the
+document's **bytes**: a `QuerySite` holds the string's interior as a byte range
+(`blastfile-dsl.md` §13.4.5), because a `"…"` string's source spelling cannot be recovered
+from its decoded text. So §4.2's conversion needs its inverse, and the Quick Fix needs the
+forward one for a range whose *end* is a byte offset:
+
+```rust
+impl<'a> Lines<'a> {
+    /// The byte offset of an LSP position (§4.2's units, clamped like `point`).
+    fn offset(&self, line: u32, character: u32) -> u32 {
+        let Some(&start) = self.starts.get(line as usize) else {
+            return self.text.len() as u32;                  // a line past the end
+        };
+        let end = self.starts.get(line as usize + 1).copied()
+            .unwrap_or(self.text.len() as u32);
+        let line_text = self.text.get(start as usize..end as usize).unwrap_or_default();
+        let chars = char_index(line_text, character);        // §4.4's function
+        let bytes: usize = line_text.chars().take(chars).map(char::len_utf8).sum();
+        start + bytes as u32
+    }
+
+    /// The LSP point of a byte offset: the line whose start is the last one `<= at`,
+    /// and the UTF-16 length of the prefix of that line before `at`.
+    fn point_at(&self, at: u32) -> (u32, u32) {
+        let at = at.min(self.text.len() as u32);
+        let line = self.starts.partition_point(|s| *s <= at).saturating_sub(1);
+        let start = self.starts.get(line).copied().unwrap_or(0) as usize;
+        let prefix = self.text.get(start..at as usize).unwrap_or_default();
+        (line as u32, prefix.chars().map(char::len_utf16).sum::<usize>() as u32)
+    }
+}
+```
+
+`char_index` is §4.4's existing function, so the two forward directions share one clamping
+rule and one definition of `character`; `point_at` is the exact inverse of `offset` on a
+character boundary (`point_at(offset(l, c)) == (l, c)` for every legal `(l, c)` — a P7 case).
+Both are `O(log lines + character)` — `point`'s bound — and they are the only two functions
+§7.6 and §7A add to `Lines`. `Lines::point` still does the 1-based-`Position` work the
+diagnostics use; `point_at` exists for a range whose ends are *bytes* (the interior's
+closing quote, the two or three source characters of `$?`/`...`).
+
+**Assertions (P7).** For `"view v \"/😀é\" { body = }"` (note the pattern's `/`): the `=`
+is char index **20** and UTF-16 index **21**, and its byte index is **24** (18 ASCII bytes +
+a 4-byte emoji + a 2-byte `é`), so `offset(0, 21) == 24` and `point_at(24) == (0, 21)`.
+Measured with `grep -bo '=' ` on the UTF-8 fixture: `24:=`. The two wrong answers are
+distinguishable in opposite directions: `character as usize` gives `21` (the `o`) and a
+`chars().count()`-based answer gives `20` (the space). `offset(9, 0)` and `point_at(huge)`
+are `text.len()` and the document's last point respectively.
 
 ## 5. Diagnostics
 
@@ -681,15 +760,19 @@ match blastit_manifest::blastfile::check(&doc.text, UidLayout::DEFAULT_BASE) {
 - The three families the CLI can produce are therefore all present, and each squiggles
   where its own shape allows:
   - **lexer/parser** refusals carry `at:` and squiggle at the token;
-  - **validate** refusals split in two: the eighteen `Location`-carrying variants land
+  - **validate** refusals split in three: fifteen `Location`-carrying variants land
     at `(0,0)` (`UnknownGroup`, `GrantOnUnknownProxy`, `UnrestrictedGroup`,
     `UnrestrictedWithQueries`, `UnrestrictedWithContent`, `UnusableTable`,
-    `RedactedQueryPlaceholder`, `LiteralQuery`, `StaticMountPrefixInvalid`,
-    `StaticFallbackInvalid`, `StaticRootInvalid`, `StaticRootUnusable`,
-    `StaticIndexInvalid`, `StaticImmutablePattern`, `StaticDeadDeclaration`,
-    `PhpEntryInvalid`, `PhpWorkersInvalid`, `PhpDeadDeclaration`), while the
-    position-less route/mount refusals do too (`InvalidRegex`, `TooManyRoutes`,
-    `UidBaseTooHigh`, …) — §4.2 lists both kinds;
+    `StaticMountPrefixInvalid`, `StaticFallbackInvalid`, `StaticRootInvalid`,
+    `StaticRootUnusable`, `StaticIndexInvalid`,
+    `StaticDeadDeclaration`, `PhpEntryInvalid`, `PhpWorkersInvalid`,
+    `PhpDeadDeclaration`; the positioned `StaticImmutableTooManyPatterns` is not one of
+    them); the position-less route/mount refusals do too
+    (`InvalidRegex`, `TooManyRoutes`, `UidBaseTooHigh`, …) — §4.2 lists both kinds; and
+    the **`query` family now squiggles inside the string**: `RedactedQueryPlaceholder`,
+    `LiteralQuery` and the new `QueryTemplate` carry `at`
+    (`blastfile-dsl.md` §13.4.5, §18.1), which is the one visible DX change of the
+    MB.34 amendment on this surface;
   - **lowering** refusals are mixed (`PhpEntrypointInvalid`, `StaticRootMissing`,
     `InvalidName` carry `at`; `InvalidApp` does not). A
   `Location`-carrying error at `(0,0)` is the known cost of not re-deriving spans in
@@ -872,7 +955,7 @@ where `<n> = total - 511`. **D6:** the fixture is 600 views that each grant a st
 nobody declares — `view v{n} "/x{n}" { postgres nosuchstore { select x } }`, 600 times —
 because `parser::parse` returns on the **first** error (`parser.rs:41`) and `lower`
 returns on the first unresolved `use` (`lower.rs:743`), so only `validate` accumulates
-(`validate.rs:74`), and `GrantOnUnknownProxy` is what it accumulates per view. It
+, and `GrantOnUnknownProxy` is what it accumulates per view. It
 publishes exactly 512 diagnostics: `[0..511]` are `GrantOnUnknownProxy` at `(0,0)` (a
 `Location`-carrying variant, §4.2), `[511].message` is
 `` 89 more problems; run `blastit check` for the full list ``, `[511].range` is
@@ -1035,8 +1118,8 @@ the sortedness is a test; a duplicate key is a test failure. Every value is copi
 `docs/reference/blastfile.md` and says nothing that page does not say — the page is the
 source, the table is a transcription, and `lsp.rs`'s own `mod tests` asserts that every
 key of the table appears in that page's text via
-`include_str!("../../../docs/reference/blastfile.md")` (three `..`, because the file
-lives at `crates/blastit/src/lsp.rs`). Wording lives in that unit test, not in
+`include_str!("../../../../docs/reference/blastfile.md")` (three `..`, because the file
+lives at `crates/blastit/src/lsp/{mod,hover}.rs`). Wording lives in that unit test, not in
 `critical_lsp.rs`: a later one-word fix to the reference page must not require a
 `critical_guard` authorization for a protected file.
 
@@ -1051,7 +1134,7 @@ lives at `crates/blastit/src/lsp.rs`). Wording lives in that unit test, not in
 | `transactions` | `` `transactions` allows `BEGIN`, `COMMIT`, `ROLLBACK` and savepoints on that store. `` |
 | `functions` | `` `functions st_distance, unaccent` allows function calls beyond the built-in safe set; `unaccent` reads a rule file, so it must be named. `` |
 | `select`, `insert`, `update`, `delete` | `` `select products(id, name)` allows reading those columns; a bare `products` reads any column. `insert`/`update`/`delete` grant those columns or that table the same way, and `update` also allows row locks. `` |
-| `query` | `` `query 'SELECT …'` allows one exact statement; repeat the directive for more. It is trusted as written: read it before pasting. `` |
+| `query` | `` `query 'SELECT id FROM products WHERE price > $?'` allows one exact PostgreSQL statement, parsed after its `$?`/`...` expansions; repeat the directive for more. It gets no table or column analysis, so read it before pasting: `pg_read_file`, `COPY … PROGRAM` and `dblink` are file or network capabilities. `` |
 | `body`, `json`, `form`, `none` | `` The ingress codec: `json`, `form`, `none` (the default) or `raw`. A body sent to a view that declares no `body` is a `413`; `json` and `form` are re-encoded canonically, and anything else is a `400`. `` |
 | `prefork` | `` `prefork` forks the worker at startup instead of on the first request. `` |
 | `app` | `` `app "shop"` names the application. One per file, optional; it is a label, never a path or a callable. `` |
@@ -1065,16 +1148,17 @@ lives at `crates/blastit/src/lsp.rs`). Wording lives in that unit test, not in
 | `view` | `` `view products GET "/products", "/products/{id:int}"` is one sandbox: one worker, one set of permissions. Views are tried in the order written, and the first match wins. `` |
 | `static` | `` `static "/assets" { root "public/assets" }` serves regular files under a prefix before any view answers; the longest matching prefix wins. `` |
 | `root`, `index`, `fallback` | `` `static` directives: `root` is the directory served (required, relative, no `..`), `index` answers a directory request (default `index.html`), `fallback` answers a path that is no file, on `GET` or `HEAD`. `` |
-| `immutable` | `` `immutable "/assets/*"` adds `Cache-Control: public, max-age=31536000, immutable`; `*` stops at `/`, so a nested tree needs one glob per depth. `` |
+| `immutable` | `` `immutable "/assets/*"` adds `Cache-Control: public, max-age=31536000, immutable` to the files it matches; a trailing `/*` crosses `/`, so `"/assets/*"` reaches `/assets/chunks/x.js`, and a shallower glob needs one entry per file otherwise. `` |
 | `regex` | `` `regex '/v[0-9]+/items'` matches the whole path in linear time, with no lookaround or backreferences. `` |
 | `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `OPTIONS` | `` A method token. `HEAD` is answered wherever `GET` is; a view that declares no method answers every method, including ones you did not intend. `CONNECT` and `TRACE` cannot reach a view. `` |
 | `$IDENT` (computed, not a row) | `` `$NAME` names an environment variable: the value stays in the environment and never in the `Blastfile`, so the file is safe to commit. A quoted string where `$IDENT` is required is a syntax error. `` |
 
 Not in the table, on purpose: `select`/`insert`/`update`/`delete`/`query` inside a
-`query '…'` string are SQL, and the raw-text hover shows the grant sentence. That is a
-**known deviation** with a named successor: `blastfile::symbols()` (§7.5) gives the CST
-context that would let hover distinguish the two, and hover inside strings and comments
-is then decided by node, not by word.
+`query '…'` string are SQL, and a raw-text hover would show the *grant* sentence for a
+word that means something else there. That is a **known deviation** with two named
+successors: `blastfile::symbols()` (§7.4) gives the CST context that would let hover
+distinguish the two, and §7.6 already resolves the two tokens that only mean something
+inside a `query` (`$?`, `...`), which are the ones the page promises a hover for.
 
 ### 7.4 The reply, and definition deferred
 
@@ -1124,14 +1208,171 @@ The **contract** assertions live in `crates/blastit/tests/critical_lsp.rs`; the
 | H3 | `postgres analytics $ANALYTICS_URL` hover at the `$` | the value contains `$ANALYTICS_URL` and `stays in the environment`, and never the value of a `DATABASE_URL` set in the environment (§11 m8) | critical |
 | H4 | `view my_view "/x"` hover on `my`, then on the `view` keyword | on `my` the word is `my_view` (7 units) and the reply is `null` (a name is not a directive, §7.2); on `view` the value is `HOVER_TABLE["view"]` verbatim (4 units) | critical |
 | H5 | `"😀 view"` hover at UTF-16 `character` **6** (the `w`), and `"view v \"/😀\" { body = }"` at **20** (the `=`) | at 6 the value is `HOVER_TABLE["view"]`; at 20 it is `null`. A `char_index` replaced by `character as usize` gives `null` at 6 and `null` at 20 — so **6** is the discriminating case | critical |
-| H6 | `HOVER_TABLE` | ≤ 48 rows, sorted, no duplicate key, every value ≤ 600 bytes, every key present in `include_str!("../../../docs/reference/blastfile.md")`, and `unrestricted`'s value contains `every statement` and `warns at boot` | unit (`lsp.rs`) |
+| H6 | `HOVER_TABLE` | ≤ 48 rows, sorted, no duplicate key, every value ≤ 600 bytes, every key present in `include_str!("../../../../docs/reference/blastfile.md")`, and `unrestricted`'s value contains `every statement` and `warns at boot` | unit (`lsp.rs`) |
+| H7 | `view v "/x" { postgres { query 'SELECT id FROM t WHERE price > $?' } }` hover on the `$`, then on the `?`, then **after** the `?` | all three replies are non-null, byte-identical to each other, equal to `SQL_HOVER_TABLE`'s `$?` paragraph, and their `range` covers exactly the two characters `$?` | critical |
+| H8 | the same file, hover on the `...` of `IN ($?, ...)`, on its first and last dot | all three replies equal the `...` paragraph and their `range` covers the three dots; and the same `$?` **outside** a `query` (`body raw # $?` and `regex '$?'`) answers `null` | critical |
 
 R-ids: **R30** (word rule and the `$` handling), **R31** (`HOVER_TABLE` bounds, the
 transcription rule and H6), **R32** (`null` for an unknown word and for punctuation),
 **R33** (definition deferred with `symbols()` + the exact `Location` shape),
-**R34** (`hoverProvider: true` only; no `definitionProvider`).
+**R34** (`hoverProvider: true` only; no `definitionProvider`), **R61** (§7.6's two tokens,
+their predicate and H7–H8).
 
-<!-- APPEND -->
+### 7.6 The two SQL tokens: `$?` and `...` (R61)
+
+The page promises exactly two hovers inside a `query` (`docs/local.md` `## Editors` step 2:
+"Hovering over `$?` or `...` says what each stands for"), so the design adds exactly two
+sentences and no SQL tutorial.
+
+**The predicate, once.** A position resolves to a SQL token only when it lies **inside a
+`query` value's interior** — `site.interior.start <= byte < site.interior.end` for some
+`QuerySite` of the tracked document, with `byte` from `Lines::offset` (§4.6). The sites come
+from `Manifest::from_blastfile_str(&text)` (parse + lower, **no** validate), so the answer
+survives a document `check` refuses — a `LiteralQuery` never reaches the LSP's model through
+`check` (§5.3), and the Quick Fix needs those sites most. `catch_unwind` wraps the call
+like §3.3's; a document that does not parse answers `null`/`[]` (there are no sites).
+
+**The two tokens.** Inside that range:
+
+1. `...` — a run of three `.` characters in the **source** starting at the cursor, or
+   containing it. Reply: the `...` paragraph; `range` covers the three dots (width 3, which
+   is §4.3's rule 2 at work: `.` is not a word character).
+2. `$?` — a `$` immediately followed by `?`, in the source. Reply: the `$?` paragraph;
+   `range` covers the two characters.
+3. Anything else inside the string: **`null`**. `$1`…`$n` is PostgreSQL's own numbering, and
+   a hover that explained it would be a SQL lesson on a token the tool does not define;
+   the page's two tokens are the two the tool defines.
+4. Anything outside every interior: today's `word_at` path, unchanged — including the
+   `$IDENT` paragraph, which is why `$DATABASE_URL` still answers.
+
+The token test is on **source** characters, not decoded ones, so the `range` it returns is
+a range the editor can select — `Lines::point_at` (§4.6) of the two (or three) byte offsets
+it found, never a `Position` walked through the decoded text.
+
+The two values are constants in `hover.rs` next to `HOVER_TABLE`, ≤ 600 bytes each, and
+`include_str!`-checked by the same H6 unit test:
+
+```
+$?  → `$?` is one bind placeholder: the app sends one value for it, and the wire sees
+      `$1, $2, …` in the order the placeholders appear. `IN ($?, ...)` binds any number
+      of values with one grant — the list length is not part of the grant.
+... → `...` is Blastit's variadic marker, not SQL: it is legal only as `IN ($?, ...)`
+      (any number of values) or after a `VALUES` row, `($?, $?), ...` (any number of
+      rows). `blastit check` refuses it anywhere else.
+```
+
+(The rows above are line-wrapped here; the constants are one paragraph each, exactly as
+the reference page carries them (`docs/reference/blastfile.md:286-292`), and H7/H8 assert the
+`hover.rs` bytes, so the two cannot drift silently.)
+
+## 7A. The Quick Fix: `textDocument/codeAction` (R62)
+
+One action, one edit, one kind. The handler is ≤ 1 screen over five steps: `uri` → the
+tracked text → `range` → a `QuerySite` → `parameterize`. The request carries **no version**
+(`CodeActionParams.textDocument` is `{uri}`), so there is nothing to compare: the server
+answers from its tracked text, and the next `publishDiagnostics` is what invalidates a
+stale answer on the client.
+
+### 7A.1 The request
+
+| Key | Read | Refusal |
+|---|---|---|
+| `textDocument.uri` | the tracked document (§2.5) | missing/non-string → `-32602` |
+| `range` | `start`/`end`, each `{line, character}` numbers (§4.6) | missing / non-object / non-numeric → `-32602` |
+| `context` | **nothing, ever** | — |
+
+`context.diagnostics` is a hint from the client and is **never** the source of truth: the
+server re-derives the finding from its own tracked text (`Lines` + `QuerySite` +
+`parameterize`). A client that sends stale, empty or fabricated diagnostics gets the same
+answer as one that sends the real set — which is what makes `codeAction` correct on a
+keystroke that arrives before the next `publishDiagnostics`. An unknown `uri` is `[]` (a
+request on a document the server does not track has nothing to offer; it is not an error,
+so it must not hang the client), and a range whose `end` precedes its `start` is `[]`.
+
+### 7A.2 The predicate, exactly
+
+Let `q` be the `QuerySite`s of the tracked document (§7.6's list). The interiors are
+**disjoint by construction** (one string token each), so at most one can match; the test is
+
+```text
+// a real range
+start_byte < q.interior.end && q.interior.start < end_byte
+// a caret: Zed sends a zero-width range, whose start is inside the interior
+start_byte == end_byte && q.interior.start <= start_byte && start_byte < q.interior.end
+```
+
+with both ends from `Lines::offset` (§4.6). `start_byte > end_byte` — an inverted range, a
+client quirk — is `[]`, not an error. The site that matches decides; with disjoint
+interiors there is never a second candidate to choose between.
+
+The action is offered iff `parameterize(&q.raw)` is `Some(new)` — §13.4.6 of
+`blastfile-dsl.md` — which is exactly:
+
+* a quoted literal outside `KNOWN_STATIC_SETUP_SQL`, which is the `LiteralQuery` case; or
+* a hand-written `$1…$n` (a paste from `psql` or a log), which `parameterize` folds to `$?`.
+
+and **never** for a statement `learn::check_learnable` refuses (`COPY … PROGRAM`,
+`pg_read_file`, `dblink`, …): the Quick Fix is a grant producer, and `ADR-0003` makes that
+one refusal set the only one a producer may use (security S2).
+
+There is **no action** for a clean `query` (`None`: nothing to change), for a redacted `…`
+(`None`: the value is gone), for `SET TIME ZONE 'UTC'` or `set_config(…)` (`None`: the
+exemption), for a document that does not parse (no sites), for an unknown `uri`, and for a
+range outside every interior.
+
+### 7A.3 The reply
+
+```json
+{"jsonrpc":"2.0","id":7,"result":[
+  {"title":"Parameterize SQL for Blastfile ($?)",
+   "kind":"quickfix",
+   "edit":{"changes":{"file:///…/Blastfile":[
+     {"range":{"start":{"line":8,"character":15},"end":{"line":8,"character":55}},
+      "newText":"SELECT id FROM products WHERE price > $?"}]}}}]}
+```
+
+| Field | Value | Why exactly this |
+|---|---|---|
+| `title` | the constant `Parameterize SQL for Blastfile ($?)` | the page's own words (`docs/local.md` step 2); one title, so a test can assert it byte for byte |
+| `kind` | `"quickfix"` | the only kind advertised (§2.3); no `refactor`, no `source.*` |
+| `edit.changes` | **one** uri, the request's `uri` echoed | a `WorkspaceEdit` over another document would be a second authority |
+| `TextEdit.range` | the **whole interior**: `Lines::point(q.at)` … `Lines::point_at(q.interior.end)` | numbering is statement-wide (§13.4.2), so a literal-only edit would leave the other `$?`s renumbered wrongly; and it is one undo step. The start reuses the diagnostic's own `Position`, so the lightbulb and the squiggle cannot disagree |
+| `TextEdit.newText` | `new`, re-encoded for the string's spelling (§7A.4) | the edit must be text the file can hold |
+| `diagnostics` | **absent** | echoing `context.diagnostics` would make the client's copy authoritative |
+| `isPreferred`, `disabled`, `command`, `data`, `codeAction/resolve` | **never emitted** | each is a second opinion (preferred-ness), a second authority (server-side apply), or a second round trip we do not need |
+
+**The reply must re-parse clean — and be a real change.** The test asserts three things,
+because an identity edit re-checks clean and would pass one assertion: (a) `newText`
+equals `parameterize(&site.raw)` (the one implementation, not a lookalike), (b) `newText`
+holds `$?` and differs from the interior it replaces, and (c) applying the edit in place and
+running `blastfile::check` publishes **no `query` diagnostic**. A literal-only edit fails
+(b) on the second `$?`; a wrong range fails (c); a redundant second edit fails the
+"exactly one `TextEdit`" assertion in C2.
+
+### 7A.4 Re-encoding the interior
+
+`parameterize` returns **decoded** text. A `'…'` interior takes it verbatim (it can hold any
+character but `'`, and a parameterised statement holds no `'`: every literal became `$?`).
+A `"…"` interior must escape, in this order, with `tokens.rs`'s own four escapes
+(`error.rs` `InvalidEscape`): `\` → `\\`, then `"` → `\"`, then a literal newline → `\n`,
+then a literal tab → `\t`. Order matters (`\` first, or `\"` becomes `\\"`), and the pass is
+~10 lines in `lsp/mod.rs` with one unit test: `query "SELECT \"o\".id FROM t WHERE email = $1"`
+parameterises to `SELECT \"o\".id FROM t WHERE email = $?` — the quoted identifier survives,
+the runaway `"` does not.
+
+### 7A.5 The assertions (C1–C8, `critical_lsp.rs`)
+
+| # | Fixture | Assertion | What it kills |
+|---|---|---|---|
+| C1 | the capability document | contains `"codeActionProvider":true` and no `codeActionKinds`, no other new key | a forgotten capability (Zed never asks), or an object that filters kinds |
+| C2 | `postgres { query "SELECT id FROM products WHERE email = $1" }` (a `psql` paste), range on the string | exactly one action: exact `title`, `kind`, one uri, one `TextEdit`; `range == {point_at(interior.start), point_at(interior.end)}` (both ends, exact); `newText` holds `$?` and no `$1`; applied → `check` is clean | an empty array, a second edit, a title that drifted from the page, a rewrite that keeps `$1`, or a range that stops at the literal |
+| C3 | `postgres { query "SELECT id FROM t WHERE email = 'a@b.com'" }` — the literal in the **`"…"` spelling**, which is the only spelling that can hold one; plus `query 'UPDATE t SET a = $1 WHERE b = $2'` for the `'…'` spelling | one action each; both ranges are exactly `{point_at(interior.start), point_at(interior.end)}`; the first `newText` holds `$?`, no `@`, and the escaped interior is still a legal `"…"` body; applied → clean for both | editing only the literal (the range would start inside the interior), keeping the value, a `'…'`-only rewrite that breaks the `"…"` spelling, or a fixture that could not exist |
+| C4 | `query 'SELECT id FROM t'` (clean), `query "SET TIME ZONE 'UTC'"`, `query '…'` (redacted) | `[]` for each | offering an action where nothing can change, or parameterising a protocol constant |
+| C5 | C2's document, but `context.diagnostics` is `[]` and then a fabricated literal diagnostic | the same one action in both cases | trusting `context.diagnostics` (the brief's named defect) |
+| C6 | a range on `body none`, on a comment, and on a `regex '…'` | `[]` | a range test that uses the whole line/document |
+| C7 | C2's document with `"😀"` before the `query`, and a `\t` inside it | the `TextEdit`'s `start` is the UTF-16 point one past the opening quote and `end` is the closing quote's, and applying it yields the identical bytes | a byte/char/UTF-16 mix-up in the range |
+| C8 | `codeAction` with no `range`, a non-numeric `character`, then a valid one | `-32602`, `-32602`, then the action | a panic or a silent `[]` on malformed params |
+
 ## 8. Extension anatomy: `editors/zed/`
 
 ### 8.1 The committed tree
@@ -1397,7 +1638,7 @@ module.exports = grammar({
     _methods: $ => seq($.method, repeat(seq(',', optional($._terminator), $.method))),
     _patterns: $ => seq($._pattern, repeat(seq(',', optional($._terminator), $._pattern))),
     _pattern: $ => choice($.string, $.regex_raw_string),
-    method: $ => /[A-Z]+/,
+    method: $ => /[A-Z][A-Z0-9_-]*/,   // the committed regex (MB.22.4); §9.3 records why
 
     block: $ => seq('{', repeat(choice($._terminator, $._statement)), '}'),
     _statement: $ => choice(
@@ -1478,7 +1719,7 @@ module.exports = grammar({
 });
 ```
 
-The block above is **verbatim `editors/tree-sitter-blastfile/grammar.js`** as the
+The block above is the **MB.22.4 record** of `editors/tree-sitter-blastfile/grammar.js` as the
 `MB.22.4` artifact generates it (tree-sitter CLI 0.25.10, `tree-sitter test` 13/13 green),
 not a sketch: four of its forms were forced by the generator or by `blastit fmt`, and each
 is pinned here so the document and the code cannot drift.
@@ -1526,6 +1767,126 @@ that would diverge from the parser's; a quoted pattern is `(string) @string` —
 pattern, placeholders included. `bind` is dropped too: `$?` occurs only inside a `query`
 string.
 
+### 9.2a The `MB.34.2` amendment: `sql_string` (R63)
+
+`§9.2` stays the record of what `MB.22.4` committed. This subsection is the **delta**
+`MB.34.6` applies to `grammar.js` and then regenerates; its rules were generated and
+parsed with the pinned `tree-sitter 0.25.10` binary on this host while this design was
+written (the probe is reproduced in `MB.34.2`'s `RESULT.md`), so the mechanism below is
+measured, not sketched.
+
+```js
+// One case-insensitive spelling per keyword: `[Ss][Ee][Ll][Ee][Cc][Tt]`. `grammar.js`
+// is JavaScript, so the class is built from the word (one array entry per keyword).
+const ci = (word) => new RegExp(
+  word.split('').map((c) => `[${c.toUpperCase()}${c.toLowerCase()}]`).join(''),
+);
+
+rules: {
+  // `query` LEAVES the shared `keyword` rule. With `'query'` in `keyword`, the
+  // state after `query` is shared with every other directive, `raw_string`
+  // (`/'[^']*'/`, 1 token) is a valid token there, and the lexer's longest match
+  // always beats `sql_string`'s opening `'` -- `sql_string` is then unreachable.
+  // Its own rule makes the state after `query` accept only `'` + interior + `'`
+  // and `"`…`"`, so the lexer has one choice. `query` with a non-string value is
+  // already a parse error in `blastit-manifest` (`any_string`, parser.rs:1335).
+  query_decl: $ => seq('query', choice($.sql_string, $.string)),
+
+  // …and it is spliced into `_statement` (the delta is a transcript, not a sketch):
+  _statement: $ => choice(
+    $.query_decl,          // NEW, first: `query` is legal only in a grant block
+    $.directive, $.endpoint, $.grant, $.use_directive, $.table_grant, $.mode,
+  ),
+
+  sql_string: $ => seq(
+    "'",
+    repeat(choice(
+      $.sql_keyword, $.sql_parameter, $.sql_ellipsis,
+      $.sql_number, $.sql_word, $.sql_operator, $.sql_other,
+    )),
+    "'",
+  ),
+  // Every interior token is `token.immediate(prec(n, …))` with n > 0, i.e. ABOVE
+  // the extras' default precedence 0. That is what stops the `#` of a SQL
+  // operator (`#>`, `#>>`) from starting a Blastfile `comment` extra *inside*
+  // the literal and eating the closing quote: measured, `'a#b'` parses as
+  // word/operator/word with no ERROR and no MISSING.
+  sql_keyword: $ => token.immediate(prec(2, choice(
+    ci('SELECT'), ci('FROM'), ci('WHERE'), ci('INSERT'), ci('INTO'), ci('VALUES'),
+    ci('UPDATE'), ci('SET'), ci('DELETE'), ci('RETURNING'), ci('WITH'), ci('AS'),
+    ci('ON'), ci('CONFLICT'), ci('DO'), ci('NOTHING'), ci('JOIN'), ci('LEFT'),
+    ci('RIGHT'), ci('INNER'), ci('OUTER'), ci('FULL'), ci('CROSS'), ci('GROUP'),
+    ci('BY'), ci('ORDER'), ci('LIMIT'), ci('OFFSET'), ci('HAVING'), ci('DISTINCT'),
+    ci('UNION'), ci('ALL'), ci('CASE'), ci('WHEN'), ci('THEN'), ci('ELSE'), ci('END'),
+    ci('IS'), ci('NULL'), ci('TRUE'), ci('FALSE'), ci('NOT'), ci('AND'), ci('OR'),
+    ci('IN'), ci('EXISTS'), ci('LIKE'), ci('ILIKE'), ci('BETWEEN'), ci('ASC'),
+    ci('DESC'), ci('BEGIN'), ci('COMMIT'), ci('ROLLBACK'), ci('SAVEPOINT'),
+    ci('CREATE'), ci('TABLE'), ci('INDEX'), ci('ALTER'), ci('DROP'), ci('TRUNCATE'),
+    ci('COPY'), ci('PROGRAM'), ci('GRANT'), ci('REVOKE'), ci('TIME'),
+    ci('ZONE'), ci('CALL'), ci('EXPLAIN'), ci('ANALYZE'), ci('VACUUM'),
+    ci('COUNT'), ci('SUM'), ci('MIN'), ci('MAX'), ci('COALESCE'), ci('NOW'),
+    ci('LOWER'), ci('UPPER'),
+  ))),
+  sql_parameter: $ => token.immediate(prec(2, choice('$?', /\$[0-9]+/))),
+  sql_ellipsis: $ => token.immediate(prec(2, '...')),
+  sql_number: $ => token.immediate(prec(2, /[0-9]+(\.[0-9]+)?/)),
+  sql_word: $ => token.immediate(prec(2, /[A-Za-z_][A-Za-z0-9_$]*/)),
+  sql_operator: $ => token.immediate(prec(2, /[-+*\/<>=~!@#%^&|?:.]+/)),
+  // The one-character fallback that makes `sql_string` accept exactly
+  // `'[^']*'`: precedence 1 still beats the extras (0) and loses every tie to a
+  // specific rule above, so nothing else is ever split by it.
+  sql_other: $ => token.immediate(prec(1, /[^']/)),
+}
+```
+
+Five decisions, each measured with the pinned generator:
+
+1. **`query` leaves the shared `keyword` rule.** Measured: with `'query'` still in
+   `keyword`, every `query '…'` parsed as `(directive (keyword) (raw_string))` — the
+   longest-match lexer always chose the one-token `raw_string`, so no `sql_string` node was
+   ever produced. Removing the word from `keyword` and giving `query` its own rule makes the
+   state after `query` unambiguous, and the same input parses as
+   `(query_decl (sql_string (sql_keyword) (sql_other) (sql_number)))` — measured on
+   `query 'SELECT 1'`. Nothing is lost: `query` is not a value, and `query foo` is refused by
+   the parser (`any_string`, `parser.rs:1335`) before and after.
+2. **`sql_string` accepts exactly `'[^']*'`.** The interior's rules are all subsets of
+   `[^']` and `sql_other` is the whole of it, so the union is `[^']`, and the closing `'`
+   is only ever matched by the rule's own literal. That is the structural proof of
+   "never stricter than `raw_string`", not a corpus count — the corpus is the regression,
+   the argument is the grammar.
+3. **Case-insensitive keywords are explicit character classes.** `ci('SELECT')` becomes
+   `[Ss][Ee][Ll][Ee][Cc][Tt]`, i.e. all 2⁶ spellings of that word, as one token. There is
+   no `i` flag in tree-sitter's regex dialect to reach for. **The list is colour only**:
+   every entry matches `sql_word`'s alphabet too, so adding or removing a keyword changes
+   which token colours it and can never change whether the file parses. The 79 words above
+   are PostgreSQL 17.7's statement and clause vocabulary plus the functions the reference
+   page's examples use; a later node may extend the array with no corpus change and no
+   design change.
+4. **`token.immediate(prec(n, …))` is the mechanism, and precedence is what closes the
+   `#` trap.** Measured: with `sql_operator` at precedence 0 the input `'a#b'` produced
+   `(sql_string (sql_word) (comment) …)` **and a MISSING `'`** — the `comment` extra
+   (`#[^\n]*`) swallowed the closing quote and the parse desynchronised. Measured again at
+   `prec(2)`: `(sql_string (sql_word) (sql_operator) (sql_word))`, no ERROR, no MISSING.
+   Lexical precedence beats an extra even when the extra's match is longer, which is the
+   only reason a split string can be safe here; `sql_other` at `prec(1)` keeps the same
+   guarantee for every character no other rule claims (spaces included, so the interior
+   stays byte-exact in the tree).
+5. **One consumer, one spelling.** `sql_string` is used only by `query_decl`, and only for
+   the `'…'` spelling: `query "…"` keeps `$.string` (with its `escape` children), because
+   an interior that may hold `\"` would need a second tokenizer that knows the four
+   escapes — a second SQL lexer, and one that would colour half a statement differently
+   from the other half. The gap is one grey run on a `"…"` query, and the only statements
+   that *must* use `"…"` are the two exempt setup forms (`SET TIME ZONE 'UTC'`,
+   `set_config(…)`), which are three words long.
+   `raw_string` stays for every other `'…'`, including `regex '…'`
+   (`regex_raw_string`, §9.2) — `sql_string` never appears under `regex`.
+
+**Measured "no false red".** The amended grammar parses the twenty-three `Blastfile`s in
+this repository — eight in `editors/tree-sitter-blastfile/test/fixtures/`, six under
+`e2e/`, nine under `python/tests/` — with **zero** `ERROR`/`MISSING` nodes, which is §9.2's
+R47 loop run before the leaf exists. `query`'s contextual-keyword cases
+(`postgres query $X`, `trait query { … }`, `view query "/x"`) parse unchanged.
+
 ### 9.3 The deliberate looseness, line by line
 
 | Grammar accepts | The parser refuses | Effect |
@@ -1536,19 +1897,36 @@ string.
 | `postgres unrestricted` as a store *name* | `StoreNameReserved` | coloured, no red |
 | a `query` that takes `"…"` as well as `'…'` | nothing — both are legal (a statement holding `'` uses `"…"`) | `(string) @string` applies |
 | an unterminated string or block at EOF | `UnterminatedString` / `UnclosedBlock` | an `ERROR` node appears — but the parser refuses those files too, so this is not a false red |
-| `$?` inside a `query '…'` | nothing — it is legal there | stays inside `raw_string`, so there is no `bind` node and no `@variable.parameter` capture |
+| `$?` inside a `query '…'` | nothing — it is legal there | `(sql_parameter)` inside `sql_string` (§9.2a); the hover that explains it is §7.6 |
+| a `#` inside a `query '…'` (`SELECT x #> $?`) | nothing — it is legal there | `(sql_operator)` inside `sql_string`, **not** a `comment`: precedence beats the extra (§9.2a decision 4). This row replaces the one-token string's free ride |
+| `query "…"` (the escaped spelling) | nothing — both spellings are legal | stays `(string)`; **no** `sql_string` children (§9.2a decision 5), so the interior of a `"…"` query is one `@string` run |
+| a `query` whose text is not SQL at all (`query 'xyz'`) | `Syntax` from `pg_query` | `(sql_string (sql_word))`; coloured, no red — the LSP owns the red |
 
 One **strictness** row remains, and it has an owner:
 
 | Grammar rejects | The parser accepts | Effect and owner |
 |---|---|---|
-| `method: /[A-Z]+/` — `M-SEARCH` or `GET2` | `is_method_word` takes any first byte `A`–`Z` and then word bytes | a red node on a legal file; it is the grammar's only known false red. §12.8 hands `MB.22.4` the one-line widening (`[A-Z][A-Z0-9_-]*`) plus an `M-SEARCH` corpus case, then a regeneration |
+| _(none)_ — the `method` widening landed in **`MB.22.4`** (commit `053b56e`), not `MB.31.4` (which only added `prec(1, $.regex_raw_string)` to `_value`): the committed regex is `/[A-Z][A-Z0-9_-]*/` (`grammar.js:56`) and `test/corpus/custom-method.txt` is green | — | this row used to be the grammar's one false red; it is recorded here so a reader does not re-open it |
 
 Nothing else in the file is stricter than the language: no rule requires a method before a
 pattern, none requires a terminator after `}`, and none checks a name against a keyword
 list. The `table_grant` row that an earlier revision carried — `egress any` colouring as a
 function — is **gone**, because `table_grant` is restricted to the four grant verbs and
 `egress any` now parses as a directive.
+
+**`sql_string` adds no strictness, and §9.2a is why.** Its interior's rules are subsets of
+`[^']` whose union is `[^']`, so the node's language is exactly `raw_string`'s; the corpus
+below is a regression, not the argument. Two rows above are *new looseness*, not new
+strictness (`#` and non-SQL text). The one strictness row in this document —
+`method: /[A-Z]+/` — is untouched by the amendment.
+
+**A pre-existing strictness this design found and does not fix.** `select query(id)` — a
+table named `query` inside a `select` grant — is an `ERROR` in the committed grammar, and
+in the amended one, identically (measured: the same tree, the same error span). `query` is
+a legal table name for the manifest's parser. It is not caused by `sql_string`, and it is
+out of `MB.34.2`'s four decisions; it is recorded as a follow-up for the next leaf that
+touches `grammar.js` (the fix is one more `query` alternative under `_table`, and a corpus
+case).
 
 ### 9.4 The pinned generator and the regeneration gate
 
@@ -1582,7 +1960,7 @@ diff is non-empty and the gate fails. Zed's own `LANGUAGE_VERSION` ceiling was n
 measured (research, open questions); the defence is a dev install, which the guard cannot
 automate, and §12.6 records as the manual pass.
 
-### 9.5 The corpus: nine files, and the five traps
+### 9.5 The corpus: twelve cases, and the five traps
 
 `test/corpus/*.txt` (`tree-sitter test`), each with a name that says what it protects:
 
@@ -1596,7 +1974,10 @@ automate, and §12.6 records as the manual pass.
 | `qualified-function.txt` — `functions st_distance, pg_catalog.unaccent` | a dotted function name is one `dotted_name` node, the form `blastit fmt` writes (§9.2 decision 5, R43a) |
 | `regex-pattern.txt` — `view v regex '/v[0-9]+/items' { }` | `regex_raw_string` / `regex_body`, and `@string.regex` |
 | `one-line-block.txt` — `static "/" { root "public" }` | `}` terminates a statement; no trailing `;` needed |
-| `method-tokens.txt` — `M-SEARCH "/x" { }` and `GET2 "/y" { }` (handed to `MB.22.4` with the `method` widening, §12.8) | `is_method_word` accepts any `[A-Z]`-led token, so the grammar must too; today it is the one known false red (§9.3) |
+| `custom-method.txt` — `M-SEARCH "/x" { }` and `GET2 "/y" { }` (landed with `method` in `MB.22.4`, §9.3) | `is_method_word` accepts any `[A-Z]`-led token, so the grammar does too; the committed regex is `/[A-Z][A-Z0-9_-]*/` |
+| `query-sql.txt` — the nine shapes of §9.2a: `SELECT … $?`, `IN ($?, ...)`, `UPDATE t SET a = $1 WHERE b = $12`, `VALUES ($?, $?), ...`, a lowercase and a mixed-case statement, `SELECT count(*), x FROM t -- note`, `query "SELECT count(*), x->>'k' FROM t"`, `select "Order" from "orders" where total >= 10.5`, and a statement with `%`, `::`, `<>`, `\|\|` and a tab/newline | `sql_string` and every child: `sql_keyword` (both cases), `sql_parameter` (`$?` and `$12`), `sql_ellipsis`, `sql_number`, `sql_word`, `sql_operator`, and the empty interior (`query ''` → `(sql_string)` with no children) |
+| `query-hash.txt` — `query 'SELECT tags #> $? '` and `query 'SELECT 1 # x'` | the `#` is an `sql_operator`, not a `comment`, and the closing quote is found: §9.2a decision 4's regression |
+| `query-spelling.txt` — `query "SET TIME ZONE 'UTC'"` and `regex '^/x[0-9]+$'` inside the same grant block | the `"…"` spelling stays `(string)` and `regex` keeps `(regex_raw_string)`/`(regex_body)`; `sql_string` appears only under `query_decl` |
 
 `test/fixtures/complete.Blastfile` is the reference page's full example;
 `test/fixtures/captures.Blastfile` is the small file §10.4 (b)–(c) run against — one
@@ -1650,11 +2031,26 @@ allowlist the guard enforces is **fifteen names**, `variable.special` included.
 | `@property` | `(table)`, `(column)`, `(dotted_name)` — a qualified function name colours like a table name |
 | `@punctuation.bracket`, `@punctuation.delimiter` | `{ } ( )`, `, ;` |
 | `@comment` | `(comment)` |
+| `@keyword` (amendment) | `(query_decl "query")`, `(sql_keyword)` — the SQL keyword set of §9.2a |
+| `@string.special` (amendment) | `(sql_string)` — the wrapper, so the quotes and the uncaptured leftovers keep the string colour |
+| `@variable.special` + `@variable` (amendment) | `(sql_parameter)` — `$?` and `$n` get `$IDENT`'s pair; `(sql_ellipsis)` — `...`, the same pair and the same reason |
 
 `@constant.builtin`, `@type.builtin`, `@function.method`, `@function.builtin` and
 `@string.special.symbol` are **never** used: four of them are outside the intersection,
 and the last has no node to attach to (§9.2 drops `placeholder`). There is no
-`@variable.parameter` either, because there is no `bind` node (§9.3).
+`@variable.parameter` either: `$?` is `@variable.special`/`@variable`, exactly like
+`$IDENT`, because `@variable.parameter` is not one of the fifteen names
+`scripts/check_zed_extension.py` allows.
+
+**The amendment adds no capture name.** `sql_number`, `sql_word`, `sql_operator` and
+`sql_other` are deliberately **uncaptured**: `number` and `operator` are not among the
+fifteen names this document measured in the three bundled themes (research §5 lists the
+intersection by the names it does *not* contain, not by all of them), and an unverified
+capture is exactly what §10.1's guard exists to reject. They inherit `@string.special`
+from `(sql_string)`, which is the *right* colour for a word or a number, not a missing one —
+today the whole string is that colour. If a later node measures `number`/`operator`, they
+are three lines here and two names in the allowlist; the negative self-test in
+`scripts/test_check_zed_extension.py` is the proof either way.
 
 ### 10.2 `highlights.scm`, complete
 
@@ -1670,6 +2066,8 @@ and the last has no node to attach to (§9.2 drops `placeholder`). There is no
 (mode (keyword) @constant)
 (grant (keyword) @constant)          ; `postgres unrestricted`
 (table_grant (keyword) @function)    ; select, insert, update, delete
+; --- MB.34.2: `query` is its own rule now (§9.2a), so it needs its own capture
+(query_decl "query" @keyword)
 
 ; --- literals
 (codec) @constant
@@ -1680,6 +2078,13 @@ and the last has no node to attach to (§9.2 drops `placeholder`). There is no
 (raw_string) @string.special
 (regex_raw_string) @string.regex
 (env_var) @variable.special @variable
+; --- MB.34.2: the SQL inside a `query '…'`: wrapper first, then the two tokens
+;     the page explains. `sql_word`/`sql_number`/`sql_operator`/`sql_other` are
+;     deliberately uncaptured (§10.1) and inherit `@string.special`.
+(sql_string) @string.special
+(sql_keyword) @keyword
+(sql_parameter) @variable.special @variable
+(sql_ellipsis) @variable.special @variable
 
 ; --- names
 (view_decl (name) @function)
@@ -1818,7 +2223,7 @@ inherits the manifest's threat model and adds no new asset.
 | `body = json` | one squiggle at the `=`, the CLI's sentence | an editor-only wording |
 | a file over 16 MiB | one diagnostic at `(0,0)`: `the file is N bytes; Blastfile is limited to 16777216 bytes …`, and the buffer is not stored | nothing, or a crash |
 | a file with 600 problems | 511 squiggles + `` 89 more problems; run `blastit check` for the full list `` | 600 squiggles on a 40-line file, or `600 more` when 89 is the count |
-| a SQL grant refused by `validate` | one diagnostic at `(0,0)` (the `Location` family, §4.2) | a squiggle on the statement, which v1 cannot place |
+| a SQL grant refused by `validate` | the **`query` family squiggles inside the string** at the offending SQL token (`RedactedQueryPlaceholder`, `LiteralQuery`, `QueryTemplate` carry `at`, §5.3, `blastfile-dsl.md` §13.4.5); a `Location`-only refusal (an unknown store, `unrestricted` with content) is still one diagnostic at `(0,0)` | "every validation error lands at `(0,0)`" — false for a `query` since MB.34.4 — or a squiggle on a `Location`-only refusal, which v1 cannot place |
 | 33 open Blastfiles | the 33rd gets the `tracks at most 32` notice; the other 32 still answer | silent drop, or unbounded memory |
 | an incremental `didChange` (a client that ignores `change: 1`) | `incremental sync is not supported; reopen the file`, and the old diagnostics are gone | stale diagnostics that show `unrestricted` as clean |
 | save a mis-indented line | the line snaps back, one undo step | an error dialog |
@@ -2034,7 +2439,7 @@ them; `RESULT.md` and the dispatch `FOLLOWUPS` list them.
 |---|---|---|
 | `MB.22.3` | the smoke command must **read stdout**: `out=$(printf 'Content-Length: 58\r\n\r\n{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \| cargo run -q -p blastit -- lsp); printf '%s' "$out" \| grep -q '"positionEncoding":"utf-16"'` | `test $? -eq 1` passes with the `lsp` arm deleted (`from_argv` falls through to `Serve`, which exits 1) |
 | `MB.22.3` | `! grep -q '_ => Position::NONE' crates/blastit-manifest/src/error.rs` | the wildcard removal has no observable test |
-| `MB.22.3` | a test asserts a positioned *syntax* error's exact site, a `Location`-carrying validation error at `(0,0)`, and a whole-file refusal at `(0,0)` | "a validation/SQL error's site" is unimplementable while `Location` has no span (§4.2) |
+| `MB.22.3` | a test asserts a positioned *syntax* error's exact site, a `Location`-carrying validation error at `(0,0)`, and a whole-file refusal at `(0,0)` | "a validation error's site" is unimplementable for a `Location`-only refusal while `Location` has no span (§4.2) — **amended 2026-11-18:** the `query` family is no longer such an error; `MB.34.4` gives `RedactedQueryPlaceholder`, `LiteralQuery` and `QueryTemplate` an `at`, so the `(0,0)` half of this test is about the `Location`-only variants and must not be written as a `query` fixture |
 | `MB.22.3` | `didChange` takes the **single** `contentChanges[0].text`; zero or more than one change object is **dropped silently** (§2.2 item 4, §2.5), not "takes the first" | §2.5 and §12.8 must state one behaviour; "takes the first" is a third |
 | `MB.22.4` | `uv run --frozen --no-sync --quiet blastit lsp`, and the pinned `tree-sitter` release binary of §9.4 instead of `npx --yes tree-sitter-cli@0.25`, in its brief and acceptance | §8.3 and §9.4: the first executes the worktree's build backend, the second runs an unpinned package from the network |
 | `MB.22.4` | the three `grep` assertions of §10.4 (b)–(d) and the fixture loop of §9.5 | `query`'s exit status alone proves only that the files parse |
@@ -2063,6 +2468,49 @@ Requirement index and nowhere stated.
 | **R57** | `blastit lsp` serves the same session from both distribution paths — the Python-free standalone binary and the wheel's console script | §12.5's two rows |
 | **R58** | the live Zed pass is recorded as a human step with its commands and observations, and is the only row no `make check` target owns | §12.6 |
 | **R59** | the registry preconditions are written down, and `MB.22.5` records which of them held when it ran | §12.7 |
+## 13. The `MB.34.2` amendment: requirements, proofs, and the two editor leaves
+
+### 13.1 Requirements
+
+| R | Requirement | Proved by |
+|---|---|---|
+| **R60** | `Lines::offset(line, character)` is the byte image of §4.2's position units and `Lines::point_at(byte)` its inverse, both built on the same `char_index`/clamping as `Lines::point`; they are the only conversions the two new ranges use | §4.6 P7 (`critical_lsp.rs`), plus `lsp.rs` `mod tests` for the clamping edges |
+| **R61** | Hover resolves `$?` and `...` **only inside a `query` interior** (§7.6), returns the two fixed paragraphs with a range over the source characters, and leaves `word_at` untouched for every other position (so `$IDENT` still answers and `$?` in a comment does not) | H7, H8; the H1–H6 rows keep passing unmodified |
+| **R62** | `textDocument/codeAction` is advertised as `codeActionProvider: true`, answers at most one `quickfix` whose single `TextEdit` replaces the whole interior, re-derives the finding from its own text and **never** reads `context.diagnostics`, and its edit re-checks clean | C1–C8; the applied-edit assertion is the one that fails for a wrong rewrite |
+| **R63** | `sql_string` exists for a `query`'s `'…'` interior with the seven child nodes, accepts exactly `'[^']*'`, and appears under no other rule; `query "…"` and `regex '…'` are unchanged | §9.2a's corpus rows, `tree-sitter test`, and the fixture loop (`tree-sitter parse` on 23 files, zero `ERROR`/`MISSING`) |
+| **R64** | The highlighting adds rules and **no capture name**: `scripts/check_zed_extension.py`'s fifteen-name allowlist is unchanged and its `missing` half still holds (every name still used) | §10.2's block; `make zed-check`; the guard's negative self-test |
+| **R65** | The two grammar mechanisms are decisions, not accidents: `query` leaves the shared `keyword` rule (or `sql_string` is unreachable), and every interior token's lexical precedence is above the extras' (or a `#` inside the literal eats the closing quote) | `query-sql.txt` + `query-hash.txt` in the corpus; §9.2a's measured trees |
+| **R66** | The quick fix and the template check are **one** implementation each, both in `blastit-sqlpolicy`, called by the editor — no regex rewrite in `lsp/` | `blastfile-dsl.md` §13.4.6/R36; `lsp/mod.rs` contains no `"fn parameterize"` and no literal scanner |
+| **R67** | The two documented gaps are stated where a reader meets them: a `"…"` query gets no `sql_string` colour (§9.3), and a deduped duplicate has no site, so no squiggle, hover or Quick Fix at it (`blastfile-dsl.md` §13.4.5) | §9.3's loose-row; the R35 test in `validate.rs` |
+| **R68** | The page sentences this design needs are **carried by the pages**: the two hover paragraphs of §7.6 (`docs/reference/blastfile.md:286-292`) and all seven refusal rows of `blastfile-dsl.md` §13.4.3, `Syntax`/`TooLong`/`TooManyQueries` included (`:298-304`); `MB.34.1` owns those pages | `make docs-check`; H7/H8 assert the `hover.rs` bytes, which the page's paragraphs transcribe |
+
+### 13.2 The tests this amendment adds
+
+| Test | Where | Asserts | Fails when |
+|---|---|---|---|
+| P7 | `critical_lsp.rs` | `Lines::offset`/`point_at` past a surrogate pair and a two-byte character, and `point_at(offset(l, c)) == (l, c)` (§4.6) | a `character as usize` or a char-count offset |
+| H7, H8 | `critical_lsp.rs` | the two hovers, their ranges, and `null` outside a `query` (§7.6) | a `word_at` that never sees `$?`, or a hover that fires in a comment |
+| C1–C8 | `critical_lsp.rs` | the capability, the one action, the edit applied and re-checked, `context.diagnostics` ignored, the malformed-params codes (§7A.5) | each row names its defect |
+| the template suite | `crates/blastit-sqlpolicy/tests/critical_query_template.rs` (protected, new) | `blastfile-dsl.md` §20's R31–R33, R36 rows | the rewrite table or a refusal offset |
+| the site suite | `crates/blastit-manifest/tests/critical_query_sites.rs` (protected, new) | T1's four named cases — `the_origin_is_the_first_character_inside_the_quote`, `the_escape_map_survives_a_multiline_double_quoted_query`, `a_duplicate_query_gets_one_site_and_one_sentence`, `a_programmatic_grant_keeps_none` — and the page's 9:16/11:26/13:31 sites; `tests/validate.rs` keeps the broad per-defect cases, `critical_manifest_011.rs` only the `at` field | the origin, the map, or the dedupe rule |
+| the grammar | `editors/tree-sitter-blastfile/test/corpus/{query-sql,query-hash,query-spelling}.txt` | §9.5's three new files | any rule of §9.2a |
+| the guard | `scripts/check_zed_extension.py` + its self-tests | R64's unchanged allowlist and the five new rules | a new capture name, or a dropped one |
+
+### 13.3 The two editor leaves
+
+| Leaf | Work | Paths (the plan's, unchanged) | Acceptance additions |
+|---|---|---|---|
+| `MB.34.5` | the capability key, `Lines::offset`, the `codeAction` handler and its re-encoding, `§7.6`'s hover, `critical_lsp.rs`'s P7/H7/H8/C1–C8 | `crates/blastit/src/lsp/{mod,hover}.rs`, `crates/blastit/tests/critical_lsp.rs` | nothing new: the plan's four commands plus the recorded live session. **No `Cargo.toml` change** — `crates/blastit` already depends on `blastit-sqlpolicy` (`crates/blastit/Cargo.toml:47`), so `parameterize` is called directly |
+| `MB.34.6` | §9.2a's grammar delta, the three corpus files, §10.2's five rules, the regeneration and the two-commit rev pin, the guard's new properties | the plan's, unchanged | `/tmp/opencode/bin/tree-sitter test` with the new files; the fixture loop over 23 files; `make zed-check` |
+| `MB.34.7` | the live proof: CLI, LSP and grammar agree on `9:16`, the Quick Fix round trip is clean, the documented commands run verbatim | the plan's, unchanged | the epic's transcript; the four user pages' commands |
+
+`MB.34.5` depends on `MB.34.4` only, and it reads the **model**, not `check`: a document
+that `validate` refuses has no `Checked`, so the handler uses
+`Manifest::from_blastfile_str` (§7.6's predicate). That is **one parse per edit**, not per request: the last `Manifest::from_blastfile_str` result is
+cached beside the tracked text (one entry, invalidated by `didChange`/`didClose`), so a hover
+or a `codeAction` reuses it and the per-publish parse is the only one a keystroke costs.
+`MAX_TEMPLATE_CHARS` bounds the statement actually inspected (security S8).
+
 ## Requirement index
 
 | R | § | Proving tier |
@@ -2078,6 +2526,7 @@ Requirement index and nowhere stated.
 | R40–R47, R43a | §9 | the pinned `tree-sitter` binary's `generate`/`test`/`parse`, `git diff --exit-code`, the fixture loop; `R43a` is the dotted `function` node of §9.2 |
 | R48–R52 | §10 | the four `tree-sitter query` runs and (b)–(d)'s three `grep`s |
 | R53–R59 | §12 | the commands of §12.1–§12.5; §12.6–§12.7 are human-only and recorded in `MB.22.5`'s `RESULT.md`; all seven are stated in §12.9 |
+| R60–R68 | §4.6, §7.6, §7A, §9.2a, §10, §13 | §13.2's table: `critical_lsp.rs` (P7, H7–H8, C1–C8), the two manifest/sqlpolicy suites, the grammar corpus, `make zed-check` |
 | S1–S11 | §11 | `critical_lsp.rs` and the guard, one row each (§11.1) |
 
 Four fresh-context critics read this document and `ADR-0013` blind and wrote
@@ -2116,7 +2565,7 @@ deferred silently.
 | # | Grade | Resolution |
 |---|---|---|
 | 1 | BLOCKER | **accepted** → §1 rows 5–8, §5.5: the span mechanism moved out of `model.rs` entirely. `sites()` (new, `blastfile/sites.rs`) locates each warning in the CST and `blastfile::check()` returns `Checked { manifest, warnings, sites }`; `model.rs` and `validate.rs` are unchanged, so there is **no path widening**. |
-| 2 | BLOCKER | **accepted** → §1: `position()` exists but ends in `_ => Position::NONE` (`error.rs:1468`); `MB.22.3` replaces that arm with the explicit position-less list, and §12.1 greps for its absence. |
+| 2 | BLOCKER | **accepted** → §1: `position()` exists but ends in `_ => Position::NONE` (`error.rs:1517`); `MB.22.3` replaces that arm with the explicit position-less list, and §12.1 greps for its absence. |
 | 3 | BLOCKER | **accepted** → §9.2: `_view_header` is `optional(_methods) optional(_patterns)` with `_pattern = string | regex_raw_string`, so `view products GET "/products", …` and `view v regex '…'` parse. |
 | 4 | BLOCKER | **accepted** → §9.2, §10.2, §10.3: no `field('name', …)` is declared and every query is positional (`(view_decl (name) @function)`), so no query can name a field the grammar lacks. |
 | 5 | MAJOR | **accepted** → §5.5: gone with `model.rs`; D7's fallback is `sites()` over an empty tree, not a `Manifest` constructor, and the six-warning fixture is written out line by line. |
@@ -2128,7 +2577,7 @@ deferred silently.
 | 11 | MAJOR | **accepted** → §8.3: `Command::env`/`Worktree::shell_env()` are the same pair type in 0.7.0, with the one-expression fix if a pinned build differs; the guard asserts a single `shell_env()` call. |
 | 12 | MAJOR | **accepted** → §11 S6, §12.1: the oracle is the `-32700` reply plus the exit, not `VmHWM`; the allocation bound is the code path of §3.2 step 3 plus the literal constant. |
 | 13 | MAJOR | **accepted** → §1: `parse_lsp`, `lsp::run`, `write_message` and `check` now carry exact signatures. |
-| 14–28 | MINOR | **accepted** → the `RawIngress` sentence now says "through" (§5.4); §11.2 says 89; `query` is `@keyword` (§10.2); `config.toml` is eight keys (§8.4, R38, §12.4); the `include_str!` path is `../../../../docs/reference/blastfile.md` from `crates/blastit/src/lsp.rs` (§7.2); §4.3's second branch drops the `-` example; `x$y` yields `$y` → `null` (§7.1); P4's fixture is `"# x\n"` × 4 194 304 + `"a"` (§4.5); `critical_blastfile_body.rs` is named (§5.5); the design says `_terminator` throughout (§9.2); clippy enforces the denies (§3.3, R11); the envelope/`uri` headroom is stated (§3.1); `outline.scm`'s quoted `@name` is accepted and documented (§10.3); equality wording is gone with `model.rs`. |
+| 14–28 | MINOR | **accepted** → the `RawIngress` sentence now says "through" (§5.4); §11.2 says 89; `query` is `@keyword` (§10.2); `config.toml` is eight keys (§8.4, R38, §12.4); the `include_str!` path is `../../../../docs/reference/blastfile.md` from `crates/blastit/src/lsp/{mod,hover}.rs` (§7.2); §4.3's second branch drops the `-` example; `x$y` yields `$y` → `null` (§7.1); P4's fixture is `"# x\n"` × 4 194 304 + `"a"` (§4.5); `critical_blastfile_body.rs` is named (§5.5); the design says `_terminator` throughout (§9.2); clippy enforces the denies (§3.3, R11); the envelope/`uri` headroom is stated (§3.1); `outline.scm`'s quoted `@name` is accepted and documented (§10.3); equality wording is gone with `model.rs`. |
 
 ### Testability (`review-testability.md`: 3 BLOCKER, 18 MAJOR, 12 MINOR)
 
@@ -2213,3 +2662,42 @@ four generated files and its README row quoting the ADR H1, §5.3's `Location`
 parenthetical, "six sessions", the method regex (`[A-Z][A-Z0-9_-]*`), §11.1's grep-list
 attribution, the dropped `egress any` sentence, the §10 title, and §4.4's surrogate
 wording.
+
+## Review Resolution — the `MB.34.2` amendment (2026-11-18)
+
+The four critic reports and the full resolution table are in `blastfile-dsl.md`'s
+`## Review Resolution — the MB.34.2 amendment`. This table records the findings whose text
+lives in this document; nothing here is deferred silently.
+
+| Finding | Resolution |
+|---|---|
+| security S1 (BLOCKER) | **accepted -> §7A.2.** No Quick Fix for a statement `learn::check_learnable` refuses, and none unless `parameterize`'s own result passes `check_template`. |
+| security S2 (BLOCKER) | **accepted -> `blastfile-dsl.md` §13.4.3/§13.4.4; §13.1 R62.** The `Syntax` sentence never embeds pg_query's message; the Quick Fix and the diagnostics therefore never echo a lexeme. |
+| security S2 (MAJOR) | **accepted -> §7A.2.** No action for a statement `learn::check_learnable` refuses. |
+| security S3 (MAJOR) | **accepted -> `blastfile-dsl.md` §13.4.5.** `QuerySite`'s manual `Debug` redacts `raw`. |
+| implementability B4 | **accepted -> §9.2a.** `_statement` gains `$.query_decl` first; the delta is a transcript. |
+| implementability M2 | **accepted -> §4.6, §7A.3.** `Lines::point_at` is defined and used for the byte end; `offset` for the two request ends. |
+| implementability M3 | **accepted -> §7A.2.** The predicate is `parameterize(&site.raw).is_some()`; no diagnostics map, no second rewrite. |
+| implementability M4 | **accepted -> §7A.5 C3.** The literal fixture is `query "… 'a@b.com'"`. |
+| implementability M6 | **accepted -> §4.6 P7.** 20/21/24, measured. |
+| testability T3–T5, T10 | **accepted -> §9.2a, §9.5, §13.2, §13.3.** The 23-file loop is a command in `MB.34.6`'s acceptance (Follow-up 3); the corpus expectation names the children; P7's fixture is the measured one; the applied-edit oracle is three assertions (§7A.3). |
+| testability T7, T8 | **accepted -> §13.2, §12.4.** `Syntax`'s `at` is asserted through `ManifestError` in `tests/validate.rs`; the guard's `missing` half gets a negative twin in `scripts/test_check_zed_extension.py`. |
+| consistency C3 (BLOCKER) | **accepted -> §1.** Fifteen `Location` variants, the two `query` variants in the positioned arm, no wildcard. |
+| consistency C5–C9 (MAJOR) | **accepted.** C5 -> §4.6; C6 -> §9.2/§9.3 (the MB.22.4 record label, and the `method` widening already landed); C7 -> §4.2/§5.3 (`StaticImmutableTooManyPatterns`); C8 -> the citations this document carries (`error.rs:1406`, `error.rs:1517`, `validate.rs`); C9 -> §9.5 (`twelve cases`, `custom-method.txt`). |
+| consistency C12, C13, C16 (MINOR) | folded: the ADR's counts/path, §2.2's heading ("eleven"), and §7.2's `include_str!` path (`../../../../docs/…` from `crates/blastit/src/lsp/mod.rs`). |
+| consistency C14 (MINOR) | **accepted -> §7.6.** The two paragraph constants are asserted by H7/H8 against `hover.rs`; the page carries them (`docs/reference/blastfile.md:286-292`), and H6's `include_str!` rule covers them. |
+| consistency C17, C18 (MINOR) | folded: Follow-up 2 re-words `MB.34.5` bullet 1; §10.1 says "fifteen names, of which four new rules use three". |
+
+**Second security pass (the same lens, a fuller report: 2 BLOCKER / 8 MAJOR / 3 MINOR).**
+Its BLOCKERs are the two already resolved above (S1 = the Quick Fix vs `check_learnable`;
+S2 = `Syntax` quoting a lexeme). Its MAJORs are resolved as follows: S3 `parameterize` is
+gated on `check_template`'s own verdict (§13.4.6); S4 the `, ...` deletion is token-exact and
+rules 6–8 run before it (§13.4.2); S5 the `escapes` walk is one cursor, `O(offset)`
+(§13.4.5); S6 `parameterize` refuses over `MAX_TEMPLATE_CHARS` (§13.4.6); **S7 the grammar is
+PostgreSQL 17.7, not 18** — `pg_query 6.2.1` vendors it (`PG_VERSION_STR "PostgreSQL 17.7
+(libpg_query)"`, `libpg_query/pg_query.h:166-167`), and §13.4.1/R31 now say so (the epic
+prose's "PostgreSQL 18" is a follow-up for the epic owner); S8 the LSP caches the last
+parse, one per edit (LSP §13.3); S9 the C3 `"…"` fixture (LSP §7A.5); S10 the `COPY … FROM
+PROGRAM` example is the literal form (§13.4.1). Its MINORs are folded: S11 the manual
+`Debug` (§13.4.5), S12 the offset-0 narrowing (the page now says "the statement's first token"), S13 every `pg_query::Error`
+variant maps to `Syntax` (§13.4.1).
