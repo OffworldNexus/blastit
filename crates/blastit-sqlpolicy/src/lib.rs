@@ -82,6 +82,7 @@ mod lru;
 mod normalize;
 mod statements;
 mod tables;
+mod template;
 
 pub use analysis::{
     Access, Analysis, AnalysisError, Classified, Op, SAFE_FUNCTIONS, StatementClass, StatementKind,
@@ -91,9 +92,13 @@ pub use learn::{
     DANGEROUS_LEARN_FUNCTIONS, LearnVerdict, RefuseReason, check_learnable,
     is_dangerous_learn_function, is_introspection_setup_sql,
 };
-pub use literals::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, redact_literals};
+pub use literals::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, literal_offset, redact_literals};
 pub use normalize::normalize;
 pub use tables::{Columns, Denied, TableGrant, TableGrants};
+pub use template::{
+    MAX_TEMPLATE_CHARS, MAX_TEMPLATE_PARAMS, MAX_TEMPLATE_PARSES, TemplateError, TemplateKind,
+    check_template, parameterize,
+};
 
 use std::collections::HashSet;
 

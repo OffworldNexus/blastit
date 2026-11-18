@@ -95,6 +95,33 @@ pub fn redact_literals(sql: &str) -> String {
     out
 }
 
+/// The character offset of the first quoted literal in `sql`, for the
+/// `LiteralQuery` refusal's site.
+///
+/// The offset is the region's **start**, prefix included: `SELECT E'x'` is `7`
+/// (the `E`), `SELECT $$x$$` is `7` (the first `$`) — the character [`redact_literals`]
+/// replaces, so a squiggle points at the token that carries the value rather
+/// than inside it. `None` when there is no literal to point at, in which case
+/// the caller falls back to the statement's own origin.
+///
+/// The count is in `char`s, like every other site in the manifest
+/// (`error::Position`), and the name is crate-qualified: `blastit-env` has an
+/// unrelated `literal_offset`.
+///
+/// ```
+/// # use blastit_sqlpolicy::literal_offset;
+/// assert_eq!(literal_offset("SELECT id FROM t"), None);
+/// assert_eq!(literal_offset("SELECT E'x'"), Some(7));
+/// assert_eq!(literal_offset(r#"SELECT "a" FROM t WHERE b = 'c'"#), Some(28));
+/// ```
+pub fn literal_offset(sql: &str) -> Option<u32> {
+    let chars: Vec<char> = sql.chars().collect();
+    let region = lex(&chars)
+        .into_iter()
+        .find(|region| region.kind.is_literal())?;
+    u32::try_from(region.start).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +182,47 @@ mod tests {
             );
             assert!(!once.contains("\\0073"), "leaked an escape in {once:?}");
         }
+    }
+
+    #[test]
+    fn the_literal_offset_is_the_region_start_in_characters() {
+        // Every literal form, prefix included, is where `redact_literals`
+        // writes its `…`.
+        for (sql, offset) in [
+            ("SELECT E'x'", 7),
+            ("SELECT B'1'", 7),
+            ("SELECT X'ff'", 7),
+            ("SELECT N'x'", 7),
+            (r"SELECT U&'\0041'", 7),
+            ("SELECT $$x$$", 7),
+            ("SELECT $tag$x$tag$", 7),
+            ("SELECT 'x'", 7),
+        ] {
+            assert_eq!(literal_offset(sql), Some(offset), "for {sql:?}");
+            let chars: Vec<char> = sql.chars().collect();
+            let region = lex(&chars)
+                .into_iter()
+                .find(|region| region.kind.is_literal());
+            assert_eq!(region.map(|region| region.start), Some(offset as usize));
+        }
+        // Nothing to point at: no literal, or only a quoted identifier and a
+        // comment, which are schema and trivia rather than data.
+        for sql in [
+            "SELECT id FROM t",
+            r#"SELECT "a" FROM "t" -- 'x'"#,
+            "SELECT $1 FROM t",
+        ] {
+            assert_eq!(literal_offset(sql), None, "for {sql:?}");
+        }
+        // Characters, not bytes: `café` before the literal costs one offset per
+        // character, so the byte position is one larger.
+        let sql = r#"SELECT "café" AS name FROM t WHERE a = 'x'"#;
+        let byte = sql.find('\'').unwrap_or_default();
+        let character = sql.get(..byte).map_or(0, |head| head.chars().count());
+        assert!(
+            byte > character,
+            "the fixture must hold a non-ASCII character"
+        );
+        assert_eq!(literal_offset(sql), Some(character as u32));
     }
 }
