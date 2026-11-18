@@ -2,7 +2,7 @@
 id: MB.34.7.4
 title: "Cover codeAction's inverted range and the escaped double-quoted interior end to end"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T05:45"
-updated: "2026-11-18T05:46"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.8
 title: "e2e: Django collectstatic served by [static] beside the WSGI app"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.2]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:03"
-updated: "2026-11-14T01:03"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

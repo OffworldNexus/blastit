@@ -2,7 +2,7 @@
 id: MB.3.16
 title: "Refuse (or prove) blastit check on an all-static Python-less manifest, pretty and --json"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.11]
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T15:08"
-updated: "2026-11-14T15:08"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

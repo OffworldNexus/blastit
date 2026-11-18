@@ -2,7 +2,7 @@
 id: MB.3.9
 title: "blastit dev runs, supervises and cleans up the embedded PHP workers itself"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.3.6]
 paths:
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T13:17"
-updated: "2026-11-14T22:18"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

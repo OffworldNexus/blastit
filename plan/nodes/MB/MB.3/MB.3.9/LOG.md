@@ -23,3 +23,7 @@ INSTALL-STORY follow-up (reviewer finding on MB.3.9.1, deferred not fixed): docs
 ## 2026-11-14T22:18 [planner]
 
 edited fields
+
+## 2026-11-18T20:36 [strategist]
+
+status ready -> done: embedded PHP worker lifecycle, supervision, and cleanup delivered over view.chan (MB.3.13, MB.3.7, MB.15, MB.24, MB.36.5)

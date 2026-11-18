@@ -2,7 +2,7 @@
 id: MB.6
 title: "Static files beside a Python/PHP app + the hashed-asset caching contract"
 kind: task
-status: ready
+status: superseded
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.2]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T00:58"
-updated: "2026-11-14T00:58"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

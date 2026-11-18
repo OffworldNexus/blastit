@@ -2,7 +2,7 @@
 id: MB.16
 title: "Deterministic ctl-write-to-gone-scheduler test (flake at supervise.rs:1045)"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T14:23"
-updated: "2026-11-14T14:23"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

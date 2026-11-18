@@ -45,14 +45,12 @@ finding into the view's `postgres` block. The reference has every
 
 ## Learn the grants
 
-`uv run blastit dev --learn` writes the views and exact `query` lines the run exercised. For a
-suite, `uv run blastit check --learn --dry-run` prints the proposal and `uv run blastit check
---learn` writes a route for a path no view matches.
+`uv run blastit dev --learn` writes the views and exact `query` lines the run exercised, including
+new statements on existing views. For a suite, `uv run blastit check --learn --dry-run` prints the
+proposal and `uv run blastit check --learn` writes newly discovered views with their statements.
 
-Before either run, give every view that touches the database an empty `postgres {}`: a view with no
-`postgres` block has no listener, so learn sees nothing from it. `--learn` never writes `body`,
-`use` or `transactions`, so declare those yourself. Read `git diff`, split a view whose paths need
-different grants, then run `uv run blastit fmt`.
+`--learn` never writes `body`, `use` or `transactions`, so declare those yourself. Read `git diff`,
+split a view whose paths need different grants, then run `uv run blastit fmt`.
 
 ## Check before you commit
 

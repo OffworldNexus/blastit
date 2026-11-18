@@ -4,13 +4,14 @@
 |---|---|
 | `blastit dev` | your machine, no root |
 | `blastit check` | CI (`blastit test` is an alias) |
+| `blastit fmt` | canonical `Blastfile` formatting (`--check` in CI) |
 | `blastit lsp` | your editor, Linux |
 | `blastit-lsp` | your editor, Linux/macOS/Windows |
 | `blastit` | production |
 | `blastit-manifest fold` | grants from a log |
 
-`dev`, `check` and `blastit` read `./Blastfile` here; `BLASTIT_MANIFEST` names
-another file, the only way to move it. There is no upward search.
+`dev`, `check`, `fmt` and `blastit` read `./Blastfile` here; `BLASTIT_MANIFEST`
+names another file, the only way to move it. There is no upward search.
 
 ## `blastit dev`
 
@@ -51,7 +52,7 @@ $ blastit check -- -k products
 |---|---|---|
 | *(none)* | — | run `pytest -q`, then check every request and statement against the `Blastfile`; an all-static file audits every `root` and runs no `pytest` |
 | `--json` | off | one JSON document on stdout; everything else on stderr |
-| `--learn` | off | record instead of failing, and write the missing views and exact `query` lines; an all-static file has nothing to learn (`2`) |
+| `--learn` | off | record instead of failing, and write missing unrouted views and their exact `query` lines (`dev --learn` adds statements to existing views); an all-static file has nothing to learn (`2`) |
 | `--dry-run` | off | with `--learn`: print the proposal, write nothing |
 | `-- ARGS…` | — | pass `ARGS` to pytest |
 
@@ -67,6 +68,13 @@ failed (`pytest` exit `5`, no tests collected, is `3`). An all-static file
 stops at `0` or `2`, with nothing run. [What it checks](../ci.md#what-it-fails-on)
 and [the `--json` contract](../ci.md#for-agents-json) are on the CI page.
 `blastit test` is the same command under its other name.
+
+## `blastit fmt`
+
+`blastit fmt [PATH]` rewrites `./Blastfile` (or `PATH`) to its [canonical
+layout](blastfile.md#formatting), preserving comments; `blastit fmt --check
+[PATH]` writes nothing and exits `0` when the file is canonical, `1` when it
+needs formatting, or `2` when the file does not parse or cannot be read.
 
 ## `blastit lsp` (Linux)
 

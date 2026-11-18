@@ -3439,3 +3439,102 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T19:54 [MB.36.11] (lead) status active -> done
 - 2026-11-18T19:57 [MB.36] (lead) Gate: seven leaves done (8/9/10 re-filed to MB.26.25/26/27 as deferred coverage, 11 landed). Acceptance at this tree: make check EXIT=0 (204 ok, 0 FAILED; docs-
 - 2026-11-18T19:57 [MB.36] (lead) status ready -> done
+- 2026-11-18T20:00 ESCALATION #14 -> strategist for MB by conductor: milestone gate for 0.2.0: verify MB exit criteria, decide which remaining ready nodes are 0.2.0 scope vs deferred vs sup
+- 2026-11-18T20:00 [MB] (conductor) 0.2.0 feature program complete at 9784965: MB.21 (Blastfile), MB.20 (/frameworks), MB.22 (lsp+Zed), MB.23 (fanotify reload), MB.24+MB.26.8 (parallel PHP), MB.25
+- 2026-11-18T20:36 [MB.26.30] (strategist) created (task) Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations
+- 2026-11-18T20:36 [MB.3.15] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.15] (strategist) re-filed as MB.26.30 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.31] (strategist) created (task) Refuse (or prove) blastit check on an all-static Python-less manifest, pretty and --json
+- 2026-11-18T20:36 [MB.3.16] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.16] (strategist) re-filed as MB.26.31 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.32] (strategist) created (task) Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field
+- 2026-11-18T20:36 [MB.3.22] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.22] (strategist) re-filed as MB.26.32 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.33] (strategist) created (task) Subreaper + WNOWAIT, BLASTIT_ALLOW_EGRESS=1 as a security switch, R4 budget and the 4x3 residue matrix
+- 2026-11-18T20:36 [MB.3.26] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.26] (strategist) re-filed as MB.26.33 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.34] (strategist) created (task) build.rs PHP toolchain probe: do not cache a no-toolchain world on a transient spawn failure
+- 2026-11-18T20:36 [MB.3.34] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.34] (strategist) re-filed as MB.26.34 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.35] (strategist) created (task) MB.3.54 review MINORs: the pretty twin cannot fail on stream, the proof token's honest limit, and two names
+- 2026-11-18T20:36 [MB.3.55] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.55] (strategist) re-filed as MB.26.35 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.36] (strategist) created (task) The unsupported-minor sentence must not fire on a supported library at an unprobed name
+- 2026-11-18T20:36 [MB.3.68] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.68] (strategist) re-filed as MB.26.36 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.37] (strategist) created (task) Run the rewritten two-package witness, and correct the grepped-set list
+- 2026-11-18T20:36 [MB.3.69] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.3.69] (strategist) re-filed as MB.26.37 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.38] (strategist) created (task) e2e: Django collectstatic served by [static] beside the WSGI app
+- 2026-11-18T20:36 [MB.8] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.8] (strategist) re-filed as MB.26.38 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.39] (strategist) created (task) Agent scratch on disk: one scratch root, retention cleanup, LESSONS entry
+- 2026-11-18T20:36 [MB.10] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.10] (strategist) re-filed as MB.26.39 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.40] (strategist) created (task) Deterministic ctl-write-to-gone-scheduler test (flake at supervise.rs:1045)
+- 2026-11-18T20:36 [MB.16] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.16] (strategist) re-filed as MB.26.40 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.41] (strategist) created (task) Compile and run critical_parallel_views inside the php-sapi image, so CI proves the measured PHP promise
+- 2026-11-18T20:36 [MB.27] (strategist) status proposed -> superseded
+- 2026-11-18T20:36 [MB.27] (strategist) re-filed as MB.26.41 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.42] (strategist) created (task) Apply the parallel-views documentation deltas: ARCHITECTURE §2.4/§2.6/§8/§8.2, settings.md and php.rs
+- 2026-11-18T20:36 [MB.28] (strategist) status proposed -> superseded
+- 2026-11-18T20:36 [MB.28] (strategist) re-filed as MB.26.42 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.43] (strategist) created (task) Real-ulimit e2e: a refused view fork costs one backoff, never a request or the tree
+- 2026-11-18T20:36 [MB.29] (strategist) status proposed -> superseded
+- 2026-11-18T20:36 [MB.29] (strategist) re-filed as MB.26.43 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.44] (strategist) created (task) One VIEW_PROCESS_MARGIN constant and a truthful view_gone paragraph in the design
+- 2026-11-18T20:36 [MB.30] (strategist) status proposed -> superseded
+- 2026-11-18T20:36 [MB.30] (strategist) re-filed as MB.26.44 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.45] (strategist) created (task) critical_learn_and_redaction.rs:518 BrokenPipe under the parallel workspace run is a race, not a flake
+- 2026-11-18T20:36 [MB.37] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.37] (strategist) re-filed as MB.26.45 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.46] (strategist) created (task) PgGrant's derived Debug prints query text: redact queries like QuerySite already redacts raw
+- 2026-11-18T20:36 [MB.38] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.38] (strategist) re-filed as MB.26.46 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.47] (strategist) created (task) docs-test's dev-learn fence exits 1 after SIGINT, twice in one session: make it deterministic
+- 2026-11-18T20:36 [MB.39] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.39] (strategist) re-filed as MB.26.47 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.48] (strategist) created (task) Protect the QuerySite Debug redaction (a query value must never reach {:?})
+- 2026-11-18T20:36 [MB.34.7.2] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.2] (strategist) re-filed as MB.26.48 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.49] (strategist) created (task) Assert the reference page's 9:16/11:26/13:31 sites and a non-zero UidLayout base
+- 2026-11-18T20:36 [MB.34.7.3] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.3] (strategist) re-filed as MB.26.49 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.50] (strategist) created (task) Cover codeAction's inverted range and the escaped double-quoted interior end to end
+- 2026-11-18T20:36 [MB.34.7.4] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.4] (strategist) re-filed as MB.26.50 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.51] (strategist) created (task) Protect the 4096-parse cap: TooManyQueries at its own site
+- 2026-11-18T20:36 [MB.34.7.5] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.5] (strategist) re-filed as MB.26.51 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.52] (strategist) created (task) Gate the CI refusal contract: check --json exits 2 with empty stdout
+- 2026-11-18T20:36 [MB.34.7.6] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.6] (strategist) re-filed as MB.26.52 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.53] (strategist) created (task) Run the tree-sitter corpus expectations inside make zed-check
+- 2026-11-18T20:36 [MB.34.7.7] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.7] (strategist) re-filed as MB.26.53 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.54] (strategist) created (task) Protect position_at's past-the-end fallback (the critical tier's one surviving mutant)
+- 2026-11-18T20:36 [MB.34.7.8] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.8] (strategist) re-filed as MB.26.54 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.55] (strategist) created (task) Protect the published query squiggle: the LSP range must equal the CLI's line:col
+- 2026-11-18T20:36 [MB.34.7.9] (strategist) status ready -> superseded
+- 2026-11-18T20:36 [MB.34.7.9] (strategist) re-filed as MB.26.55 — superseded means re-filed here, not dropped
+- 2026-11-18T20:36 [MB.26.56] (strategist) created (task) Run cargo-mutants on blastit-php-sapi (ini.rs, request.rs, abi.rs, toolchain.rs) and close non-equivalent survivors
+- 2026-11-18T20:36 [MB.3.5.2] (strategist) status ready -> superseded: obsolete TOML `[route.php]`/`workers` + `manifest.md` probe brief; superseded by `MB.21` (`Blastfile` `entrypoint php`, `docs/refere
+- 2026-11-18T20:36 [MB.3.5.3] (strategist) status ready -> superseded: obsolete TOML `parse.rs` `ROUTE_KEY_EXPECTED` task; `parse.rs` and `tests/parse.rs` were deleted in `MB.21` (`Blastfile` `entrypoint
+- 2026-11-18T20:36 [MB.3.5] (strategist) status ready -> superseded: obsolete TOML `[route.php]` (`entry` + `workers`) epic; superseded by `MB.21` (`Blastfile` `entrypoint php` + `critical_php_manifest
+- 2026-11-18T20:36 [MB.3.6.4.1] (strategist) status ready -> superseded: obsolete `MB.9.1.1` `Upstream`/`Observation` + `[route.static]` check brief; PHP `dev --learn` and `check` boot/root/libphp gates sh
+- 2026-11-18T20:36 [MB.3.6.4.2] (strategist) status ready -> superseded: obsolete `MB.9` + `[route.php]` `serve_and_run` brief; `0.2.0` documents `blastit fmt --check` + `dev --learn` for PHP (`docs/framew
+- 2026-11-18T20:36 [MB.3.6.4] (strategist) status ready -> superseded: obsolete `MB.9`-coupled PHP `check -- <suite>` sub-epic; superseded by `MB.21.4.3`/`MB.36.5` for `0.2.0` and carried forward into `M
+- 2026-11-18T20:36 [MB.3.6] (strategist) status ready -> superseded: obsolete `Upstream`-trait (`MB.9`) and `[route.php]` dispatch epic; superseded by `MB.3.13` + `MB.21` + `MB.24` + `MB.36.5` (`blasti
+- 2026-11-18T20:36 [MB.3.20] (strategist) status proposed -> superseded: obsolete held docs pass for `MB.3.17`; every deliverable landed across `MB.3.10`, `MB.3.30` (retired-PHP guard), `MB.3.32` (`ADR-
+- 2026-11-18T20:36 [MB.6] (strategist) status ready -> superseded: obsolete pre-`Blastfile` static framing task (cites retired `docs/reference/manifest.md`); superseded by `MB.20` (`docs/frameworks/p
+- 2026-11-18T20:36 [MB.11] (strategist) status ready -> done: delivered in f430031 and carried into Blastfile /deploy by MB.18 + MB.21.6
+- 2026-11-18T20:36 [MB.12] (strategist) status ready -> done: delivered in 5fab787 (ADR-0009, ADR-0010, backend-runtimes.md + 4 critic lenses); WorkerRuntime trait superseded by ADR-0016 (MB.36)
+- 2026-11-18T20:36 [MB.13] (strategist) status ready -> done: delivered in aa94c58 and distilled further in MB.18 (6ba10d3)
+- 2026-11-18T20:36 [MB.3.9] (strategist) status ready -> done: embedded PHP worker lifecycle, supervision, and cleanup delivered over view.chan (MB.3.13, MB.3.7, MB.15, MB.24, MB.36.5)
+- 2026-11-18T20:36 [MB.34.7] (strategist) status review -> done: outside-in E2E-MB.34.md proof passed review; 8 AUDIT-MB.34 coverage leaves re-filed to MB.26.48-55
+- 2026-11-18T20:36 [MB.34] (strategist) status ready -> done: SQL $?/... template validation, inner line:col spans, Quick Fix, hover, and highlighting shipped; deferred coverage in MB.26.48-55
+- 2026-11-18T20:36 [MB.3] (strategist) status ready -> done: 0.2.0 embedded PHP 8.3/8.4/8.5 over view.chan + php2shell defense shipped; deferred coverage in MB.26.30-37 and non-Python check suite run
+- 2026-11-18T20:36 [MB.5] (strategist) v0.2.0 gate carry-forward: non-Python request-level `blastit check -- <suite>` (formerly `MB.3.6.4` against retired `MB.9` `Upstream` types) belongs to `MB.5`'s
+- 2026-11-18T20:44 [MB] (strategist) v0.2.0 sub-release gate PASSED: all 0.2.0 epics (MB.1..MB.3, MB.12, MB.21..MB.25, MB.31, MB.32, MB.34..MB.36) done; deferred coverage re-filed to MB.26.30-56; M

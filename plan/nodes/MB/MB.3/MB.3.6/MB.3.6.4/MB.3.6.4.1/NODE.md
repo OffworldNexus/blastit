@@ -2,7 +2,7 @@
 id: MB.3.6.4.1
 title: "Two-shape http_obs reader, executor_ran accounting and the learn static proposal - design MB.3.6c part 1"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.6.3.3]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.34.7.3
 title: "Assert the reference page's 9:16/11:26/13:31 sites and a non-zero UidLayout base"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T05:45"
-updated: "2026-11-18T05:46"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

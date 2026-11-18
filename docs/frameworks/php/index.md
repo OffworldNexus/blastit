@@ -54,7 +54,7 @@ and Ubuntu 22.04 ship 8.2 or older, which the boot refuses by design. `BLASTIT_L
 absolute path; an image you build adds the same library and the shim; a boot without one names the
 package.
 
-We support supported PHP versions: 8.3, 8.4 and 8.5.
+Supported PHP versions: 8.3, 8.4 and 8.5.
 
 ## Concurrency
 

@@ -2,7 +2,7 @@
 id: MB.3.15
 title: "Protected critical_backend_capability suite: the design R12 refusal matrix in both build configurations"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T15:08"
-updated: "2026-11-14T15:08"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

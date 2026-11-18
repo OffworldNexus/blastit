@@ -2,7 +2,7 @@
 id: MB.3.6.4
 title: "check::serve_and_run, the 3-way check branch order and PHP learn attribution - design MB.3.6c"
 kind: epic
-status: ready
+status: superseded
 priority: 3
 depends_on: [MB.3.6.3]
 paths:
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T03:37"
-updated: "2026-11-14T10:50"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

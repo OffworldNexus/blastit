@@ -80,12 +80,12 @@ Your app keeps reading `DATABASE_URL`: Blastit reads the real one, hands the app
 local URL, and connects upstream itself. The password never enters the app's
 environment, and a `Blastfile` holds no credentials, so it is safe to commit.
 
-A view with no `postgres` block gets no listener at all. Here `postgres {}` gives
-it a listener that denies every statement (`42501`) — what the next step fixes.
+A view with no `postgres` block gets no listener in normal mode. Here `postgres {}`
+gives it a listener that denies every statement (`42501`) — what `--learn` fills in.
 
 ## Fill the grants in one pass
 
-With a test suite, one command records the whole app:
+With a test suite, `check --learn` adds newly discovered views and their queries:
 
 ```console
 $ uv run blastit check --learn

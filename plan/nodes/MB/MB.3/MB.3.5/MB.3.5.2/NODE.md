@@ -2,7 +2,7 @@
 id: MB.3.5.2
 title: "Entry + libphp probes, boot predicates and the manifest reference entry for [route.php]"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: [MB.3.5.1]
@@ -19,7 +19,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T14:39"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

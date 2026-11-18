@@ -2,7 +2,7 @@
 id: MB.11
 title: Rewrite the DigitalOcean roles/pooler section for clarity (backport to 0.2.0)
 kind: task
-status: ready
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T12:56"
-updated: "2026-11-14T12:56"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.37
 title: "critical_learn_and_redaction.rs:518 BrokenPipe under the parallel workspace run is a race, not a flake"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T01:42"
-updated: "2026-11-18T01:42"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

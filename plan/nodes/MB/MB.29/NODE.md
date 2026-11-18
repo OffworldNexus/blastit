@@ -2,7 +2,7 @@
 id: MB.29
 title: "Real-ulimit e2e: a refused view fork costs one backoff, never a request or the tree"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T08:41"
-updated: "2026-11-17T08:41"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

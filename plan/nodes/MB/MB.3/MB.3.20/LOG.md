@@ -15,3 +15,7 @@ requirement added: the retarget must be VERIFIED by a test (php.md no longer men
 ## 2026-11-14T17:04 [unknown]
 
 edited fields
+
+## 2026-11-18T20:36 [strategist]
+
+status proposed -> superseded: obsolete held docs pass for `MB.3.17`; every deliverable landed across `MB.3.10`, `MB.3.30` (retired-PHP guard), `MB.3.32` (`ADR-0008` tombstone + `AUDIT-MB.3.4-gate.md` banner + dead corpus deletion), `MB.20`, and `MB.21.5.1`

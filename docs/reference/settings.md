@@ -8,7 +8,7 @@ counts the same. `--preset` is a flag; `--port` belongs to `blastit dev`.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_APP` | the `Blastfile`'s `entrypoint` | the WSGI callable, `module:attribute`; one of the two is required |
+| `BLASTIT_APP` | the `Blastfile`'s `entrypoint python` | the WSGI callable, `module:attribute`; required for Python views when `entrypoint python` is omitted |
 | `BLASTIT_PRELOAD` | the `Blastfile`'s `preload` | modules imported before the fork, comma-separated |
 | `BLASTIT_MANIFEST` | `./Blastfile` | the file Blastit reads |
 | `BLASTIT_SCRIPT_NAME` | — | mount prefix stripped before routing; the app sees `SCRIPT_NAME` |
@@ -65,8 +65,8 @@ needs none of them and says so in its banner.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_MAX_WORKERS` | `16` | live request threads across every view; keep it under the database connection limit |
-| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | request-thread cap of one view process; also sizes its `RLIMIT_NPROC` |
+| `BLASTIT_MAX_WORKERS` | `16` | live request slots across every view; keep it under the database connection limit |
+| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | sizes one view process (and its `RLIMIT_NPROC`); adds no concurrent requests to a pooled route |
 | `BLASTIT_QUEUE_SIZE` | `256` | the bounded admission queue; beyond it the answer is `503` |
 | `BLASTIT_QUEUE_TIMEOUT` | `10s` | how long a request may wait in that queue before `503` |
 | `BLASTIT_REQUEST_TIMEOUT` | `30s` | how long before the client gets a `504` |
@@ -112,7 +112,7 @@ No TLS or HTTP/2: a load balancer terminates TLS. `Upgrade` gets `501`.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` or `eager`; `prefork = true` overrides it per route |
+| `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` or `eager`; `prefork` overrides it per route |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | the live view-process cap, with LRU retirement |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | the expected cost of one view process; the cap's starting divisor |
 | `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total`, the smaller of `MemTotal` and the cgroup limit; the non-reclaimable reading (page cache and reclaimable slab left out) is compared against it. `blastit dev` refuses a boot above it and warns once above the `85%` default; one idle view process per check is retired |

@@ -2,19 +2,16 @@
 id: MB.3.6.4.2
 title: "check::serve_and_run, the 3-way branch order and the protected learn suite - design MB.3.6c part 2"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.6.4.1]
-paths:
-  - crates/blastit/src/cli.rs
-  - crates/blastit/src/check.rs
-  - crates/blastit/tests/critical_php_learn.rs
+paths: [crates/blastit/src/cli.rs, crates/blastit/src/check.rs, crates/blastit/tests/critical_php_learn.rs]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T10:51"
-updated: "2026-11-14T10:51"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.34.7.5
 title: "Protect the 4096-parse cap: TooManyQueries at its own site"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T05:45"
-updated: "2026-11-18T05:46"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

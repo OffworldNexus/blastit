@@ -39,3 +39,7 @@ FOLLOW-UP from MB.3.5.4: crates/blastit-manifest/src/edit.rs::expected_routes dr
 ## 2026-11-14T16:36 [lead]
 
 OWNERSHIP: the edit.rs --learn route-dropping bug is MB.3.21 now, NOT this node (it stayed folded in once and that was wrong). Do not fix or duplicate it here; if the learn work touches expected_routes, stop and hand it to MB.3.21.
+
+## 2026-11-18T20:36 [strategist]
+
+status ready -> superseded: obsolete `MB.9`-coupled PHP `check -- <suite>` sub-epic; superseded by `MB.21.4.3`/`MB.36.5` for `0.2.0` and carried forward into `MB.5` (`0.2.3` unified multi-backend `check`)

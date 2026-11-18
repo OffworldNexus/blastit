@@ -2,7 +2,7 @@
 id: MB.3.55
 title: "MB.3.54 review MINORs: the pretty twin cannot fail on stream, the proof token's honest limit, and two names"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.54]
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-15T08:46"
-updated: "2026-11-15T09:18"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

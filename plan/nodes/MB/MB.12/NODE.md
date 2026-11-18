@@ -2,7 +2,7 @@
 id: MB.12
 title: "Architect how blastit serves each backend runtime (WSGI, embedded PHP, Node, static, JVM) and what distribution follows from it"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths: ["docs/design/backend-runtimes.md", "docs/decisions/**", "docs/frameworks/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: architect
 created: "2026-11-14T13:05"
-updated: "2026-11-14T22:19"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

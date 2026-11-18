@@ -125,9 +125,11 @@ $ uv run blastit check -- -k products
 ## Bootstrap an existing project
 
 It needs a file that boots: an `entrypoint`, a `postgres` store and one view.
-[Getting started](getting-started.md) is the smallest. `--learn` discovers views
-and statements; `entrypoint`, `preload` and the store's variable names are yours
-to write.
+[Getting started](getting-started.md) is the smallest. `check --learn` discovers
+unrouted views and their statements (`dev --learn` also adds statements to
+existing views); `entrypoint`, `preload` and the store's variable names are
+yours to write. For an `entrypoint php` app, gate formatting in CI with
+`blastit fmt --check` ([PHP CI](frameworks/php/index.md#what-ci-can-prove)).
 
 ```console
 $ uv run blastit check --learn              # record, write what was missing

@@ -31,3 +31,7 @@ ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded
 ## 2026-11-14T22:18 [planner]
 
 edited fields
+
+## 2026-11-18T20:36 [strategist]
+
+status ready -> superseded: obsolete `Upstream`-trait (`MB.9`) and `[route.php]` dispatch epic; superseded by `MB.3.13` + `MB.21` + `MB.24` + `MB.36.5` (`blastit-view-php` over `view.chan`, `ADR-0016`), with non-Python `check -- <suite>` tracked in `MB.5` (`0.2.3`)

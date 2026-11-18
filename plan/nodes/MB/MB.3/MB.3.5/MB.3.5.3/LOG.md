@@ -15,3 +15,7 @@ ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded
 ## 2026-11-14T22:18 [planner]
 
 edited fields
+
+## 2026-11-18T20:36 [strategist]
+
+status ready -> superseded: obsolete TOML `parse.rs` `ROUTE_KEY_EXPECTED` task; `parse.rs` and `tests/parse.rs` were deleted in `MB.21` (`Blastfile` `entrypoint php` diagnostics covered in `critical_blastfile_entrypoint.rs` / `critical_blastfile_errors.rs`)

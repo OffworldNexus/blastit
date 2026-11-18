@@ -54,7 +54,7 @@ flowchart TB
 ```
 
 The edge speaks plain HTTP/1.1 to Blastit, a view dials no TCP socket unless its
-route sets `egress = true`, and only `dbproxy` reaches the database. `postgresql`
+route sets `egress any`, and only `dbproxy` reaches the database. `postgresql`
 is 0.2.0's only proxy protocol.
 
 ## Fair queuing is part of the model

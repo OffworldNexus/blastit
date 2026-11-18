@@ -2,7 +2,7 @@
 id: MB.3.5.3
 title: Name php in ROUTE_KEY_EXPECTED and move the pinned expectation in tests/parse.rs
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.3.5.1]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T13:22"
-updated: "2026-11-14T22:18"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

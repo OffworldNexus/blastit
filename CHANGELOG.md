@@ -5,74 +5,74 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
-## 0.2.0 (2026-11-15)
+## 0.2.0 (2026-11-18)
 
-Your built front end now runs under blastit, an all-static site needs no app at
-all, and a Symfony or Laravel front controller runs in its own worker instead of
-`php-fpm`.
+Blastit now reads a purpose-built `Blastfile`, serves static sites and SPAs with
+no interpreter at all, runs Symfony and Laravel front controllers inside
+parallel per-route workers via embedded NTS `libphp` (PHP 8.3, 8.4 and 8.5),
+reloads changed files in `blastit dev` over `fanotify`, and ships a native
+language server (`blastit-lsp`) and Zed extension with SQL template validation.
 
-- **Serve a built front end from the manifest.** A `[route.static]` with a
-  `root` serves that directory itself — no nginx, no extra process, no uid of
-  its own — in one fixed order: an existing file, a directory's `index`, the SPA
-  fallback, the app, then `404` ([static assets and
+- **One manifest format: `Blastfile` and `blastit fmt`.** `./Blastfile` replaces
+  `blastit.toml` everywhere — zero TOML dependency, `app`, `entrypoint python`
+  or `entrypoint php`, `postgres $DATABASE_URL` or a split store block,
+  reusable `trait` blocks (`use`), typed path patterns (`"/products/{id:int}"`,
+  `"/assets/*"`, `regex '…'`), `static` mounts, `body json|form|none|raw`,
+  `egress any` and `prefork`, with lossless comment-preserving formatting via
+  `blastit fmt` (`--check` in CI) and syntax highlighting on the documentation
+  site ([Blastfile](https://offworldnexus.github.io/blastit/blastfile/)).
+- **Static mounts and SPA / front-controller routing.** A `static "<prefix>"`
+  mount with `root` serves regular files and directory `index` files directly
+  from the scheduler via `blastit-view-static` — no nginx, no extra worker —
+  before handing misses to a matching `view` or the mount's `fallback` on
+  `GET`/`HEAD` ([static sites and
   SPAs](https://offworldnexus.github.io/blastit/frameworks/static-and-spa/)).
-- **SPAs and front controllers are one flag apart.** `spa = true` answers a path
-  that is no file with `index.html`; with `spa` unset the same miss reaches the
-  manifest's `app` with the URL as `PATH_INFO`, so `/checkout/42` stays the app's
-  business. A served file never reaches the app, and neither does a refusal.
-- **`..` cannot leave `root`.** Plain and percent-encoded `..`, NUL and other
-  control bytes, absolute and backslash paths are `400`; a symlink that leaves
-  the tree, and a dotfile such as `.env` or `.git`, are `404` — `/.well-known/`
-  excepted. A refusal is final: never the app, never `index.html`.
-- **A fingerprinted file is cached for a year.** Only a file whose *answering*
-  path matches `immutable` gets
-  `Cache-Control: public, max-age=31536000, immutable`; every other answer,
-  `index.html` included, is `no-cache`, and an `ETag`/`Last-Modified` makes the
-  revalidation a `304`.
-- **A static-only site is a manifest and nothing else.** No `app`, no `pytest`:
-  `blastit dev` serves the tree as your own uid, `blastit check` audits every
-  root instead of running a suite and exits `0` (`2` when a root is missing or
-  not a directory), and `--json` gives an agent the same verdict as one document.
-  A route with an app still runs the suite as before.
-- **PHP runs in the same worker.** A `[route.php]` with
-  `entry = "public/index.php"` runs the front controller in the route's own
-  unprivileged worker — no `php-fpm`, no FastCGI, no nginx rewrite, no second
-  server to supervise. A `[route.static]` with `root = "public"` beside it
-  serves the assets, and an optional `workers` (1–64) only lowers the per-route
-  concurrency blastit derives. Symfony, Laravel and any PSR-15 front controller
-  are the same block.
-- **PHP is the host's, and the boot names the package.** Blastit embeds the
-  host's NTS `libphp`; it does not bundle PHP and has no fallback. Install
-  `libphp-embed` on Debian/Ubuntu, `php84-embed` on Alpine or `php-embedded` on
-  Fedora/RHEL, or point `BLASTIT_LIBPHP` at one. Without it the boot stops
-  before it binds and says which package and which `(PHP X.Y, <arch>-<libc>)`
-  is missing.
-- **The CGI surface is absent, not filtered.** There is no CGI binary and no
-  FastCGI parameter stream: `$_SERVER` is built in C with `SCRIPT_FILENAME` and
-  `DOCUMENT_ROOT` pinned at boot, so `PHP_VALUE`, `PHP_ADMIN_VALUE`,
-  `REDIRECT_STATUS` and `-d` gadgets have no way in, and a `Proxy:` header never
-  becomes `HTTP_PROXY`. A `.php`/`.phar`/`.phtml` file under a static root is
-  `404`, and the worker's seccomp role refuses `execve` and process creation.
-- **`dev --learn` and `check` know about PHP routes.** `blastit dev --learn`
-  records the routes and the exact statements the PHP app runs and writes them
-  into `blastit.toml`; `blastit check --learn` proposes new routes only, so a
-  grant for a statement on an existing route is still a 0.2.x gap. `blastit
-  check` validates the manifest, the static roots and the `libphp` gate. The
-  request-level audit stays a Python-suite feature in 0.2.0.
-- **The binary a plain build makes is portable.** `cargo build -p blastit` now
-  produces the standalone artifact — no `libpython`, no `RUNPATH` into a build
-  host's interpreter cache — so you can copy it onto a server that never had
-  Python and serve a static site, or a PHP route with the host's `libphp`. CI
-  proves it by running it in an image with no CPython at all.
-- **`body = "raw"` is refused at boot, not warned about.** A route that declares
-  `body = "raw"` without `allow_raw = true` now fails a production boot, before
-  the listener binds and naming the route and the key, instead of serving and
-  handing unvalidated bytes to the app's parser. `blastit dev` still warns and
-  serves, and `blastit check` still reports `raw_ingress`.
-- **Both deployment recipes put a pooler in front.** The DigitalOcean App
-  Platform spec and the Compose/Traefik recipe now connect the app to a
-  connection pooler — DigitalOcean's managed pooler, one setting; a PgBouncer
-  service — while migrations connect to PostgreSQL directly
+  `openat2` confinement refuses `..`, control bytes (`400`), dotfiles outside
+  `/.well-known/`, symlinks leaving `root`, and `.php`/`.phar`/`.phtml` source
+  files (`404`). One `immutable` grammar — bare `immutable`, `"/assets/*"`
+  crossing `/`, or `regex '…'` — sets the year-long `Cache-Control` header on
+  matched files while keeping `fallback` answers `no-cache` with `ETag`/`304`.
+  An all-static `Blastfile` runs `blastit dev` and `blastit check [--json]` with
+  no `entrypoint` and no `pytest`.
+- **Embedded PHP 8.3, 8.4 and 8.5 in parallel per-route workers.** `entrypoint
+  php "public/index.php"` loads the host's NTS `libphp` (`libphp-embed` on
+  Debian/Ubuntu, `php85-embed` on Alpine, `php-embedded` on Fedora/RHEL, or
+  `BLASTIT_LIBPHP`; PHP 8.2 and older are refused at boot) through per-minor
+  C SAPI shims shipped in the standalone Linux release archives
+  ([PHP](https://offworldnexus.github.io/blastit/frameworks/php/)). Each route
+  forks on-demand unprivileged `blastit-view-php` processes up to
+  `BLASTIT_MAX_WORKERS`, with `$_SERVER` built in C, `SCRIPT_FILENAME`,
+  `DOCUMENT_ROOT`, `libphp` and the shim pinned by inode at boot, and `execve` /
+  process creation blocked by seccomp — leaving the CGI/FastCGI parameter
+  surface (`PHP_VALUE`, `PHP_ADMIN_VALUE`, `REDIRECT_STATUS`, `-d` gadgets,
+  `Proxy:` / `HTTP_PROXY`) absent by construction. Contained `exit()`/`die()`
+  and fatals end as `outcome: "bailed"` and pay at least their wall time.
+- **Live reload in `blastit dev` and `INFO runtime` startup diagnostics.**
+  `blastit dev` tracks loaded Python modules/files, `preload`, PHP
+  `included_files`, and `./Blastfile` via unprivileged `fanotify` (zero
+  `inotify`), retiring views and refreshing `dbproxy` policies on save without
+  dropping `:8080`; `--no-reload` turns it off
+  ([Local development](https://offworldnexus.github.io/blastit/local/#live-reload)).
+  Boot and reload emit a structured `INFO runtime` event naming the resolved
+  Python + environment, PHP + `libphp` + `php.ini`, or static mount count.
+- **SQL template validation, `blastit-lsp`, and the Zed extension.** Every
+  `query '…'` grant is validated against PostgreSQL 18 syntax across `$?`,
+  `IN ($?, ...)` and `VALUES (…), ...` with exact inner `line:col` spans at
+  boot, `blastit check`, and in the editor. `blastit lsp` (Linux) and the
+  standalone `blastit-lsp` binary (Linux, macOS and Windows release assets)
+  power the `editors/zed` extension — resolving from Zed settings, `PATH`, or
+  GitHub Releases without `uv` — with Tree-sitter `Blastfile` + inner SQL
+  highlighting, `$?`/`...` hover, formatting, and the **Parameterize SQL for
+  Blastfile ($?)** Quick Fix.
+- **Four view crates, portable standalone builds, raw-body gate, and poolers.**
+  `blastit-view` is now a pure-`std` `view.chan` transport with per-backend
+  `blastit-view-{static,python,php}` crates gated by Cargo features, so
+  `cargo build -p blastit` links neither `libpython` nor a build-host `RUNPATH`.
+  `blastit dev --learn` writes PHP and Python grants into `./Blastfile`
+  (`blastit fmt --check` gates PHP formatting in CI while suite-driven request
+  auditing remains Python-only in `0.2.0`). Production refuses `body raw`
+  without `unvalidated` before binding, and both deployment presets put a
+  connection pooler in front of PostgreSQL
   ([Deployments](https://offworldnexus.github.io/blastit/deploy/)).
 
 ## 0.1.2 (2026-11-13)
@@ -123,8 +123,7 @@ The first hour with blastit now happens on your own machine, as you, in one pass
   per request.
 
 (corrected in 0.2.0: `check --learn` proposes new routes; grants for statements
-on an existing route are written by `dev --learn` and are the 0.2.x gap —
-MB.3.51.)
+on an existing route are written by `dev --learn` and remain a 0.2.x gap.)
 
 ## 0.1.0 (2026-10-27)
 

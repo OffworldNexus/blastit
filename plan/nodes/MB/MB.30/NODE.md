@@ -2,7 +2,7 @@
 id: MB.30
 title: One VIEW_PROCESS_MARGIN constant and a truthful view_gone paragraph in the design
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T08:41"
-updated: "2026-11-17T08:41"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

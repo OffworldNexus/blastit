@@ -1,8 +1,9 @@
 # blastit — Architecture
 
-blastit is a WSGI server for Python that **sandboxes views**. Each view runs
-under its own uid, and a view only gets the capabilities the manifest lists for
-it. For now that means the database: route X may run parameterised queries A
+blastit is a zero-trust application harness for 12-factor web apps (Python WSGI,
+embedded PHP 8.3–8.5, and static sites) that **sandboxes views**. Each view runs
+under its own uid, and a view only gets the capabilities the `Blastfile` lists
+for it. For now that means PostgreSQL: route X may run parameterised queries A
 and B, route Y may run query C, and nothing else. If an attacker takes over a
 view, they get that view's allowlist and nothing more.
 
@@ -71,13 +72,15 @@ process serves which request comes from blastit's own routing table in the
 manifest (§6). A second binary, `blastit-lsp`, is the **editor** surface: it
 plays no role in this process tree, and §2.7 says what it may and may not link.
 
-**Execution modes.** Four entry points:
+**Execution modes.** Six entry points:
 
 | Entry point | Mode | Runs |
 |---|---|---|
 | `blastit` | production | stage 0, then `execve` stage 1 under real uids or capabilities; refuses to start without them |
-| `blastit dev` | single-uid simulation | the same five roles under `geteuid()`, loopback by default; a non-loopback bind needs `--host` and `BLASTIT_DEV_EXPOSE=1`, and the banner then says `EXPOSED, no auth`; `--learn` allows what the manifest lacks and records it |
-| `blastit check` (`blastit test`) | audit | `pytest` through dbproxy; `--learn` proposes new views with their exact grants, never a grant on an existing view (`dev --learn` does that) |
+| `blastit dev` | single-uid simulation | the same five roles under `geteuid()`, loopback by default, with `fanotify` live reload (`--no-reload` turns it off); a non-loopback bind needs `--host` and `BLASTIT_DEV_EXPOSE=1`, and the banner then says `EXPOSED, no auth`; `--learn` allows what the manifest lacks and records it |
+| `blastit check` (`blastit test`) | audit | `pytest` through dbproxy (or static-root audit on an all-static file); `--learn` proposes new views with their exact grants, never a grant on an existing view (`dev --learn` does that) |
+| `blastit fmt` | formatter | lossless canonical formatting of `./Blastfile` (or `--check` in CI) |
+| `blastit lsp` / `blastit-lsp` | language server | stdio JSON-RPC LSP for `Blastfile` diagnostics, formatting, `$?`/`...` hover, and SQL parameterisation Quick Fixes |
 | `blastit-manifest fold` | manifest tooling | the missing grants a log's denials name |
 
 The component table below is the production topology; `blastit dev` runs the
@@ -283,8 +286,10 @@ http.
   "/*" {}`, listed last) lets the app render its own 404s. Every routing
   decision is logged as a `request` event (§8.1).
 * **Admission.** It keeps one global budget, `BLASTIT_MAX_WORKERS`, which is
-  the number of request threads alive across all view processes. It can also
-  enforce a per-view cap. Excess requests wait in a bounded FIFO
+  the number of live request slots across all view processes (each route owns
+  one threaded Python process or a pool of single-request PHP processes, each
+  admitting `per_process_cap` requests, forked one at a time up to
+  `BLASTIT_MAX_WORKERS`). Excess requests wait in a bounded FIFO
   (`BLASTIT_QUEUE_SIZE`, `BLASTIT_QUEUE_TIMEOUT`); once that overflows, the
   answer is `503`. A request at the head that cannot be served — its route's
   view is not ready — does not hold up the requests behind it whose route can.
@@ -480,9 +485,10 @@ CPython view (the scheduler's queue, the `ctl.chan` lifecycle, and a fresh
 process whenever the scheduler's budget allows one). There is no `php-fpm`, no
 FastCGI stream and no second server: NTS `libphp` serves one request per
 process, so a PHP file's concurrency is the number of live view processes,
-which `BLASTIT_MAX_WORKERS` caps for the whole app and `BLASTIT_VIEW_MAX_WORKERS`
-caps per view. Nothing in the `Blastfile` sets either: the scheduler owns
-parallelism.
+which `BLASTIT_MAX_WORKERS` caps for the whole app — and each of those
+processes runs one request at a time (`BLASTIT_VIEW_MAX_WORKERS` sizes one
+process and its `RLIMIT_NPROC`, never the route's process count). Nothing in
+the `Blastfile` sets either: the scheduler owns parallelism.
 
 **One transport, one runtime.** The worker is `blastit-view-php`'s concrete
 `PhpEmbedRuntime` — there is no runtime trait, because the interface a view has
@@ -548,7 +554,7 @@ artifact needs neither.
 
 | Crate | Owns | Direct dependencies | Builds on |
 |---|---|---|---|
-| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code** | every workspace crate (the view crates optional behind `php`/`python`), plus `libc`, `pyo3` (optional), `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
+| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code** | `blastit-dbproxy`, `blastit-env`, `blastit-events`, `blastit-frame`, `blastit-http`, `blastit-ingress`, `blastit-lsp`, `blastit-manifest`, `blastit-scheduler`, `blastit-sqlpolicy`, `blastit-sys`, `blastit-view`, optional `blastit-view-php` (`php`) and `blastit-view-python` (`python`), plus `libc`, `pyo3` (optional), `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
 | `blastit-sys` | the OS surface: fork/exec, uids, capabilities, seccomp, signals, `fanotify`, `/proc` | `libc`, `rustix`, `thiserror` | Linux |
 | `blastit-dbproxy` | the PostgreSQL broker: per-route listener, the query allowlist | `async-trait`, `blastit-events`, `blastit-sqlpolicy`, `blastit-sys`, `pregresql`, `rustix`, `serde`, `serde_json`, `thiserror`, `tokio`, `zeroize`, `tokio-postgres` (dev) | Linux |
 | `blastit-scheduler` | the routing table, the worker budget, fair queuing, the static mount's admission and dispatch (`static` feature) | `blastit-events`, `blastit-frame`, `blastit-ingress`, `blastit-manifest`, `blastit-view`, optional `blastit-view-static` (`static`, default here), `rustix`, `serde_json`, `thiserror`, `tokio` | Linux |
@@ -1109,7 +1115,7 @@ statements allowed and whether transaction control is allowed.
 The app is never asked anything. It receives ordinary WSGI requests and routes
 them itself, exactly as it would behind any other WSGI server.
 
-```blastfile
+```text title="Blastfile"
 app "myshop"
 
 entrypoint python "myshop.wsgi:application" {   # WSGI callable; BLASTIT_APP overrides it
@@ -1540,7 +1546,8 @@ manifest buys.
 | `SIGTERM` to PID 1 | http stops accepting and finishes in-flight requests until `BLASTIT_GRACEFUL_TIMEOUT`, then `SIGTERM` → `SIGKILL` to everyone, then exit |
 
 **Sizing.** Choose `BLASTIT_MAX_WORKERS` ≤ the DB plan's connection limit,
-because each request thread can hold one upstream connection.
+because each live request slot (thread or PHP worker process) can hold one
+upstream connection.
 
 The fair queue's tables are bounded by configuration, not by the number of
 clients: `BLASTIT_FQ_OUTER_MAX` outer flows per worker, and
@@ -1557,7 +1564,8 @@ writes to gets copied (§9.2). So:
 * `BLASTIT_VIEW_SPAWN=lazy` (the default) means only views that are actually
   hit cost memory. Views that declare `prefork` are forked at
   startup, which removes the first-hit fork latency (12–60 ms on DO).
-* `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes. When a
+* `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes (the
+  pools' workers plus any fork in flight, charged one fork at a time). When a
   new one is needed, the least-recently-used **evictable** one is retired: a
   process that is `READY`, has nothing in flight and has no request waiting in
   the admission queue for its own route. A process that has not answered the
@@ -1621,9 +1629,8 @@ writes to gets copied (§9.2). So:
 
 stdout is blastit's only output, and it is an **event stream: one event per
 line**. Events cover two things: what blastit decided (routing, denials,
-process lifecycle) and what the app printed. blastit doesn't analyse the
-stream. Future, out-of-scope tooling can parse it to find missing grants or
-routing drift.
+process lifecycle) and what the app printed. `blastit-manifest fold` reads that
+stream offline to turn `sql.denied` events into exact `Blastfile` grants (§6).
 
 **Formats.** `BLASTIT_LOG_FORMAT=json` (the default, for the server) prints one
 JSON object per line. `pretty` prints the same events as coloured, aligned,
@@ -1673,7 +1680,9 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 | `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`, `reload`) | view process lifecycle |
 | `process.cap` | scheduler | info | `estimate_bytes` (the measured cost of one view process), `cap` (the live view process cap it buys) | the measured cost or the cap changed (§8 Sizing); never once per request |
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
-| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root` or `capabilities`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the preset in force with the settings it supplied and the ones an explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`; E1 — `preset` is written as `null` in a `boot` that has none, and the supplied settings' values are the preset's own, never the operator's), the rendered output variable *names* per proxy (never values), the warning text (for example a trait no view uses) | lifecycle of the whole server |
+| `runtime` | init | info | `kind` (`python`, `php`, `static`), plus `version` and `environment` (`python`), `version`, `libphp` and `php_ini` (`php`), or `mounts` (`static`) | once at boot and after each `dev.reload` |
+| `dev.reload` / `dev.reload.unavailable` | init | info / warn | `scope`, `changed`, `duration_ms` (`dev.reload`); `reason` (`dev.reload.unavailable`) | `blastit dev` `fanotify` live reload |
+| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root`, `capabilities`, or `unprivileged-dev`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the preset in force with the settings it supplied and the ones an explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`; E1 — `preset` is written as `null` in a `boot` that has none, and the supplied settings' values are the preset's own, never the operator's), the rendered output variable *names* per proxy (never values), the warning text (for example a trait no view uses) | lifecycle of the whole server |
 
 A `remote_addr` field is the same address the app sees in `REMOTE_ADDR`: a
 bare IP, never `ip:port` (§2.5). A port is never a log field at all — it is a
@@ -1740,8 +1749,8 @@ with `request` events.
 | `BLASTIT_LOG_FORMAT` | `json` | `json` (one event per line) \| `pretty` (coloured, for humans) |
 | `BLASTIT_LOG_LEVEL` | `info` | minimum level of events printed |
 | `BLASTIT_UID_BASE` | `20000` | base of the uid layout |
-| `BLASTIT_MAX_WORKERS` | `16` | global number of live request threads |
-| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | per-view thread cap (also sets `RLIMIT_NPROC`) |
+| `BLASTIT_MAX_WORKERS` | `16` | global number of live request slots (a Python thread, or a PHP worker process) |
+| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | requests per view process; also sets its `RLIMIT_NPROC`; does not bound a pooled route's process count |
 | `BLASTIT_QUEUE_SIZE` / `BLASTIT_QUEUE_TIMEOUT` | `256` / `10s` | admission queue |
 | `BLASTIT_FAIR_QUEUING` | `0` | `1` orders the admission queue fairly (§2.4) instead of by arrival; `0` is exactly the FIFO |
 | `BLASTIT_FQ_OUTER_PREFIX_V4` / `_V6` | `24` / `56` | how much of a client address an outer flow keeps; read as `32` / `128` when longer |
@@ -2084,20 +2093,6 @@ Still open:
   step: repeat the measurement with Django + the scientific stack preloaded,
   immortalized and warmed up, and check how much a realistic request
   dirties.
-* **Immortalization across CPython versions.** The low-32-bit marker is
-  verified on 3.12. 3.13 should behave the same; 3.14 and the free-threaded
-  build use a different refcount layout and need their own handling.
-* **pregresql#1** (§2.2): review and merge. Then check
-  `message_credentials` under DO's gVisor with the real crate; the spike only
-  checked `SCM_CREDENTIALS` from Python.
-* **SQL variants.** `IN ($1, $2, …)` lists of varying length, Django's dynamic
-  savepoint names, and named cursors (`DECLARE "_django_curs_…"`) all break
-  exact matching. We will probably need a fingerprint-style normaliser
-  (collapse `IN` lists, wildcard identifier suffixes) instead of exact text.
 * **Parameter constraints.** Should the manifest ever constrain parameter
   values (for example "`$1` must equal the session's user id")? Out of scope
-  for v1.
-* **Keeping the routing table in sync with the app.** The two route
-  independently, so they can drift. blastit only logs the evidence
-  (`request` and `sql.denied` events); turning it into manifest changes is
-  left to future tooling.
+  for `0.2.0`.

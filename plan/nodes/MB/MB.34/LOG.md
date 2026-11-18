@@ -7,3 +7,7 @@ created (epic) SQL + $?/... template validation with exact inner line:col spans,
 ## 2026-11-17T13:18 [planner]
 
 Decomposed MB.34 into 7 DX-first leaves: docs (34.1), design (34.2), sqlpolicy template engine (34.3), manifest spans (34.4), LSP codeAction+hover (34.5), tree-sitter SQL (34.6), e2e proof (34.7).
+
+## 2026-11-18T20:36 [strategist]
+
+status ready -> done: SQL $?/... template validation, inner line:col spans, Quick Fix, hover, and highlighting shipped; deferred coverage in MB.26.48-55

@@ -2,7 +2,7 @@
 id: MB.3.20
 title: "Held docs pass for MB.3.17: php.md fence and its removed setting's note, design/ADR supersession lines, AUDIT note"
 kind: task
-status: proposed
+status: superseded
 owner: "doc-writer"
 priority: 2
 depends_on: [MB.3.17, MB.12]
@@ -17,7 +17,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T16:09"
-updated: "2026-11-14T17:04"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

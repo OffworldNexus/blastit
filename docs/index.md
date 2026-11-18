@@ -1,5 +1,5 @@
 ---
-description: "A zero-trust WSGI server: one sandbox per route, no database credentials in the app, only the SQL each route needs."
+description: "A zero-trust application harness: one sandbox per route, no database credentials in the app, only the SQL each route needs."
 hide:
   - toc
 ---
@@ -8,7 +8,7 @@ hide:
 
 # Small bird. Small blast radius.
 
-**blastit serves your WSGI app unchanged and splits it into one sandbox per
+**blastit serves your Python WSGI app, PHP front controller or static site unchanged and splits it into one sandbox per
 route.** Each route gets its own process, its own uid and its own database
 allowlist, so a bug in the least important page is worth that page, not the app.
 
@@ -58,10 +58,11 @@ started](getting-started.md) builds a smaller app in three steps.
 
 ## Is it for you?
 
-Yes for WSGI (Django, Flask, SQLAlchemy, psycopg 3), PostgreSQL and Linux.
-No for HTTP/2, WebSockets or non-CPython interpreters.
+Yes for Python WSGI (Django, Flask, SQLAlchemy, psycopg 3), embedded PHP 8.3–8.5
+(Symfony, Laravel, PSR-15), static sites and SPAs, PostgreSQL and Linux (plus
+`blastit-lsp` on Linux, macOS and Windows).
+No for HTTP/2 or WebSockets.
 
 !!! note "Pre-release"
 
-    0.1.1 is the first developer-experience release; the manifest may still
-    change before 1.0.
+    0.2.0 is a pre-1.0 release; surfaces may still evolve before 1.0.

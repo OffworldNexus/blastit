@@ -161,7 +161,7 @@ and `(st_dev, st_ino)`-verified at boot, passed to the child as a descriptor and
 `dlopen`ed through `/proc/self/fd/<n>`, so a swapped file cannot be loaded; no
 `libphp` symbol is reachable in init, http, the scheduler or dbproxy. Without a usable
 NTS library the boot refuses, naming the distro package (`libphp-embed`,
-`php84-embed`, `php-embedded`) or `BLASTIT_LIBPHP`.
+`php85-embed`, `php-embedded`) or `BLASTIT_LIBPHP`.
 
 `.php`/`.phtml`/`.phar` under a static root is `404` whatever its case, so a front
 controller's source is never served as a file. Until Milestone C's CDR, an upload is

@@ -61,3 +61,7 @@ RELEASE FOLDED (owner 2026-11-14): there is no separate 0.2.1 release -- everyth
 ## 2026-11-14T22:18 [planner]
 
 edited fields
+
+## 2026-11-18T20:36 [strategist]
+
+status ready -> done: 0.2.0 embedded PHP 8.3/8.4/8.5 over view.chan + php2shell defense shipped; deferred coverage in MB.26.30-37 and non-Python check suite runner in MB.5

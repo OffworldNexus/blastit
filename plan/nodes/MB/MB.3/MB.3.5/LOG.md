@@ -31,3 +31,7 @@ ADR-0010 supersedes the pool model for PHP: [route.php] is first-class (embedded
 ## 2026-11-14T22:18 [planner]
 
 edited fields
+
+## 2026-11-18T20:36 [strategist]
+
+status ready -> superseded: obsolete TOML `[route.php]` (`entry` + `workers`) epic; superseded by `MB.21` (`Blastfile` `entrypoint php` + `critical_php_manifest.rs` / `critical_blastfile_entrypoint.rs`)

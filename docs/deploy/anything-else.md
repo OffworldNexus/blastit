@@ -23,8 +23,8 @@ table of levers, then the sections that need more than a row, then three recipes
 | `BLASTIT_PROXY_DB_MAX_CONNECTIONS` | `= MAX_WORKERS` | the pool has fewer clients to give | the proxy waits for a connection instead of opening one, and requests slow down under load |
 | `BLASTIT_UID_BASE` | `20000` | the range collides inside the container | two roles share a uid and the boundaries between them collapse |
 | `BLASTIT_SECCOMP` | `1` | only on an exotic kernel, for debugging | `0` removes the syscall and egress wall, and both presets abort the boot on it |
-| `egress = true` | off, per route | that route calls an API | without it `socket(AF_INET)` fails `EPERM`; with it, every address and port, cloud metadata included |
-| `BLASTIT_VIEW_SPAWN` | `lazy` | first-request latency matters | `eager` forks every view at boot; `prefork = true` does it per route |
+| `egress any` | off, per route | that route calls an API | without it `socket(AF_INET)` fails `EPERM`; with it, every address and port, cloud metadata included |
+| `BLASTIT_VIEW_SPAWN` | `lazy` | first-request latency matters | `eager` forks every view at boot; `prefork` does it per route |
 
 [Settings](../reference/settings.md) lists the rest.
 
@@ -120,8 +120,8 @@ $ psql 'postgresql://app:REPLACE_WITH_APP_PASSWORD@REPLACE_WITH_DB_HOST:5432/REP
   logged in with, so the change is invisible until they recycle (an hour by
   default). Restarting drops in-flight transactions — and on App Platform the pool
   is created after the role, so the order matters.
-- **A `UTC` database makes the group grant a `dead_grant`.** Django then sends no
-  `set_config('TimeZone', …)`, so the `connection` group's grant for it is unused:
+- **A `UTC` database makes the trait grant a `dead_grant`.** Django then sends no
+  `set_config('TimeZone', …)`, so the `connection` trait's grant for it is unused:
   remove it where `check` runs against such a database, and keep it where the
   database says otherwise ([what `check` fails on](../ci.md#what-it-fails-on)).
 
@@ -136,7 +136,7 @@ per table and verb as routes grow.
 
 ## Egress { #egress }
 
-A view opens no TCP connection unless its route says `egress = true`, and then it
+A view opens no TCP connection unless its route says `egress any`, and then it
 reaches **any** IPv4/IPv6 address and port, cloud metadata included: there is no
 allowlist yet. `postgresql` reaches the network through `dbproxy` instead, which
 holds the credential and enforces the grants.

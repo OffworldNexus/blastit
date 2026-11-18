@@ -2,7 +2,7 @@
 id: MB.3.69
 title: "Run the rewritten two-package witness, and correct the grepped-set list"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-16T00:19"
-updated: "2026-11-16T00:19"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

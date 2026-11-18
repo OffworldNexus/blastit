@@ -2,7 +2,7 @@
 id: MB.3
 title: "Embedded PHP Backend: host NTS libphp in per-route view workers & php2shell Defense (0.2.0)"
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MB.2]
 paths: ["e2e/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T10:42"
-updated: "2026-11-14T22:18"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

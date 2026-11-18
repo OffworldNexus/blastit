@@ -8,7 +8,7 @@ depends_on: [MA]
 paths: []
 attempts: 0
 max_attempts: 3
-escalation: none
+escalation: strategist
 created: "2026-11-12T00:50"
 updated: "2026-11-14T22:18"
 ---
@@ -50,7 +50,12 @@ Expand Blastit across focused `0.2.x` sub-releases into a **multi-backend zero-t
 - wire-level `--learn` + `blastit check` (`--json` v1 schema), and
 - `MA.6`'s zero-copy `ReqHeadView` / `RawFrame` forwarding, 64-frame / 256 KiB channel batching (`chan.rs`), lazy 64 KiB response credit (`WINDOW_LOW_WATER`), and pooled view threads (`blastit-view`).
 
-A static, PHP (embedded `libphp` in a view worker, ADR-0010), Vite/Node (HTTP upstream), or Tomcat/JVM view is a **new `Upstream` implementation behind the existing supervisor and `RawFrame` scheduler channel**, not a second supervisor: reuse the role split, UID layout (`UID_BASE + 1000 + i`), seccomp baseline, per-route socket rule, and secret barrier before inventing anything.
+A static, PHP (embedded `libphp` in a view worker, ADR-0010), Vite/Node (HTTP upstream), or Tomcat/JVM view sits behind the existing supervisor and `RawFrame` scheduler channel (`view.chan`), not a second supervisor: reuse the role split, UID layout (`UID_BASE + 1000 + i`), seccomp baseline, per-route socket rule, and secret barrier before inventing anything.
+
+**Updated at the `v0.2.0` gate (2026-11-18) for `0.2.2` (`MB.4` Node/Vite) & `0.2.3` (`MB.5` JVM):**
+- **`Blastfile` is the sole manifest (`ADR-0012`):** the retired TOML manifest is permanently gone and guarded (`scripts/check_manifest_purity.py`, `test_docs_assets.py`). New backends add an `entrypoint <kind>` form in `crates/blastit-manifest/src/blastfile/`, update `crates/blastit-lsp` + `editors/tree-sitter-blastfile/grammar.js` (remember the 2-step `parser.c` + `editors/zed/extension.toml` `rev` pin), and extend `docs/javascripts/blastfile-highlight.js`.
+- **View crates over `view.chan`, not traits (`ADR-0016`):** `Upstream` and `WorkerRuntime` are deleted and guarded by `crates/blastit/tests/critical_artifacts.rs`. Each backend is its own feature-gated crate (`blastit-view-{static,python,php}`, next `blastit-view-node` / `blastit-view-http`) speaking `view.chan` over `crates/blastit-view` (pure-`std` transport). `cargo build -p blastit --locked` must remain free of `libpython` (`make rs-no-python`, `scripts/check-portable-elf.sh`).
+- **Unified multi-backend `blastit check` (`MB.5`):** `0.2.0` ships `dev --learn` across Python and PHP and `blastit fmt --check` for PHP CI, while suite-driven request auditing (`blastit check -- <suite>`) for non-Python backends was carried forward from `MB.3.6.4` into `MB.5` (`0.2.3`).
 
 **Mandatory DX-First sequence per sub-release (non-negotiable).**
 1. One lean user page per backend under `docs/frameworks/` covering Local (zero `sudo`), CI/CD (`blastit check`), and Deployments → `dx` + `ai-ergonomics` goldfish critics.

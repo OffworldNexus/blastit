@@ -2,7 +2,7 @@
 id: MB.34
 title: "SQL + $?/... template validation with exact inner line:col spans, Quick Fixes and highlighting across blastit-sqlpolicy, blastit-manifest, blastit lsp and the Zed grammar"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.31]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.3.5
 title: "Parse and validate [route.php] (entry + workers) in blastit-manifest"
 kind: epic
-status: ready
+status: superseded
 priority: 2
 depends_on: [MB.3.4]
 paths:
@@ -22,7 +22,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-14T01:09"
-updated: "2026-11-14T22:18"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal

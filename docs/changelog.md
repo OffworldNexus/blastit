@@ -7,7 +7,7 @@ at the root of the repository, and how a release is cut is in
 
 See also:
 
-* [`ROADMAP.md`](https://github.com/OffworldNexus/blastit/blob/develop/ROADMAP.md) —
+* [`plan/ROADMAP.md`](https://github.com/OffworldNexus/blastit/blob/develop/plan/ROADMAP.md) —
   what is built, in what order, and what "done" meant for each step;
 * the
   [pull requests into `develop`](https://github.com/OffworldNexus/blastit/pulls?q=is%3Apr+base%3Adevelop) —

@@ -2,7 +2,7 @@
 id: MB.39
 title: "docs-test's dev-learn fence exits 1 after SIGINT, twice in one session: make it deterministic"
 kind: task
-status: ready
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T06:15"
-updated: "2026-11-18T06:15"
+updated: "2026-11-18T20:36"
 ---
 
 # Goal
