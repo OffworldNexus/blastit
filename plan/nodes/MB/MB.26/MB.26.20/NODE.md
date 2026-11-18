@@ -2,7 +2,7 @@
 id: MB.26.20
 title: "Kill the dev_reload mutation survivors: create/delete trigger legs, pre_fork ordering, path boundary, EAGAIN, weak oracles"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.23.6]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T21:11"
-updated: "2026-11-17T21:11"
+updated: "2026-11-19T00:36"
 ---
 
 Re-filed from MB.23.12 (MB.23 audit, PASS WITH GAPS, 2026-11-17) so the deferred gap stays actionable; MB.23 closed for 0.2.0 scope.

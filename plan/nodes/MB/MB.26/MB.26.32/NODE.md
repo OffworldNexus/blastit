@@ -2,7 +2,7 @@
 id: MB.26.32
 title: "Close MB.3.5.4 review MINORs: PHP-only BLASTIT_APP refusal, check's pytest branch, Route::executor, dead key field"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -16,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T20:36"
-updated: "2026-11-18T20:36"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

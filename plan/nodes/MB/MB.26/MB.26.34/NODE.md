@@ -2,7 +2,7 @@
 id: MB.26.34
 title: "build.rs PHP toolchain probe: do not cache a no-toolchain world on a transient spawn failure"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T20:36"
-updated: "2026-11-18T20:36"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

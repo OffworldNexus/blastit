@@ -7,3 +7,7 @@ created (task) Give critical_guard a per-node base: the release-branch merge bas
 ## 2026-11-17T07:22 [planner]
 
 edited fields
+
+## 2026-11-19T00:36 [expert]
+
+status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices

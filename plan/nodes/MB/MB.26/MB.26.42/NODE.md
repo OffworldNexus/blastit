@@ -2,7 +2,7 @@
 id: MB.26.42
 title: "Apply the parallel-views documentation deltas: ARCHITECTURE §2.4/§2.6/§8/§8.2, settings.md and php.rs"
 kind: task
-status: proposed
+status: superseded
 owner: "doc-writer"
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T20:36"
-updated: "2026-11-18T20:36"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

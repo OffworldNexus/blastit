@@ -3540,3 +3540,73 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T20:44 [MB] (strategist) v0.2.0 sub-release gate PASSED: all 0.2.0 epics (MB.1..MB.3, MB.12, MB.21..MB.25, MB.31, MB.32, MB.34..MB.36) done; deferred coverage re-filed to MB.26.30-56; M
 - 2026-11-18T20:57 HUMAN H-016 opened by conductor (node MB)
 - 2026-11-18T20:57 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
+- 2026-11-19T00:16 [MB.40] (conductor) created (epic) GEPA G4 harness overhaul, P0 bugfixes, deduplication, god-file split, CLI craft & visual docs
+- 2026-11-19T00:16 [MB.40.1] (conductor) created (task) Install GEPA G4 .opencode bundle, fast-check Makefile split, delete 7 regex guards & retire MB.26 micro-nodes
+- 2026-11-19T00:16 [MB.40.2] (conductor) created (task) Fix the 4 live P0/High bugs: store-less check crash, table-grant $? check false-positive, --learn reload/probe bugs & coverage flush
+- 2026-11-19T00:16 [MB.40.3] (conductor) created (task) Deduplicate forks & seams: ObsVerdict, fold.py SQL FFI, single-impl traits, shared ELF & ProxySpec builders, delete mock_pg.rs
+- 2026-11-19T00:16 [MB.40.4] (conductor) created (task) Split god-files (scheduler.rs, config.rs, sqlpolicy/analysis.rs, stage0/1) into cohesive modules & serde wire structs
+- 2026-11-19T00:16 [MB.40.5] (conductor) created (task) CLI visual & UX craft overhaul: --version, clean --help, NO_COLOR/IsTerminal, http:// banner, actionable check & fmt diffs
+- 2026-11-19T00:16 [MB.40.6] (conductor) created (task) Visual documentation hierarchy pass: Python+PHP+static README, Mermaid diagrams, admonitions, command-first guides & runnable-docs check
+- 2026-11-19T00:16 ESCALATION #15 -> expert for MB.40.1 by conductor: Install GEPA G4 agentic bundle, Makefile fast-check split, regex guard cleanup & MB.26 consolidation
+- 2026-11-19T00:16 [MB.40.1] (conductor) status ready -> active
+- 2026-11-19T00:16 [MB.40.1] (conductor) attempt 1/3 started
+- 2026-11-19T00:16 AUTOPILOT on by conductor executing MB.40 GEPA G4 install and 6 pre-diagnosed 0.2.0 slices
+- 2026-11-19T00:16 [MB.40.1] (conductor) base d0a4562372ee8e7486a4642a2ab1670d7898e156
+- 2026-11-19T00:36 [MB.40.6] (expert) edited fields
+- 2026-11-19T00:36 [MB.26.1] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.10] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.11] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.12] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.13] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.14] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.15] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.16] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.17] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.18] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.19] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.2] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.20] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.21] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.22] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.23] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.24] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.25] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.26] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.27] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.28] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.29] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.3] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.30] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.31] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.32] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.33] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.34] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.35] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.36] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.37] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.38] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.39] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.4] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.40] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.41] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.42] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.43] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.44] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.45] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.46] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.47] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.48] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.49] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.5] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.50] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.51] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.52] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.53] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.54] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.55] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.56] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.6] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.7] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26.9] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:36 [MB.26] (expert) status ready -> superseded: Consolidated into MB.40 holistic quality & coverage slices
+- 2026-11-19T00:50 [MB.40.1] (conductor) status active -> done

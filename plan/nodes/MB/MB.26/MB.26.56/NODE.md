@@ -2,7 +2,7 @@
 id: MB.26.56
 title: "Run cargo-mutants on blastit-php-sapi (ini.rs, request.rs, abi.rs, toolchain.rs) and close non-equivalent survivors"
 kind: task
-status: proposed
+status: superseded
 owner: "test-curator"
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T20:36"
-updated: "2026-11-18T20:36"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

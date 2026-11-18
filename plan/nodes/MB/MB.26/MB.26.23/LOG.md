@@ -3,3 +3,7 @@
 ## 2026-11-17T21:11 [planner]
 
 created (task) Prove the reload transaction is idempotent and a payload-carrying 0x45 is refused by the streaming Decoder
+
+## 2026-11-19T00:36 [expert]
+
+status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices

@@ -2,7 +2,7 @@
 id: MB.26.33
 title: "Subreaper + WNOWAIT, BLASTIT_ALLOW_EGRESS=1 as a security switch, R4 budget and the 4x3 residue matrix"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T20:36"
-updated: "2026-11-18T20:36"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

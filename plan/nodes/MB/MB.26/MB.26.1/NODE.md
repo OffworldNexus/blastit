@@ -2,7 +2,7 @@
 id: MB.26.1
 title: "Post-0.2.0 coverage: pin blastfile::read's accepted path so the read bound's mutants die in-crate"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 4
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T06:14"
-updated: "2026-11-17T06:14"
+updated: "2026-11-19T00:36"
 ---
 
 Moved from `MB.21.5.6` (`MB.21`) to `MB.26.1` at the 0.2.0 release gate; scope, `paths`, owner and acceptance are unchanged. Ids quoted inside the text below keep their pre-move numbering — use this node's id in commands.

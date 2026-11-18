@@ -43,6 +43,7 @@ STATUSES = (
 CLOSED = ("done", "superseded")
 KINDS = ("milestone", "epic", "task")
 OWNERS = (
+    "writer",
     "doc-writer",
     "designer",
     "implementer",

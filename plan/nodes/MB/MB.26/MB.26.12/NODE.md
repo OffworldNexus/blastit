@@ -2,7 +2,7 @@
 id: MB.26.12
 title: "Give critical_guard a per-node base: the release-branch merge base reports every earlier node as a violation"
 kind: task
-status: proposed
+status: superseded
 owner: planner
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T07:22"
-updated: "2026-11-17T07:22"
+updated: "2026-11-19T00:36"
 ---
 
 ## Goal

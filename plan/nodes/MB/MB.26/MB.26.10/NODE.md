@@ -2,7 +2,7 @@
 id: MB.26.10
 title: "Make the blastit lsp page's exit codes and uv form true (1 also for an unframeable stream, 2 for a bad argument, --no-sync for the editor)"
 kind: task
-status: proposed
+status: superseded
 owner: "doc-writer"
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T07:22"
-updated: "2026-11-17T07:22"
+updated: "2026-11-19T00:36"
 ---
 
 ## Goal

@@ -2,7 +2,7 @@
 id: MB.26.24
 title: "Close the three escapes a goldfish review proved against the committed lsp-portable guard: target-class paths, src/bin roots, package renames"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T12:14"
-updated: "2026-11-18T12:14"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

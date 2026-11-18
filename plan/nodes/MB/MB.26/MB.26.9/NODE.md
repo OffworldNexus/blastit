@@ -2,7 +2,7 @@
 id: MB.26.9
 title: "Gate grammar.js against the committed tree-sitter parser (regenerate + diff), because tree-sitter test never reads grammar.js"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -16,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T07:22"
-updated: "2026-11-17T07:22"
+updated: "2026-11-19T00:36"
 ---
 
 ## Goal

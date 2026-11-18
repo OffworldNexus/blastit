@@ -3,3 +3,7 @@
 ## 2026-11-17T21:11 [planner]
 
 created (task) Close accepted rows T17, T20 and T23: production/check hold no hook, and keep-alive survives an all-views and a preload reload
+
+## 2026-11-19T00:36 [expert]
+
+status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices

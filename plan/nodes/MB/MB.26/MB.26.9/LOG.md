@@ -7,3 +7,7 @@ created (task) Gate grammar.js against the committed tree-sitter parser (regener
 ## 2026-11-17T07:22 [planner]
 
 edited fields
+
+## 2026-11-19T00:36 [expert]
+
+status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices

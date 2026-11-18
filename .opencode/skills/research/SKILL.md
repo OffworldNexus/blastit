@@ -7,16 +7,16 @@ description: How Blastit researchers investigate protocols, modern framework idi
 
 ## Procedure
 
-1. **Check existing repo knowledge first:** `docs/research/INDEX.md`, `docs/knowledge/LESSONS.md`, `ARCHITECTURE.md`, and `docs/spikes/`. Never duplicate completed research.
-2. **Parallelize broad questions:** If a research node has ≥ 3 independent sub-topics (e.g., FastCGI wire framing vs Symfony/Laravel PSR idioms vs PHP CGI/FastCGI CVEs), spawn parallel background `researcher` subagents, each writing `docs/research/<date>-<slug>-<part>.md`, then synthesize the master note.
+1. **Check existing repo knowledge first:** `docs/research/INDEX.md`, `docs/knowledge/LESSONS.md`, and `ARCHITECTURE.md`. Never duplicate completed research.
+2. **Parallelize broad questions:** If a research node has >= 3 independent sub-topics (e.g., MySQL/Redis wire framing vs Node/Spring Boot 12-factor idioms vs `node2shell`/polyglot CVEs), spawn parallel background `researcher` subagents, each writing `docs/research/<date>-<slug>-<part>.md`, then synthesize the master note.
 3. **Primary sources & local verification:**
-   - Wire specs (PostgreSQL, MySQL client/server protocol, MongoDB `OP_MSG`, Redis RESP2/RESP3, FastCGI 1.0, RFC 9110/9112 HTTP/1.1).
+   - Wire & ABI specs (PostgreSQL, MySQL client/server protocol, MongoDB `OP_MSG`, Redis RESP2/RESP3, embedded SAPI / N-API ABIs, RFC 9110/9112 HTTP/1.1).
    - Official framework docs & source code (Django, Flask/SQLAlchemy, Symfony, Laravel, Vite, SvelteKit/Remix/Hono, Tomcat/Spring Boot).
-   - Official CVE advisories / NVD / upstream patches for `php2shell`, `node2shell`, HTTP smuggling, and media parser CVEs.
-   - When a 2-minute local probe in `/tmp/opencode/` answers an empirical question (e.g. testing how a driver parses a Unix-socket URI or how `wasmtime` fuel behaves), run it and record the exact command and output!
+   - Official CVE advisories / NVD / upstream patches for `php2shell`, `node2shell`, HTTP smuggling, and media/PDF parser CVEs.
+   - When a 2-minute local probe in `/tmp/opencode/` answers an empirical question (e.g. testing how a driver parses a Unix-socket URI or how `wasmtime` fuel behaves), run it via `uv run --no-project` or `cargo` and record the exact command and output!
 4. **Strict license verification (Apache-2.0 project):**
    - Check the actual `LICENSE` / `Cargo.toml` license expression of every candidate crate or C/Rust library compiled to WASM.
-   - **Allowed:** `Apache-2.0`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `MPL-2.0` (file-level, if unmodified crate).
+   - **Allowed:** `Apache-2.0`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, `MPL-2.0` (file-level, if unmodified crate).
    - **Forbidden in shipped wheels/binaries/WASM:** `GPL-*`, `LGPL-*` (static WASM linking), `AGPL-*`, `SSPL`, non-commercial licenses. Always state the verified SPDX license in the comparison table.
 
 ## Note format: `docs/research/YYYY-MM-DD-<slug>.md`
@@ -26,7 +26,7 @@ description: How Blastit researchers investigate protocols, modern framework idi
 - Node: <plan id>   - Author: researcher   - Date: YYYY-MM-DD
 
 ## TL;DR (<= 8 lines)
-## Developer Experience Implications (what framework idioms/defaults make this zero-config for users?)
+## Developer Experience Implications (what framework idioms/defaults make this zero-config in `Blastfile`?)
 ## Technical Findings (with citations / empirical probes)
 ## Comparison Table (options, SPDX license, maintenance, footprint, security properties)
 ## Concrete Recommendations for Blastit

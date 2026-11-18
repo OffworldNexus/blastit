@@ -1,6 +1,6 @@
 ---
 name: DX-First (Developer Experience & Docs Before Code)
-description: MANDATORY for every planner, doc-writer, designer, architect, reviewer, critic, lead and strategist in Blastit. Everything in Blastit stems from the developer experience: lean user documentation for Local, CI/CD and Deployments is written and critiqued BEFORE any internal design or code.
+description: MANDATORY for orchestrators, architects, writers, and UX reviewers in Blastit. Everything in Blastit stems from the developer experience: lean visual user documentation for Local, CI/CD and Deployments is written and reviewed BEFORE any internal design or code.
 ---
 
 # DX-First: Everything Stems From Developer Experience
@@ -9,44 +9,38 @@ Blastit succeeds only if adopting it feels **effortless, foolproof, and lean** �
 
 ## 1. The Iron Law: Docs Before Design, Design Before Code
 
-Before writing any internal Rust/Python architecture or production code for a feature, backend, ingress validator, or outgoing proxy:
+Before writing internal Rust/Python architecture or production code for a feature, backend, ingress validator, or outgoing proxy:
 
-1. **Write the user-facing documentation FIRST** (`docs/`), showing **exact, runnable commands and files** in all three environments:
-   - **On the local developer machine:** Zero `sudo`, zero manual `chmod` on home directories, zero `setcap` ceremony required for daily coding. Show how the developer starts `blastit dev` (unprivileged single-UID simulation that runs the real process topology, `execve` secret swap, ingress WASM validators, and egress brokers so any misconfiguration fails loudly on `localhost` for an honest program), and how optional real-capability local testing works when desired.
-   - **In CI/CD:** One fast, unprivileged, deterministic command (`blastit check` / `blastit test`) that runs the app's test suite through Blastit's brokers/validators and fails if **any** route is unexercised, **any** SQL query / Redis key / Mongo op / HTTP call is undeclared, **any** grant is dead, or **any** route lacks expected input rules.
+1. **Write the user-facing documentation FIRST** (`docs/`, owned by `writer` or `architect`), showing **exact, runnable commands and files** in all three environments:
+   - **On the local developer machine:** Zero `sudo`, zero manual `chmod` on home directories, zero `setcap` ceremony required for daily coding. Lead immediately with 3 zero-`sudo` commands (`blastit dev` runs the real multi-process topology, stage-0 `execve` secret swap, ingress validators, and egress brokers so any misconfiguration fails loudly on `localhost`).
+   - **In CI/CD:** One fast, unprivileged, deterministic command (`blastit check`) that runs the app's test suite through Blastit's brokers/validators and fails if **any** route is unexercised, **any** SQL query / Redis key / Mongo op / HTTP call is undeclared, **any** grant is dead, or **any** route lacks expected input rules (and passes cleanly on 0-proxy store-less apps).
    - **Across deployment scenarios:** Foolproof presets (`digitalocean-paas`, `compose-traefik`, plus clean 12-factor container/systemd recipes) where production `blastit` **fails closed** if real OS isolation (root or capabilities + seccomp) is missing.
-2. **Critique the DX with fresh eyes** (`critic` subagents with the `dx` and `ai-ergonomics` lenses). Every extra step, redundant environment variable, manual copy-paste loop, or paragraph of kernel trivia is a defect.
-3. **Only after the DX spec is accepted**, write the technical design (`docs/design/<slug>.md`) and implement the code so the documented commands work verbatim.
+2. **Review with `review-ux` and `review-arch`.** Every extra step, redundant environment variable, manual copy-paste loop, missing Mermaid diagram, or paragraph of kernel trivia is a defect.
+3. **Only after the DX spec is clean**, implement the code in coarse vertical slices so the documented commands work verbatim.
 
 ## 2. Target Audience: Modern 12-Factor Frameworks Only
 
-- **We do NOT support legacy un-12-factorizable monoliths** (such as WordPress, FTP-mutated docroots, or untested spaghetti). Never complicate the manifest or CLI to accommodate them.
+- **We do NOT support legacy un-12-factorizable monoliths** (such as WordPress, FTP-mutated docroots, or untested spaghetti). Never complicate `Blastfile` or CLI flags to accommodate them.
 - **We DO play natively with modern, tested, 12-factor frameworks and their idioms:**
-  - **Python (WSGI):** Django, Flask, SQLAlchemy, psycopg 3 — zero-boilerplate connection/parameter diagnostics.
-  - **PHP (PHP-FPM / FastCGI):** Symfony, Laravel, Slim, PSR-7 / PSR-15 front controllers (`public/index.php`), clean URL rewriting without nginx regex soup, safe static asset serving.
+  - **Python (WSGI):** Django, Flask, SQLAlchemy, psycopg 3 — zero-boilerplate connection/parameter diagnostics (`entrypoint python "app:app"`).
+  - **PHP (embedded NTS `libphp` `8.3, 8.4, 8.5`):** Symfony, Laravel, Slim, PSR-7 / PSR-15 front controllers (`entrypoint php "public/index.php"`), automatic host NTS `libphp` discovery (`BLASTIT_LIBPHP` override only), clean URL rewriting without nginx boilerplate, safe static asset serving — zero external PHP daemon or CGI parameter surface.
   - **Node & Frontend (Vite / HTTP upstream):** Vite dev/preview & static assets, SvelteKit, React Router / Remix, Nuxt, Hono, Next standalone — seamless asset + SSR split.
   - **JVM (Tomcat / Servlet / Spring Boot):** 12-factor embedded or standalone Tomcat / Spring Boot apps talking over local sockets/loopback, JDBC/Redis/HTTP proxying without changing app code.
 
 ## 3. Human + AI Manifest Ergonomics (`Blastfile`)
 
-Every manifest feature must pass two tests:
+Every `Blastfile` feature must pass two tests:
 
-1. **The Human Test:** Can a developer read `Blastfile` in 30 seconds and immediately see what each route can touch? Are defaults smart enough that `./Blastfile` is discovered automatically and common wiring needs minimal lines?
-2. **The AI Agent Test:** How does an developer OR an AI agent fill in `Blastfile` and **know for sure nothing was forgotten**?
-   - **Single-pass wire learning (`--learn` / `--record`):** Because Blastit owns the ingress gate and every outgoing proxy (`postgresql`, `mysql`, `mongodb`, `redis`, `http`), it observes every route hit, header, payload shape, and outgoing query/call **on the wire** across *every* backend language (Python, PHP, Node, Java) — without needing per-language monkeypatching! In `--learn` mode, Blastit logs-and-allows instead of aborting on the first denial, so one run of the test suite captures *every* statement and call across the entire app in one pass.
-   - **Strict completeness verification:** CI mode checks 4-way coverage:
-     1. Every observed request matched an intended route (no accidental catch-all drift).
-     2. Every observed outgoing operation is granted (zero missing queries/endpoints).
-     3. Every view and grant in the `Blastfile` was actually exercised by tests (or explicitly marked), catching dead grants and untested edge cases.
-     4. Every route accepting bodies/uploads declares explicit ingress validation (or explicit opt-out, flagged loudly).
-   - **Actionable diagnostics:** Both pretty human output (naming the exact config line or framework setting to change) and `--json` output (structured for AI agents to apply cleanly in one edit).
+1. **The Human Test:** Can a developer read `Blastfile` in 30 seconds and immediately see what each `view` can touch? Declare `entrypoint` once at top level, nest capability blocks inside each `view`, use clean `"/*"` / `regex '...'` / bare `immutable`, and auto-discover `./Blastfile`.
+2. **The AI Agent Test:** How does a developer OR an AI agent fill in `Blastfile` and **know for sure nothing was forgotten**?
+   - **Single-pass wire learning (`--learn` / `--learn --dry-run`):** Observes every route hit and outgoing query/call on the wire across every backend language in one pass without learning `..` or dotfile scanner probes.
+   - **Strict completeness verification (`blastit check` / `--json`):** Verifies zero unrouted requests, zero missing grants, zero dead grants, and explicit body policies — printing dead-grant `sql`, `proxy`, and `fix.to` (`view <name> postgres`) in both human and `--json` output with proper singular/plural (`1 request`).
 
-## 4. Ruthless Documentation Leanness Rules
+## 4. Visual Hierarchy & Ruthless Leanness Rules (`<130` lines/page)
 
-Today's developer stops reading the moment documentation lectures them. Enforce these rules on every page under `docs/` and `README.md`:
+Today's developer closes bloated documentation immediately. Enforce on every page under `docs/` and `README.md`:
 
-- **Lead with the working 10-line example.** Never open a guide with caveats, kernel internals, `sys.path` edge cases, or gVisor war stories. Put architecture and OS mechanics in `how-it-works.md`, `security.md`, and `ARCHITECTURE.md` — nowhere else.
-- **Count the steps.** Getting started must take **≤ 3 steps** and **Zero `sudo`** (`uv add blastit` → 6-line `Blastfile` → `uv run blastit dev`).
-- **One canonical way per task.** Don't show 4 ways to pass environment variables in a tutorial; show the cleanest one and link to `reference/` for overrides.
-- **Short sentences, active voice, scannable tables.** Cut every paragraph that doesn't change what the reader types or decides. Aim for user guide pages under 150 lines.
-- **Every snippet is tested.** Commands, `Blastfile` blocks, Compose files, and CI snippets in `docs/` must actually parse and run.
+- **Immediate 3-step zero-`sudo` happy path:** Right under `# Title` + 1–2 line scope statement, show the 3 runnable commands. Put caveats in `!!! warning` *after* Command 1 and platform/wheel matrices in collapsed `??? note` near the bottom — **never** before Command 1.
+- **Visual hierarchy on every guide/spec:** Include at least **1 Mermaid diagram** (`flowchart LR`/`TB` or `sequenceDiagram`), at least **1 admonition** (`!!! note` / `!!! warning`), compact tables, non-empty `Blastfile` grants, and forward `## Where next` links.
+- **Zero diary/apology bloat:** Keep pages `<130` lines (target 75–95 lines). Zero diary headings (`What we thought...`), zero roadmap excuses (`Until Milestone...`, `not supported yet`), and zero host-package apologies.
+- **Every snippet is tested:** `make docs-check` (`uvx --offline zensical build --strict`) and runnable-docs execution (`make docs-test` inside `make check`) verify every link and command.

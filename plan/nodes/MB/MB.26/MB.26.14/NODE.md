@@ -2,7 +2,7 @@
 id: MB.26.14
 title: "Locate an endpoint-level body raw warning (sites.rs raw_body's endpoint chain is untested)"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T07:23"
-updated: "2026-11-17T07:23"
+updated: "2026-11-19T00:36"
 ---
 
 ## Goal

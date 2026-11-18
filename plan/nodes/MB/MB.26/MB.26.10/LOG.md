@@ -7,3 +7,7 @@ created (task) Make the blastit lsp page's exit codes and uv form true (1 also f
 ## 2026-11-17T07:22 [planner]
 
 edited fields
+
+## 2026-11-19T00:36 [expert]
+
+status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices

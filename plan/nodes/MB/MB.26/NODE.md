@@ -2,7 +2,7 @@
 id: MB.26
 title: "Post-0.2.0 Blastfile coverage hardening: the audit's remaining survivors and the PHP view-retire race"
 kind: epic
-status: ready
+status: superseded
 priority: 2
 depends_on: []
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T06:14"
-updated: "2026-11-17T06:14"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

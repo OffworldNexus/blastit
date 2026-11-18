@@ -2,7 +2,7 @@
 id: MB.26.29
 title: "Prove the static open flags: O_DIRECTORY at the root, O_NONBLOCK against a FIFO swap, CLOEXEC across execve"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-18T18:27"
-updated: "2026-11-18T18:27"
+updated: "2026-11-19T00:36"
 ---
 
 # Goal

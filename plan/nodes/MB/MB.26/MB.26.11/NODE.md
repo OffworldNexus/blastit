@@ -2,7 +2,7 @@
 id: MB.26.11
 title: "Prove blastit lsp exits 1 when the process cannot drop its file capabilities (S10's seventh session, rootless e2e)"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 2
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T07:22"
-updated: "2026-11-17T07:22"
+updated: "2026-11-19T00:36"
 ---
 
 ## Goal

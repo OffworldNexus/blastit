@@ -2,7 +2,7 @@
 id: MB.26.2
 title: "Give P4's postcondition oracle a direct test and a truthful section for unresolved grants"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: []
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T06:14"
-updated: "2026-11-17T06:14"
+updated: "2026-11-19T00:36"
 ---
 
 Moved from `MB.21.5.8` (`MB.21`) to `MB.26.2` at the 0.2.0 release gate; scope, `paths`, owner and acceptance are unchanged. Ids quoted inside the text below keep their pre-move numbering — use this node's id in commands.
