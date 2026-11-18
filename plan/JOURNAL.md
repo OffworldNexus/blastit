@@ -3062,3 +3062,131 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T00:37 [MB.31.4] (lead) status review -> done
 - 2026-11-18T00:37 [MB.31] (lead) gate passed: 31.1 docs (dx+ai-ergonomics accept), 31.2 lowering through pattern.rs with the 32-cap at the 33rd node and Spelling so a regex is never read as a g
 - 2026-11-18T00:37 [MB.31] (lead) status ready -> done
+- 2026-11-18T00:38 [MB.34.1] (lead) status ready -> active
+- 2026-11-18T00:38 [MB.34.1] (lead) attempt 1/3 started
+- 2026-11-18T00:38 [MB.34.1] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T00:50 [MB.34.1] (lead) status active -> review
+- 2026-11-18T00:50 [MB.34.1] (lead) owner reported done; dispatching reviewer against base 5f29398
+- 2026-11-18T00:51 [MB.34.1] (lead) owner done; reviewer dispatched against base 5f29398
+- 2026-11-18T00:57 [MB.34.1] (lead) REVIEW FAIL (attempt 1): MAJOR local.md:120-121+124-125 tells the reader to paste a redacted `sql` (full of `…`) which the reference refuses; MINOR blastfile.md
+- 2026-11-18T00:57 [MB.34.1] (lead) status review -> ready
+- 2026-11-18T00:57 [MB.34.1] (lead) attempt 2/3 started
+- 2026-11-18T00:58 [MB.34.1] (lead) status ready -> review
+- 2026-11-18T00:58 [MB.34.1] (lead) attempt 2 done; five findings fixed; reviewer 2 dispatched
+- 2026-11-18T01:05 [MB.34.1] (lead) reviewer: VERDICT PASS (attempt 2). Four reviewer-specified MINORs applied before commit (redaction glyph in a copyable cell, bind-in-code clause, RESULT verdic
+- 2026-11-18T01:05 [MB.34.2] (lead) status ready -> active
+- 2026-11-18T01:05 [MB.34.2] (lead) attempt 1/3 started
+- 2026-11-18T01:05 [MB.34.2] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T01:05 [MB.32.1] (lead) status ready -> active
+- 2026-11-18T01:05 [MB.32.1] (lead) attempt 1/3 started
+- 2026-11-18T01:05 [MB.32.1] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T01:12 [MB.34.1] (lead) pre-commit gate run 1: rust+critical+docs targets green, py-lint red only from MB.32.1's in-flight test_docs_assets.py edit (unused tomllib import). Will re-run
+- 2026-11-18T01:25 [MB.34.3] (lead) edited fields
+- 2026-11-18T01:25 [MB.34.4] (lead) edited fields
+- 2026-11-18T01:25 [MB.34.6] (lead) edited fields
+- 2026-11-18T01:26 [MB.34.8] (lead) created (task) State every query refusal and quote the two hover paragraphs on the pages (design MB.34.2 supersedes the page's silence)
+- 2026-11-18T01:26 [MB.34.2] (lead) status active -> review
+- 2026-11-18T01:26 [MB.34.2] (lead) owner done (attempt 1, after a step-limit resume); 4 lenses closed; reviewer dispatched
+- 2026-11-18T01:26 [MB.34.8] (lead) Scope widened by MB.34.2's design: the three refusal rows are Syntax, TooLong (65_536 chars) and TooManyQueries (4_096 entries), plus two clauses (a `query "…"`
+- 2026-11-18T01:26 [MB.34.8] (lead) status ready -> active
+- 2026-11-18T01:26 [MB.34.8] (lead) attempt 1/3 started
+- 2026-11-18T01:26 [MB.34.8] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T01:30 [MB.34.2] (lead) REVIEW FAIL (attempt 1): 1 stale-fence-table blocker is MB.32.1's in-flight file (not this node); real ones: T1 still unprotected (need critical_query_sites.rs)
+- 2026-11-18T01:30 [MB.34.2] (lead) status review -> ready
+- 2026-11-18T01:30 [MB.34.2] (lead) attempt 2/3 started
+- 2026-11-18T01:30 [MB.32.1] (lead) lead: (1) fence pins must be shift-proof, keyed on (page, first body line) not (page,line) — a concurrent doc node edits blastfile.md; (2) the recorded 1-failed
+- 2026-11-18T01:31 [MB.34.2] (lead) attempt 2 done: T1 now a protected critical_query_sites.rs; row 9 message-free; fifteen Location variants; §9.2 method regex corrected; five exact Positions; fo
+- 2026-11-18T01:31 [MB.34.2] (lead) status ready -> review
+- 2026-11-18T01:37 [MB.34.8] (lead) status active -> review
+- 2026-11-18T01:37 [MB.34.8] (lead) owner done; dx critic CHANGES->PASS; reviewer dispatched
+- 2026-11-18T01:40 [MB.34.2] (lead) REVIEW FAIL (attempt 2): protected critical_query_sites.rs still unnamed in §13.2 and §20's R34/R35 protected column (BLOCKER); RESULT.md row 9 / §3 still print
+- 2026-11-18T01:40 [MB.34.2] (lead) status review -> ready
+- 2026-11-18T01:40 [MB.34.2] (lead) attempt 3/3 started
+- 2026-11-18T01:41 [MB.34.2] (lead) status ready -> review
+- 2026-11-18T01:41 [MB.34.2] (lead) attempt 3 done: critical_query_sites named in §13.2/§20 R34/R35, row 9 message-free, follow-ups renumbered 1-4 and verified by grep, MB.22.4 attribution, 4 MINO
+- 2026-11-18T01:42 [MB.32.1] (lead) status active -> review
+- 2026-11-18T01:42 [MB.32.1] (lead) owner done: fence table re-keyed on (page, first body line); make check EXIT=0 (5162 lines); 15 reverted mutations each red; 52 pytest. Reviewer dispatched. NOT
+- 2026-11-18T01:42 [MB.37] (lead) created (task) critical_learn_and_redaction.rs:518 BrokenPipe under the parallel workspace run is a race, not a flake
+- 2026-11-18T01:48 [MB.34.8] (lead) reviewer VERDICT PASS; 3 reviewer MINORs applied (StrayEllipsis span renders whole — verified in site HTML, ## Errors claim narrowed, 'can quote'). Committing w
+- 2026-11-18T01:48 [MB.34.1] (lead) will be committed together with MB.34.8: both nodes edited the same three pages in one tree, so the shared-file hunks land in the MB.34.1 commit (documented, no
+- 2026-11-18T01:54 [MB.34.4] (lead) edited fields
+- 2026-11-18T01:54 [MB.34.2] (lead) REVIEW FAIL (attempt 3): 8/8 prior findings verified fixed. Remaining: 1 MAJOR that is plan metadata the LEAD owns — critical_query_sites.rs was missing from MB
+- 2026-11-18T01:54 [MB.34.2] (lead) edited fields
+- 2026-11-18T01:54 [MB.34.2] (lead) status review -> ready
+- 2026-11-18T01:54 [MB.34.2] (lead) attempt 4/4 started
+- 2026-11-18T01:54 [MB.34.4] (lead) paths: added crates/blastit-manifest/tests/critical_query_sites.rs (new protected T1 suite the accepted design names; was out of lane).
+- 2026-11-18T01:55 [MB.34.2] (lead) status ready -> review
+- 2026-11-18T01:55 [MB.34.2] (lead) attempt 4 done: 5 MINORs closed; Syntax now pinned to the first non-trivia code character with a leading-newline case. Final narrow reviewer dispatched in paral
+- 2026-11-18T01:55 [MB.34.3] (lead) status ready -> active
+- 2026-11-18T01:55 [MB.34.3] (lead) attempt 1/3 started
+- 2026-11-18T01:55 [MB.34.3] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T02:04 [MB.34.3] (lead) lead correction sent: Syntax carries NO message (design R33); offset = first char that is neither is_space nor inside a Comment region; parse form vs wire form 
+- 2026-11-18T02:04 [MB.34.2] (lead) REVIEW FAIL (attempt 4): MAJOR was a live conflict with MB.34.3's stale brief (message string) — lead corrected MB.34.3 directly; design R33/§13.4.3/§13.4.4 ver
+- 2026-11-18T02:04 [MB.34.2] (lead) edited fields
+- 2026-11-18T02:04 [MB.34.2] (lead) status review -> ready
+- 2026-11-18T02:04 [MB.34.2] (lead) attempt 5/5 started
+- 2026-11-18T02:12 [MB.34.2] (lead) reviewer 5: VERDICT PASS. All seven citation fixes verified on disk; design accepted (5 rounds, substance stable since round 3). Also reported a byte-vs-char ca
+- 2026-11-18T02:38 [MB.32.1] (lead) post-review fixes done: 26 palette rules scoped to code[data-blastfile-highlighted], count message names the surplus, 4 more offline patterns; 6 new mutations e
+- 2026-11-18T02:38 [MB.32.2] (lead) status ready -> active
+- 2026-11-18T02:38 [MB.32.2] (lead) attempt 1/3 started
+- 2026-11-18T02:38 [MB.32.2] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T02:54 [MB.32.2] (lead) status active -> review
+- 2026-11-18T02:54 [MB.32.2] (lead) owner done: 13 classes >=4.5:1 both schemes (light min 5.78, dark 7.08), non-Blastfile fences untouched, anchors/copy intact, instant nav + no-JS + 390px checke
+- 2026-11-18T03:19 [MB.34.3] (lead) status active -> review
+- 2026-11-18T03:19 [MB.34.3] (lead) owner done: template.rs 1371l, protected suite 24 tests, mutants 122/128 killable (95.3%), 0 timeout; brief corrected from the design on 6 points. Reviewer disp
+- 2026-11-18T03:19 [MB.34.4] (lead) status ready -> active
+- 2026-11-18T03:19 [MB.34.4] (lead) attempt 1/3 started
+- 2026-11-18T03:19 [MB.34.4] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T03:32 [MB.32.2] (lead) REVIEW FAIL (attempt 1): evidence integrity — 13-mobile-light.png is byte-identical to the dark capture (md5 de4740…), and the clientWidth==scrollWidth claim is
+- 2026-11-18T03:32 [MB.32.2] (lead) status review -> ready
+- 2026-11-18T03:32 [MB.32.2] (lead) attempt 2/3 started
+- 2026-11-18T03:38 [MB.32.2] (lead) status ready -> review
+- 2026-11-18T03:38 [MB.32.2] (lead) attempt 2 done: distinct light/dark mobile captures (differing md5), measured scroll metrics (code.scrollWidth 401 reachable to 11), 263/263-byte clipboard matc
+- 2026-11-18T03:41 [MB.32.2] (lead) REVIEW FAIL (attempt 2): 5 of 7 fixes verified (distinct md5s, pixel colours, span counts, formula, RESULT). Remaining: the anchor HUD claim has no HUD in the P
+- 2026-11-18T03:41 [MB.32.2] (lead) status review -> ready
+- 2026-11-18T03:41 [MB.32.2] (lead) attempt 3/3 started
+- 2026-11-18T03:59 [MB.32.2] (lead) REVIEW FAIL (attempt 3): 3/5 verified. Remaining: the 07 caption claims visible line-number anchors that the PNG does not show (the anchors are empty <a id> ele
+- 2026-11-18T03:59 [MB.32.2] (lead) edited fields
+- 2026-11-18T03:59 [MB.32.2] (lead) status ready -> ready
+- 2026-11-18T03:59 [MB.32.2] (lead) attempt 4/4 started
+- 2026-11-18T04:04 [MB.34.4] (lead) status active -> review
+- 2026-11-18T04:04 [MB.34.4] (lead) owner done: QuerySite{at,interior,escapes,raw} + query_sites() one-per-entry, NONE for PgGrant::new; 3 refusal families with exact line:col; new protected criti
+- 2026-11-18T04:11 [MB.34.4] (lead) reviewer VERDICT PASS: five positions (5,34)(5,72)(5,84)(4,23)(5,23) re-derived, protected diff is 5 added at: lines only, all four T1 cases load-bearing, uv ca
+- 2026-11-18T04:11 [MB.34.5] (lead) status ready -> active
+- 2026-11-18T04:11 [MB.34.5] (lead) attempt 1/3 started
+- 2026-11-18T04:11 [MB.34.5] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T04:11 [MB.34.6] (lead) status ready -> active
+- 2026-11-18T04:11 [MB.34.6] (lead) attempt 1/3 started
+- 2026-11-18T04:11 [MB.34.6] (lead) base 5f293985cc355b29dbac08421482b8ea84d1c677
+- 2026-11-18T04:12 [MB.38] (lead) created (task) PgGrant's derived Debug prints query text: redact queries like QuerySite already redacts raw
+- 2026-11-18T04:15 [MB.32.2] (lead) reviewer 4: VERDICT PASS. Captions now match their pixels; Django row carries its own 390/710/320 (re-derived); trimEnd reason stated. Two MINOR precision nits 
+- 2026-11-18T04:24 [MB.34.6] (lead) edited fields
+- 2026-11-18T04:24 [MB.34.6] (lead) owner done: sql_string + 7 children, 'query' out of , 33/33 corpus, 23 Blastfiles parse with 0 ERROR/MISSING as a permanent guard, 46 properties / 23 self-tests
+- 2026-11-18T04:24 [MB.34.6] (lead) edited fields
+- 2026-11-18T04:24 [MB.34.6] (lead) owner done: sql_string + 7 children; "query" removed from keyword; 33/33 corpus; 23 Blastfiles parse with 0 ERROR/MISSING as a permanent guard; 46 properties / 
+- 2026-11-18T04:27 [MB.34.6] (lead) status active -> review
+- 2026-11-18T04:27 [MB.34.6] (lead) follow-up done: grammar highlights.scm now mirrors Zed's five SQL patterns; new guard property 'highlights: copies agree' (one-directional) with a negative twin
+- 2026-11-18T04:39 [MB.34.6] (lead) REVIEW FAIL (attempt 1): MAJOR - query_decl requires a value, so `functions query` and `select query` (both legal, fmt-canonical) now ERROR; the base grammar sp
+- 2026-11-18T04:39 [MB.34.6] (lead) status review -> ready
+- 2026-11-18T04:39 [MB.34.6] (lead) attempt 2/3 started
+- 2026-11-18T04:41 [MB.34.5] (lead) status active -> review
+- 2026-11-18T04:41 [MB.34.5] (lead) owner done: codeActionProvider only, Lines::{offset,point_at}, OnceCell site cache, §7.6 hover, §7A handler through the shipped parameterize; critical_lsp +561/
+- 2026-11-18T04:49 [MB.34.5] (lead) reviewer: VERDICT PASS (3 MINOR). Sending the three code MINORs back: inside() accepts byte==interior.end (hover on the closing quote answers), one unreachable 
+- 2026-11-18T05:02 [MB.34.1] (lead) committed 15870a0
+- 2026-11-18T05:02 [MB.34.1] (lead) status review -> done
+- 2026-11-18T05:02 [MB.34.8] (lead) committed d174253
+- 2026-11-18T05:02 [MB.34.8] (lead) status review -> done
+- 2026-11-18T05:02 [MB.34.2] (lead) committed 632f9fb
+- 2026-11-18T05:02 [MB.34.2] (lead) status ready -> done
+- 2026-11-18T05:02 [MB.32.1] (lead) committed fc81ef0
+- 2026-11-18T05:02 [MB.32.1] (lead) status review -> done
+- 2026-11-18T05:02 [MB.32.2] (lead) committed ccf0a22
+- 2026-11-18T05:02 [MB.32.2] (lead) status ready -> done
+- 2026-11-18T05:02 [MB.34.3] (lead) committed 4bddd63
+- 2026-11-18T05:02 [MB.34.3] (lead) status review -> done
+- 2026-11-18T05:02 [MB.34.4] (lead) committed 142f5c3
+- 2026-11-18T05:02 [MB.34.4] (lead) status review -> done
+- 2026-11-18T05:02 [MB.34.5] (lead) committed d2b9f07
+- 2026-11-18T05:02 [MB.34.5] (lead) status review -> done
+- 2026-11-18T05:02 [MB.34.6] (lead) committed 5bbd244 (A) + 0e79aba (B)
+- 2026-11-18T05:02 [MB.34.6] (lead) status ready -> done
