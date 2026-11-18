@@ -6,8 +6,11 @@ grammar `rev`, resolves `path =` inside that commit, compiles the grammar wasm
 from `parser.c`, and loads exactly the captures and `.scm` files committed here.
 A typo in any of those is an install-time failure, or a silently plain-text
 editor, so every property of the accepted design
-(`docs/design/blastfile-lsp-zed.md` §8.1–§8.4, §10.1–§10.3, §12.4) is a line
-this script checks.
+(`docs/design/blastfile-lsp-zed.md` §8.1–§8.4, §8.3a, §10.1–§10.3, §12.4) is a line
+this script checks. `src/lib.rs`'s half is §8.3a's resolution order — settings,
+`blastit-lsp`, `blastit lsp`, one Release download — and the properties there are
+literal: the five asset names, their extraction types, the one joined relaunch
+path, the `PATH`/`SYSTEMROOT` allowlist, and no `[[capabilities]]` block.
 
 Two things it deliberately does **not** do: it never reads the network (the
 shallow-fetch reproduction is `MB.22.5`'s acceptance command, not a `make check`
@@ -88,16 +91,51 @@ CAPTURES = frozenset(
     }
 )
 
-#: `src/lib.rs`'s `uv` argv: `uv run --frozen --no-sync --quiet blastit lsp`
-#: (§8.3). The whitespace between the items is the source's, so it is matched
-#: loosely; the order is exact and `--no-sync` must be one of them.
-UV_ARGV = (
-    '"run"',
-    '"--frozen"',
-    '"--no-sync"',
-    '"--quiet"',
-    '"blastit"',
-    '"lsp"',
+#: §8.3a's five release assets in table order: `(os, architecture, asset)`. The
+#: variable name is `architecture` and the type `Architecture` in `src/lib.rs`;
+#: here both are the WIT spelling, so the tuple is the design's table read
+#: literally.
+ASSETS = (
+    ("Linux", "X8664", "blastit-lsp-x86_64-unknown-linux-gnu.tar.gz"),
+    ("Linux", "Aarch64", "blastit-lsp-aarch64-unknown-linux-gnu.tar.gz"),
+    ("Mac", "Aarch64", "blastit-lsp-aarch64-apple-darwin.tar.gz"),
+    ("Mac", "X8664", "blastit-lsp-x86_64-apple-darwin.tar.gz"),
+    ("Windows", "X8664", "blastit-lsp-x86_64-pc-windows-msvc.zip"),
+)
+
+#: The resolution order, as the three calls `language_server_command` makes: a
+#: download-first extension is the regression `lib: order` exists for (§8.3a).
+RESOLUTION_STEPS = ("from_settings(", "from_path(", "from_release(")
+
+#: The names the child may inherit (§8.3a). Anything else in the shell
+#: environment — `LD_PRELOAD`, `PGPASSWORD`, `BLASTIT_*` — stays behind.
+ENV_ALLOWLIST = 'const ENV_ALLOWLIST: [&str; 2] = ["PATH", "SYSTEMROOT"];'
+
+#: Where the download lands and where the relaunch path starts (§8.3a). One
+#: name, and deliberately version-free: `<version>` is knowable only from GitHub,
+#: so a versioned directory would put the network in front of a binary that is
+#: already on disk.
+EXTRACT_DIR = 'const EXTRACT_DIR: &str = "blastit-lsp";'
+
+#: The cache hit, pinned verbatim (the way `ENV_ALLOWLIST` is): a real early
+#: return before any network call, not a decorative `metadata` probe beside an
+#: unconditional download. `is_file()` rules out a directory of that name.
+CACHE_HIT = "if std::fs::metadata(&command).is_ok_and(|entry| entry.is_file()) {"
+
+#: The argument vectors any arm may build: none, and `["lsp"]` for the Linux
+#: `blastit` binary. Anything else is an argument the server never agreed to
+#: take (`blastit-lsp` reads stdin only).
+ALLOWED_ARGV = ("Vec::new()", 'vec!["lsp".to_string()]')
+
+#: What `uv` in the editor path was spelled as (the defect `MB.33` removes).
+#: The patterns are regular expressions so that this file does not itself carry
+#: the two literals `MB.33`'s acceptance greps the tree for: a guard that trips
+#: that grep is the wrong kind of green. The escaped hyphen is a literal hyphen.
+UV_PATTERNS = (
+    r'which\("uv"\)',
+    r'"--frozen"',
+    r'"--no\-sync"',
+    r'"run"',
 )
 
 #: The three build artefacts Zed writes into the extension directory (§8.1).
@@ -230,13 +268,13 @@ def is_committed(tracked_paths: set[str] | None, root: Path, relative: str) -> b
     )
 
 
-def check_extension(guard: Guard, root: Path) -> None:
+def check_extension(guard: Guard, root: Path) -> dict[str, Any] | None:
     """§8.2's manifest rules, one property per line."""
     data = load_toml(
         guard, root / "editors" / "zed" / "extension.toml", "extension: parse"
     )
     if data is None:
-        return
+        return None
 
     required = (
         "id",
@@ -311,6 +349,7 @@ def check_extension(guard: Guard, root: Path) -> None:
         "name" not in server,
         "LanguageServerManifestEntry has no `name` field; the table key is the server id",
     )
+    return data
 
 
 def check_config(guard: Guard, root: Path) -> None:
@@ -801,50 +840,274 @@ def check_tree(guard: Guard, root: Path, tracked_paths: set[str] | None) -> None
     )
 
 
+def function_body(source: str, header: str) -> str:
+    """The braced body of the first `header` in `source`, or `""`.
+
+    A positional rule ("the settings read is above `which`") only means
+    something inside the one function that orders the steps, so the guard reads
+    that body and not the file: a helper defined above may legitimately call
+    `which` before the settings helper is defined.
+    """
+    start = source.find(header)
+    if start == -1:
+        return ""
+    opening = source.find("{", start)
+    if opening == -1:
+        return ""
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1 : index]
+    return ""
+
+
+def asset_arms(source: str) -> list[tuple[str, str, str, str, str]]:
+    """`(os, architecture, name, file type, executable)` per `asset_for` arm.
+
+    The five arms are read out of the match rather than grepped file-wide, so a
+    name that moved to another platform pair is a red and not a coincidence.
+    """
+    body = function_body(source, "fn asset_for(")
+    arms = re.findall(
+        r"\(zed::Os::(\w+), zed::Architecture::(\w+)\)\s*=>\s*Some\(Asset \{(.*?)\}\),",
+        body,
+        re.DOTALL,
+    )
+    parsed = []
+    for os_name, architecture, fields in arms:
+        name = re.search(r'name:\s*"([^"]+)"', fields)
+        file_type = re.search(r"file_type:\s*zed::DownloadedFileType::(\w+)", fields)
+        executable = re.search(r'executable:\s*"([^"]+)"', fields)
+        parsed.append(
+            (
+                os_name,
+                architecture,
+                name.group(1) if name else "",
+                file_type.group(1) if file_type else "",
+                executable.group(1) if executable else "",
+            )
+        )
+    return parsed
+
+
 def check_lib(guard: Guard, root: Path) -> None:
-    """§8.3's `src/lib.rs`: the resolution order, the argv, and no process exec."""
+    """§8.3a's `src/lib.rs`: the order, the five assets, and the allowlist."""
     lib_rs = root / "editors" / "zed" / "src" / "lib.rs"
     try:
         source = lib_rs.read_text(encoding="utf-8")
     except OSError:
-        guard.fail("lib: which order", f"{lib_rs} is missing")
+        guard.fail("lib: order", f"{lib_rs} is missing")
         return
 
-    blastit_at = source.find('which("blastit")')
-    uv_at = source.find('which("uv")')
+    # 1. The order itself: settings, then `$PATH`, then one download.
+    steps = function_body(source, "fn language_server_command")
+    positions = [steps.find(step) for step in RESOLUTION_STEPS]
+    guard.require(
+        "lib: order",
+        all(position != -1 for position in positions)
+        and positions == sorted(positions)
+        and all(steps.count(step) == 1 for step in RESOLUTION_STEPS),
+        "the three steps must be one call each, in this order: "
+        f"{' -> '.join(RESOLUTION_STEPS)} (a download-first extension is red)",
+    )
+
+    # 2. The better `$PATH` name first: the portable archive beats `blastit`.
+    portable_at = source.find('worktree.which("blastit-lsp")')
+    cli_at = source.find('worktree.which("blastit")')
     guard.require(
         "lib: which order",
-        blastit_at != -1 and uv_at != -1 and blastit_at < uv_at,
-        'which("blastit") must be resolved before which("uv")',
+        portable_at != -1
+        and cli_at != -1
+        and portable_at < cli_at
+        and source.count('worktree.which("blastit-lsp")') == 1
+        and source.count('worktree.which("blastit")') == 1,
+        'which("blastit-lsp") must be resolved before which("blastit"), once each',
     )
 
-    argv = re.search(
-        r"\[\s*" + r"\s*,\s*".join(re.escape(item) for item in UV_ARGV) + r"\s*,?\s*\]",
-        source,
-    )
+    # 3. `blastit` on `$PATH` is the Linux `blastit lsp`, so it needs the argv;
+    #    every other arm must add none — the portable server reads stdin only.
+    #    Three arms take none: the `blastit-lsp` on `$PATH`, the cached binary
+    #    and the freshly unpacked one.
+    argv = [value.strip() for value in re.findall(r"args:\s*([^,\n]+),", source)]
+    invented = sorted(set(argv) - set(ALLOWED_ARGV))
     guard.require(
-        "lib: argv",
-        argv is not None,
-        'the uv fallback argv must be ["run", "--frozen", "--no-sync", '
-        '"--quiet", "blastit", "lsp"] in that order (§8.3)',
+        "lib: arguments",
+        not invented
+        and argv.count('vec!["lsp".to_string()]') == 1
+        and argv.count("Vec::new()") == 3,
+        "every `args:` must be `Vec::new()` (three arms: `blastit-lsp` on "
+        '`$PATH`, the cached binary, the unpacked one) or exactly ["lsp"] once '
+        f'for `which("blastit")`; got {argv}',
     )
 
-    guard.expect("lib: shell_env", source.count("shell_env()"), 1)
+    # 4. `uv` left the editor path entirely (§8.3a, owner mandate).
+    uv = [pattern for pattern in UV_PATTERNS if re.search(pattern, source)]
+    guard.require(
+        "lib: no uv",
+        not uv,
+        f"`uv` is back in the editor path ({uv}); the server is its own binary",
+    )
+
+    # 5. One shell environment read, and it is filtered, not assigned.
+    guard.expect("lib: shell_env", source.count("shell_env("), 1)
+    guard.require(
+        "lib: env allowlist",
+        ENV_ALLOWLIST in source
+        and "ENV_ALLOWLIST.contains" in source
+        and "env: worktree.shell_env()" not in source
+        and re.search(r"\bbinary\.env\b", source) is None
+        and "initialization_options" not in source
+        and "workspace_configuration" not in source,
+        "the child env must be the literal PATH/SYSTEMROOT allowlist: never "
+        "`binary`'s env map, never `Command { env: worktree.shell_env() }`, "
+        "and no settings payload (§8.3a)",
+    )
+
     guard.require(
         "lib: no process",
         "std::process" not in source and "Command::new" not in source,
         "the wasm must never execute anything: Zed spawns the returned Command",
     )
+
+    # 6. The platform table: five arms, read out of the match.
+    arms = asset_arms(source)
     guard.require(
-        "lib: error string",
-        "uv sync" in source and "uv add blastit" in source,
-        "the not-installed error must name `uv add blastit` and `uv sync`",
+        "lib: platform",
+        [(os_name, architecture) for os_name, architecture, *_ in arms]
+        == [(os_name, architecture) for os_name, architecture, _ in ASSETS],
+        "asset_for must match current_platform()'s five pairs, in §8.3a's order "
+        f"(got {[(arm[0], arm[1]) for arm in arms]})",
+    )
+
+    # 7. The asset names, literally, and their extraction type.
+    guard.require(
+        "lib: asset map",
+        [name for _, _, name, _, _ in arms] == [name for _, _, name in ASSETS],
+        "the five asset names must be §8.3a's verbatim: "
+        f"got {[arm[2] for arm in arms]}",
+    )
+    guard.require(
+        "lib: zip windows",
+        len(arms) == 5
+        and all(
+            (file_type == "Zip") == (os_name == "Windows")
+            for os_name, _, _, file_type, _ in arms
+        ),
+        "`Zip` on `Os::Windows` only and `GzipTar` on the other four: a wrong "
+        f"type fails at extraction on the user's machine (got {[arm[3] for arm in arms]})",
+    )
+
+    # 8. The executable: one joined shape, `.exe` on Windows only, and
+    #    `make_file_executable` with no `cfg!` beside it (a no-op off Unix).
+    exes = [executable for _, _, _, _, executable in arms]
+    windows_exes = [
+        executable
+        for os_name, _, _, _, executable in arms
+        if os_name == "Windows" and executable.endswith(".exe")
+    ]
+    path_of = function_body(source, "fn executable_path(")
+    guard.require(
+        "lib: executable",
+        "zed::make_file_executable(&command)" in source
+        and "cfg!(" not in source
+        and len(windows_exes) == 1
+        and sum(1 for executable in exes if executable.endswith(".exe")) == 1
+        and '"{EXTRACT_DIR}/{directory}/{}"' in path_of
+        and "asset.executable" in path_of,
+        "one joined path `<extract dir>/<target>/<executable>`, "
+        "`blastit-lsp.exe` only on Windows, and one unconditional "
+        "make_file_executable (§8.3a)",
+    )
+
+    # 9. Where the download lands: one relative directory name, shared with the
+    #    relaunch path, and never the worktree root.
+    destination = re.search(
+        r"zed::download_file\(\s*&asset_url\.download_url,\s*EXTRACT_DIR,\s*asset\.file_type\s*\)",
+        source,
+    )
+    guard.require(
+        "lib: download destination",
+        EXTRACT_DIR in source
+        and destination is not None
+        and "root_path" not in source
+        and path_of.count("EXTRACT_DIR") == 1,
+        "download_file takes a directory relative to the extension's work "
+        "directory — the one `EXTRACT_DIR` constant the relaunch path also "
+        "starts with — never an absolute path (§8.3a)",
+    )
+
+    # 10. The cache answers before any network call, and it is a real early
+    #     return: `metadata(..).is_ok_and(|entry| entry.is_file())`.
+    step = function_body(source, "fn from_release(")
+    cache_at = step.find(CACHE_HIT)
+    release_at = step.find("zed::latest_github_release(")
+    download_at = step.find("zed::download_file(")
+    guard.require(
+        "lib: cache",
+        CACHE_HIT in source
+        and cache_at != -1
+        and release_at != -1
+        and cache_at < release_at
+        and "return Ok(" in step[cache_at:release_at]
+        and download_at > release_at,
+        "the unpacked `blastit-lsp/<target>/blastit-lsp` must be a hit BEFORE "
+        "`latest_github_release`: an offline or rate-limited machine with the "
+        "binary on disk gets a server (§8.3a)",
+    )
+
+    # 11. The two status words: `Downloading` before the fetch, `Failed` on every
+    #     error -- the failure helper reports both, in that order.
+    guard.require(
+        "lib: status",
+        source.count("LanguageServerInstallationStatus::Downloading") == 2
+        and step.find("LanguageServerInstallationStatus::Downloading") != -1
+        and step.find("LanguageServerInstallationStatus::Downloading") < release_at
+        and source.find("LanguageServerInstallationStatus::Downloading")
+        < source.find("LanguageServerInstallationStatus::Failed("),
+        "report Downloading before the fetch, then Failed(<one sentence>) — "
+        "a silent failure is an editor that never starts the server",
+    )
+
+    # 12. Every failure names the five targets and the way past it: one
+    #     definition, one use per failure, and no failure without it.
+    code = source.split("#[cfg(test)]")[0]
+    hint = re.search(r'const FAILURE_HINT: &str = "(.*?)";', source, re.DOTALL)
+    hint_text = " ".join(hint.group(1).replace("\\\n", "").split()) if hint else ""
+    failures = [match.start() for match in re.finditer(r"return Err\(failed\(", source)]
+    guard.require(
+        "lib: failure",
+        len(failures) == 5
+        and code.count("FAILURE_HINT") == len(failures) + 1
+        and "lsp.blastit-lsp.binary.path" in hint_text
+        and "Linux x86_64/aarch64" in hint_text
+        and "macOS x86_64/aarch64" in hint_text
+        and "Windows x86_64" in hint_text,
+        "each of the five failures (unsupported pair, no release, no asset, "
+        "download, executable) must carry the supported targets and "
+        "`lsp.blastit-lsp.binary.path` (design §8.3a)",
+    )
+
+    # 13. The one release, and no CDN host named anywhere.
+    guard.require(
+        "lib: asset url",
+        source.count('"OffworldNexus/blastit"') == 1
+        and "githubusercontent" not in source
+        and "githubusercontent"
+        not in (root / "editors" / "zed" / "extension.toml").read_text(
+            encoding="utf-8", errors="replace"
+        ),
+        "the release URL is `OffworldNexus/blastit` once; the browser URL 302s to "
+        "a CDN host and the download gate is checked before the redirect",
     )
 
     capabilities = []
     for path in sorted(ext_rs_files(root / "editors" / "zed")):
         if re.search(
-            r"^\s*\[capabilities\]",
+            r"^\s*\[\[?capabilities\]\]?",
             path.read_text(encoding="utf-8", errors="replace"),
             re.MULTILINE,
         ):
@@ -852,7 +1115,29 @@ def check_lib(guard: Guard, root: Path) -> None:
     guard.require(
         "lib: no capabilities",
         not capabilities,
-        f"[capabilities] under editors/zed turns a zero-config install into a permission prompt: {capabilities}",
+        f"a [capabilities] block is inert for download_file and names a host that "
+        f"fails closed: {capabilities}",
+    )
+
+
+def check_capabilities(guard: Guard, root: Path, data: dict[str, Any] | None) -> None:
+    """The parsed manifest declares no capability at all (§8.3a).
+
+    Structural, not textual: `[[capabilities]]` parses to a top-level
+    `capabilities` array, and the host never consults it for `download_file`
+    (`crates/extension/src/capability_granter.rs` gates `download_file` on the
+    user's setting, checked before the redirect). A declared host therefore
+    fails closed, so the empty manifest is the property, not a wider one.
+    """
+    if data is None:
+        guard.fail("extension: capabilities", "the manifest does not parse")
+        return
+    declared = data.get("capabilities")
+    guard.require(
+        "extension: capabilities",
+        declared is None,
+        f"[[capabilities]] {declared!r} must not be declared: the download gate "
+        'is the user\'s setting (`host = "*"` by default), never this manifest',
     )
 
 
@@ -916,7 +1201,8 @@ def check_settings(guard: Guard, root: Path) -> None:
 def check(root: Path, require_parse: bool = False) -> int:
     """Runs every property against `root`; returns the process exit status."""
     guard = Guard()
-    check_extension(guard, root)
+    manifest = check_extension(guard, root)
+    check_capabilities(guard, root, manifest)
     check_config(guard, root)
     check_grammar(guard, root)
     check_sql_grammar(guard, root)

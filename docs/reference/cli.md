@@ -103,12 +103,13 @@ because a document is broken.
 The parser is the visible check: a `query` that does not parse gets one diagnostic
 at its first token — the sentence `blastit check` prints on Linux.
 
-Zed's extension downloads this binary itself, once per Blastit release, and
-reuses the cached copy. On Linux, [`blastit lsp`](#blastit-lsp-linux) is the same
-server: the extension runs it when `blastit` is on the `PATH` it sees, and downloads
-otherwise. To pin a version, work offline, or use another editor, take the asset for
-your target from [a release](https://github.com/OffworldNexus/blastit/releases) and
-unpack it — one directory holding `blastit-lsp` (`blastit-lsp.exe` on Windows):
+Zed's extension finds the server itself, first match wins: an
+`lsp.blastit-lsp.binary.path` you set, then `blastit-lsp` on the `PATH` it sees,
+then `blastit lsp` there, and last this release asset for your platform, unpacked
+once and then reused from disk — a later start needs no network at all. To pin a
+version, work offline, or use another editor, take the asset for your target from
+[a release](https://github.com/OffworldNexus/blastit/releases) and unpack it — one
+directory holding `blastit-lsp` (`blastit-lsp.exe` on Windows):
 
 ```text
 # macOS, Apple silicon; Intel uses x86_64-apple-darwin, Linux the same command
@@ -132,8 +133,7 @@ same name under a tag. Shipped from the release that carries the portable server
 earlier tags have no `blastit-lsp-*` asset.
 
 Keep that file anywhere permanent and name its absolute path — not its folder — in
-your settings: `zed: open settings` for every project, or a project's
-`.zed/settings.json`, merging:
+`zed: open settings`, merging:
 
 ```json
 { "lsp": { "blastit-lsp": { "binary": { "path": "/Users/you/bin/blastit-lsp" } } } }

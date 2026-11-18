@@ -153,9 +153,12 @@ store, including the ones reading password hashes.
    `editors/zed` — the only step needing Rust (Zed's builder installs the
    `wasm32-wasip2` target itself). Once listed, `zed: extensions` → **Blastfile** is
    the whole step.
-2. Once the release ships `blastit-lsp`, the extension finds the server itself, in a
-   fixed order ([the order](reference/cli.md#blastit-lsp)); there is nothing to
-   configure.
+2. The extension finds the server itself, first match wins: an
+   `lsp.blastit-lsp.binary.path` you set, then `blastit-lsp` on your `PATH`, then
+   `blastit lsp` there, and last its own release binary for your platform,
+   downloaded once and reused from disk after that
+   ([the order](reference/cli.md#blastit-lsp)). Nothing to configure;
+   `zed: open settings` overrides the path.
 3. Open `./Blastfile`: colours (SQL inside a `query '…'` only: a `query "…"` is
    one string), bracket matching, an outline, and a squiggle, inside the string,
    at the `line:col` `blastit check` prints. Quick Fix **Parameterize SQL for

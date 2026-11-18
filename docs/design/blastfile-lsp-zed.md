@@ -1665,11 +1665,18 @@ package and no checkout gets a working server on all five targets.
 |---|---|---|---|
 | 1. Settings | `zed::settings::LspSettings::for_worktree("blastit-lsp", worktree)`'s `binary.path` — an unpacked archive, `target/release/blastit-lsp`, or the Linux `blastit` | `binary.arguments`, defaulting to `[]` when unset. `binary.env` is **ignored** | always first: an explicit path is the user's decision. A reader who points `path` at the Linux `blastit` binary adds `"arguments": ["lsp"]`; the README says so in one line and the CLI page says `"arguments"` never belongs beside `blastit-lsp` |
 | 2. `$PATH` | `worktree.which("blastit-lsp")`, else `worktree.which("blastit")` | none, or `["lsp"]` for the second name | the portable archive on any platform, `~/.local/bin`, `uv tool install blastit`'s console script, a distro package |
-| 3. One download | `zed::latest_github_release("OffworldNexus/blastit", …)` by `zed::current_platform()` | the asset for the pair, extracted by `zed::download_file` | last, once per extension version: the file is cached under the extension's work directory and a second start does no network I/O |
+| 3. One download | `zed::latest_github_release("OffworldNexus/blastit", …)` by `zed::current_platform()` | the asset for the pair, extracted by `zed::download_file` | last, and only on a cache miss: the binary is unpacked under the extension's work directory and a later start is answered from disk **before** any network call |
 
-**`<version>` is `latest_github_release(…).version`**, interpolated into **both** the
-`download_file` destination and the relaunch path, so the cached directory and the command cannot
-diverge (a local build reached through step 1 or 2 never passes through either).
+**One version-free directory, stated once (amended 2026-11-18 by `MB.33`).** The
+`download_file` destination and the relaunch path share **one** name, `blastit-lsp` — the same
+name, so they cannot diverge — and it carries no `<version>` segment. A version segment is
+knowable only from `latest_github_release`, so interpolating it would put a GitHub request in front
+of a binary that is already on disk, which is exactly what the third row forbids. The cache is
+therefore consulted **first**: `std::fs::metadata(…).is_ok_and(|entry| entry.is_file())` on
+`blastit-lsp/blastit-lsp-<target>/blastit-lsp(.exe)`, and `latest_github_release` runs only on a
+miss. The cost, said plainly: a cached binary is not refreshed when a newer Blastit release
+appears, because finding that out needs the network this order exists to avoid; clearing the
+extension's work directory is the refresh.
 
 **What the extension does not filter, stated plainly.** `LspSettings::for_worktree` returns the
 merged settings for the worktree, and the extension API gives no way to tell which layer a key
@@ -1688,19 +1695,19 @@ remove, and it is listed as a follow-up on this node.
 
 | `current_platform()` | Asset | File type | Executable, relative to the extension's work directory |
 |---|---|---|---|
-| `(Linux, X8664)` | `blastit-lsp-x86_64-unknown-linux-gnu.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-x86_64-unknown-linux-gnu/blastit-lsp` |
-| `(Linux, Aarch64)` | `blastit-lsp-aarch64-unknown-linux-gnu.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-aarch64-unknown-linux-gnu/blastit-lsp` |
-| `(Mac, Aarch64)` | `blastit-lsp-aarch64-apple-darwin.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-aarch64-apple-darwin/blastit-lsp` |
-| `(Mac, X8664)` | `blastit-lsp-x86_64-apple-darwin.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-x86_64-apple-darwin/blastit-lsp` |
-| `(Windows, X8664)` | `blastit-lsp-x86_64-pc-windows-msvc.zip` | `Zip` | `blastit-lsp-<version>/blastit-lsp-x86_64-pc-windows-msvc/blastit-lsp.exe` |
+| `(Linux, X8664)` | `blastit-lsp-x86_64-unknown-linux-gnu.tar.gz` | `GzipTar` | `blastit-lsp/blastit-lsp-x86_64-unknown-linux-gnu/blastit-lsp` |
+| `(Linux, Aarch64)` | `blastit-lsp-aarch64-unknown-linux-gnu.tar.gz` | `GzipTar` | `blastit-lsp/blastit-lsp-aarch64-unknown-linux-gnu/blastit-lsp` |
+| `(Mac, Aarch64)` | `blastit-lsp-aarch64-apple-darwin.tar.gz` | `GzipTar` | `blastit-lsp/blastit-lsp-aarch64-apple-darwin/blastit-lsp` |
+| `(Mac, X8664)` | `blastit-lsp-x86_64-apple-darwin.tar.gz` | `GzipTar` | `blastit-lsp/blastit-lsp-x86_64-apple-darwin/blastit-lsp` |
+| `(Windows, X8664)` | `blastit-lsp-x86_64-pc-windows-msvc.zip` | `Zip` | `blastit-lsp/blastit-lsp-x86_64-pc-windows-msvc/blastit-lsp.exe` |
 
 | Rule | Why | Assertion (in `scripts/check_zed_extension.py` unless named) |
 |---|---|---|
-| each asset is `blastit-lsp-<target>.tar.gz` on Linux/macOS and `.zip` on Windows, and the archive's one top-level directory is `blastit-lsp-<target>/` holding exactly the executable, `LICENSE` and a `SHA256SUMS` over those files (no `README.md`: the LSP has no page of its own) | Zed extracts **verbatim** — no top-directory stripping (`crates/util/src/archive.rs:20-47`) — so the extension must name the directory it extracts, and the archive's shape is what makes that one expression: `format!("blastit-lsp-{version}/blastit-lsp-{target}/{exe}")` | `lib: asset map` asserts the five literal names and their `GzipTar`/`Zip` types; `lib: executable` asserts the one joined path shape and `blastit-lsp.exe` only on Windows; `MB.35.5`'s acceptance extracts an archive and asserts exactly those three entries, then smokes the extracted file |
+| each asset is `blastit-lsp-<target>.tar.gz` on Linux/macOS and `.zip` on Windows, and the archive's one top-level directory is `blastit-lsp-<target>/` holding exactly the executable, `LICENSE` and a `SHA256SUMS` over those files (no `README.md`: the LSP has no page of its own) | Zed extracts **verbatim** — no top-directory stripping (`crates/util/src/archive.rs:20-47`) — so the extension must name the directory it extracts, and the archive's shape is what makes that one expression: `format!("blastit-lsp/blastit-lsp-{target}/{exe}")` | `lib: asset map` asserts the five literal names and their `GzipTar`/`Zip` types; `lib: executable` asserts the one joined path shape and `blastit-lsp.exe` only on Windows; `MB.35.5`'s acceptance extracts an archive and asserts exactly those three entries, then smokes the extracted file |
 | the Linux assets are built in `quay.io/pypa/manylinux_2_28_<arch>` with a measured `--max-glibc 2_28` floor and smoke-tested on Debian 12, and `scripts/check_workflows.py` learns `scripts/build-lsp.sh` (its floor rule matches only `build-standalone.sh` today, so an `ubuntu-latest` LSP build would pass `make workflow-check` green) | `ubuntu-24.04` would give every Linux asset `GLIBC_2.39`, which refuses to start on Debian 12 — the portability promise this epic exists for, and the defect `MB.3.60` recorded for the serving archives | `make workflow-check` and `MB.35.5`'s `packaging-gates-test`; `docs/testing/E2E-MB.35.md`'s recorded floor |
 | the CI leg takes its matrix from a preceding `matrix` job's output (`needs.matrix.outputs.lsp`), never from a shell command inside `fromJSON(...)`; `scripts/check_workflows.py`'s `OUTPUT_SPECS` gains `lsp`; and the release job gains `needs` for the LSP legs, a `download-artifact` with `pattern: lsp-*`, a `--count lsp` assertion, the archive globs named explicitly (`blastit-*-unknown-linux-*.tar.gz` for the archives, `blastit-lsp-*` for the new family) so neither count swallows the other (today's `blastit-*.tar.gz` matches `blastit-lsp-*.tar.gz`), the LSP archives in the final `SHA256SUMS`, and the per-leg `dist/SHA256SUMS.<target>` rename | the reviewer must be able to see that a new family joined the one publishing step without silently widening or skipping its checksum rule; `fromJSON(<command>)` is not an Actions expression and a workflow using it is rejected before any leg runs | `make workflow-check` and `MB.35.5`'s `packaging-gates-test`; the matrix-output pattern and the per-leg rename already exist for the standalone job (`publish-pypi.yml:160-187`, `:299-301`) |
 | **Trust root, stated:** the `SHA256SUMS` inside an archive is for a human who unpacked it and authenticates nothing; the extension's only control is HTTPS to `github.com` (the release-level `SHA256SUMS` asset is for CI and for a reader who verifies by hand — the wasm never fetches it); **0.2.0 ships no signature** | ADR-0013's old table describes a second artifact "to build, sign, publish": the signing half is not met, and a reader must not infer notarization or Authenticode from the word, nor a checksum check the extension does not perform | the row is prose; §14.3's macOS sentence says quarantine applies to a browser download, not to Zed's fetch; a signature is a follow-up, not a promise |
-| `zed::download_file(&asset.download_url, "blastit-lsp-<version>", kind)` extracts into that relative destination | `download_file` takes a **directory** path: `"blastit-lsp.zip"` would become a directory of that name | `lib: download destination` asserts the versioned literal |
+| `zed::download_file(&asset.download_url, "blastit-lsp", kind)` extracts into that relative destination, `EXTRACT_DIR` in `src/lib.rs` | `download_file` takes a **directory** path: `"blastit-lsp.zip"` would become a directory of that name | `lib: download destination` pins the `EXTRACT_DIR` constant and the `download_file` call's three arguments |
 | `make_file_executable` is called unconditionally after extraction | it is a no-op `Ok(())` off Unix (`crates/util/src/fs.rs:94-111`), so there is **no** `if cfg!(windows)` and no second code path | `lib: executable` asserts the call and asserts no `cfg!` near it |
 | `Zip` only on `Os::Windows`, `GzipTar` otherwise | one arm per platform pair; the wrong type fails at extraction on the user's machine | `lib: zip windows` asserts the two types and their match arms |
 | **no `[[capabilities]]` block anywhere under `editors/zed/`** | the `download_file` gate is a **user setting** (`host = "*"`, `path = ["**"]` by default) checked on the **pre-redirect** URL; the manifest is never consulted, so a block is inert, and naming the CDN host would fail closed. This is a guardrail, not an egress sandbox: `fetch` performs no capability check | `lib: no capabilities` greps extension.toml and `src/lib.rs`; `docs/research/2026-11-17-cross-platform-blastit-lsp.md` §3 is the citation |
@@ -1732,6 +1739,18 @@ follow-up on this node.
 
 R-ids: **R72** (the three-step order, the five assets, and the guard properties above), **R75**
 (the trust root and the per-leg checksums).
+
+**Amended 2026-11-18 (`MB.33` landed in `editors/zed/src/lib.rs`).** The three page sentences
+this section assigns to `MB.33` now carry all four rows, in this order: `docs/local.md`
+`## Editors` step 2, `docs/reference/cli.md` `## blastit-lsp` and `editors/zed/README.md` (whose
+"Until the release that ships `blastit-lsp` …" paragraph is gone); the CLI page no longer offers
+a project's `.zed/settings.json`, so the setting is `zed: open settings`, per user. In the same
+edit the third row's promise is met by the code rather than documented around: the cache is checked
+**before** `latest_github_release`, on `blastit-lsp/blastit-lsp-<target>/blastit-lsp(.exe)`, so a
+second start performs no network I/O at all and an offline or rate-limited machine with the binary
+on disk still gets a server. The version-free directory and its cost are stated under the order
+table above; the five asset names, their types and the archive's own `blastit-lsp-<target>/`
+directory are unchanged.
 
 ### 8.4 `languages/blastfile/config.toml`, complete
 

@@ -16,11 +16,11 @@ paths:
   - docs/reference/cli.md
   - "docs/design/blastfile-lsp-zed.md"
   - "docs/decisions/ADR-0013-blastfile-lsp-and-zed.md"
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:57"
-updated: "2026-11-17T13:18"
+updated: "2026-11-18T07:55"
 ---
 
 # Goal

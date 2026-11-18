@@ -20,9 +20,6 @@ The extension finds the server itself, first match wins:
 | `blastit` on your `PATH` | `blastit lsp` |
 | none of these | its GitHub Release build for your platform, downloaded once |
 
-Until the release that ships `blastit-lsp`, this extension runs a `blastit`/`uv`
-already on `PATH`.
-
 Every row runs the same server: rows 1–3 use a file already on disk, and the last
 fetches that same file once and reuses it. Never point `path` at a `blastit` binary
 without `"arguments": ["lsp"]`: the bare binary is the production server and fails

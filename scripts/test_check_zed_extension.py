@@ -50,6 +50,12 @@ GRAMMAR_JS = "editors/tree-sitter-blastfile/grammar.js"
 SETTINGS = ".zed/settings.json"
 LOCAL_PAGE = "docs/local.md"
 
+#: The cache hit `check_zed_extension.py` pins, carried here a second time on
+#: purpose: these cases mutate *this* literal, so a guard whose own copy is
+#: weakened no longer matches `src/lib.rs` and every cache case goes red. It is
+#: also the whole point of `lib: cache` — a real early return, not a probe.
+CACHE_HIT = "if std::fs::metadata(&command).is_ok_and(|entry| entry.is_file()) {"
+
 #: The directories the guard's §9.2a parse loop covers. The temp tree must hold
 #: the same `Blastfile`s: "grammar: fixture count" is red when the loop finds
 #: fewer than the design's twenty-three, and a baseline that is red for a
@@ -124,6 +130,7 @@ EXPECTED_PROPERTIES = (
     "language_servers: languages",
     "language_servers: language_ids",
     "language_servers: no name",
+    "extension: capabilities",
     "config: name",
     "config: grammar",
     "config: path_suffixes",
@@ -151,11 +158,22 @@ EXPECTED_PROPERTIES = (
     "license: inside",
     "tree: no build artifacts",
     "tree: gitignore",
+    "lib: order",
     "lib: which order",
-    "lib: argv",
+    "lib: arguments",
+    "lib: no uv",
     "lib: shell_env",
+    "lib: env allowlist",
     "lib: no process",
-    "lib: error string",
+    "lib: platform",
+    "lib: asset map",
+    "lib: zip windows",
+    "lib: executable",
+    "lib: download destination",
+    "lib: cache",
+    "lib: status",
+    "lib: failure",
+    "lib: asset url",
     "lib: no capabilities",
     "settings: format_on_save",
     "docs: settings fence",
@@ -277,7 +295,7 @@ class GuardCase(unittest.TestCase):
             for line in result.stdout.splitlines()
             if line.startswith("ok   ")
         )
-        self.assertEqual(len(properties), 47, "the guard checks exactly 47 properties")
+        self.assertEqual(len(properties), 59, "the guard checks exactly 59 properties")
         self.assertEqual(
             properties,
             sorted(EXPECTED_PROPERTIES),
@@ -469,14 +487,233 @@ class GuardCase(unittest.TestCase):
         self.assert_red("lib: shell_env")
 
     def test_swapped_which_order_is_red(self) -> None:
+        # `blastit-lsp` is the portable binary and wins over `blastit`: a user
+        # with both installed must get the better one.
         path = self.root / LIB
         text = path.read_text(encoding="utf-8")
-        text = text.replace('which("blastit")', 'which("TMP")')
-        text = text.replace('which("uv")', 'which("blastit")')
-        text = text.replace('which("TMP")', 'which("uv")')
+        text = text.replace('which("blastit-lsp")', 'which("TMP")')
+        text = text.replace('which("blastit")', 'which("blastit-lsp")')
+        text = text.replace('which("TMP")', 'which("blastit")')
         path.write_text(text, encoding="utf-8")
         self.stage()
         self.assert_red("lib: which order")
+
+    def test_a_dropped_path_step_is_red(self) -> None:
+        # §8.3a's order with the `$PATH` step removed: a developer who owns a
+        # binary would be sent to the network for one they already have.
+        self.rewrite(
+            LIB,
+            "        if let Some(command) = from_path(worktree) {\n"
+            "            return Ok(command);\n"
+            "        }\n",
+            "",
+        )
+        self.assert_red("lib: order")
+
+    def test_settings_after_path_is_red(self) -> None:
+        # The explicit path is the user's decision, so it must be read first: a
+        # settings-writing developer whose `PATH` also holds a server would
+        # silently get the wrong one.
+        path = self.root / LIB
+        text = path.read_text(encoding="utf-8")
+        settings_step = (
+            "        if let Some(command) = from_settings(worktree) {\n"
+            "            return Ok(command);\n"
+            "        }\n"
+        )
+        path_step = (
+            "        if let Some(command) = from_path(worktree) {\n"
+            "            return Ok(command);\n"
+            "        }\n"
+        )
+        self.assertIn(settings_step + path_step, text)
+        path.write_text(
+            text.replace(settings_step + path_step, path_step + settings_step, 1),
+            encoding="utf-8",
+        )
+        self.stage()
+        self.assert_red("lib: order")
+
+    def test_a_uv_step_is_red(self) -> None:
+        # The owner's defect: `uv` in the editor path. One line brings it back.
+        self.rewrite(
+            LIB,
+            "fn from_path(worktree: &zed::Worktree) -> Option<zed::Command> {\n",
+            "fn from_path(worktree: &zed::Worktree) -> Option<zed::Command> {\n"
+            '    let _uv = worktree.which("uv");\n',
+        )
+        self.assert_red("lib: no uv")
+
+    def test_a_wrong_arguments_vector_is_red(self) -> None:
+        # `blastit` on `PATH` is the production server and needs `lsp`; the
+        # portable binary takes nothing.
+        self.rewrite(LIB, 'vec!["lsp".to_string()]', "Vec::new()")
+        self.assert_red("lib: arguments")
+
+    def test_a_wide_env_allowlist_is_red(self) -> None:
+        # `SYSTEMROOT` is not decoration: without it a Windows child cannot
+        # resolve its own DLLs. Dropping a name from the list is the mutation.
+        self.rewrite(
+            LIB,
+            'const ENV_ALLOWLIST: [&str; 2] = ["PATH", "SYSTEMROOT"];',
+            'const ENV_ALLOWLIST: [&str; 1] = ["PATH"];',
+        )
+        self.assert_red("lib: env allowlist")
+
+    def test_a_misspelt_asset_is_red(self) -> None:
+        # One character in the asset name is a 404 on the user's machine, which
+        # is the failure mode no local test can see.
+        self.rewrite(
+            LIB,
+            "blastit-lsp-x86_64-apple-darwin.tar.gz",
+            "blastit-lsp-x86_64-darwin.tar.gz",
+        )
+        self.assert_red("lib: asset map")
+
+    def test_a_windows_gzip_asset_is_red(self) -> None:
+        # `GzipTar` on Windows is a `.zip` the host refuses to extract; the
+        # type and the extension are one decision.
+        path = self.root / LIB
+        text = path.read_text(encoding="utf-8")
+        doctored, count = re.subn(
+            r"(blastit-lsp-x86_64-pc-windows-msvc\.zip\",\s*"
+            r"file_type: zed::DownloadedFileType::)Zip",
+            r"\1GzipTar",
+            text,
+        )
+        self.assertEqual(count, 1, doctored)
+        path.write_text(doctored, encoding="utf-8")
+        self.stage()
+        self.assert_red("lib: zip windows")
+
+    def test_a_cfg_gated_make_file_executable_is_red(self) -> None:
+        # The call is unconditional because it is a no-op off Unix: a `cfg!`
+        # beside it is the second code path §8.3a removes.
+        self.rewrite(
+            LIB,
+            "    if let Err(error) = zed::make_file_executable(&command) {",
+            "    let _ = cfg!(unix);\n"
+            "    if let Err(error) = zed::make_file_executable(&command) {",
+        )
+        self.assert_red("lib: executable")
+
+    def test_an_absolute_download_destination_is_red(self) -> None:
+        # `download_file` takes a *directory* relative to the extension's work
+        # directory; an absolute path writes outside it.
+        self.rewrite(
+            LIB,
+            'const EXTRACT_DIR: &str = "blastit-lsp";',
+            'const EXTRACT_DIR: &str = "/blastit-lsp";',
+        )
+        self.assert_red("lib: download destination")
+
+    def test_no_cache_check_is_red(self) -> None:
+        # Without the early return every editor start re-downloads the release,
+        # and an offline machine gets no server at all.
+        self.rewrite(LIB, CACHE_HIT, "if false {")
+        self.assert_red("lib: cache")
+
+    def test_a_release_lookup_before_the_cache_is_red(self) -> None:
+        # The MAJOR this case exists for: `latest_github_release` in front of
+        # the cache hit puts GitHub on the path of a binary that is already
+        # unpacked, so an offline or rate-limited start fails with `Failed(…)`
+        # and no server. The mutation is the real inversion — the cache block
+        # moves below the release lookup.
+        path = self.root / LIB
+        text = path.read_text(encoding="utf-8")
+        start = text.find(CACHE_HIT)
+        self.assertNotEqual(start, -1, f"{LIB} does not contain {CACHE_HIT!r}")
+        start -= len("    ")
+        end = text.find("        });\n    }\n", start)
+        self.assertNotEqual(end, -1, "the cache block is not the expected shape")
+        block = text[start : end + len("        });\n    }\n")]
+        without = text[:start] + text[start + len(block) :]
+        release = without.find("RELEASE_OPTIONS) {")
+        self.assertNotEqual(release, -1)
+        after = without.find("\n    };\n", release)
+        self.assertNotEqual(after, -1)
+        at = after + len("\n    };\n")
+        path.write_text(without[:at] + block + without[at:], encoding="utf-8")
+        self.stage()
+        self.assert_red("lib: cache")
+
+    def test_a_missing_downloading_status_is_red(self) -> None:
+        # The developer must see "downloading", not an editor that hangs.
+        self.rewrite(
+            LIB,
+            "    zed::set_language_server_installation_status(\n"
+            "        id,\n"
+            "        &zed::LanguageServerInstallationStatus::Downloading,\n"
+            "    );\n",
+            "",
+        )
+        self.assert_red("lib: status")
+
+    def test_a_foreign_argument_is_red(self) -> None:
+        # `blastit-lsp` reads stdin only: an arm that grows an argument still
+        # passes every other property, so this one must be the whitelist.
+        self.rewrite(
+            LIB,
+            "        args: Vec::new(),",
+            '        args: vec!["--stdio".to_string()],',
+        )
+        self.assert_red("lib: arguments")
+
+    def test_a_binary_env_is_red(self) -> None:
+        # §8.3a ignores the settings' env map: it is the one loader-hijack
+        # vector (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`) a settings file could
+        # add, and the server reads no environment at all.
+        self.rewrite(
+            LIB,
+            "    let args = binary.arguments.unwrap_or_default();",
+            "    let args = binary.arguments.unwrap_or_default();\n"
+            "    let _ = binary.env;",
+        )
+        self.assert_red("lib: env allowlist")
+
+    def test_a_failure_without_the_two_halves_is_red(self) -> None:
+        # A Mac on an unbuilt target must be told which machines have a server
+        # and which setting bypasses the download.
+        self.rewrite(LIB, '; {FAILURE_HINT}")', '; ")')
+        self.assert_red("lib: failure")
+
+    def test_a_cdn_host_is_red(self) -> None:
+        # The download gate is checked before the redirect, so naming the CDN is
+        # both useless and a wider permission.
+        path = self.root / LIB
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + "\n// release-assets.githubusercontent.com\n",
+            encoding="utf-8",
+        )
+        self.stage()
+        self.assert_red("lib: asset url")
+
+    def test_a_declared_capability_is_red(self) -> None:
+        # Two properties, because the regression arrives twice: the parsed
+        # manifest grows a block (`extension: capabilities`) and the text grep
+        # over `editors/zed/**` finds it (`lib: no capabilities`). The host
+        # never consults the manifest for `download_file`, so a declared host
+        # fails closed -- the empty manifest is the property.
+        path = self.root / EXTENSION
+        path.write_text(
+            path.read_text(encoding="utf-8")
+            + '\n[[capabilities]]\nkind = "download_file"\n'
+            + 'host = "github.com"\npath = ["**"]\n',
+            encoding="utf-8",
+        )
+        self.stage()
+        self.assert_red("extension: capabilities", "lib: no capabilities")
+
+    def test_a_wrong_platform_arm_is_red(self) -> None:
+        # A Mac arm that names the wrong architecture downloads the wrong
+        # binary, and every static check except the platform table still passes.
+        self.rewrite(
+            LIB,
+            "(zed::Os::Mac, zed::Architecture::Aarch64)",
+            "(zed::Os::Mac, zed::Architecture::X8664)",
+        )
+        self.assert_red("lib: platform")
 
     def test_settings_off_is_red(self) -> None:
         path = self.root / SETTINGS
