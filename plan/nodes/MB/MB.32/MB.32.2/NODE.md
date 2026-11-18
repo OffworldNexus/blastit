@@ -2,7 +2,7 @@
 id: MB.32.2
 title: "Browser proof of the Blastfile highlighter: light and dark computed colours at AA, copy text and line anchors intact, instant navigation and plain fences (visual-checker)"
 kind: task
-status: ready
+status: done
 owner: "visual-checker"
 priority: 2
 depends_on: [MB.32.1]
@@ -11,7 +11,7 @@ attempts: 4
 max_attempts: 4
 escalation: none
 created: "2026-11-17T12:46"
-updated: "2026-11-18T03:59"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

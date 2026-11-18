@@ -31,3 +31,11 @@ status active -> review
 ## 2026-11-18T03:19 [lead]
 
 owner done: template.rs 1371l, protected suite 24 tests, mutants 122/128 killable (95.3%), 0 timeout; brief corrected from the design on 6 points. Reviewer dispatched; MB.34.4 opened in parallel on the design-fixed API.
+
+## 2026-11-18T05:02 [lead]
+
+committed 4bddd63
+
+## 2026-11-18T05:02 [lead]
+
+status review -> done

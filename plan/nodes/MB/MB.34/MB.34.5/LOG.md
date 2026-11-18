@@ -27,3 +27,11 @@ owner done: codeActionProvider only, Lines::{offset,point_at}, OnceCell site cac
 ## 2026-11-18T04:49 [lead]
 
 reviewer: VERDICT PASS (3 MINOR). Sending the three code MINORs back: inside() accepts byte==interior.end (hover on the closing quote answers), one unreachable "..." branch, and two assertions on the test’s own expected values (tests that cannot fail).
+
+## 2026-11-18T05:02 [lead]
+
+committed d2b9f07
+
+## 2026-11-18T05:02 [lead]
+
+status review -> done

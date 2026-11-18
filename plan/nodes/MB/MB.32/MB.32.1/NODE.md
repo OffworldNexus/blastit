@@ -2,7 +2,7 @@
 id: MB.32.1
 title: "Ship docs/javascripts/blastfile-highlight.js plus SQL interior tokens ($?, $1..$n, ...), the AA palette and the asset tests that pin the 33-fence classification"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.31, MB.34.1]
@@ -15,7 +15,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:46"
-updated: "2026-11-18T01:42"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

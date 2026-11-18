@@ -2,16 +2,16 @@
 id: MB.34.7
 title: "Prove MB.34 end to end: CLI/JSON/LSP agree on line:col, the Quick Fix round trip is clean, and the documented commands run verbatim"
 kind: task
-status: ready
+status: active
 owner: implementer
 priority: 1
 depends_on: [MB.34.5, MB.34.6]
 paths: ["docs/testing/E2E-MB.34.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T05:03"
 ---
 
 # Goal

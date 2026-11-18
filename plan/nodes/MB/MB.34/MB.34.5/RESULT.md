@@ -463,4 +463,69 @@ exit=0
 
 ### `make check` after the fixes
 
-<!--CHECK2-->
+```console
+$ timeout 3000 make check
+uv run --no-project tools/guard.py
+guard: OK (32 staged/untracked file(s) checked)
+uv run --no-project tools/critical_guard.py --base HEAD 
+critical-guard: HEAD..working tree, 55 changed file(s)
+  M  crates/blastit-manifest/tests/critical_manifest_011.rs  [VIOLATION: not covered by any node path]
+  M  crates/blastit/tests/critical_lsp.rs  [VIOLATION: not covered by any node path]
+  report only: 2 breaking change(s) would fail an enforced run
+cargo fmt --all -- --check
+…
+ok   highlights: captures
+ok   highlights: variable pair
+ok   highlights: sql captures
+ok   indents: capture
+ok   brackets: captures
+ok   outline: captures
+ok   highlights: copies agree
+ok   cargo: workspace
+ok   cargo: crate-type
+ok   license: inside
+ok   tree: no build artifacts
+ok   tree: gitignore
+ok   lib: which order
+ok   lib: argv
+ok   lib: shell_env
+ok   lib: no process
+ok   lib: error string
+ok   lib: no capabilities
+ok   settings: format_on_save
+ok   docs: settings fence
+zed-check: OK (47 properties checked)
+UV_OFFLINE=1 uv run --no-project scripts/test_check_zed_extension.py
+.........................
+----------------------------------------------------------------------
+Ran 25 tests in 4.817s
+
+OK
+uv run --no-project tools/plan.py validate
+plan OK
+exit=0
+```
+
+**The lead committed this node (and MB.34.3/34.4/34.6) as `d2b9f07` while the second `make check`
+was still running**, so that run's report-mode `critical-guard` line saw the pre-commit tree
+(“55 changed file(s)”). The commit carries exactly the post-review state — strict `inside()`, no
+third `sql_token` branch, `critical_lsp.rs` +597/−0 — and on the committed tree:
+
+```console
+$ timeout 300 cargo test -p blastit --test critical_lsp
+test result: ok. 52 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+exit=0
+
+$ timeout 300 cargo test -p blastit --lib lsp
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 246 filtered out; finished in 0.00s
+exit=0
+
+$ uv run --no-project tools/critical_guard.py --base HEAD --node MB.34.5
+critical-guard: HEAD..working tree, 5 changed file(s)
+node MB.34.5: paths ['crates/blastit/src/lsp/mod.rs', 'crates/blastit/src/lsp/hover.rs', 'crates/blastit/tests/critical_lsp.rs']
+  no change to a protected critical test
+exit=0
+```
+
+Nothing was staged, committed, pushed or planned by this leaf; the only file this pass leaves
+modified is this `RESULT.md`.

@@ -107,3 +107,11 @@ attempt 5/5 started
 ## 2026-11-18T02:12 [lead]
 
 reviewer 5: VERDICT PASS. All seven citation fixes verified on disk; design accepted (5 rounds, substance stable since round 3). Also reported a byte-vs-char cap defect in MB.34.3's in-flight template.rs, forwarded to that owner.
+
+## 2026-11-18T05:02 [lead]
+
+committed 632f9fb
+
+## 2026-11-18T05:02 [lead]
+
+status ready -> done

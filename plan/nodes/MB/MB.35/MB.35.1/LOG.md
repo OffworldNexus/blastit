@@ -11,3 +11,15 @@ edited fields
 ## 2026-11-17T13:18 [planner]
 
 edited fields
+
+## 2026-11-18T05:03 [lead]
+
+status ready -> active
+
+## 2026-11-18T05:03 [lead]
+
+attempt 1/3 started
+
+## 2026-11-18T05:03 [lead]
+
+base d5e43e9

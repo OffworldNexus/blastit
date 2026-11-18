@@ -63,3 +63,11 @@ pre-commit gate run 1: rust+critical+docs targets green, py-lint red only from M
 ## 2026-11-18T01:48 [lead]
 
 will be committed together with MB.34.8: both nodes edited the same three pages in one tree, so the shared-file hunks land in the MB.34.1 commit (documented, not silent).
+
+## 2026-11-18T05:02 [lead]
+
+committed 15870a0
+
+## 2026-11-18T05:02 [lead]
+
+status review -> done

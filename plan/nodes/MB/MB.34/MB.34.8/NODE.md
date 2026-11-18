@@ -2,7 +2,7 @@
 id: MB.34.8
 title: "State every query refusal and quote the two hover paragraphs on the pages (design MB.34.2 supersedes the page's silence)"
 kind: task
-status: review
+status: done
 owner: "doc-writer"
 priority: 2
 depends_on: [MB.34.2]
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-18T01:26"
-updated: "2026-11-18T01:37"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

@@ -39,3 +39,11 @@ owner done: fence table re-keyed on (page, first body line); make check EXIT=0 (
 ## 2026-11-18T02:38 [lead]
 
 post-review fixes done: 26 palette rules scoped to code[data-blastfile-highlighted], count message names the surplus, 4 more offline patterns; 6 new mutations each red. Accepted by lead; MB.32.2 is the independent witness for the scoping change.
+
+## 2026-11-18T05:02 [lead]
+
+committed fc81ef0
+
+## 2026-11-18T05:02 [lead]
+
+status review -> done

@@ -2,7 +2,7 @@
 id: MB.34.2
 title: "Design the template rewrite, the exact decoded-span contract, codeAction/hover and the SQL grammar boundary (ADR-0013 amendment)"
 kind: task
-status: ready
+status: done
 owner: designer
 priority: 1
 depends_on: [MB.34.1]
@@ -15,7 +15,7 @@ attempts: 5
 max_attempts: 5
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T02:04"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

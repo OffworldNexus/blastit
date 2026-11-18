@@ -2,7 +2,7 @@
 id: MB.34.1
 title: "Document SQL template validation, the exact squiggle, the Parameterize Quick Fix and $?/... hover on the reference, local, CI and troubleshooting pages"
 kind: task
-status: review
+status: done
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.31]
@@ -11,7 +11,7 @@ attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T00:58"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

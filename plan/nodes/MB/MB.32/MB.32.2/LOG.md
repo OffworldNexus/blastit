@@ -75,3 +75,11 @@ attempt 4/4 started
 ## 2026-11-18T04:15 [lead]
 
 reviewer 4: VERDICT PASS. Captions now match their pixels; Django row carries its own 390/710/320 (re-derived); trimEnd reason stated. Two MINOR precision nits recorded, not blocking.
+
+## 2026-11-18T05:02 [lead]
+
+committed ccf0a22
+
+## 2026-11-18T05:02 [lead]
+
+status ready -> done

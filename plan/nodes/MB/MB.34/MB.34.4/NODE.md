@@ -2,7 +2,7 @@
 id: MB.34.4
 title: "blastit-manifest: carry each query's raw text and string Position, validate the template, and put every query refusal at its exact inner line:col"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.34.3]
@@ -19,7 +19,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T04:04"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

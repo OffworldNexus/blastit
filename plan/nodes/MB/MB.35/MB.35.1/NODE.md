@@ -2,16 +2,16 @@
 id: MB.35.1
 title: "Verify pg_query on Windows MSVC and both Apple targets, plus the Zed download/Zip/which facts, with citations"
 kind: task
-status: ready
+status: active
 owner: researcher
 priority: 1
 depends_on: [MB.32]
 paths: ["docs/research/2026-11-17-cross-platform-blastit-lsp.md"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:18"
+updated: "2026-11-18T05:03"
 ---
 
 # Goal

@@ -3190,3 +3190,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T05:02 [MB.34.5] (lead) status review -> done
 - 2026-11-18T05:02 [MB.34.6] (lead) committed 5bbd244 (A) + 0e79aba (B)
 - 2026-11-18T05:02 [MB.34.6] (lead) status ready -> done
+- 2026-11-18T05:03 [MB.34.7] (lead) status ready -> active
+- 2026-11-18T05:03 [MB.34.7] (lead) attempt 1/3 started
+- 2026-11-18T05:03 [MB.34.7] (lead) base d5e43e9
+- 2026-11-18T05:03 [MB.32] (lead) Gate evidence (all run at d5e43e9): plan.py validate -> plan OK; make docs-check -> "No issues found" (0.19s); pytest python/tests/test_docs_assets.py -q -> 52 
+- 2026-11-18T05:03 [MB.32] (lead) status ready -> done
+- 2026-11-18T05:03 [MB.35.1] (lead) status ready -> active
+- 2026-11-18T05:03 [MB.35.1] (lead) attempt 1/3 started
+- 2026-11-18T05:03 [MB.35.1] (lead) base d5e43e9

@@ -2,7 +2,7 @@
 id: MB.34.6
 title: "Tree-sitter: tokenize query SQL (keywords, $?/$n, ...), capture it in highlights.scm, regenerate parser.c and re-pin the Zed grammar rev"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.34.2, MB.34.4]
@@ -21,7 +21,7 @@ attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T04:39"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

@@ -31,3 +31,11 @@ owner done; dx critic CHANGES->PASS; reviewer dispatched
 ## 2026-11-18T01:48 [lead]
 
 reviewer VERDICT PASS; 3 reviewer MINORs applied (StrayEllipsis span renders whole — verified in site HTML, ## Errors claim narrowed, 'can quote'). Committing with MB.34.1.
+
+## 2026-11-18T05:02 [lead]
+
+committed d174253
+
+## 2026-11-18T05:02 [lead]
+
+status review -> done

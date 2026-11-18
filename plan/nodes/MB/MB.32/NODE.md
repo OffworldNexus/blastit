@@ -2,7 +2,7 @@
 id: MB.32
 title: "Blastfile + query-SQL syntax highlighting on the Zensical site: one offline lexer, an AA palette in light and dark, asset tests and a browser proof"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.34]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:46"
-updated: "2026-11-17T13:18"
+updated: "2026-11-18T05:03"
 ---
 
 # Goal

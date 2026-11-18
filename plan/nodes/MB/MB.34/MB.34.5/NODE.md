@@ -2,7 +2,7 @@
 id: MB.34.5
 title: "blastit lsp: advertise codeAction, ship the Parameterize SQL Quick Fix and $?/... hover, and grow critical_lsp without losing a case"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.34.4]
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T04:41"
+updated: "2026-11-18T05:02"
 ---
 
 # Goal

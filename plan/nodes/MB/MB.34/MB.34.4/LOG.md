@@ -39,3 +39,11 @@ owner done: QuerySite{at,interior,escapes,raw} + query_sites() one-per-entry, NO
 ## 2026-11-18T04:11 [lead]
 
 reviewer VERDICT PASS: five positions (5,34)(5,72)(5,84)(4,23)(5,23) re-derived, protected diff is 5 added at: lines only, all four T1 cases load-bearing, uv cache confirmed repaired. One pre-existing MINOR (PgGrant derives Debug with unredacted queries) filed as a follow-up node.
+
+## 2026-11-18T05:02 [lead]
+
+committed 142f5c3
+
+## 2026-11-18T05:02 [lead]
+
+status review -> done
