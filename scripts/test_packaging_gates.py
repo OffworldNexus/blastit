@@ -12,6 +12,7 @@ workflow, matrix, wheel-tag or exec-env guards can silently go vacuous.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -84,6 +85,9 @@ def _copy_matrix_fixture(dst: Path) -> Path:
     shutil.copy2(PLATFORM_MATRIX, root / "scripts" / "platform_matrix.py")
     shutil.copy2(REPO / "README.md", root / "README.md")
     shutil.copytree(REPO / "docs", root / "docs")
+    # `--check` reads the site's own `exclude_docs` list to decide what a page is
+    # (`MB.35.5`), so the fixture carries the site configuration it reads.
+    shutil.copy2(REPO / "zensical.toml", root / "zensical.toml")
     return root
 
 
@@ -476,6 +480,93 @@ def test_workflow_auditor_cases() -> int:
         )
         cases_run += 1
 
+        # 16. `MB.35.5`: the editor family is declared once. A matrix job that
+        #     stops exporting `lsp` leaves every consumer reading an output no
+        #     job declares, and `fromJSON("")` fails at run time — after the
+        #     checkout, on the release PR.
+        case_dir = Path(tmp) / "lsp-output-dropped"
+        shutil.copytree(base, case_dir)
+        ci = case_dir / ".github" / "workflows" / "ci.yml"
+        text = ci.read_text(encoding="utf-8")
+        output_line = "      lsp: ${{ steps.legs.outputs.lsp }}\n"
+        _expect(output_line in text, "the ci fixture no longer exports the lsp matrix")
+        ci.write_text(text.replace(output_line, "", 1), encoding="utf-8")
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "needs.matrix.outputs.lsp" in res.stdout,
+            "auditor must reject a consumer of an undeclared matrix output",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 17. ... and an asset renamed on one side only: the release downloads
+        #     `pattern: lsp-*`, so an upload renamed `editor-*` pairs with
+        #     nothing and five assets silently stop shipping.
+        case_dir = Path(tmp) / "lsp-asset-renamed"
+        shutil.copytree(base, case_dir)
+        pub = case_dir / ".github" / "workflows" / "publish-pypi.yml"
+        text = pub.read_text(encoding="utf-8")
+        upload_line = "          name: lsp-${{ matrix.target }}\n"
+        _expect(upload_line in text, "the publish fixture no longer uploads lsp assets")
+        pub.write_text(
+            text.replace(
+                upload_line, "          name: editor-${{ matrix.target }}\n", 1
+            ),
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "matches no upload" in res.stdout,
+            "auditor must reject a download pattern with no matching upload",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 18. `MB.35.5` / rule 17: a shipped LSP archive built on the runner
+        #     instead of inside its glibc floor's image — `MB.3.60`'s defect,
+        #     one artifact family later.
+        case_dir = Path(tmp) / "lsp-built-on-the-runner"
+        shutil.copytree(base, case_dir)
+        pub = case_dir / ".github" / "workflows" / "publish-pypi.yml"
+        text = pub.read_text(encoding="utf-8")
+        image_line = (
+            '              args+=(--image "${{ matrix.builder_image }}" '
+            '--max-glibc "${{ matrix.glibc_floor }}")\n'
+        )
+        _expect(
+            image_line in text, "the publish fixture no longer names the builder image"
+        )
+        pub.write_text(text.replace(image_line, "", 1), encoding="utf-8")
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "without `--image`" in res.stdout,
+            "auditor must reject a blastit-lsp archive built on the runner",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 19. `MB.35.5` / rule 18: the five editor targets are the matrix's. A
+        #     workflow or the LSP build script that spells one is the second copy
+        #     that drifts when a leg is added, dropped or renamed.
+        case_dir = Path(tmp) / "editor-target-respelled"
+        shutil.copytree(base, case_dir)
+        shutil.copy2(
+            REPO / "scripts" / "build-lsp.sh", case_dir / "scripts" / "build-lsp.sh"
+        )
+        builder = case_dir / "scripts" / "build-lsp.sh"
+        builder.write_text(
+            builder.read_text(encoding="utf-8")
+            + "\n# legacy: bash build-lsp.sh --target x86_64-apple-darwin\n",
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "second copy of the table" in res.stdout,
+            "auditor must reject an editor target spelled outside platform_matrix.py",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
     return cases_run
 
 
@@ -643,6 +734,122 @@ def test_platform_matrix_cases() -> int:
             res.returncode == 1 and "no `suites_because` says why" in res.stderr,
             "matrix check must reject a leg whose suites are dropped without a reason",
             res.stderr,
+        )
+        cases_run += 1
+
+        # `MB.35.5`: the lsp family's one numeric claim is `5` lsp assets, and the
+        # chain noun → key → count has to hold. Counting the editor family as
+        # "archives" is the exact drift the separate noun exists to prevent: the
+        # page would then be read against the standalone family (`4`).
+        case_dir = Path(tmp) / "lsp-counted-as-archives"
+        shutil.copytree(base, case_dir)
+        pm = case_dir / "scripts" / "platform_matrix.py"
+        text = pm.read_text(encoding="utf-8")
+        lsp_key = '        "lsp asset": len(lsp_legs()),\n'
+        _expect(lsp_key in text, "the matrix fixture no longer declares the lsp key")
+        pm.write_text(
+            text.replace(lsp_key, '        "lsp asset": len(binary_legs()),\n', 1),
+            encoding="utf-8",
+        )
+        res = _run_matrix(case_dir, "--check", "--quiet")
+        _expect(
+            res.returncode == 1 and "claims 5 lsp assets" in res.stderr,
+            "matrix check must reject an lsp count taken from another family",
+            res.stderr,
+        )
+        cases_run += 1
+
+        # `MB.35.5`: a **design review** is not a page — `zensical.toml`'s
+        # `exclude_docs` keeps `docs/design/` out of the site — so a count it
+        # quotes must not decide a build. This already happened once: an
+        # untracked `portable-lsp-arch.review-implementability.md` said "9
+        # archives" and `make check` died at `platform-matrix-check`. The same
+        # sentence on a published page must still be refused, so the case proves
+        # the boundary rather than "the gate stopped reading".
+        case_dir = Path(tmp) / "review-file-is-not-a-page"
+        shutil.copytree(base, case_dir)
+        review = (
+            case_dir
+            / "docs"
+            / "design"
+            / "portable-lsp-arch.review-implementability.md"
+        )
+        review.parent.mkdir(parents=True, exist_ok=True)
+        review.write_text(
+            "The matrix declares 9 archives today, and 3 proven wheels.\n",
+            encoding="utf-8",
+        )
+        res = _run_matrix(case_dir, "--check", "--quiet")
+        _expect(
+            res.returncode == 0,
+            "a design review file is not a page: a count it quotes must not red --check",
+            res.stdout + res.stderr,
+        )
+        page = case_dir / "docs" / "getting-started.md"
+        page.write_text(
+            page.read_text(encoding="utf-8")
+            + "\nThe matrix declares 9 archives today.\n",
+            encoding="utf-8",
+        )
+        res = _run_matrix(case_dir, "--check", "--quiet")
+        _expect(
+            res.returncode == 1 and "claims 9 archives" in res.stderr,
+            "the same count on a published page must still be refused",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # `MB.35.5`: one table. A leg added to `LSP_LEGS` alone must reach
+        # `--matrix lsp` with every field a producer and a consumer need, and
+        # `--summary` must carry its `ci_command` — no second edit anywhere.
+        case_dir = Path(tmp) / "lsp-leg-added-once"
+        shutil.copytree(base, case_dir)
+        pm = case_dir / "scripts" / "platform_matrix.py"
+        text = pm.read_text(encoding="utf-8")
+        anchor = '        "target": "x86_64-pc-windows-msvc",\n'
+        _expect(anchor in text, "the matrix fixture no longer carries the windows leg")
+        pm.write_text(
+            text.replace(
+                anchor,
+                '        "target": "aarch64-pc-windows-msvc",\n'
+                '        "runs_on": "windows-11-arm",\n'
+                '        "platform": "windows",\n'
+                '        "enabled": True,\n'
+                "    },\n"
+                "    {\n" + anchor,
+                1,
+            ),
+            encoding="utf-8",
+        )
+        res = _run_matrix(case_dir, "--matrix", "lsp")
+        _expect(
+            res.returncode == 0,
+            "the matrix with the added leg must generate",
+            res.stdout + res.stderr,
+        )
+        legs = {leg["target"]: leg for leg in json.loads(res.stdout)["include"]}
+        _expect(
+            len(legs) == 6,
+            "a leg added to LSP_LEGS once must appear in --matrix lsp",
+            res.stdout,
+        )
+        new = legs.get("aarch64-pc-windows-msvc", {})
+        _expect(
+            new.get("archive") == "blastit-lsp-aarch64-pc-windows-msvc.zip"
+            and new.get("dir") == "blastit-lsp-aarch64-pc-windows-msvc"
+            and new.get("executable") == "blastit-lsp.exe"
+            and "scripts/lsp_smoke.py --binary dist/smoke-aarch64-pc-windows-msvc/"
+            in new.get("ci_command", ""),
+            "the added leg's names must be derived by the table, not re-spelled",
+            res.stdout,
+        )
+        summary = _run_matrix(case_dir, "--summary", "lsp")
+        _expect(
+            summary.returncode == 0
+            and "`blastit-lsp-aarch64-pc-windows-msvc.zip`" in summary.stdout
+            and "NOT RUN" in summary.stdout,
+            "the summary must list the new leg and its command",
+            summary.stdout + summary.stderr,
         )
         cases_run += 1
 

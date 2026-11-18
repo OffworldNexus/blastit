@@ -2,7 +2,7 @@
 id: MB.35.5
 title: "Build, smoke and release blastit-lsp on five targets from platform_matrix, with workflow and packaging gates kept honest"
 kind: task
-status: ready
+status: review
 owner: implementer
 priority: 1
 depends_on: [MB.35.4]
@@ -14,11 +14,11 @@ paths:
   - scripts/test_packaging_gates.py
   - "scripts/build-lsp.sh"
   - scripts/lsp_smoke.py
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T07:22"
 ---
 
 # Goal

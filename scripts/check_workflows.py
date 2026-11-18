@@ -85,6 +85,24 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
     **What this cannot see**: whether the named image's glibc really is the
     declared floor (the two run-time checks above answer that), and a build
     driven from Python.
+
+17. in the shipping workflow, every step that runs `scripts/build-lsp.sh` names
+    `--image` (the leg's `builder_image`, from the matrix) and `--max-glibc` (the
+    leg's `glibc_floor`), so a Linux `blastit-lsp` asset is compiled inside the
+    image whose glibc it claims — `MB.3.60`'s class, one family later (`MB.35.5`).
+    Apple and Windows legs are built by their own toolchain on their native
+    runner and carry no glibc floor, which the matrix refuses to give them. The
+    step also passes `--archive`, `--executable` and `--dir` from the matrix, so
+    the asset, the top-level directory and the executable are the table's rather
+    than re-derived. The recognizer is self-tested at the top of every run, like
+    rule 15's.
+
+18. no workflow and no editor build script spells one of the five editor target
+    triples: they are `scripts/platform_matrix.py`'s (`--matrix lsp`), and a
+    literal is the second copy that drifts when a leg is added, dropped or
+    renamed (`MB.35.5`). A leg arrives as `${{ matrix.* }}` or as an OS shape
+    (`*-apple-darwin`). Scanned over `.github/**/*.yml` and `scripts/build-lsp.sh`
+    — the two places a producer could re-spell the table — and self-tested first.
 """
 
 from __future__ import annotations
@@ -146,6 +164,7 @@ OUTPUT_SPECS: dict[str, tuple[str, str]] = {
     "wheels": ("wheels", ""),
     "shims": ("shims", ""),
     "binaries": ("binaries", ""),
+    "lsp": ("lsp", ""),
     "legs": ("shims", ""),
     "wheels_gnu": ("wheels", "gnu"),
     "wheels_musl": ("wheels", "musl"),
@@ -285,13 +304,38 @@ def check_platform_matrix_calls(run_text: str, scope: str, report: Report) -> No
     folded = join_shell_continuations(run_text)
     for match in LEG_CALL.finditer(folded):
         tail = match.group(1)
+        matrix_match = re.search(
+            r"--matrix\s+['\"]?(?P<family>[A-Za-z][\w-]*|\$[\w{}.-]+)", tail
+        )
+        if matrix_match is not None:
+            family = matrix_match.group("family").strip("'\"")
+            if family.startswith("$"):
+                # A family resolved from a shell variable at run time (the
+                # `for pair in …` loop). Its values are checked by the matrix the
+                # job itself expands, so there is no literal here to judge.
+                continue
+            report.check(
+                family in {"shims", "binaries", "wheels", "images", "lsp"},
+                f"{scope}: platform_matrix.py --matrix {family!r} names a family the "
+                "generator does not have (wheels, binaries, shims, images, lsp)",
+            )
+            continue
         leg_match = re.search(r"--leg\s+(\S+)", tail)
         if leg_match is None:
             continue
         family = leg_match.group(1).strip("'\"")
-        if family not in {"shims", "binaries", "wheels"}:
+        if family not in {"shims", "binaries", "wheels", "lsp"}:
             report.fail(
                 f"{scope}: platform_matrix.py --leg {family!r} names an unknown family"
+            )
+            continue
+        if family == "lsp":
+            # One option per leg: a target is the only thing that separates the
+            # five editor archives (there is no libc split).
+            report.check(
+                re.search(r"--target\b", tail) is not None,
+                f"{scope}: `platform_matrix.py --leg lsp` omits `--target`, which "
+                "matches five legs and exits 2 under `set -e` (use `--count lsp` for counts)",
             )
             continue
         required = ["--libc", "--arch"]
@@ -448,6 +492,13 @@ def runs_host_standalone_build(text: str) -> bool:
     return bool(STANDALONE_BUILD.search(text) or STANDALONE_MAKE.search(text))
 
 
+# The editor archive's build (`MB.35.5`): the same defect class as `MB.3.60` — a
+# "portable" Linux binary compiled on whatever runner picked up the job, then
+# published for Debian 12. `scripts/build-lsp.sh --image` builds inside the image
+# whose glibc *is* the floor; without it the archive keeps the runner's.
+LSP_BUILD = re.compile(r"scripts/build-lsp\.sh\b")
+
+
 def check_standalone_build(
     workflow: str,
     job_name: str,
@@ -516,6 +567,100 @@ def check_standalone_build(
                 "scripts/platform_matrix.py, but this step builds with another image: the "
                 "image is the claim, so it comes from the matrix rather than from a literal",
             )
+
+
+def check_lsp_build(
+    workflow: str,
+    job_name: str,
+    job: dict,
+    entries: list[dict[str, str]] | None,
+    report: Report,
+) -> None:
+    """`MB.35.5`: a shipped `blastit-lsp` is built in its floor's image, from the table's names.
+
+    The defect is `MB.3.60`'s, one artifact family later: a "portable" binary
+    compiled on `ubuntu-24.04` carries glibc 2.39 and refuses to start on Debian
+    12 (2.36), which is the distribution the docs name. So every step of the
+    shipping workflow that runs `scripts/build-lsp.sh` is asked two questions,
+    and both answers must come from the matrix rather than from a literal:
+
+    * the build names `--image` — the leg's own `builder_image` — because the
+      image is the floor, and `--max-glibc` the leg's `glibc_floor`, so the build
+      refuses a binary that outgrew it;
+    * every `-gnu` leg of the job carries both numbers in the matrix, and their
+      values appear in the step once expanded (so a leg without them is a
+      refusal, not a silent host build).
+
+    Apple and Windows legs are exempt by construction: no container has their C
+    library, so they build on their native runner and claim no glibc floor — and
+    the matrix refuses to give them one.
+
+    What this cannot see: whether the named image's glibc really is the declared
+    floor (the build measures the finished binary with `readelf`, and the leg
+    smokes the archive), and whether the smoke ran (that is `scripts/lsp_smoke.py`
+    itself, and the leg's own step).
+    """
+    for idx, step in enumerate(job.get("steps") or [], 1):
+        run = str(step.get("run") or "")
+        folded = join_shell_continuations(run)
+        if not LSP_BUILD.search(folded):
+            continue
+        scope = f"{workflow}: job {job_name} step {idx}"
+        report.check(
+            "--image" in folded,
+            f"{scope}: runs scripts/build-lsp.sh without `--image`, so the archive is "
+            "compiled against the runner's C library and every Linux asset inherits the "
+            "runner's glibc (MB.3.60: GLIBC_2.39 in a file that must start on Debian 12). "
+            "Pass `--image ${{{{ matrix.builder_image }}}}` and "
+            "`--max-glibc ${{{{ matrix.glibc_floor }}}}` from the matrix",
+        )
+        for entry in entries or [{}]:
+            if not entry.get("target", "").endswith("-gnu"):
+                continue
+            expanded = expand_matrix_text(folded, entry)
+            floor = entry.get("glibc_floor", "")
+            builder = entry.get("builder_image", "")
+            label = entry.get("target") or "the gnu leg"
+            report.check(
+                bool(builder) and builder in expanded,
+                f"{scope}: {label} declares builder_image {builder or '<none>'!r} in "
+                "scripts/platform_matrix.py, but this step never names it as `--image`: "
+                "the image is the claim, so it comes from the matrix",
+            )
+            report.check(
+                bool(floor) and f"--max-glibc {floor}" in expanded.replace('"', ""),
+                f"{scope}: {label} declares glibc_floor {floor or '<none>'!r} in "
+                "scripts/platform_matrix.py, but this step never asserts it as "
+                "`--max-glibc`: nothing then measures the archive's floor",
+            )
+        # The three names the archive, the unpack and the consumer all depend on
+        # are the table's, so the step passes them rather than re-deriving them:
+        # one table is the node's promise (`R74`), and a re-derived name is the
+        # second copy that drifts.
+        for flag, field in (
+            ("--archive", "archive"),
+            ("--executable", "executable"),
+            ("--dir", "dir"),
+        ):
+            report.check(
+                flag in folded and field in folded,
+                f"{scope}: runs scripts/build-lsp.sh without `{flag} "
+                f"${{{{ matrix.{field} }}}}`: the archive name, the top-level "
+                "directory and the executable are the matrix's fields, and a step "
+                "that re-derives them is a second copy of the table",
+            )
+        for entry in entries or [{}]:
+            if not entry.get("target"):
+                continue
+            expanded = expand_matrix_text(folded, entry)
+            for field in ("archive", "executable", "dir"):
+                value = entry.get(field, "")
+                report.check(
+                    bool(value) and value in expanded,
+                    f"{scope}: {entry['target']} declares {field} {value or '<none>'!r} in "
+                    f"scripts/platform_matrix.py, but this step never passes it as "
+                    f"`--{field}`: the artifact would not be the one the matrix names",
+                )
 
 
 def check_step_scripts(step: dict, scope: str, report: Report) -> None:
@@ -649,6 +794,87 @@ def self_test_rule16() -> list[str]:
     return problems
 
 
+# `MB.35.5`: the five editor targets are the matrix's, so a workflow (or the LSP
+# build script) that spells one is a second copy of the table — the copy that
+# drifts when a leg is added, dropped or renamed. `scripts/platform_matrix.py` is
+# the only file that may name them; everywhere else the leg arrives as
+# `${{ matrix.* }}` or as an OS shape (`*-apple-darwin`).
+LSP_TARGET_LITERAL = re.compile(
+    # The OS segment is matched with or without its libc/ABI suffix: a glob such as
+    # `blastit-x86_64-unknown-linux-*.tar.gz` spells the target just as surely as
+    # the full triple does, and that was the second copy this rule exists for.
+    r"\b(?:x86_64|aarch64)-(?:unknown-linux|apple-darwin|pc-windows)"
+)
+
+
+def target_literal_problems(text: str) -> list[str]:
+    """Every editor target triple `text` spells, with its line number."""
+    problems: list[str] = []
+    for match in LSP_TARGET_LITERAL.finditer(text):
+        line = text[: match.start()].count("\n") + 1
+        problems.append(
+            f"line {line}: spells the editor target {match.group(0)!r}, a second copy "
+            "of the table (the five targets are `scripts/platform_matrix.py --matrix "
+            "lsp`): take the leg from `${{ matrix.* }}` or match an OS shape instead"
+        )
+    return problems
+
+
+def check_target_table_literals(repo: Path, report: Report) -> None:
+    """`MB.35.5`: no workflow and no LSP build script re-spells a target triple.
+
+    `self_test_rule18` keeps the recognizer honest: a `${{ matrix.target }}`
+    reference and an OS shape are both allowed, a literal triple is not.
+    """
+    files = sorted((repo / ".github").rglob("*.yml"))
+    builder = repo / "scripts" / "build-lsp.sh"
+    if builder.is_file():
+        files.append(builder)
+    scanned = 0
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        scanned += 1
+        for problem in target_literal_problems(text):
+            report.fail(f"{path.relative_to(repo)}: {problem}")
+    report.check(
+        scanned > 0,
+        "no workflow or LSP build script was scanned for a re-spelled editor target",
+    )
+
+
+def self_test_rule18() -> list[str]:
+    """Prove rule 18 still refuses a re-spelled editor target (`MB.35.5`)."""
+    problems: list[str] = []
+    buggy = [
+        "archives=(blastit-x86_64-unknown-linux-*.tar.gz)\n",
+        "run: bash scripts/build-lsp.sh --target aarch64-apple-darwin",
+        "run: bash scripts/build-lsp.sh --target x86_64-pc-windows-msvc",
+    ]
+    fixed = [
+        (
+            "runs-on: ${{ matrix.runs_on }}\n"
+            'run: bash scripts/build-lsp.sh --target "${{ matrix.target }}"\n'
+        ),
+        'case "$target" in *-apple-darwin) platform=macos ;; esac\n',
+        'python3 scripts/lsp_smoke.py --binary "$tmp/${{ matrix.dir }}"\n',
+    ]
+    for shape in buggy:
+        if not target_literal_problems(shape):
+            problems.append(
+                f"rule 18 no longer sees {shape.strip()!r} as a re-spelled target"
+            )
+    for shape in fixed:
+        found = target_literal_problems(shape)
+        if found:
+            problems.append(
+                f"rule 18 refused a matrix reference: {shape.strip()!r} -> {found}"
+            )
+    return problems
+
+
 def self_test_rule15() -> list[str]:
     """Prove rule 15 still recognises a host standalone build (`MB.3.61`).
 
@@ -705,6 +931,66 @@ def self_test_rule15() -> list[str]:
     return problems
 
 
+def self_test_rule17() -> list[str]:
+    """Prove rule 17 still refuses a shipped LSP archive built on the runner.
+
+    `MB.35.5`: the editor archive is a second family with the `MB.3.60` shape
+    available to it — build on the runner, publish for Debian 12 — so its
+    recognizer gets the same treatment as the standalone rule's: a host build
+    must be refused, a matrix-driven image build must pass, and dropping the
+    floor must be refused on its own.
+    """
+    problems: list[str] = []
+    entries = [
+        {
+            "target": "x86_64-unknown-linux-gnu",
+            "builder_image": "quay.io/pypa/manylinux_2_28_x86_64",
+            "glibc_floor": "2_28",
+            "archive": "blastit-lsp-x86_64-unknown-linux-gnu.tar.gz",
+            "executable": "blastit-lsp",
+            "dir": "blastit-lsp-x86_64-unknown-linux-gnu",
+        }
+    ]
+    host = "bash scripts/build-lsp.sh --target x86_64-unknown-linux-gnu --out dist"
+    shipped = (
+        'bash scripts/build-lsp.sh --target "${{ matrix.target }}" --out dist \\\n'
+        '  --image "${{ matrix.builder_image }}" --max-glibc "${{ matrix.glibc_floor }}" \\\n'
+        '  --archive "${{ matrix.archive }}" --executable "${{ matrix.executable }}" \\\n'
+        '  --dir "${{ matrix.dir }}"\n'
+    )
+    for shape, expected in ((host, True), (shipped, False)):
+        inner = Report(quiet=True)
+        check_lsp_build(
+            "publish-pypi.yml",
+            "self-test",
+            {"steps": [{"run": shape}]},
+            entries,
+            inner,
+        )
+        if bool(inner.problems) != expected:
+            problems.append(
+                f"rule 17 {'passed' if expected else 'refused'} "
+                f"{'a host' if expected else 'a matrix-driven'} build-lsp.sh step: "
+                f"{inner.problems}"
+            )
+    for missing in (
+        ' --max-glibc "${{ matrix.glibc_floor }}"',
+        ' --archive "${{ matrix.archive }}"',
+        ' --dir "${{ matrix.dir }}"',
+    ):
+        inner = Report(quiet=True)
+        check_lsp_build(
+            "publish-pypi.yml",
+            "self-test",
+            {"steps": [{"run": shipped.replace(missing, "")}]},
+            entries,
+            inner,
+        )
+        if not inner.problems:
+            problems.append(f"rule 17 passed a step without `{missing.strip()}`")
+    return problems
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", default=".", help="repository root")
@@ -747,9 +1033,42 @@ def main(argv: list[str] | None = None) -> int:
             "workflow-check: rule 16 self-test ok — a CARGO_HOME symlink is a read-only write"
         )
 
+    lsp_problems = self_test_rule17()
+    if lsp_problems:
+        for problem in lsp_problems:
+            print(f"FAIL {problem}")
+        print(
+            f"workflow-check: FAIL — rule 17's own self-test is broken "
+            f"({len(lsp_problems)} problem(s)); the shippable-lsp-build verdict below it "
+            "would not be worth anything",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.quiet:
+        print(
+            "workflow-check: rule 17 self-test ok — a shipped blastit-lsp is built in its floor's image"
+        )
+
+    table_problems = self_test_rule18()
+    if table_problems:
+        for problem in table_problems:
+            print(f"FAIL {problem}")
+        print(
+            f"workflow-check: FAIL — rule 18's own self-test is broken "
+            f"({len(table_problems)} problem(s)); the one-table scan below it would not "
+            "be worth anything",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.quiet:
+        print(
+            "workflow-check: rule 18 self-test ok — an editor target triple outside the table is a copy"
+        )
+
     repo = Path(args.repo).resolve()
     report = Report(args.quiet)
     check_container_caches(repo, report)
+    check_target_table_literals(repo, report)
     workflows = sorted(repo.glob(".github/workflows/*.yml"))
     actions = sorted(repo.glob(".github/actions/*/action.yml"))
 
@@ -1002,6 +1321,7 @@ def main(argv: list[str] | None = None) -> int:
             upstream = transitive_needs(job_name, jobs_needing)
             if path.name in SHIPPING_WORKFLOWS:
                 check_standalone_build(path.name, job_name, job, entries, report)
+                check_lsp_build(path.name, job_name, job, entries, report)
             for idx, step in enumerate(job.get("steps") or [], 1):
                 scope = f"{path.name}: job {job_name} step {idx}"
                 check_step_scripts(step, scope, report)

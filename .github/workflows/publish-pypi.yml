@@ -166,6 +166,7 @@ jobs:
       shims: ${{ steps.legs.outputs.shims }}
       binaries_gnu: ${{ steps.legs.outputs.binaries_gnu }}
       binaries_musl: ${{ steps.legs.outputs.binaries_musl }}
+      lsp: ${{ steps.legs.outputs.lsp }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
@@ -179,8 +180,9 @@ jobs:
           set -euo pipefail
           # One subset per libc, because a musl artifact is built in an Alpine
           # job container and a glibc one on the runner: two jobs cannot share a
-          # `container:` and still be one matrix.
-          for pair in wheels:gnu wheels:musl shims: binaries:gnu binaries:musl; do
+          # `container:` and still be one matrix. `lsp` has no libc split: its
+          # legs are three operating systems, and each is built natively.
+          for pair in wheels:gnu wheels:musl shims: binaries:gnu binaries:musl lsp:; do
               family=${pair%%:*}
               libc=${pair##*:}
               key=$family${libc:+_$libc}
@@ -402,6 +404,86 @@ jobs:
           path: |
             dist/${{ matrix.archive }}
             dist/SHA256SUMS.${{ matrix.target }}
+          if-no-files-found: error
+
+  lsp:
+    name: blastit-lsp (${{ matrix.target }})
+    needs: [guard, matrix]
+    if: needs.guard.outputs.should_build == 'true'
+    # The native runner per leg comes from the matrix; a Linux leg is built
+    # inside the image whose glibc is its floor, exactly like the standalone
+    # archive but with no shims and no PHP.
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.lsp) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Per target: one leg's `target/<triple>` must never be linked into
+          # another OS's archive.
+          key: lsp-${{ matrix.target }}
+      # `clang-sys` 1.9.1 has no registry fallback and `windows-latest` leaves
+      # `LIBCLANG_PATH` unset, so the directory holding `libclang.dll` is pinned
+      # (`docs/research/2026-11-17-cross-platform-blastit-lsp.md` §Q1).
+      - name: Pin LIBCLANG_PATH (research §Q1)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+      - name: Build the archive (native, or inside the matrix builder image)
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--target "${{ matrix.target }}" --out dist
+                --archive "${{ matrix.archive }}"
+                --executable "${{ matrix.executable }}"
+                --dir "${{ matrix.dir }}")
+          if [ -n "${{ matrix.builder_image }}" ]; then
+              args+=(--image "${{ matrix.builder_image }}" --max-glibc "${{ matrix.glibc_floor }}")
+          fi
+          bash scripts/build-lsp.sh "${args[@]}"
+      # §14.4.1: the published archive is unpacked, its three entries are
+      # asserted, and **the extracted file** is what the smoke drives. The
+      # directory and the executable are the matrix's, so the unpack cannot
+      # disagree with what the build staged.
+      - name: Unpack the archive and smoke the extracted file
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="dist/smoke-${{ matrix.target }}"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          case "${{ matrix.archive }}" in
+              *.zip) "${{ matrix.python }}" -m zipfile -e "dist/${{ matrix.archive }}" "$tmp" ;;
+              *) tar -xzf "dist/${{ matrix.archive }}" -C "$tmp" ;;
+          esac
+          ( cd "$tmp/${{ matrix.dir }}" && ls | sort | tr '\n' ',' && echo )
+          # The archive's own list, verified with the tool this OS has:
+          # `sha256sum -c` on Linux/Windows, `shasum -a 256 -c` on macOS (which
+          # ships no coreutils; `-a 256` matters because `shasum -c` means SHA-1).
+          ( cd "$tmp/${{ matrix.dir }}" && ${{ matrix.sha_verify }} )
+          "${{ matrix.python }}" scripts/lsp_smoke.py \
+              --binary "$tmp/${{ matrix.dir }}/${{ matrix.executable }}"
+      # `release` downloads every artifact family with `merge-multiple`, where
+      # five files all called `SHA256SUMS` would leave one of them — and the
+      # standalone job already writes `SHA256SUMS.<target>`, so this family
+      # prefixes its own (`lsp-`) rather than overwriting another family's.
+      - name: Name the checksum file after its target and family
+        run: mv dist/SHA256SUMS "dist/SHA256SUMS.lsp-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lsp-${{ matrix.target }}
+          # Explicit: the archive is the asset the extension downloads, and the
+          # per-leg checksum is what `release` verifies before it tags.
+          path: |
+            dist/${{ matrix.archive }}
+            dist/SHA256SUMS.lsp-${{ matrix.target }}
           if-no-files-found: error
 
   wheels_gnu:
@@ -742,10 +824,10 @@ jobs:
 
   release:
     name: tag & GitHub release
-    # The archives and the shims must exist before a tag ships: a release that
-    # publishes PyPI but no binary is exactly the half-landed matrix `MB.3.18`
-    # forbids.
-    needs: [guard, pypi, shims, binaries_gnu, binaries_musl]
+    # The archives, the shims and the editor binaries must exist before a tag
+    # ships: a release that publishes PyPI but no binary is exactly the
+    # half-landed matrix `MB.3.18` forbids.
+    needs: [guard, pypi, shims, binaries_gnu, binaries_musl, lsp]
     if: >-
       !cancelled() &&
       needs.guard.result == 'success' &&
@@ -754,6 +836,7 @@ jobs:
       needs.shims.result == 'success' &&
       needs.binaries_gnu.result == 'success' &&
       needs.binaries_musl.result == 'success' &&
+      needs.lsp.result == 'success' &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/develop' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
@@ -764,8 +847,8 @@ jobs:
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.3.2
-      # Explicitly download the two GitHub Release families (`standalone-*` and
-      # `shim-*`); PyPI owns `wheel-*` and `sdist`.
+      # Explicitly download the three GitHub Release families (`standalone-*`,
+      # `shim-*` and `lsp-*`); PyPI owns `wheel-*` and `sdist`.
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -776,31 +859,54 @@ jobs:
           path: dist
           merge-multiple: true
           pattern: shim-*
+      # The editor binaries are their own family (`MB.35`): five assets whose
+      # names start `blastit-lsp-`, counted by `--count lsp` and never by the
+      # standalone family's count.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: lsp-*
       # Verify every per-target archive checksum, check that the exact matrix
-      # counts of archives and shims arrived, and write one sorted `SHA256SUMS`
-      # covering every release asset (archives + standalone shims).
+      # counts of archives, shims and lsp assets arrived, and write one sorted
+      # `SHA256SUMS` covering every release asset.
       - name: Verify matrix counts and write one checksum file for the whole release
         run: |
           set -euo pipefail
           expected_bins=$(uv run --no-project scripts/platform_matrix.py --count binaries)
           expected_shims=$(uv run --no-project scripts/platform_matrix.py --count shims)
+          expected_lsp=$(uv run --no-project scripts/platform_matrix.py --count lsp)
           (
               cd dist
+              # An unmatched glob must vanish, not survive as its own literal: a
+              # leg dropped from the matrix would otherwise read as one artifact
+              # and fail a count `platform_matrix.py --count` gets right.
+              shopt -s nullglob
               for sum_file in SHA256SUMS.*; do
                   sha256sum -c "$sum_file"
               done
               rm -f SHA256SUMS.*
-              archives=(blastit-*.tar.gz)
+              # Two families, one `blastit-` prefix. The standalone list is every
+              # `.tar.gz` whose name is not the editor family's, so no target is
+              # spelled here and a new leg needs no edit in this file. `^$` is
+              # not a filename: with `nullglob` and no match, `printf` still emits
+              # one empty line, and an empty entry would read as one archive.
+              mapfile -t archives < <(printf '%s\n' blastit-*.tar.gz | grep -v -e '^blastit-lsp-' -e '^$')
+              lsp=(blastit-lsp-*)
               shims=(libblastit_php*.so)
               if [[ ${#archives[@]} -ne $expected_bins ]]; then
-                  echo "::error::expected $expected_bins standalone archive(s), found ${#archives[@]}"
+                  echo "::error::expected $expected_bins standalone archive(s), found ${#archives[@]}: ${archives[*]}"
+                  exit 1
+              fi
+              if [[ ${#lsp[@]} -ne $expected_lsp ]]; then
+                  echo "::error::expected $expected_lsp blastit-lsp asset(s), found ${#lsp[@]}: ${lsp[*]}"
                   exit 1
               fi
               if [[ ${#shims[@]} -ne $expected_shims ]]; then
                   echo "::error::expected $expected_shims PHP shim(s), found ${#shims[@]}"
                   exit 1
               fi
-              sha256sum "${archives[@]}" "${shims[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
+              sha256sum "${archives[@]}" "${lsp[@]}" "${shims[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
               sha256sum -c SHA256SUMS
           )
           cat dist/SHA256SUMS

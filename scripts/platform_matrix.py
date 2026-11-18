@@ -18,12 +18,16 @@ Three things make this more than a matrix constant:
    declared leg is one CI builds on the release PR, a proved one is one whose
    artifact has been run.
 
-2. **A count in a document is a claim, and claims are checked.** `--check`
-   reads the published pages *and* the internal design records (both are
-   edited by this repo, and the ADR is the table of record a reviewer reads),
-   refusing any `N wheels/archives/shims` above the declared matrix and any
-   `N proven …` above `PROVEN`. Internal hits are also listed as notes, so the
-   report says which document states what.
+2. **A count in a document is a claim, and claims are checked — but only in a
+   document a reader can reach.** `--check` reads every page the site publishes
+   *and* the two internal records it pins (the ADR is the table of record a
+   reviewer reads), refusing any `N wheels/archives/shims/lsp assets` above the
+   declared matrix and any `N proven …` above `PROVEN`. The site's own
+   `exclude_docs` list (`zensical.toml`) decides what a page is: a design
+   *review* that quotes a count is working material, not a promise, and letting
+   it red `make check` is how the gate dies on an untracked file (`MB.35.5`).
+   Hits in the two records are listed as notes, so the report says which
+   document states what.
 
 3. **A dropped leg keeps its reason.** `enabled: False` carries
    `dropped_because` in one sentence, and `--summary` quotes it, so the honest
@@ -37,8 +41,11 @@ Usage (stdlib only; `make platform-matrix-check` runs the first):
     scripts/platform_matrix.py --matrix binaries
     scripts/platform_matrix.py --matrix shims
     scripts/platform_matrix.py --matrix images
+    scripts/platform_matrix.py --matrix lsp         # editor binaries (five targets)
     scripts/platform_matrix.py --summary            # Markdown, for a RESULT
     scripts/platform_matrix.py --count shims --libc gnu --arch x86_64
+    scripts/platform_matrix.py --count lsp
+    scripts/platform_matrix.py --leg lsp --target x86_64-unknown-linux-gnu
     scripts/platform_matrix.py --leg shims --minor 8.3 --libc gnu --arch x86_64
 """
 
@@ -48,6 +55,7 @@ import argparse
 import json
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -204,6 +212,11 @@ PROVEN: dict[tuple, str] = {
     ("wheels", "3.14", "x86_64", "musl"): "MB.3.18",
     ("archives", "x86_64", "gnu"): "MB.3.18",
     ("archives", "x86_64", "musl"): "MB.3.18",
+    # `MB.35.5` built the `manylinux_2_28` archive, unpacked it and drove a real
+    # `initialize → didOpen → shutdown → exit` session with `scripts/lsp_smoke.py`
+    # (`0` stderr bytes). The four other legs are built by the first CI run on
+    # their native runners; until then they are states, not proofs (§14.2).
+    ("lsp", "x86_64-unknown-linux-gnu"): "MB.35.5",
 }
 
 # --- what each built shim leg actually reached (`MB.3.58` review) -------------
@@ -265,6 +278,59 @@ SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
     ),
 }
 REACHES = ("built", "probed", "served", "refused")
+
+# The editor binaries (`MB.35`, `ADR-0010` §4, design §8.3a/§14). One leg per
+# target, and the four fields a workflow and a consumer both need: `target` (the
+# Rust triple), `runs_on` (the **native** runner), `archive` (the exact asset
+# name) and `executable` (what the Zed extension relaunches). Everything else —
+# the format, the Python a Windows leg spells `python`, the builder image — is
+# derived below, so a leg is declared once.
+#
+# `runs_on` is never an emulator: an artifact that was never executed is a claim,
+# not a proof (`MB.35.1`), and `macos-15-intel` is the only `cargo test`-grade
+# evidence for the x86_64 Apple leg (cross-plus-Rosetta is not).
+LSP_LEGS = (
+    {
+        "target": "x86_64-unknown-linux-gnu",
+        "runs_on": "ubuntu-24.04",
+        "platform": "linux",
+        "enabled": True,
+    },
+    {
+        "target": "aarch64-unknown-linux-gnu",
+        "runs_on": "ubuntu-24.04-arm",
+        "platform": "linux",
+        "enabled": True,
+    },
+    {
+        "target": "aarch64-apple-darwin",
+        "runs_on": "macos-latest",
+        "platform": "macos",
+        "enabled": True,
+    },
+    {
+        "target": "x86_64-apple-darwin",
+        "runs_on": "macos-15-intel",
+        "platform": "macos",
+        "enabled": True,
+    },
+    {
+        "target": "x86_64-pc-windows-msvc",
+        "runs_on": "windows-latest",
+        "platform": "windows",
+        "enabled": True,
+    },
+)
+
+# The archive format and the executable name per OS: `.tar.gz` on Unix, `.zip` on
+# Windows (the extension's `Zip` extractor, §8.3a), and the `exe` suffix only
+# where Windows needs it.
+LSP_FORMATS = {"linux": "tar.gz", "macos": "tar.gz", "windows": "zip"}
+LSP_EXECUTABLES = {
+    "linux": "blastit-lsp",
+    "macos": "blastit-lsp",
+    "windows": "blastit-lsp.exe",
+}
 
 # Consumer images (`ADR-0010` §4.3), one tag per libc.
 IMAGES = (
@@ -364,6 +430,107 @@ def shim_name(minor: str, arch: str, libc: str) -> str:
     return f"libblastit_php{PHP_MINORS[minor]}-{arch}-{libc}.so"
 
 
+def lsp_legs() -> list[dict]:
+    """One editor archive per enabled target (`ADR-0010` §4, design §14.1 R74).
+
+    The archive name is the contract §8.3a states and `MB.33`'s resolution reads:
+    `blastit-lsp-<target>.tar.gz` on Linux and macOS, `.zip` on Windows, one
+    top-level `blastit-lsp-<target>/` directory holding the executable, `LICENSE`
+    and an in-archive `SHA256SUMS`.
+
+    Every field a producer or a consumer needs is **derived here**: `archive`,
+    `dir`, `executable`, `ext`, the Python a leg spells out loud, the builder
+    image and floor, and `ci_command` — the exact command line that proves the
+    leg. `scripts/build-lsp.sh` and both workflows take the names from these
+    fields, so a leg added to `LSP_LEGS` reaches the build, the unpack, the
+    smoke and the release without a second edit, and no other file has to know
+    the five target triples.
+
+    A Linux leg carries the builder image whose glibc *is* its floor and the
+    floor itself, because those are the two numbers the shipping workflow must
+    name and the guard refuses a step that does not (`MB.3.60`'s class). The
+    three other legs build on the runner's own toolchain and claim no glibc.
+    """
+    legs = []
+    for leg in LSP_LEGS:
+        if not leg["enabled"]:
+            continue
+        target = leg["target"]
+        arch = target.split("-")[0]
+        platform = leg["platform"]
+        linux = platform == "linux"
+        ext = LSP_FORMATS[platform]
+        executable = LSP_EXECUTABLES[platform]
+        directory = f"blastit-lsp-{target}"
+        archive = f"{directory}.{ext}"
+        builder_image = LIBCS["gnu"]["builder_image"].format(arch=arch) if linux else ""
+        glibc_floor = LIBCS["gnu"]["glibc_floor"] if linux else ""
+        # The Python a leg spells out loud: `python3` on Unix, `python` on
+        # Windows. It runs `scripts/lsp_smoke.py`, which is stdlib only — the
+        # artifact itself needs no interpreter at all.
+        python = "python" if platform == "windows" else "python3"
+        # The SHA-256 verifier the leg's OS has: macOS ships `shasum` (Perl) and
+        # no coreutils, every other runner has `sha256sum`. `shasum -c` defaults
+        # to SHA-1, so `-a 256` is part of the command, not a detail.
+        sha_verify = (
+            "shasum -a 256 -c SHA256SUMS"
+            if platform == "macos"
+            else "sha256sum -c SHA256SUMS"
+        )
+        # The exact command line the leg's CI job runs, printed by `--summary`
+        # so a "NOT RUN" row carries the command that would run it rather than a
+        # promise that one exists. Built from this leg's own fields, so it cannot
+        # drift from them.
+        build = [
+            "bash",
+            "scripts/build-lsp.sh",
+            "--target",
+            target,
+        ]
+        if linux:
+            build += ["--image", builder_image, "--max-glibc", glibc_floor]
+        build += [
+            "--archive",
+            archive,
+            "--executable",
+            executable,
+            "--dir",
+            directory,
+            "--out",
+            "dist",
+        ]
+        unpack = (
+            f"{python} -m zipfile -e dist/{archive} dist/smoke-{target}"
+            if ext == "zip"
+            else f"tar -xzf dist/{archive} -C dist/smoke-{target}"
+        )
+        legs.append(
+            {
+                "name": target,
+                "target": target,
+                "arch": arch,
+                "runs_on": leg["runs_on"],
+                "platform": platform,
+                "archive": archive,
+                "dir": directory,
+                "ext": ext,
+                "executable": executable,
+                "python": python,
+                "sha_verify": sha_verify,
+                "builder_image": builder_image,
+                "glibc_floor": glibc_floor,
+                "ci_command": (
+                    " ".join(build)
+                    + f" && {unpack}"
+                    + f" && ( cd dist/smoke-{target}/{directory} && {sha_verify} )"
+                    + f" && {python} scripts/lsp_smoke.py --binary"
+                    + f" dist/smoke-{target}/{directory}/{executable}"
+                ),
+            }
+        )
+    return legs
+
+
 def proved(family: str) -> list[tuple]:
     return sorted(key for key in PROVEN if key[0] == family)
 
@@ -448,6 +615,71 @@ INTERNAL_DOCS = frozenset(
     }
 )
 
+# The site's exclusion list, read from the site's own configuration. A gate that
+# scans a document nobody can reach is a gate that fails on working material: a
+# design *review* quoting "9 archives" red `make check` once (`MB.35.5`, the
+# untracked `portable-lsp-arch.review-implementability.md`), because `--check`
+# walked `docs/design/`. `zensical.toml` already says which directories are not
+# pages, so that one list decides here too — two lists is how they disagree. The
+# fallback is the list as written when this was added, for a fixture whose copy
+# of the site config is missing.
+SITE_EXCLUSIONS_FALLBACK: tuple[str, ...] = (
+    "/archive/",
+    "/spikes/",
+    "/VISION.md",
+    "/design/",
+    "/decisions/",
+    "/research/",
+    "/knowledge/",
+    "/testing/",
+)
+
+# A review of a document is never a promise: it quotes the numbers it is arguing
+# about, including the ones it says are wrong. Skipped wherever it lives, so
+# moving one out of `docs/design/` cannot re-arm it.
+REVIEW_FILE = re.compile(r"\.review[-.]")
+
+
+def site_exclusions(repo: Path = REPO) -> tuple[str, ...]:
+    """`zensical.toml`'s `exclude_docs` lines (GitHub-style docs ignore patterns)."""
+    config = repo / "zensical.toml"
+    try:
+        with config.open("rb") as handle:
+            document = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return SITE_EXCLUSIONS_FALLBACK
+    raw = (document.get("project") or {}).get("exclude_docs") or ""
+    patterns = tuple(
+        line.strip()
+        for line in str(raw).splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+    return patterns or SITE_EXCLUSIONS_FALLBACK
+
+
+def is_page(name: str, patterns: tuple[str, ...]) -> bool:
+    """Whether a repo-relative Markdown path is a document a reader can reach.
+
+    `README.md` is a page (it is the wheel's long description). The two
+    `INTERNAL_DOCS` are checked even though the site excludes them: they are the
+    records the pins below exist for, and they are named, not discovered.
+    """
+    if name in INTERNAL_DOCS:
+        return True
+    if REVIEW_FILE.search(name):
+        return False
+    if not name.startswith("docs/"):
+        return True
+    site_path = name[len("docs") :]
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            if site_path.startswith(pattern):
+                return False
+        elif site_path == pattern:
+            return False
+    return True
+
+
 # `N shims`, "`8` wheels", "**4** proven PHP shims": every live count in the ADR
 # and the design doc is backticked, so the digit is never bare and a pattern that
 # insists on `\d+` matches nothing. `MARK` is the wrapper the Markdown actually
@@ -465,7 +697,7 @@ CLAIM = re.compile(
     + MARK
     + r"\s+"
     + QUALIFIER
-    + r"(?P<family>shims?|wheels?|archives?|tarballs?)",
+    + r"(?P<family>shims?|wheels?|archives?|tarballs?|lsp assets?)",
     re.IGNORECASE,
 )
 PROVEN_CLAIM = re.compile(
@@ -475,7 +707,7 @@ PROVEN_CLAIM = re.compile(
     + MARK
     + r"\s+proven\s+"
     + QUALIFIER
-    + r"(?P<family>shims?|wheels?|archives?|tarballs?)",
+    + r"(?P<family>shims?|wheels?|archives?|tarballs?|lsp assets?)",
     re.IGNORECASE,
 )
 
@@ -498,6 +730,14 @@ PINNED: tuple[tuple[str, str, str], ...] = (
         "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
         "`12` shims",
         "declared shim count",
+    ),
+    # `MB.35.5` / `R74`: the editor family's one numeric claim. Without this pin a
+    # regex edit could stop seeing it and the `lsp` count would be checked against
+    # nothing, which is the vacuous-gate failure the module's header names.
+    (
+        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
+        "`5` lsp assets",
+        "declared lsp count",
     ),
     (
         "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
@@ -530,6 +770,9 @@ def declared_of(family: str) -> int:
         "wheel": len(wheel_legs()),
         "archive": len(binary_legs()),
         "tarball": len(binary_legs()),
+        # `family.lower().rstrip("s")` of the page noun `lsp assets` (`R74`): the
+        # family key is `lsp asset`, or `--count lsp` would `KeyError`.
+        "lsp asset": len(lsp_legs()),
         # `images` is not a count any page states yet; 0 refuses the claim.
         "image": 0,
     }[family]
@@ -542,6 +785,7 @@ def proven_of(family: str) -> int:
         "wheel": proven_count("wheels"),
         "archive": proven_count("archives"),
         "tarball": proven_count("archives"),
+        "lsp asset": proven_count("lsp"),
         "image": 0,
     }[family]
 
@@ -620,6 +864,62 @@ def check(problems: list[str], notes: list[str]) -> None:
         ):
             problems.append(f"{leg['name']}: {leg['shim']} is not the §4.1 name")
 
+    # The editor family (`MB.35.5`, `R74`): five legs, one asset name each, and a
+    # format that is Windows' `.zip` and Unix's `.tar.gz` — the two the
+    # extension's extractor and §8.3a's table state. A dropped leg keeps its
+    # reason, exactly like the serving legs.
+    seen_targets: list[str] = []
+    for leg in LSP_LEGS:
+        target = leg.get("target", "")
+        where = f"LSP_LEGS {target or '<no target>'}"
+        if not re.fullmatch(
+            r"(?:x86_64|aarch64)-(?:unknown-linux-gnu|apple-darwin|pc-windows-msvc)",
+            target,
+        ):
+            problems.append(f"{where}: not one of the five targets §8.3a names")
+        if target in seen_targets:
+            problems.append(f"{where}: declared twice: a target is one leg")
+        seen_targets.append(target)
+        platform = leg.get("platform", "")
+        if platform not in LSP_FORMATS:
+            problems.append(f"{where}: unknown platform {platform!r}")
+            continue
+        if not leg.get("runs_on"):
+            problems.append(
+                f"{where}: no native runner: an unpackaged leg proves nothing"
+            )
+        if not leg.get("enabled") and not leg.get("dropped_because"):
+            problems.append(
+                f"{where}: disabled with no reason: `--summary` cannot say which "
+                "targets have no language server without it"
+            )
+        if leg.get("enabled") and leg.get("dropped_because"):
+            problems.append(f"{where}: enabled and dropped at the same time")
+    for leg in lsp_legs():
+        if (
+            leg["archive"]
+            != f"blastit-lsp-{leg['target']}.{LSP_FORMATS[leg['platform']]}"
+        ):
+            problems.append(
+                f"{leg['name']}: {leg['archive']} is not the §8.3a asset name"
+            )
+        if leg["executable"] != LSP_EXECUTABLES[leg["platform"]]:
+            problems.append(
+                f"{leg['name']}: {leg['executable']} is not the executable the "
+                "extension relaunches"
+            )
+        if leg["platform"] == "linux":
+            if not leg["builder_image"] or not leg["glibc_floor"]:
+                problems.append(
+                    f"{leg['name']}: a Linux leg names no builder_image/glibc_floor, "
+                    "so nothing builds it inside the glibc it claims"
+                )
+        elif leg["builder_image"] or leg["glibc_floor"]:
+            problems.append(
+                f"{leg['name']}: a non-Linux leg claims a glibc floor: only the "
+                "Linux assets promise one"
+            )
+
     # `SHIM_REACHES` is the support statement (`MB.3.58` review): a row must name
     # a leg this matrix builds, say what it reached, and say how that was
     # measured. A `served` row without a CI suite would be a claim no leg
@@ -657,6 +957,7 @@ def check(problems: list[str], notes: list[str]) -> None:
         {("shims", leg["minor"], leg["arch"], leg["libc"]) for leg in shim_legs()}
         | {("wheels", leg["python"], leg["arch"], leg["libc"]) for leg in wheel_legs()}
         | {("archives", leg["arch"], leg["libc"]) for leg in binary_legs()}
+        | {("lsp", leg["target"]) for leg in lsp_legs()}
     )
     for key in PROVEN:
         if key not in declared_keys:
@@ -702,8 +1003,13 @@ def check(problems: list[str], notes: list[str]) -> None:
                 "count gate that sees no count is not a gate"
             )
 
-    # The proven-count rule, applied to every page that states a count.
+    # The proven-count rule, applied to every page that states a count — never to
+    # a document `zensical.toml` keeps out of the site (`MB.35.5`), except the two
+    # records pinned above.
+    patterns = site_exclusions()
     for name, text in texts.items():
+        if not is_page(name, patterns):
+            continue
         internal = name in INTERNAL_DOCS
         label = "note" if internal else "claim"
         for match in CLAIM.finditer(text):
@@ -743,8 +1049,25 @@ def check(problems: list[str], notes: list[str]) -> None:
 
 # --- the output -------------------------------------------------------------
 
+# One sentence for every leg whose smoke has not run on its own runner. It is the
+# wording `MB.35.5`'s RESULT and the evidence table must use, defined here so the
+# summary and the record cannot disagree about what "unproven" means.
+UNPROVEN = "declared, unproven — NOT RUN (no CI runner or cross toolchain on this host)"
 
-def summary() -> str:
+
+def summary(family: str = "") -> str:
+    """The Markdown report, whole or for one family (`--summary [FAMILY]`).
+
+    `--summary lsp` prints the editor family's row, its five artifacts (with the
+    exact command CI runs for each) and the note that defines "proved"; `R74` and
+    the review command name it that way, so the option takes a family rather than
+    making a reader grep one table out of all of them.
+    """
+    only = family
+
+    def wants(name: str) -> bool:
+        return not only or only == name
+
     lines = [
         "| family | declared | built & exercised | dropped (reason) |",
         "|---|---|---|---|",
@@ -755,13 +1078,25 @@ def summary() -> str:
         if dropped
         else "—"
     )
-    for name, family, count in (
+    lsp_dropped = [leg for leg in LSP_LEGS if not leg["enabled"]]
+    lsp_reason = (
+        "; ".join(f"{leg['target']}: {leg['dropped_because']}" for leg in lsp_dropped)
+        if lsp_dropped
+        else "—"
+    )
+    for name, key, count in (
         ("wheels", "wheels", len(wheel_legs())),
         ("standalone archives", "archives", len(binary_legs())),
         ("PHP shims", "shims", len(shim_legs())),
+        # The editor family is counted on its own noun: an LSP archive is never an
+        # "archive" here, because that count is the standalone family's (`R74`).
+        ("lsp assets (editor)", "lsp", len(lsp_legs())),
     ):
+        if only and {"archives": "binaries"}.get(key, key) != only:
+            continue
         lines.append(
-            f"| {name} | {count} | {proven_count(family)} of {count} | {reason} |"
+            f"| {name} | {count} | {proven_count(key)} of {count} | "
+            f"{lsp_reason if key == 'lsp' else reason} |"
         )
     lines.append("")
     lines.append(
@@ -771,25 +1106,52 @@ def summary() -> str:
     lines.append("")
     lines.append("| artifact | leg | status |")
     lines.append("|---|---|---|")
-    for leg in wheel_legs():
-        node = PROVEN.get(("wheels", leg["python"], leg["arch"], leg["libc"]))
-        lines.append(
-            f"| wheel cp{leg['python'].replace('.', '')} `{leg['name']}` | "
-            f"{leg['runs_on']} | {'proved by ' + node if node else 'declared, unbuilt'} |"
-        )
-    for leg in binary_legs():
-        node = PROVEN.get(("archives", leg["arch"], leg["libc"]))
-        lines.append(
-            f"| `{leg['archive']}` | {leg['runs_on']} | "
-            f"{'proved by ' + node if node else 'declared, unbuilt'} |"
-        )
-    for leg in shim_legs():
-        node = PROVEN.get(("shims", leg["minor"], leg["arch"], leg["libc"]))
-        lines.append(
-            f"| `{leg['shim']}` | {leg['base']} ({leg['runs_on']}) | "
-            f"{'proved by ' + node if node else 'declared, unbuilt'} |"
-        )
+    if wants("wheels"):
+        for leg in wheel_legs():
+            node = PROVEN.get(("wheels", leg["python"], leg["arch"], leg["libc"]))
+            lines.append(
+                f"| wheel cp{leg['python'].replace('.', '')} `{leg['name']}` | "
+                f"{leg['runs_on']} | {'proved by ' + node if node else 'declared, unbuilt'} |"
+            )
+    if wants("binaries"):
+        for leg in binary_legs():
+            node = PROVEN.get(("archives", leg["arch"], leg["libc"]))
+            lines.append(
+                f"| `{leg['archive']}` | {leg['runs_on']} | "
+                f"{'proved by ' + node if node else 'declared, unbuilt'} |"
+            )
+    if wants("shims"):
+        for leg in shim_legs():
+            node = PROVEN.get(("shims", leg["minor"], leg["arch"], leg["libc"]))
+            lines.append(
+                f"| `{leg['shim']}` | {leg['base']} ({leg['runs_on']}) | "
+                f"{'proved by ' + node if node else 'declared, unbuilt'} |"
+            )
+    if wants("images"):
+        for image in IMAGES:
+            lines.append(
+                f"| `{image['tag']}` | PHP {image['minor']} on {image['libc']} "
+                "| declared (a consumer image, not a counted family) |"
+            )
+    if wants("lsp"):
+        for leg in lsp_legs():
+            node = PROVEN.get(("lsp", leg["target"]))
+            status = f"proved by {node}" if node else UNPROVEN
+            lines.append(
+                f"| `{leg['archive']}` | {leg['runs_on']} | "
+                f"{status}; the command CI runs is `{leg['ci_command']}` |"
+            )
     lines.append("")
+    if wants("lsp"):
+        lines.append(
+            "An lsp leg is proved only after `scripts/lsp_smoke.py` drove a real "
+            "session against **the archive it publishes** on that leg's native runner; "
+            "a built-but-unsmoked leg is declared, unproven, and carries the command "
+            "that would prove it."
+        )
+        lines.append("")
+    if not wants("shims"):
+        return "\n".join(lines).rstrip("\n")
     lines.append(
         "The two protected PHP suites (`MB.3.39`) run **in the leg's own image**, "
         "so a leg may only claim them if that image builds them (`MB.3.58`):"
@@ -802,7 +1164,6 @@ def summary() -> str:
             spec = PHP_BUILDS[(minor, libc)]
             cell = "yes" if spec["suites"] else f"no — {spec['suites_because']}"
             lines.append(f"| PHP {minor}, {libc} | {cell} |")
-    counts = reaches_counts()
     lines.append("")
     lines.append("## Which PHP a user can actually run (measured, `SHIM_REACHES`)")
     lines.append("")
@@ -840,12 +1201,14 @@ def _filtered_legs(
     python: str = "",
     libc: str = "",
     arch: str = "",
+    target: str = "",
 ) -> list[dict]:
     legs = {
         "wheels": wheel_legs,
         "binaries": binary_legs,
         "shims": shim_legs,
         "images": lambda: [dict(item) for item in IMAGES],
+        "lsp": lsp_legs,
     }[family]()
     if minor:
         legs = [leg for leg in legs if leg.get("minor") == minor]
@@ -855,6 +1218,8 @@ def _filtered_legs(
         legs = [leg for leg in legs if leg.get("libc") == libc]
     if arch:
         legs = [leg for leg in legs if leg.get("arch") == arch]
+    if target:
+        legs = [leg for leg in legs if leg.get("target") == target]
     return legs
 
 
@@ -865,14 +1230,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="validate the matrix and every stated count",
     )
-    parser.add_argument("--matrix", choices=("wheels", "binaries", "shims", "images"))
+    parser.add_argument(
+        "--matrix", choices=("wheels", "binaries", "shims", "images", "lsp")
+    )
     parser.add_argument(
         "--count",
-        choices=("wheels", "binaries", "shims", "images"),
+        choices=("wheels", "binaries", "shims", "images", "lsp"),
         help="print how many enabled legs match the filters (exits 0 even when 0)",
     )
-    parser.add_argument("--summary", action="store_true")
-    parser.add_argument("--leg", choices=("wheels", "binaries", "shims"))
+    parser.add_argument(
+        "--summary",
+        nargs="?",
+        const="",
+        default=None,
+        choices=("", "wheels", "binaries", "shims", "images", "lsp"),
+        help="print the Markdown report, or one family's section (`--summary lsp`)",
+    )
+    parser.add_argument("--leg", choices=("wheels", "binaries", "shims", "lsp"))
     parser.add_argument(
         "--minor",
         default="",
@@ -894,6 +1268,12 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         choices=("", "x86_64", "aarch64"),
         help="filter to this arch (x86_64 or aarch64)",
+    )
+    parser.add_argument(
+        "--target",
+        default="",
+        choices=("", *(leg["target"] for leg in LSP_LEGS)),
+        help="with --leg/--count/--matrix lsp: filter by Rust triple",
     )
     parser.add_argument(
         "--quiet", action="store_true", help="--check without the per-document notes"
@@ -919,6 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
             python=args.python,
             libc=args.libc,
             arch=args.arch,
+            target=args.target,
         )
         print(json.dumps({"include": legs}, indent=None, separators=(",", ":")))
     if args.count:
@@ -928,6 +1309,7 @@ def main(argv: list[str] | None = None) -> int:
             python=args.python,
             libc=args.libc,
             arch=args.arch,
+            target=args.target,
         )
         print(len(legs))
     if args.leg:
@@ -937,6 +1319,7 @@ def main(argv: list[str] | None = None) -> int:
             python=args.python,
             libc=args.libc,
             arch=args.arch,
+            target=args.target,
         )
         if len(legs) == 0:
             print(
@@ -951,9 +1334,11 @@ def main(argv: list[str] | None = None) -> int:
                 missing.append("--minor")
             if args.leg == "wheels" and not args.python:
                 missing.append("--python")
-            if not args.libc:
+            if args.leg == "lsp" and not args.target:
+                missing.append("--target")
+            if args.leg != "lsp" and not args.libc:
                 missing.append("--libc")
-            if not args.arch:
+            if args.leg != "lsp" and not args.arch:
                 missing.append("--arch")
             hint = (
                 f"pass {', '.join(missing)} (or use --count {args.leg})"
@@ -967,15 +1352,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         print("\n".join(f"{key}={value}" for key, value in legs[0].items()))
-    if args.summary:
-        print(summary())
+    if args.summary is not None:
+        print(summary(args.summary))
     if args.check and not (args.matrix or args.count or args.leg or args.summary):
         print(
             f"platform-matrix: ok — {len(wheel_legs())} wheels, "
-            f"{len(binary_legs())} archives, {len(shim_legs())} shims declared; "
+            f"{len(binary_legs())} archives, {len(shim_legs())} shims, "
+            f"{len(lsp_legs())} lsp assets declared; "
             f"built and exercised: {proven_count('wheels')}/{len(wheel_legs())} wheels, "
             f"{proven_count('archives')}/{len(binary_legs())} archives, "
-            f"{proven_count('shims')}/{len(shim_legs())} shims; "
+            f"{proven_count('shims')}/{len(shim_legs())} shims, "
+            f"{proven_count('lsp')}/{len(lsp_legs())} lsp assets; "
             f"reaches: {reaches_sentence()}; "
             f"{len([leg for leg in LEGS if not leg['enabled']])} leg(s) dropped"
         )

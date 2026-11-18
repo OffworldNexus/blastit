@@ -525,6 +525,91 @@ jobs:
             -e BLASTIT_BIN=/usr/local/bin/blastit \
             debian:trixie-slim bash /usr/local/bin/standalone-runtime-check.sh --require-no-python
 
+  # The editor binaries (`MB.35`): five targets, declared once in
+  # `scripts/platform_matrix.py --matrix lsp` and built on each **native** runner.
+  # A leg is a proof only after `scripts/lsp_smoke.py` drove a real session
+  # against the archive it publishes — macOS and Windows included, because those
+  # are exactly the files the Zed extension downloads (§8.3a).
+  matrix:
+    name: the lsp legs (scripts/platform_matrix.py)
+    runs-on: ubuntu-24.04
+    outputs:
+      lsp: ${{ steps.legs.outputs.lsp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - id: legs
+        run: echo "lsp=$(uv run --no-project scripts/platform_matrix.py --matrix lsp)" >> "$GITHUB_OUTPUT"
+
+  lsp:
+    name: blastit-lsp (${{ matrix.target }})
+    needs: matrix
+    # The native runner per leg comes from the matrix: an artifact nothing
+    # executed is a claim, not a proof (`MB.35.1`).
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.lsp) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Per target: a warm `target/<triple>` from another OS must never be
+          # linked into this archive.
+          key: lsp-${{ matrix.target }}
+      # `pg_query`'s build runs bindgen, which needs the clang C API by name, and
+      # `clang-sys` 1.9.1 has no registry fallback: `windows-latest` leaves
+      # `LIBCLANG_PATH` unset and the search stops at clang-sys's own list, so the
+      # `bin` directory that holds `libclang.dll` is pinned here
+      # (`docs/research/2026-11-17-cross-platform-blastit-lsp.md` §Q1).
+      - name: Pin LIBCLANG_PATH (research §Q1)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+      # A Linux leg is built inside the image whose glibc *is* its floor and the
+      # floor is asserted by the build (`MB.3.60`'s class, an editor binary this
+      # time); the Apple and Windows legs build on the runner's own toolchain,
+      # because no container has their C library.
+      - name: Build the archive (native, or inside the matrix builder image)
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--target "${{ matrix.target }}" --out dist
+                --archive "${{ matrix.archive }}"
+                --executable "${{ matrix.executable }}"
+                --dir "${{ matrix.dir }}")
+          if [ -n "${{ matrix.builder_image }}" ]; then
+              args+=(--image "${{ matrix.builder_image }}" --max-glibc "${{ matrix.glibc_floor }}")
+          fi
+          bash scripts/build-lsp.sh "${args[@]}"
+      # §14.4.1: unpack the archive the release will publish, assert its three
+      # entries, and smoke **the extracted file** — never the build tree's copy.
+      # The directory and the executable are the matrix's, so the unpack cannot
+      # disagree with what the build staged.
+      - name: Unpack the archive and smoke the extracted file
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="dist/smoke-${{ matrix.target }}"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          case "${{ matrix.archive }}" in
+              *.zip) "${{ matrix.python }}" -m zipfile -e "dist/${{ matrix.archive }}" "$tmp" ;;
+              *) tar -xzf "dist/${{ matrix.archive }}" -C "$tmp" ;;
+          esac
+          ( cd "$tmp/${{ matrix.dir }}" && ls | sort | tr '\n' ',' && echo )
+          # The archive's own list, verified with the tool this OS has:
+          # `sha256sum -c` on Linux/Windows, `shasum -a 256 -c` on macOS (which
+          # ships no coreutils; `-a 256` matters because `shasum -c` means SHA-1).
+          ( cd "$tmp/${{ matrix.dir }}" && ${{ matrix.sha_verify }} )
+          "${{ matrix.python }}" scripts/lsp_smoke.py \
+              --binary "$tmp/${{ matrix.dir }}/${{ matrix.executable }}"
+
   wheel-smoke:
     name: wheel in a uv virtualenv (modelw/base, CPython 3.14)
     runs-on: ubuntu-24.04
