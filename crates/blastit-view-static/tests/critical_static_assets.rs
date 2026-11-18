@@ -25,12 +25,12 @@ use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
 
 use blastit_manifest::blastfile::{StaticImmutable, StaticPattern};
-use blastit_scheduler::rewrite::{Rewrite, decide};
-use blastit_scheduler::static_asset::{
+use blastit_view_static::rewrite::{Rewrite, decide};
+use blastit_view_static::static_asset::{
     AnswerKind, Backend, STATIC_MAX_FILE_BYTES, StaticFile, StaticMeta, StaticOutcome, StaticRoot,
     head_segments,
 };
-use blastit_scheduler::static_response::{StaticResponse, http_date};
+use blastit_view_static::static_response::{StaticResponse, http_date};
 use static_fixture::{APP_JS, APP_JS_BYTES, Fixture, StaticTree, content_of};
 
 const APP_URL: &str = "/assets/app.4f1c2a9b7d3e.js";
@@ -87,7 +87,7 @@ fn head_count(response: &StaticResponse, name: &str) -> usize {
         .count()
 }
 
-fn read_body(body: blastit_scheduler::static_response::StaticBody) -> Vec<u8> {
+fn read_body(body: blastit_view_static::static_response::StaticBody) -> Vec<u8> {
     let mut file = std::fs::File::from(body.file);
     let mut bytes = vec![0u8; usize::try_from(body.len).expect("the body fits in memory")];
     file.read_exact(&mut bytes).expect("read the served body");

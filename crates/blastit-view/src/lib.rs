@@ -137,6 +137,10 @@ mod error;
 mod flow;
 #[cfg(feature = "python")]
 mod input;
+// The one request-target decoder (`MB.36.2`, D3): the scheduler routes on it
+// and the static responder resolves on it, so there is never a second
+// implementation of what `%2F` means.
+pub mod path;
 // Embedded PHP (`MB.3.13`): `PhpEmbedRuntime` and the single-request channel
 // loop. The crate stays `#![forbid(unsafe_code)]`; the `dlopen` and the C sink
 // trampolines are in `blastit-php-sapi`.

@@ -1441,6 +1441,12 @@ fn scheduler_config(
         // configuration, so stage 1 never re-derives a path from its own
         // working directory.
         manifest_dir: config.manifest_dir.clone(),
+        // A build without the responder cannot resolve that constant, and needs
+        // no ceiling: it serves no file and `run` refuses any mount at boot
+        // (`SchedulerError::StaticNotCompiled`). The update syntax below then
+        // supplies `SchedulerConfig::default()`'s own feature-less value, so the
+        // ceiling is still spelled once (design §4.6).
+        #[cfg(feature = "static")]
         static_max_bytes: blastit_scheduler::static_asset::STATIC_MAX_FILE_BYTES,
         // §9.2: the file's mounts travel beside the route table, because a
         // mount owns no uid and starts no process.

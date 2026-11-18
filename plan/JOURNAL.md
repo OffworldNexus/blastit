@@ -3349,3 +3349,20 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T11:58 [MB.35.6] (lead) committed 3d0d235 (expert token-stream rewrite + symlink-dir fix; make check EXIT=0)
 - 2026-11-18T11:58 [MB.35] (lead) Gate: all six leaves done. Acceptance run at this tree: make check EXIT=0 (189 suites, lsp-portable inside), make e2e EXIT=0 (411 checks / 0 failures), plan.py 
 - 2026-11-18T11:58 [MB.35] (lead) status ready -> done
+- 2026-11-18T12:14 [MB.26.24] (lead) created (task) Close the three escapes a goldfish review proved against the committed lsp-portable guard: target-class paths, src/bin roots, package renames
+- 2026-11-18T12:14 [MB.36.2] (lead) status ready -> active
+- 2026-11-18T12:14 [MB.36.2] (lead) attempt 1/3 started
+- 2026-11-18T12:14 [MB.36.2] (lead) attempt 1/3 started; base 4aa39d9
+- 2026-11-18T12:34 [MB.36.2] (lead) edited fields
+- 2026-11-18T12:34 [MB.36.2] (lead) lead note for MB.36.6: crates/blastit/src/stage1.rs:1444 assigns `static_max_bytes: blastit_scheduler::static_asset::STATIC_MAX_FILE_BYTES` unconditionally, and
+- 2026-11-18T12:34 [MB.36.6] (lead) edited fields
+- 2026-11-18T12:44 [MB.36.2] (lead) status active -> review
+- 2026-11-18T12:55 [MB.36.2] (lead) edited fields
+- 2026-11-18T12:55 [MB.36.2] (lead) reviewer VERDICT PASS (4 MINORs). Lead reopens for MINOR 2: build-standalone.sh:112 and publish-pypi.yml:250 build `-p blastit --no-default-features --features 
+- 2026-11-18T12:55 [MB.36.2] (lead) status review -> active
+- 2026-11-18T12:55 [MB.36.2] (lead) attempt 2/3 started
+- 2026-11-18T12:55 [MB.36.6] (lead) edited fields
+- 2026-11-18T13:08 [MB.36.2] (lead) MB.36.6 MUST ALSO FIX BEHAVIOUR, NOT ONLY COMPILE: `scripts/build-standalone.sh` (5 sites) and `publish-pypi.yml:250` build the archive as `--no-default-feature
+- 2026-11-18T13:08 [MB.36.2] (lead) status active -> review
+- 2026-11-18T13:15 [MB.36.6] (lead) edited fields
+- 2026-11-18T13:21 [MB.36.2] (lead) status review -> done

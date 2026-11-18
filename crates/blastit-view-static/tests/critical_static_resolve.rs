@@ -32,7 +32,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use blastit_manifest::blastfile::{StaticImmutable, StaticPattern};
-use blastit_scheduler::static_asset::{
+use blastit_view_static::static_asset::{
     AnswerKind, Backend, MAX_SEGMENT_BYTES, MAX_STATIC_PATH_BYTES, STATIC_CHUNK_BYTES,
     STATIC_MAX_FILE_BYTES, STATIC_RESOLVE_FLAGS, StaticOutcome, StaticRefusal, StaticRoot,
     classify, head_segments, is_dotfile, same_inode, segments,

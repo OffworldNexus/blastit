@@ -24,12 +24,12 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
-use blastit_scheduler::rewrite::{Rewrite, decide};
-use blastit_scheduler::static_asset::{
+use blastit_view_static::rewrite::{Rewrite, decide};
+use blastit_view_static::static_asset::{
     AnswerKind, Backend, StaticFile, StaticMeta, StaticOutcome, StaticRoot, head_segments,
     is_php_source,
 };
-use blastit_scheduler::static_response::{StaticBody, StaticResponse};
+use blastit_view_static::static_response::{StaticBody, StaticResponse};
 use rustix::fs::{Mode, chmod};
 use static_fixture::{Fixture, StaticTree};
 

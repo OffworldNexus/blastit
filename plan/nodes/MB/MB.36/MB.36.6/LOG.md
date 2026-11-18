@@ -7,3 +7,15 @@ created (task) Finish the Cargo feature matrix (default php+static, wheel python
 ## 2026-11-17T15:57 [planner]
 
 edited fields
+
+## 2026-11-18T12:34 [lead]
+
+edited fields
+
+## 2026-11-18T12:55 [lead]
+
+edited fields
+
+## 2026-11-18T13:15 [lead]
+
+edited fields

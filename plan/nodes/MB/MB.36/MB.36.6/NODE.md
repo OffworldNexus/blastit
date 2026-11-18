@@ -14,16 +14,22 @@ paths:
   - Makefile
   - "scripts/check-portable-elf.sh"
   - "scripts/build-standalone.sh"
+  - "scripts/build-standalone-in-image.sh"
+  - ".github/workflows/publish-pypi.yml"
   - ARCHITECTURE.md
   - docs/knowledge/LESSONS.md
   - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
+  - "docs/decisions/ADR-0007-static-asset-serving-and-rewriting.md"
   - docs/decisions/README.md
   - "docs/design/backend-runtimes.md"
+  - "docs/design/static-and-spa.md"
+  - "docs/design/view-crates-architecture.md"
+  - crates/blastit/src/stage1.rs
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T15:57"
+updated: "2026-11-18T13:15"
 ---
 
 # Goal
@@ -71,6 +77,7 @@ $ cargo check -p blastit-py --locked
 $ make rs-no-python
 $ make rs-no-default
 $ make standalone
+$ tar -tzf dist/blastit-*.tar.gz >/dev/null && echo "archive built"
 $ make platform-matrix-check
 $ grep -q 'blastit-view-python' ARCHITECTURE.md && grep -q 'blastit-view-php' ARCHITECTURE.md && grep -q 'blastit-view-static' ARCHITECTURE.md && echo "architecture names the crates"
 $ test -z "$(grep -rn 'WorkerRuntime' ARCHITECTURE.md crates/)" && echo "no trait claim left"
@@ -78,6 +85,16 @@ $ make check
 ```
 - `make rs-no-python`, `make rs-no-default` and `make standalone` prove the shipped artifact: no
   `libpython`, no `libphp` `DT_NEEDED`, no `RUNPATH`, no test-only boot seam, no inotify symbol.
+- **The archive is built without `static` today and that is a behaviour loss, not only a build
+  detail.** `scripts/build-standalone.sh` (five `--features php` sites, reached from
+  `.github/workflows/publish-pypi.yml` through `scripts/build-standalone-in-image.sh`) selects
+  the `static`-less configuration, so from `MB.36.2` until this leaf the archive *compiles* and
+  then refuses a manifest with a mount (`SchedulerError::StaticNotCompiled`, `MB.36.2`'s
+  `LOG.md`). Fix the spelling **and** prove the capability, because `make standalone` exiting 0
+  cannot see it: unpack the archive, run its binary against a throwaway root holding one
+  `static "/site" { root "public" }` mount, and show that its refusal is the privilege/`dev`
+  refusal and **not** `StaticNotCompiled`; `strings` on the archive's binary naming
+  `blastit-view-static` is the second witness. Paste both.
 - `make platform-matrix-check` proves the declared artifact matrix still describes the build.
 - `RESULT.md` pastes `make check`, `make rs-no-python`, `make standalone`,
   `make platform-matrix-check` tails and the `cargo tree -p blastit --features …` lines for

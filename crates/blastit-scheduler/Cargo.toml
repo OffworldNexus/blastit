@@ -10,11 +10,29 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The static view kind (`MB.36.2`, ADR-0016 decision 6): a **default** feature
+# over an optional `blastit-view-static`, so this package's own tests run the
+# static suites while a build that leaves it off refuses a manifest with a
+# mount at boot (`SchedulerError::StaticNotCompiled`) instead of linking the
+# responder. `blastit` depends on this crate with `default-features = false`
+# and forwards the feature, so the standalone binary's graph is explicit.
+default = ["static"]
+static = ["dep:blastit-view-static"]
+
 [dependencies]
 blastit-events = { version = "0.2.0", path = "../blastit-events" }
 blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
 blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
 blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+# The request-target decoder (`path`) is the transport crate's, and only its:
+# `default-features = false` because `blastit-view` still defaults `python`,
+# and an edge with defaults on would link `libpython` into the standalone
+# binary (`LESSONS.md` `MB.17`).
+blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+# The static responder: resolution, the rewrite order and the head builder.
+# Optional, and never the reverse edge (D3/D4).
+blastit-view-static = { version = "0.2.0", path = "../blastit-view-static", optional = true }
 rustix = { version = "1.1.5", features = ["net", "process", "fs"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

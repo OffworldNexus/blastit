@@ -62,12 +62,16 @@ mod config;
 mod ctl;
 mod error;
 mod fair;
-mod path;
-pub mod rewrite;
+// The one request-target decoder now lives in the transport crate (`MB.36.2`,
+// D3), re-exported here so `crate::path::…` keeps naming it from one place.
+pub use blastit_view::path;
 mod route;
 mod scheduler;
-pub mod static_asset;
-pub mod static_response;
+// The static view kind (`MB.36.2`): this crate dispatches, `blastit-view-static`
+// resolves and answers (ADR-0016 decision 1). A build without `static` refuses a
+// manifest that declares a mount at boot instead of linking the responder.
+#[cfg(feature = "static")]
+pub use blastit_view_static::{rewrite, static_asset, static_response};
 mod task;
 
 pub use crate::config::{

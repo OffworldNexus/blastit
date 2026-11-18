@@ -16,13 +16,13 @@ path = "src/main.rs"
 
 [features]
 # A plain `cargo build -p blastit` is the **standalone** artifact (ADR-0010 §4):
-# `php` needs nothing at link time, while `python` would link `libpython` and a
-# `RUNPATH` into the build host's interpreter cache — a binary that only runs in
-# the checkout that produced it (`MB.17`). The wheel opts in to `python`
-# explicitly through `crates/blastit-py/Cargo.toml`, and every `make` target that
-# needs an interpreter passes the feature, so WSGI coverage never disappears by
-# default.
-default = ["php"]
+# `php` and `static` need nothing at link time, while `python` would link
+# `libpython` and a `RUNPATH` into the build host's interpreter cache — a binary
+# that only runs in the checkout that produced it (`MB.17`). The wheel opts in to
+# `python` explicitly through `crates/blastit-py/Cargo.toml`, and every `make`
+# target that needs an interpreter passes the feature, so WSGI coverage never
+# disappears by default.
+default = ["php", "static"]
 # Every embedded-CPython role: the `BLASTIT_APP` import, the WSGI views, the
 # immortalisation pass and `blastit dev --learn`. Off in the standalone archive,
 # which carries no `libpython` and refuses a manifest that needs an interpreter
@@ -33,6 +33,13 @@ python = ["dep:pyo3", "blastit-view/python"]
 # that does it lives in `blastit-php-sapi`. The standalone binary therefore
 # carries no `DT_NEEDED` on `libphp` (`make rs-no-python`).
 php = ["blastit-view/php", "dep:blastit-php-sapi"]
+# File-serving routes (`static "<prefix>"`, ARCHITECTURE.md §9.2). On by
+# default: a manifest with a mount must serve, and a build that leaves this
+# off refuses that manifest at boot (`SchedulerError::StaticNotCompiled`)
+# instead of linking the responder. `blastit-scheduler` is pulled in with
+# `default-features = false` so this one line, and not a dependency default,
+# is what decides whether the static responder is in the binary.
+static = ["blastit-scheduler/static"]
 
 [dependencies]
 blastit-dbproxy = { version = "0.2.0", path = "../blastit-dbproxy" }
@@ -44,7 +51,7 @@ blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
 blastit-lsp = { version = "0.2.0", path = "../blastit-lsp" }
 blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
 blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }
-blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler" }
+blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler", default-features = false }
 blastit-sqlpolicy = { version = "0.2.0", path = "../blastit-sqlpolicy" }
 blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
 blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }

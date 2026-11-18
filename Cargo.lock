@@ -249,6 +249,8 @@ dependencies = [
  "blastit-frame",
  "blastit-ingress",
  "blastit-manifest",
+ "blastit-view",
+ "blastit-view-static",
  "rustix 1.1.5",
  "serde_json",
  "thiserror 2.0.21",
@@ -280,6 +282,16 @@ dependencies = [
  "blastit-frame",
  "blastit-php-sapi",
  "pyo3",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "blastit-view-static"
+version = "0.2.0"
+dependencies = [
+ "blastit-manifest",
+ "blastit-view",
+ "rustix 1.1.5",
  "thiserror 2.0.21",
 ]
 

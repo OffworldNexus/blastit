@@ -139,8 +139,10 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+#[cfg(feature = "static")]
 use std::io;
 use std::os::fd::OwnedFd;
+#[cfg(feature = "static")]
 use std::os::unix::fs::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -155,7 +157,9 @@ use blastit_frame::{
     RequestCost, RespHead, TypeCode,
 };
 use blastit_ingress::{BodyPlan, apply_transcoded_headers, plan_body, transcode_buffered};
-use blastit_manifest::{MountTable, RoutingTable};
+#[cfg(feature = "static")]
+use blastit_manifest::MountTable;
+use blastit_manifest::RoutingTable;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -167,11 +171,14 @@ use crate::fair::{Cost, FairQueue, FlowRef, NextFlow};
 use crate::path::{
     is_control_byte, normalize_script_name, path_of_target, percent_decode, strip_script_name,
 };
+#[cfg(feature = "static")]
 use crate::rewrite::{Rewrite, decide, declares_body};
 use crate::route::RouteInfo;
+#[cfg(feature = "static")]
 use crate::static_asset::{
     STATIC_CHUNK_BYTES, StaticFile, StaticOutcome, StaticRoot, is_dotfile, is_php_source, segments,
 };
+#[cfg(feature = "static")]
 use crate::static_response::{StaticBody, StaticResponse};
 use crate::task::{
     OutFrame, Outbound, PushError, ctl_frame_size, read_frames, read_raw_frames, release,
@@ -199,10 +206,12 @@ const CREDIT_OVERFLOW: &str = "credit_overflow";
 /// How many finished static reads may wait for the scheduler before a blocking
 /// task waits. At most one read per admission slot can ever be outstanding, so
 /// this is a handful of windows rather than a queue.
+#[cfg(feature = "static")]
 const STATIC_IN_CAPACITY: usize = 64;
 /// The `reason` a static response is aborted with when its file cannot be read
 /// in full (design §4.6): a short read is never answered with a body shorter
 /// than the `Content-Length` the head promised.
+#[cfg(feature = "static")]
 const STATIC_READ_FAILED: &str = "static: read failed";
 
 /// One finished static read, on its way back to the scheduler.
@@ -210,6 +219,7 @@ const STATIC_READ_FAILED: &str = "static: read failed";
 /// The [`StaticBody`] travels with the bytes so the descriptor the resolver
 /// opened is never duplicated: a blocked read keeps it, and the scheduler's next
 /// read takes it back from here.
+#[cfg(feature = "static")]
 struct StaticRead {
     /// The `http.chan` stream this read belongs to.
     stream_id: u32,
@@ -222,6 +232,16 @@ struct StaticRead {
     /// The bytes read, or why the read failed.
     result: io::Result<Vec<u8>>,
 }
+
+/// The message a finished static read travels back on.
+#[cfg(feature = "static")]
+type StaticReadMsg = StaticRead;
+/// A build without the `static` responder opens no read task and no root, so
+/// its channel carries the unit message and its arm never completes: the
+/// sender is held for the whole run, and [`run`]'s loop is the same in both
+/// builds (`MB.36.2`).
+#[cfg(not(feature = "static"))]
+type StaticReadMsg = ();
 
 /// Where a `request` or `process.retired` event goes.
 ///
@@ -644,6 +664,7 @@ struct Request {
     /// route with `[route.static]` (design §4.4): the responder's method/body
     /// gate outranks a codec error on a path it answers, and only a `Forward`
     /// ever answers this.
+    #[cfg(feature = "static")]
     body_plan_error: Option<u16>,
     /// Whether the request may be dispatched: an `AllowEmptyOnly` or `Buffer`
     /// body sets it only when its `REQ_END` proved the body complete (a
@@ -655,6 +676,7 @@ struct Request {
     /// mount misses and a view matched (§9.2 steps 1–2).
     static_pending: bool,
     /// The mount whose root is resolved, kept beside the segments.
+    #[cfg(feature = "static")]
     static_mount: Option<usize>,
     /// The path below the mount's prefix, split into segments and kept until
     /// `dispatch_static` borrows it for `StaticRoot::resolve`; a queued static
@@ -662,12 +684,15 @@ struct Request {
     static_parts: Option<Vec<String>>,
     /// `rewrite::declares_body` for this head: `Request` keeps no header list,
     /// so the one bit the answer needs is taken from the borrowed head.
+    #[cfg(feature = "static")]
     static_has_body: bool,
     /// The request's `If-None-Match`, for the responder's `304` (design §4.5).
     /// `None` unless a static route asked for it.
+    #[cfg(feature = "static")]
     static_if_none_match: Option<Vec<u8>>,
     /// The bytes still owed for a static `GET`, from the descriptor the
     /// resolver opened. `Some` only after `StaticRoot::respond` handed it over.
+    #[cfg(feature = "static")]
     static_body: Option<StaticBody>,
     /// One static read is in flight for this request: its result is what
     /// releases the slot, never a timeout or a cancellation (design §4.6).
@@ -753,9 +778,11 @@ enum Resolution {
     Bad,
     /// A mount claimed the path and the resolver refuses it (`..`, a backslash,
     /// a leading `//`, a path over the ceiling): `400` final (§9.2 step 0).
+    #[cfg(feature = "static")]
     MountRefused,
     /// A mount matched and the resolved path is a dotfile or a PHP source:
     /// `404` final, before any view (§9.2 step 2's `Hidden`).
+    #[cfg(feature = "static")]
     Hidden,
     /// A view's path pattern matched but no view declared this method: `405`
     /// with the union of their declared methods (§9.2 step 4).
@@ -772,6 +799,7 @@ enum Resolution {
         /// attribute the request (`R26`).
         path: String,
         /// The mount that claims this path, when one does (§9.2 step 1).
+        #[cfg(feature = "static")]
         mount: Option<MountHead>,
     },
     /// A route, one of its rules, and the `PATH_INFO` that matched.
@@ -784,11 +812,13 @@ enum Resolution {
         path_info: String,
         /// The mount that claims this path, when one does: its file answers
         /// before the view, and its `fallback` answers after it (§9.2).
+        #[cfg(feature = "static")]
         mount: Option<MountHead>,
     },
 }
 
 /// One matched mount and the request path below its prefix (§9.2).
+#[cfg(feature = "static")]
 struct MountHead {
     /// Index of the mount in `SchedulerConfig::mounts`.
     mount: usize,
@@ -798,16 +828,14 @@ struct MountHead {
     segments: Vec<String>,
 }
 
+#[cfg(feature = "static")]
 impl Resolution {
     /// The mount that claims this request, if any.
     fn mount(&self) -> Option<&MountHead> {
         match self {
             Self::Unrouted { mount, .. } | Self::Routed { mount, .. } => mount.as_ref(),
-            Self::Bad
-            | Self::MountRefused
-            | Self::Hidden
-            | Self::Health
-            | Self::MethodNotAllowed { .. } => None,
+            Self::Bad | Self::Health | Self::MethodNotAllowed { .. } => None,
+            Self::MountRefused | Self::Hidden => None,
         }
     }
 }
@@ -818,6 +846,7 @@ impl Resolution {
 /// Built in [`Scheduler::begin_raw`] while the head is still the borrowed
 /// payload, so [`Request`] keeps no header list: the answer is built from the
 /// two facts this carries and the segments the resolver takes.
+#[cfg(feature = "static")]
 enum StaticHead {
     /// Steps 3–4 passed: `dispatch_static` resolves these segments once the
     /// request holds a slot, so a queued request opens no descriptor.
@@ -848,12 +877,15 @@ struct Scheduler {
     /// The normalised `BLASTIT_SCRIPT_NAME` mount prefix (§6), if any.
     script_name: Option<String>,
     /// The file's static mounts, compiled for the longest-prefix match (§9.2).
+    #[cfg(feature = "static")]
     mounts: MountTable,
     /// One root per mount, opened by [`run`] before the first request: a mount
     /// whose root cannot be opened exits the role.
+    #[cfg(feature = "static")]
     mount_roots: Vec<Arc<StaticRoot>>,
     /// The sending half of the static read results, cloned into one blocking
     /// task per read.
+    #[cfg(feature = "static")]
     static_in: mpsc::Sender<StaticRead>,
     started: Instant,
     counter: u64,
@@ -931,9 +963,9 @@ impl Scheduler {
         http_out: Outbound,
         view_in: mpsc::Sender<ViewIn>,
         ctl_out: Outbound,
-        mounts: MountTable,
-        mount_roots: Vec<Arc<StaticRoot>>,
-        static_in: mpsc::Sender<StaticRead>,
+        #[cfg(feature = "static")] mounts: MountTable,
+        #[cfg(feature = "static")] mount_roots: Vec<Arc<StaticRoot>>,
+        #[cfg(feature = "static")] static_in: mpsc::Sender<StaticRead>,
     ) -> Self {
         let script_name = cfg.script_name.as_deref().and_then(normalize_script_name);
         let fair_queuing = cfg.fair_queuing;
@@ -951,8 +983,11 @@ impl Scheduler {
             http_out,
             view_in,
             ctl_out,
+            #[cfg(feature = "static")]
             mounts,
+            #[cfg(feature = "static")]
             mount_roots,
+            #[cfg(feature = "static")]
             static_in,
             script_name,
             started: Instant::now(),
@@ -1390,6 +1425,7 @@ impl Scheduler {
         // `[route.static]` the head is also decoded to segments here — before a
         // slot, a queue entry or any descriptor — so a `..` or a dotfile is
         // answered without ever reaching `admit_ready`.
+        #[cfg(feature = "static")]
         let static_head = self.static_head(&head, &resolution);
         // The few head fields routing and the `request` event need, copied out
         // before the raw payload is moved into the request.
@@ -1416,13 +1452,18 @@ impl Scheduler {
             bytes_out: 0,
             body: Vec::new(),
             body_plan: BodyPlan::AllowEmptyOnly,
+            #[cfg(feature = "static")]
             body_plan_error: None,
             body_ready: true,
             static_pending: false,
+            #[cfg(feature = "static")]
             static_mount: None,
             static_parts: None,
+            #[cfg(feature = "static")]
             static_has_body: false,
+            #[cfg(feature = "static")]
             static_if_none_match: None,
+            #[cfg(feature = "static")]
             static_body: None,
             pumping: false,
             learn_fallback: false,
@@ -1457,12 +1498,14 @@ impl Scheduler {
                     None,
                 )
             }
+            #[cfg(feature = "static")]
             Resolution::MountRefused => {
                 // §9.2 step 0: a shape the resolver refuses is a `400` before
                 // any mount or view is consulted.
                 self.requests.insert(stream_id, request);
                 self.refuse_static(stream_id, 400, None)
             }
+            #[cfg(feature = "static")]
             Resolution::Hidden => {
                 // §9.2 step 0: the full path is a dotfile or a PHP source
                 // before any mount or view is consulted, and no view may answer
@@ -1487,6 +1530,7 @@ impl Scheduler {
                 // or its `fallback` even when no view matched. It takes a slot
                 // exactly like a routed static request, and a miss that reaches
                 // step 4 is a `404` (or the `--learn` fallback).
+                #[cfg(feature = "static")]
                 if let Some(StaticHead::Resolve {
                     mount,
                     segments,
@@ -1555,6 +1599,7 @@ impl Scheduler {
                 // plan is still computed (a miss that forwards needs it) but its
                 // error is *stored*, not answered: the mount's method/body gate
                 // outranks a codec error on a path a file answers.
+                #[cfg(feature = "static")]
                 if let Some(StaticHead::Resolve {
                     mount,
                     segments,
@@ -1655,6 +1700,7 @@ impl Scheduler {
     /// so a refused (`400`) or hidden (`404`) path is answered there, before
     /// `admit_ready`: no slot is taken, nothing queues, and no `..` probe can
     /// turn into a `503` (§9.2).
+    #[cfg(feature = "static")]
     fn static_head(&self, head: &ReqHeadView<'_>, resolution: &Resolution) -> Option<StaticHead> {
         let mount = resolution.mount()?;
         let headers: Vec<(Vec<u8>, Vec<u8>)> = head
@@ -1969,6 +2015,7 @@ impl Scheduler {
                 None => {
                     return Resolution::Unrouted {
                         path: request_path,
+                        #[cfg(feature = "static")]
                         mount: None,
                     };
                 }
@@ -1980,6 +2027,7 @@ impl Scheduler {
         // is stripped, so a mount can neither hide a refusal nor manufacture
         // one. They only apply when a mount claims the path: an app is free to
         // serve a dotfile of its own.
+        #[cfg(feature = "static")]
         let mount = match self.mounts.lookup(path) {
             None => None,
             Some(found) => {
@@ -2007,6 +2055,7 @@ impl Scheduler {
                 route: matched.route,
                 rule: u32::try_from(matched.rule).unwrap_or(u32::MAX),
                 path_info: path.to_string(),
+                #[cfg(feature = "static")]
                 mount,
             },
             None => {
@@ -2019,6 +2068,7 @@ impl Scheduler {
                 }
                 Resolution::Unrouted {
                     path: request_path,
+                    #[cfg(feature = "static")]
                     mount,
                 }
             }
@@ -2744,6 +2794,7 @@ impl Scheduler {
     ///    `GET`/`HEAD` that declares no body;
     /// 4. `Hidden`/`Refused`/a missing `fallback` is final, and a miss with no
     ///    view and no fallback is a `404` (or the `--learn` fallback).
+    #[cfg(feature = "static")]
     fn dispatch_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         let Some(request) = self.requests.get_mut(&stream_id) else {
             return Ok(());
@@ -2811,6 +2862,7 @@ impl Scheduler {
     /// owns the answer from here, exactly as before. A request no view matched
     /// asks the mount's declared `fallback`, on `GET`/`HEAD` only, and is a
     /// `404` otherwise (or the `--learn` fallback, which is the app).
+    #[cfg(feature = "static")]
     fn mount_missed(
         &mut self,
         stream_id: u32,
@@ -2861,6 +2913,7 @@ impl Scheduler {
     ///
     /// The static slot is released first: a learn request is served by the
     /// app's ordinary view path, which takes its own slot.
+    #[cfg(feature = "static")]
     fn mount_learn_or_404(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         if !self.cfg.learn_mode {
             return self.refuse_static(stream_id, 404, None);
@@ -2882,6 +2935,7 @@ impl Scheduler {
     /// Only the status and the header **names** are ever recorded anywhere:
     /// `StaticResponse` has no `Debug` on purpose (`MB.2.4.2`), and a header
     /// value may be content-derived, so the response is never formatted.
+    #[cfg(feature = "static")]
     fn serve_static(
         &mut self,
         stream_id: u32,
@@ -2936,6 +2990,7 @@ impl Scheduler {
     /// else. Without that, a front controller's view would get `REQ_HEAD` for a
     /// request whose first body byte is a `413` — the very race this file's
     /// head-time refusal exists to close, on the one path a mount fronts.
+    #[cfg(feature = "static")]
     fn forward_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         self.release_static_slot(stream_id);
         let (error, waiting, buffered) = match self.requests.get_mut(&stream_id) {
@@ -3013,6 +3068,7 @@ impl Scheduler {
     /// `pread`, whose result comes back over `static_in`. Nothing here loops or
     /// spawns a thread per request: one read is ever outstanding per slot, and
     /// `slots <= max_workers` is therefore the reader bound as well.
+    #[cfg(feature = "static")]
     fn pump_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         let Some(request) = self.requests.get(&stream_id) else {
             return Ok(());
@@ -3092,6 +3148,7 @@ impl Scheduler {
     /// The short-read rule is design §4.6's: a body is never truncated under a
     /// `Content-Length` the head already promised, so an error or fewer bytes
     /// than were asked for is `RespAbort` and never a silently short `200`.
+    #[cfg(feature = "static")]
     fn on_static_read(&mut self, read: StaticRead) -> Result<(), SchedulerError> {
         let stream_id = read.stream_id;
         let forward = match self.requests.get_mut(&stream_id) {
@@ -3134,6 +3191,7 @@ impl Scheduler {
 
     /// Ends a static response whose bytes are all out: `RESP_END`, the slot and
     /// the request.
+    #[cfg(feature = "static")]
     fn finish_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         self.http_push(stream_id, Frame::RespEnd)?;
         if let Some(request) = self.requests.get_mut(&stream_id) {
@@ -3153,6 +3211,7 @@ impl Scheduler {
     /// `RESP_ABORT` and never a second status. §8.1's outcome list is closed and
     /// has no "the responder failed" member, so this reports `view_died`: the
     /// response died mid-stream, exactly as a view's thread would.
+    #[cfg(feature = "static")]
     fn abort_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         self.http_push(
             stream_id,
@@ -3174,6 +3233,7 @@ impl Scheduler {
     /// The slot goes back exactly once — [`Scheduler::release_static_slot`] is
     /// the only place that decrements it, and it is a no-op on a request that
     /// already let go — and the request is only dropped when it did.
+    #[cfg(feature = "static")]
     fn release_finished_static(&mut self, stream_id: u32) -> Result<(), SchedulerError> {
         // The last byte — or the abort — is where the cost is fixed, exactly as
         // a streamed view response does at its `RESP_END`.
@@ -3201,6 +3261,31 @@ impl Scheduler {
         request.slots = false;
         self.slots = self.slots.saturating_sub(1);
         true
+    }
+
+    /// The three calls the view path makes into the responder, in a build
+    /// without `static` (`MB.36.2`).
+    ///
+    /// [`run`] refuses a manifest that declares a mount in that build
+    /// ([`SchedulerError::StaticNotCompiled`]), so no request ever matches a
+    /// mount, sets `static_pending`, or holds a static body: each of these is
+    /// unreachable, and "nothing to do" is what the compiler is told.
+    #[cfg(not(feature = "static"))]
+    fn dispatch_static(&mut self, _stream_id: u32) -> Result<(), SchedulerError> {
+        Ok(())
+    }
+
+    /// See the `static` build's `pump_static`.
+    #[cfg(not(feature = "static"))]
+    fn pump_static(&mut self, _stream_id: u32) -> Result<(), SchedulerError> {
+        Ok(())
+    }
+
+    /// See the `static` build's `on_static_read`: nothing ever sends on that
+    /// channel, so this is never called.
+    #[cfg(not(feature = "static"))]
+    fn on_static_read(&mut self, _read: StaticReadMsg) -> Result<(), SchedulerError> {
+        Ok(())
     }
 
     /// Answers a request the static responder refused (design §4.4).
@@ -5252,6 +5337,13 @@ pub async fn run<C: CtlChannel + Send + 'static>(
     ctl: C,
     emit: Emit,
 ) -> Result<(), SchedulerError> {
+    // A manifest that declares a static mount needs the responder this binary
+    // was built without: refuse at boot, before a single channel is served
+    // (`MB.36.2`, ADR-0016 decision 6).
+    #[cfg(not(feature = "static"))]
+    if !cfg.mounts.is_empty() {
+        return Err(SchedulerError::StaticNotCompiled);
+    }
     let limits = cfg.frame_limits;
     let (http_read, http_write) = http.into_split();
     let (http_in_tx, mut http_in_rx) = mpsc::channel(HTTP_IN_CAPACITY);
@@ -5282,21 +5374,31 @@ pub async fn run<C: CtlChannel + Send + 'static>(
     // Held for the whole run, so `http_in_rx` only ever ends with an explicit
     // `HttpIn::Closed`.
     let _keepalive = http_in_tx;
-    // One static root per mount, opened here as the scheduler's uid and before
-    // a single request is served: a root that cannot be opened is a broken
-    // declaration, not a degraded answer, so it exits the role (§9.2).
-    let mounts = MountTable::from_mounts(&cfg.mounts);
-    let mut mount_roots: Vec<Arc<StaticRoot>> = Vec::with_capacity(cfg.mounts.len());
-    for mount in &cfg.mounts {
-        let mut root = StaticRoot::open(&cfg.manifest_dir, &mount.policy)
-            .map_err(|error| SchedulerError::protocol(error.to_string()))?
-            .with_prefix(&mount.prefix);
-        // The one source of the per-file ceiling: no environment variable and
-        // no manifest key (design §4.6).
-        root.max_bytes = cfg.static_max_bytes;
-        mount_roots.push(Arc::new(root));
-    }
-    let (static_in, mut static_in_rx) = mpsc::channel(STATIC_IN_CAPACITY);
+    // The static responder is compiled in: one root per mount is opened here as
+    // the scheduler's uid and before a single request is served. A root that
+    // cannot be opened is a broken declaration, not a degraded answer, so it
+    // exits the role (§9.2).
+    #[cfg(feature = "static")]
+    let (mounts, mount_roots, static_in, mut static_in_rx) = {
+        let mounts = MountTable::from_mounts(&cfg.mounts);
+        let mut mount_roots: Vec<Arc<StaticRoot>> = Vec::with_capacity(cfg.mounts.len());
+        for mount in &cfg.mounts {
+            let root = StaticRoot::open(&cfg.manifest_dir, &mount.policy)
+                .map_err(|error| SchedulerError::protocol(error.to_string()))?
+                .with_prefix(&mount.prefix)
+                // The one source of the per-file ceiling: no environment
+                // variable and no manifest key (design §4.6).
+                .with_max_bytes(cfg.static_max_bytes);
+            mount_roots.push(Arc::new(root));
+        }
+        let (static_in, static_in_rx) = mpsc::channel::<StaticReadMsg>(STATIC_IN_CAPACITY);
+        (mounts, mount_roots, static_in, static_in_rx)
+    };
+    // Nothing ever sends on it (see `StaticReadMsg`), and the sender is held
+    // for the whole run, so its `select!` arm never completes.
+    #[cfg(not(feature = "static"))]
+    let (_static_in, mut static_in_rx) = mpsc::channel::<StaticReadMsg>(1);
+    #[cfg(feature = "static")]
     let mut scheduler = Scheduler::new(
         cfg,
         routes,
@@ -5309,6 +5411,8 @@ pub async fn run<C: CtlChannel + Send + 'static>(
         mount_roots,
         static_in,
     );
+    #[cfg(not(feature = "static"))]
+    let mut scheduler = Scheduler::new(cfg, routes, table, emit, http_out, view_in_tx, ctl_out);
     scheduler.start()?;
 
     loop {

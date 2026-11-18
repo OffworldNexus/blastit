@@ -1,0 +1,27 @@
+[package]
+name = "blastit-view-static"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+# The one request-target decoder lives in the transport crate (D3): this crate
+# resolves a path the scheduler already decoded, it never decodes a second
+# time. `default-features = false` because `blastit-view` still defaults
+# `python`, and an edge with defaults on would link `libpython` into the
+# standalone binary the scheduler is part of.
+blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+rustix = { version = "1.1.5", features = ["fs"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+# The suites' one non-root precondition is `geteuid()`, and the fixture builds
+# a FIFO and a few modes: the library itself needs only `fs`.
+rustix = { version = "1.1.5", features = ["fs", "process"] }

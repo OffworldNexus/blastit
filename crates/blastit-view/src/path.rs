@@ -12,13 +12,18 @@
 //! Anything that fails step 2 or 3 is a `400`. The view then rebuilds its own
 //! `environ` from the original target, so the scheduler never rewrites the
 //! request it forwards.
+//!
+//! This is the tree's **only** request-target decoder (design `MB.36` D3): the
+//! scheduler routes on [`percent_decode`] and `blastit-view-static` resolves a
+//! file on it, so what `%2F` means has one implementation and no crate carries
+//! a second.
 
 /// The request target without its query string (§8.1: query strings are never
 /// logged, and they are never routed on).
 ///
 /// A `#` is left alone: fragments are not sent in a request line, but if one
 /// appears it is part of the path bytes as far as blastit is concerned.
-pub(crate) fn path_of_target(target: &[u8]) -> &[u8] {
+pub fn path_of_target(target: &[u8]) -> &[u8] {
     match target.iter().position(|byte| *byte == b'?') {
         Some(end) => &target[..end],
         None => target,
@@ -29,7 +34,7 @@ pub(crate) fn path_of_target(target: &[u8]) -> &[u8] {
 ///
 /// Returns `None` for a `%` that is not followed by two hexadecimal digits:
 /// blastit will not guess at what the client meant (§2.4 answers `400`).
-pub(crate) fn percent_decode(input: &[u8]) -> Option<Vec<u8>> {
+pub fn percent_decode(input: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(input.len());
     let mut index = 0;
     while index < input.len() {
@@ -65,7 +70,7 @@ fn hex(byte: &u8) -> Option<u8> {
 ///
 /// Returns `None` when the path is not inside the mount, which the caller
 /// answers with a `404`.
-pub(crate) fn strip_script_name<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+pub fn strip_script_name<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     // Both an empty prefix and `/` mount at the root: nothing to strip.
     if prefix.is_empty() || prefix == "/" {
         return Some(path);
@@ -101,7 +106,7 @@ pub fn normalize_script_name(prefix: &str) -> Option<String> {
 ///
 /// A request path carrying one of those cannot be routed (and must not reach
 /// an event): §3.2 answers `400`.
-pub(crate) fn is_control_byte(byte: u8) -> bool {
+pub fn is_control_byte(byte: u8) -> bool {
     byte < 0x20
 }
 

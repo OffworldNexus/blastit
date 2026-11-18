@@ -36,7 +36,7 @@ use blastit_manifest::blastfile::StaticImmutable;
 use rustix::fs::{FileType, Mode, OFlags, ResolveFlags, Stat, fstat, open, openat, openat2};
 use rustix::io::Errno;
 
-use crate::path::{path_of_target, percent_decode};
+use blastit_view::path::{path_of_target, percent_decode};
 
 /// The longest decoded request path a static route resolves, in bytes
 /// (`R7`). Checked before any syscall, so `ENAMETOOLONG` is unreachable.
@@ -54,7 +54,7 @@ pub const STATIC_CHUNK_BYTES: usize = 64 * 1024;
 pub const STATIC_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Every pid/uid/control byte of a decoded path below this is refused
-/// (`R7`): NUL and the C0 range, exactly [`crate::path`]'s rule.
+/// (`R7`): NUL and the C0 range, exactly [`blastit_view::path`]'s rule.
 const CONTROL_LIMIT: u8 = 0x20;
 
 /// The exact `RESOLVE_*` composition [`StaticRoot::resolve`] passes to
@@ -74,7 +74,7 @@ pub const STATIC_RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
 ///
 /// [`StaticRefusal::Encoding`] is the one variant [`segments`] cannot itself
 /// return: it takes an already-decoded `&str`, and the single percent-decode
-/// (`crate::path`) answers `400` for a malformed escape or invalid UTF-8
+/// (`blastit_view::path`) answers `400` for a malformed escape or invalid UTF-8
 /// before this function runs. The variant exists so the responder's `400`
 /// mapping is one table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -300,6 +300,17 @@ impl StaticRoot {
     /// reader's only mount and every unit fixture's shape.
     pub fn with_prefix(mut self, prefix: &str) -> Self {
         self.prefix = prefix.to_string();
+        self
+    }
+
+    /// This root with the per-file ceiling `run` was configured with (§4.6).
+    ///
+    /// [`STATIC_MAX_FILE_BYTES`] is the default `StaticRoot::open` installs and
+    /// the only constant `SchedulerConfig::static_max_bytes` defaults to; the
+    /// scheduler applies its configured value through this one setter, so a
+    /// caller outside this crate cannot reach behind the root to change it.
+    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes;
         self
     }
 
@@ -628,7 +639,7 @@ pub fn same_inode(probe: (u64, u64), read: (u64, u64)) -> bool {
     probe == read
 }
 
-/// One decode already happened (`crate::path`). The decoded path must begin
+/// One decode already happened (`blastit_view::path`). The decoded path must begin
 /// with exactly one `/`: a second leading `/` (from `//x` or `/%2Fx`) is
 /// [`StaticRefusal::Absolute`], because it is the form a naive `root + path`
 /// join treats as an absolute filesystem path.

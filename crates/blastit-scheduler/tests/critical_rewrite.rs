@@ -17,7 +17,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
-#[path = "common/static_fixture.rs"]
+#[path = "../../blastit-view-static/tests/common/static_fixture.rs"]
 mod static_fixture;
 
 use std::io::Read;

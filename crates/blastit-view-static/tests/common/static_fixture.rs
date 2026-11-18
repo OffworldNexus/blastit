@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use blastit_manifest::StaticPolicy;
 use blastit_manifest::blastfile::{StaticImmutable, StaticPattern};
-use blastit_scheduler::static_asset::{Backend, STATIC_MAX_FILE_BYTES, StaticRoot};
+use blastit_view_static::static_asset::{Backend, STATIC_MAX_FILE_BYTES, StaticRoot};
 use rustix::fs::{CWD, Mode, chmod, mkfifoat};
 
 /// The hashed asset the page's fence answers.

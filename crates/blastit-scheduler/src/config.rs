@@ -323,7 +323,15 @@ impl Default for SchedulerConfig {
             mem_total_bytes: None,
             view_mem_estimate: 32 * 1024 * 1024,
             manifest_dir: PathBuf::new(),
+            // The one source of the ceiling is the responder's constant
+            // (`STATIC_MAX_FILE_BYTES`, no environment variable, no manifest
+            // key, design §4.6). A build that compiled no responder serves no
+            // file — `run` refuses a manifest with a mount — so the field keeps
+            // its shape and no number.
+            #[cfg(feature = "static")]
             static_max_bytes: crate::static_asset::STATIC_MAX_FILE_BYTES,
+            #[cfg(not(feature = "static"))]
+            static_max_bytes: 0,
             mounts: Vec::new(),
         }
     }

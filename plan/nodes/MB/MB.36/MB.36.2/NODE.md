@@ -2,7 +2,7 @@
 id: MB.36.2
 title: "Extract crates/blastit-view-static: openat2 root resolution, MIME/ETag/immutable/SPA-answer responder, and the three protected static suites, with no behaviour change"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.36.1, MB.33, MB.23.5.2]
@@ -24,14 +24,16 @@ paths:
   - "crates/blastit-scheduler/tests/critical_static_entry.rs"
   - "crates/blastit-scheduler/tests/critical_rewrite.rs"
   - "crates/blastit-scheduler/tests/common/static_fixture.rs"
+  - "crates/blastit-scheduler/tests/static_feature_off.rs"
   - "crates/blastit-scheduler/Cargo.toml"
   - crates/blastit/Cargo.toml
+  - crates/blastit/src/stage1.rs
   - Cargo.lock
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T15:57"
+updated: "2026-11-18T13:21"
 ---
 
 # Goal
