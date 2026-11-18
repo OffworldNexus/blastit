@@ -39,3 +39,11 @@ attempt 2/3 started
 ## 2026-11-18T07:02 [lead]
 
 reviewer 2: VERDICT PASS. Five fixes verified on disk; packaging-gates now 54 cases (MB.35.5 added 5); one MINOR — tokio-postgres is a dev-dep and must not sit in the "can be built where" column (fixing).
+
+## 2026-11-18T07:06 [lead]
+
+status ready -> done
+
+## 2026-11-18T07:06 [lead]
+
+committed ef93363

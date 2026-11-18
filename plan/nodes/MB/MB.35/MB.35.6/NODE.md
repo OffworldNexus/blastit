@@ -11,11 +11,11 @@ paths:
   - scripts/test_check_lsp_portable.py
   - Makefile
   - "docs/testing/E2E-MB.35.md"
-attempts: 0
-max_attempts: 3
-escalation: none
+attempts: 4
+max_attempts: 5
+escalation: expert
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T09:18"
 ---
 
 # Goal

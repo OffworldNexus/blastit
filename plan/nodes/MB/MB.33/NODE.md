@@ -2,7 +2,7 @@
 id: MB.33
 title: "Resolve blastit-lsp without uv on Linux, macOS and Windows: Zed LspSettings -> which(blastit-lsp) -> GitHub Release download, with the exact [[capabilities]] and a guard that fails on extras"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.35]
@@ -20,7 +20,7 @@ attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T12:57"
-updated: "2026-11-18T07:55"
+updated: "2026-11-18T08:55"
 ---
 
 # Goal

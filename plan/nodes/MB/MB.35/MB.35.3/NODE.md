@@ -2,7 +2,7 @@
 id: MB.35.3
 title: "Amend ADR-0013 and design 8.3: blastit-lsp crate boundary, portability invariant, three-step resolution and the five-target matrix table"
 kind: task
-status: ready
+status: done
 owner: designer
 priority: 1
 depends_on: [MB.35.2]
@@ -15,7 +15,7 @@ attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T06:51"
+updated: "2026-11-18T07:06"
 ---
 
 # Goal

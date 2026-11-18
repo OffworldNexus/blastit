@@ -3268,3 +3268,75 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T05:47 [MB.34.7] (test-curator) G1 re-filed as MB.34.7.9: MB.34.7.1 and the lead's MB.34.9 were both superseded in the 05:46 reconciliation, leaving the LSP-squiggle gap with no live node.
 - 2026-11-18T05:51 [MB.35.1] (lead) status review -> done
 - 2026-11-18T05:51 [MB.35.1] (lead) committed 8dc0fab
+- 2026-11-18T05:52 [MB.35.2] (lead) status active -> review
+- 2026-11-18T05:52 [MB.35.2] (lead) owner done: ## blastit-lsp machine contract (no args/stdio/extensionless, five "never does", exits 0/1, five assets, binary.path), macOS/Windows editor-only; te
+- 2026-11-18T05:52 [MB.35.3] (lead) status ready -> active
+- 2026-11-18T05:52 [MB.35.3] (lead) attempt 1/3 started
+- 2026-11-18T05:52 [MB.35.3] (lead) base 143afaf
+- 2026-11-18T06:00 [MB.35.2] (lead) REVIEW FAIL (attempt 1): MAJOR README still teaches `rustup target add wasm32-wasip2` (a phantom step) while RESULT §5 claims it was removed; MAJOR troubleshoot
+- 2026-11-18T06:00 [MB.35.2] (lead) status review -> ready
+- 2026-11-18T06:00 [MB.35.2] (lead) attempt 2/3 started
+- 2026-11-18T06:15 [MB.35.2] (lead) attempt 3: four closing MINORs applied (build is "after the release that ships blastit-lsp"; local.md step 2 says "once the release ships"; 29+5 docstring; revi
+- 2026-11-18T06:15 [MB.35.2] (lead) status ready -> review
+- 2026-11-18T06:15 [MB.39] (lead) created (task) docs-test's dev-learn fence exits 1 after SIGINT, twice in one session: make it deterministic
+- 2026-11-18T06:31 [MB.35.4] (lead) edited fields
+- 2026-11-18T06:31 [MB.35.4] (lead) paths added by lead from the accepted design: crates/blastit-manifest/src/lib.rs (re-export parameterize) and crates/blastit/tests/critical_lsp.rs (4 include_st
+- 2026-11-18T06:31 [MB.35.3] (lead) status active -> review
+- 2026-11-18T06:31 [MB.35.3] (lead) owner done: 4 artefacts (ADR-0013 amendment +208/-3, ADR-0010 lsp family row, design §1/§8.3a/§11/§14 +457/-8, ARCHITECTURE §2.7 15-row table); 15 critic report
+- 2026-11-18T06:31 [MB.35.4] (lead) status ready -> active
+- 2026-11-18T06:31 [MB.35.4] (lead) attempt 1/3 started
+- 2026-11-18T06:31 [MB.35.4] (lead) base 143afaf
+- 2026-11-18T06:43 [MB.35.4] (lead) status active -> review
+- 2026-11-18T06:43 [MB.35.4] (lead) owner done: crate extracted (98% renames), blastit lsp is `pub use blastit_lsp as lsp`, deps exactly blastit-manifest + serde_json (0 libc/rustix/nix/pyo3 in ca
+- 2026-11-18T06:43 [MB.35.5] (lead) status ready -> active
+- 2026-11-18T06:43 [MB.35.5] (lead) attempt 1/3 started
+- 2026-11-18T06:43 [MB.35.5] (lead) base 143afaf
+- 2026-11-18T06:51 [MB.35.3] (lead) REVIEW FAIL (attempt 1): MAJOR ADR-0013 Consequences :84/:94 still assert the two premises the amendment reverses and the amendment does not name them as supers
+- 2026-11-18T06:51 [MB.35.3] (lead) status review -> ready
+- 2026-11-18T06:51 [MB.35.3] (lead) attempt 2/3 started
+- 2026-11-18T06:51 [MB.35.4] (lead) reviewer: VERDICT PASS — 98% renames, body byte-identical but for the 4 design-mandated edits, closure is blastit-manifest(+sqlpolicy/pg_query/regex)+serde_json
+- 2026-11-18T06:57 [MB.35.5] (lead) status active -> review
+- 2026-11-18T06:57 [MB.35.5] (lead) owner done: lsp family in platform_matrix (5 legs, --matrix/--count/--leg/--summary, PROVEN per target), build-lsp.sh (manylinux, getcap empty, LICENSE+SHA256SU
+- 2026-11-18T07:02 [MB.35.3] (lead) reviewer 2: VERDICT PASS. Five fixes verified on disk; packaging-gates now 54 cases (MB.35.5 added 5); one MINOR — tokio-postgres is a dev-dep and must not sit 
+- 2026-11-18T07:06 [MB.35.2] (lead) status review -> done
+- 2026-11-18T07:06 [MB.35.2] (lead) committed da04c46
+- 2026-11-18T07:06 [MB.35.3] (lead) status ready -> done
+- 2026-11-18T07:06 [MB.35.3] (lead) committed ef93363
+- 2026-11-18T07:06 [MB.35.4] (lead) status review -> done
+- 2026-11-18T07:06 [MB.35.4] (lead) committed 1126395 (renames in da04c46)
+- 2026-11-18T07:06 [MB.35.5] (lead) REVIEW FAIL (attempt 1): Linux x86_64 is proved (layout, glibc 2.28, getcap empty, no libpython, 0-stderr smoke) and the review-file gate works both ways, but "
+- 2026-11-18T07:06 [MB.35.5] (lead) status review -> ready
+- 2026-11-18T07:06 [MB.35.5] (lead) attempt 2/3 started
+- 2026-11-18T07:06 [MB.35.6] (lead) status ready -> active
+- 2026-11-18T07:06 [MB.35.6] (lead) attempt 1/3 started
+- 2026-11-18T07:06 [MB.35.6] (lead) base ef93363
+- 2026-11-18T07:22 [MB.35.5] (lead) status ready -> review
+- 2026-11-18T07:22 [MB.35.5] (lead) attempt 2: one table restored (build-lsp.sh matches OS shapes, assets come from --archive/--dir/--executable; release counts blastit-*.tar.gz minus lsp), --summ
+- 2026-11-18T07:26 [MB.35.6] (lead) status active -> review
+- 2026-11-18T07:26 [MB.35.6] (lead) owner done: check_lsp_portable.py (6 properties: manifest ceiling, source tokens, environment, cargo metadata closure, identity, wiring) + 15 mutation twins (47
+- 2026-11-18T07:26 [MB.33] (lead) status ready -> active
+- 2026-11-18T07:26 [MB.33] (lead) attempt 1/3 started
+- 2026-11-18T07:26 [MB.33] (lead) base ef93363
+- 2026-11-18T07:35 [MB.35.5] (lead) reviewer 2: VERDICT PASS — no full triple outside platform_matrix.py, release job target-free with nullglob, --summary lsp 5 legs each with its ci_command, 447 
+- 2026-11-18T07:35 [MB.35.6] (lead) reviewer: VERDICT PASS — four transcripts all 924f0d24 and diff-clean, archive layout + sha256sum + empty getcap + --help/--version exit 1, six properties, 47 a
+- 2026-11-18T07:45 [MB.33] (lead) status active -> review
+- 2026-11-18T07:45 [MB.33] (lead) owner done: settings -> which(blastit-lsp) -> which(blastit) lsp -> Release download (GzipTar x4, Zip on Windows, relative <version>/<target>/), make_file_execu
+- 2026-11-18T07:55 [MB.35.5] (lead) reviewer 2: VERDICT PASS — 0 full triples outside the table (only comments/derived names), release count target-free with nullglob, --summary lsp 5 legs with ve
+- 2026-11-18T07:55 [MB.33] (lead) REVIEW FAIL (attempt 1): MAJOR editors/zed/src/lib.rs:169 — latest_github_release runs BEFORE the cache hit at :179, so an offline/rate-limited machine that alr
+- 2026-11-18T07:55 [MB.33] (lead) status review -> ready
+- 2026-11-18T07:55 [MB.33] (lead) attempt 2/3 started
+- 2026-11-18T08:20 [MB.33] (lead) reviewer 2: VERDICT PASS — cache-first verified (metadata before latest_github_release, version-free EXTRACT_DIR so both paths name one file), promise consisten
+- 2026-11-18T08:20 [MB.35.6] (lead) REVIEW FAIL (round 2): MAJOR the brace/alias classification still lets four COMPILING escapes through (root alias, brace-item alias, std glob, fs brace alias) w
+- 2026-11-18T08:20 [MB.35.6] (lead) status review -> ready
+- 2026-11-18T08:20 [MB.35.6] (lead) attempt 2/3 started
+- 2026-11-18T08:54 [MB.35.6] (lead) REVIEW FAIL (round 3): three MORE compiling escapes — std::os omitted from FORBIDDEN_MODULES (use std::os as o; o::unix::fs::symlink), and the split rule only m
+- 2026-11-18T08:54 [MB.35.6] (lead) edited fields
+- 2026-11-18T08:54 [MB.35.6] (lead) status ready -> ready
+- 2026-11-18T08:54 [MB.35.6] (lead) attempt 3/4 started
+- 2026-11-18T08:55 [MB.35.5] (lead) status review -> done
+- 2026-11-18T08:55 [MB.35.5] (lead) committed 1d42a49
+- 2026-11-18T08:55 [MB.33] (lead) status ready -> done
+- 2026-11-18T08:55 [MB.33] (lead) committed 233c959
+- 2026-11-18T09:18 ESCALATION #13 -> expert for MB.35.6 by lead: 4 cheap attempts, each closing a spelling class and each revealing a new one: the source property is a line-based scanne
+- 2026-11-18T09:18 [MB.35.6] (lead) edited fields
+- 2026-11-18T09:18 [MB.35.6] (lead) attempt 4/5 started

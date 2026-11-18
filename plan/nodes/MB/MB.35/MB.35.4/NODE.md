@@ -2,7 +2,7 @@
 id: MB.35.4
 title: "Extract crates/blastit-lsp (bin blastit-lsp + thin blastit lsp delegation) with the protected critical_lsp suite unchanged"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.35.3]
@@ -19,7 +19,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T06:43"
+updated: "2026-11-18T07:06"
 ---
 
 # Goal

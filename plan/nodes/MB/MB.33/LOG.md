@@ -47,3 +47,11 @@ attempt 2/3 started
 ## 2026-11-18T08:20 [lead]
 
 reviewer 2: VERDICT PASS — cache-first verified (metadata before latest_github_release, version-free EXTRACT_DIR so both paths name one file), promise consistent in code/page/design incl. the refresh cost, guard pins CACHE_HIT verbatim + 44 tests, wasm build 0 warnings, make check EXIT=0. Two MINORs: document the "clear the work dir to refresh" remedy on the CLI page; README remains unattributed.
+
+## 2026-11-18T08:55 [lead]
+
+status ready -> done
+
+## 2026-11-18T08:55 [lead]
+
+committed 233c959

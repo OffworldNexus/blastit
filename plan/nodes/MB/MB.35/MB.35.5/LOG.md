@@ -51,3 +51,11 @@ reviewer 2: VERDICT PASS — no full triple outside platform_matrix.py, release 
 ## 2026-11-18T07:55 [lead]
 
 reviewer 2: VERDICT PASS — 0 full triples outside the table (only comments/derived names), release count target-free with nullglob, --summary lsp 5 legs with verbatim ci_command, 449 checks / 56 cases, drift proved both ways; the Apple sha256sum blocker was fixed mid-review (shasum selector + per-leg sha_verify) and verified with both tools. Six MINORs recorded (PYTHON_VERSION env, --image re-exec name forwarding, rule 17 not scanning ci.yml, NODE.md:85, RESULT predates the fix, 4 foreign ruff files).
+
+## 2026-11-18T08:55 [lead]
+
+status review -> done
+
+## 2026-11-18T08:55 [lead]
+
+committed 1d42a49

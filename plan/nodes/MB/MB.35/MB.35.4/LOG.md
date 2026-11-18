@@ -35,3 +35,11 @@ owner done: crate extracted (98% renames), blastit lsp is `pub use blastit_lsp a
 ## 2026-11-18T06:51 [lead]
 
 reviewer: VERDICT PASS — 98% renames, body byte-identical but for the 4 design-mandated edits, closure is blastit-manifest(+sqlpolicy/pg_query/regex)+serde_json with 0 forbidden hits, protected diff exactly 4+/4- and zero removed asserts, cli.rs untouched, stdio suite asserts an exact {4,8}-{4,12} severity-1 range with env_clear(). One MINOR (RESULT diff arithmetic) fixed.
+
+## 2026-11-18T07:06 [lead]
+
+status review -> done
+
+## 2026-11-18T07:06 [lead]
+
+committed 1126395 (renames in da04c46)

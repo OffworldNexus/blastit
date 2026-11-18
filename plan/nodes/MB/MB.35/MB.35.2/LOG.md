@@ -47,3 +47,11 @@ attempt 3: four closing MINORs applied (build is "after the release that ships b
 ## 2026-11-18T06:15 [lead]
 
 status ready -> review
+
+## 2026-11-18T07:06 [lead]
+
+status review -> done
+
+## 2026-11-18T07:06 [lead]
+
+committed da04c46
