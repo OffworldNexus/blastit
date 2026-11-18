@@ -3538,3 +3538,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T20:36 [MB.3] (strategist) status ready -> done: 0.2.0 embedded PHP 8.3/8.4/8.5 over view.chan + php2shell defense shipped; deferred coverage in MB.26.30-37 and non-Python check suite run
 - 2026-11-18T20:36 [MB.5] (strategist) v0.2.0 gate carry-forward: non-Python request-level `blastit check -- <suite>` (formerly `MB.3.6.4` against retired `MB.9` `Upstream` types) belongs to `MB.5`'s
 - 2026-11-18T20:44 [MB] (strategist) v0.2.0 sub-release gate PASSED: all 0.2.0 epics (MB.1..MB.3, MB.12, MB.21..MB.25, MB.31, MB.32, MB.34..MB.36) done; deferred coverage re-filed to MB.26.30-56; M
+- 2026-11-18T20:57 HUMAN H-016 opened by conductor (node MB)
+- 2026-11-18T20:57 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0

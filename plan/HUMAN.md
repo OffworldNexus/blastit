@@ -153,3 +153,11 @@ Expensive budget exhausted (60.74/00). Please raise expensive_cap_usd in plan/BU
 
 **Answer:**
 
+## H-016 [open] (node MB)
+
+- asked: 2026-11-18T20:57 by conductor
+
+Release v0.2.0 is ready on branch release/0.2.0 (HEAD 7cdb546, PR targeting develop). Review and squash-merge the PR on GitHub — merging validates CI, Docs, and Live DigitalOcean e2e on develop and automatically publishes v0.2.0 to PyPI and GitHub Releases. Scope: Blastfile replaces the TOML manifest entirely; embedded NTS libphp for PHP 8.3/8.4/8.5 (8.2 dropped); blastit dev live reload via fanotify (all views, :8080 held, --no-reload); parallel PHP view processes under one scheduler budget; blastit lsp + Zed extension for Blastfile (highlighting, SQL + $? diagnostics, Quick Fix, format-on-save) with a portable standalone blastit-lsp resolved without uv; one immutable pattern grammar (bare / subtree / regex); the four-crate view architecture (blastit-view transport only, view-{static,python,php}) with WorkerRuntime deleted. Verified locally: make check EXIT=0 (204 suites), make e2e EXIT=0 (411 checks). NOT yet executed anywhere: the macOS/Windows and aarch64 blastit-lsp/wheel/archive legs and the DigitalOcean live run — they run for the first time on this PR and on develop after merge.
+
+**Answer:**
+
