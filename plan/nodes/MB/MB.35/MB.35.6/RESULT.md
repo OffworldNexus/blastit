@@ -1,110 +1,160 @@
 # RESULT — MB.35.6: make the portability promise enforced, then prove the documented commands
 
-STATUS: done (attempt 4 — the lead's redesign: the `source` property is an **allowlist of `std`
-paths**, so the class is closed by construction instead of enumerated)
+STATUS: done (attempt 5 — `expert`: every remaining per-line regex in `source` moved onto the
+`code_tokens()` stream with fixed-point `extern crate` + `use` alias resolution, `[lib]`/`[[bin]]`
+target-path containment enforced in `scan_manifest`, and the allowlist self-check proved by a
+guard-mutating negative twin; 59 fixtures, 229 assertions, 43 cargo-checked)
 
-## Round 4 — the redesign, and the tail it replaces
+## Root-Cause Diagnosis (Attempt 5 — `expert`)
 
-Rounds 1–3 each added needles and each review found a spelling the list did not have. This round's
-two proofs of that tail both **compiled, were fmt-clean and passed the 18-needle guard**:
+Attempts 1–3 chased a spelling denylist. Attempt 4 inverted `std` paths to `STD_ALLOWLIST`, **but**
+left half the scanner on compacted individual lines (`"".join(line.split())`) and assumed every
+compiled file already lived under `src/`:
 
-- `use std::os as o; o::unix::fs::symlink("a", "b")` — `os` was missing from `FORBIDDEN_MODULES`;
-- `use std as\ns;` and `use std::\n*;` — the split rule only matched a line ending exactly `usestd`.
+1. **`extern crate`, `include!`, `#[path = …]` and `NEEDLES` were per-line regexes (`BLOCKER`).**
+   `extern\ncrate std as s;` bypassed `re.compile(r"externcrate")`, and `collect_std_paths` only
+   inspected paths whose literal root token was `"std"`, so `s::process::Command::new(..)`,
+   `s::env::var(..)` and `s::os::unix::fs::symlink(..)` compiled (`cargo check` exit 0) while the
+   guard exited 0. Along the way, `code_tokens()` also failed to strip `r#` on raw identifiers
+   (`r#std`, `r#os`), mis-lexed `b"\"…"` escaped byte strings as raw strings, and checked
+   `#![forbid(unsafe_code)]` via raw substring (`in text`) — which `src/lib.rs`'s line-40 `//!`
+   doc comment satisfied even when the real attribute on line 44 was deleted.
+2. **`scan_manifest` never inspected `[lib].path` or `[[bin]].path` (`MAJOR`).** Pointing `[lib]`
+   or `[[bin]]` at `../../outside.rs` (containing `Command::new`) while leaving clean files in
+   `src/` compiled cleanly and bypassed `scan_sources` completely; symlinks inside `src/` had the
+   same shape.
+3. **`cfg_predicates` ran on a single compacted line (`MAJOR`).** `#[cfg\n(unix)]` and
+   `cfg\n!(unix)` bypassed `_CFG_OPEN` on each half-line.
+4. **No negative twin tested `STD_ALLOWLIST`'s own `std::env` self-check (`MAJOR`).** Deleting the
+   `for allowed_path in STD_ALLOWLIST:` loop left all 126 assertions green.
+5. **Two `MINOR`s.** The docstring/E2E prose overstated single-line literal matching and
+   unscoped "by construction" coverage, and the self-test banner printed `len(cases)` (`32`) while
+   building two extra uncounted trees (`34`).
 
-A deny-list over spellings has an unbounded tail by construction, so it is gone. `source` now
-checks **paths**, and every path must be on a pinned allowlist:
+## Fix — Token-Shaped Guard + Target-Root Containment
 
-| Mechanism | What it does |
+| Mechanism | What changed in `scripts/check_lsp_portable.py` |
 |---|---|
-| `code_tokens()` | tokenises each file of `src/`; comments and string literals are trivia, so a doc paragraph quoting `std::` is not a hit while real code always is |
-| `parse_use_tree()` | flattens a `use` tree into full paths, so `as` renames and `::{…}` groups are resolved (`use std::{io::{self, Read}, process as p};` → `std::io`, `std::io::Read`, `std::process`); the *path* is what is checked, which is why an alias cannot hide one |
-| `collect_std_paths()` | every fully-qualified `std::…` path in the code, plus every `use` tree, filtered to `std` |
-| `STD_ALLOWLIST` | the 10 `std` paths the crate may name, each with the reason it needs it — exact paths, **never prefixes** (a row for `std::io` does not allow `std::io::Result`) |
-| the allowlist may not hold `std::env` | the guard refuses an `environment` row itself, so the "reads no environment" promise cannot be switched off by editing a list |
+| `code_tokens()` | Lexes once per `.rs` file: skips `//` and nested `/* … */` comments plus `'…'`/`b'…'` char literals, folds `"…"`/`b"…"`/`c"…"` and `(b\|c)?r#*"…"#*` raw strings into single `"str"` tokens (so prose inside strings never triggers identifier/path rules while `#[cfg(target_os = "linux")]` keeps its predicate), and normalizes `r#ident` raw identifiers to `ident`. |
+| `scan_file_tokens()` | Runs **all** `source` and `environment` checks on `code_tokens()` — zero per-line regexes remain: (1) parses `extern crate X [as Y]`, FFI `extern`, and `use` trees (`_joined` fixed from `[:-4]` to `removesuffix("::self")`); (2) resolves `extern crate` + `use` crate/module aliases for `std`/`core`/`alloc` and `{libc, rustix, nix, pyo3, blastit_sys}` to a fixed point; (3) parses `#[…]` and `#![…]` brackets and `ident !` macro calls on tokens so `#[\ncfg\n(unix)]`, `cfg\n!(unix)`, `include\n!("…")`, `#[\npath\n=\n"…"]`, `extern\ncrate`, `extern\n"C"` and real `#![forbid(unsafe_code)]` inner attributes are token-exact across arbitrary whitespace, newlines and comments. |
+| `scan_manifest()` + symlink checks | Verifies `[lib].path` and every `[[bin]].path` are relative `.rs` paths resolving inside `crates/blastit-lsp/src/` (`Path.resolve().is_relative_to(...)`), refuses a symlinked `src/` or any symlinked `.rs` inside `src/`, and checks `#![forbid(unsafe_code)]` on every target root. |
+| `test_check_lsp_portable.py` | Every built workspace tree lives in `cases` (`len(trees) == len(cases) == 59`, `229` assertions, `43` cargo-checked with `cargo clean --offline -p blastit-lsp` before each check). Adds compiling (`cargo check` exit 0) escape fixtures for `lib-path-outside`, `bin-path-outside`, `split-extern-crate-spawn`, `split-extern-crate-os`, `split-extern-crate-env`, `three-line-extern-crate`, `split-extern-c`, `split-libc`, `split-nix`, `foreign-{rustix,pyo3,blastit-sys}`, `split-include-macro`, `split-path-attribute` (`#\n[\npath\n=\n…\n]`), `inner-path-attribute`, `split-cfg-unix`, `split-hash-cfg`, `inner-cfg-unix`, `split-cfg-attr`, `split-cfg-macro`, `macro-std-escape`, `symlink-source`, `symlink-dir`, doc-comment-only `no-forbid`, `submodule-forbid-only`, and raw-identifier + block-comment `invented-spelling`, plus `mid-ident-split` (`rus\ntix` rejected by `rustc`) and a `mutated_allowlist_guard` twin that injects `"std::env::var"` into a temp copy of the guard and asserts `{environment}`. |
 
-The 10 rows, derived from the source and not guessed:
-
-| Path | Why the crate needs it |
-|---|---|
-| `std::cell::OnceCell` | the per-document cell the session caches before it fills it |
-| `std::collections::BTreeMap` | the `documents` map, ordered so a replay is deterministic |
-| `std::io` | `io::stdin`/`io::stdout`: the frames are this process's only transport |
-| `std::io::Read` | reading one frame's body off stdin |
-| `std::io::Write` | writing one frame to stdout |
-| `std::panic::AssertUnwindSafe` | the parser/formatter call is wrapped (design §3.3) |
-| `std::panic::catch_unwind` | so a panic in the parser declines a request, never kills the session |
-| `std::panic::set_hook` | the hook that keeps a panic payload off stderr |
-| `std::process::exit` | `main.rs`'s pinned three-line entry point |
-| `std::str::from_utf8` | a frame's header block is bytes; `Content-Length` is read as text |
-
-Kept exactly as they were: the `manifest` ceiling, `environment` (now fed by the path scan and
-un-allowlistable), `closure`, `identity`, `wiring`, the `#[cfg(test)]`-only `cfg` rule,
-`#![forbid(unsafe_code)]`, the pinned `src/main.rs`, and the foreign or unreadable-file needles
-(`libc::`, `rustix`, `nix::`, `pyo3`, `blastit_sys`, `extern "C"`, `include!`, `#[path = …]`,
-`extern crate`) — 9 of them, none of which is a `std` path.
-
-### The class is closed, not the instances
-
-Every spelling from three rounds is a fixture that **compiles** (`cargo check --offline -p
-blastit-lsp` exits 0) and is **refused** with the exact property label: `literal-path`,
-`brace-group`, `brace-alias`, `root-alias`, `glob`, `split-root-alias`, `split-glob`, `os-alias`,
-`self-item`, `star-item`, `extern-crate`, `include-macro`, `path-attribute`, plus `exact-row`
-(no prefix widening) and `allowlist-drift` (a legitimate item with no row). 32 fixtures,
-126 assertions.
-
-And the proof that it is a class: a fixture built from a spelling on **no list anywhere** —
-`std :: os :: unix :: fs :: symlink("a", "b")`, with the spaces no formatter produces — is
-refused, because the allowlist checks the path and not the spelling:
+### Verbatim Refusals on the Closed Classes (each `cargo check --offline -p blastit-lsp` exit 0)
 
 ```console
-invented-spelling: source: names `std::os::unix::fs::symlink`, which is not one of the 10 pinned `std` paths …
+=== lib-path-outside (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/Cargo.toml: manifest: [lib] sets `path = '../../outside.rs'`, which resolves outside `crates/blastit-lsp/src` — every library and binary target must live inside `src/` so the source scan reads every compiled root
+
+=== bin-path-outside (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/Cargo.toml: manifest: [[bin]] (blastit-lsp) sets `path = '../../outside_bin.rs'`, which resolves outside `crates/blastit-lsp/src` — every library and binary target must live inside `src/` so the source scan reads every compiled root
+
+=== split-extern-crate-spawn (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/lib.rs:8: source: contains `extern crate` — `extern crate` introduces a second crate binding outside `use`
+crates/blastit-lsp/src/lib.rs:12: source: names `std::process::Command::new`, which is not one of the 10 pinned `std` paths — use an allowlisted path, or add a row to `STD_ALLOWLIST` in `scripts/check_lsp_portable.py` with the reason this crate needs it
+
+=== split-extern-crate-os (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/lib.rs:8: source: contains `extern crate` — `extern crate` introduces a second crate binding outside `use`
+crates/blastit-lsp/src/lib.rs:12: source: names `std::os::unix::fs::symlink`, which is not one of the 10 pinned `std` paths — use an allowlisted path, or add a row to `STD_ALLOWLIST` in `scripts/check_lsp_portable.py` with the reason this crate needs it
+
+=== split-extern-crate-env (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/lib.rs:8: source: contains `extern crate` — `extern crate` introduces a second crate binding outside `use`
+crates/blastit-lsp/src/lib.rs:12: environment: names `std::env::var`, which is not one of the 10 pinned `std` paths — use an allowlisted path, or add a row to `STD_ALLOWLIST` in `scripts/check_lsp_portable.py` with the reason this crate needs it
+
+=== split-include-macro (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/lib.rs:8: source: contains `include!` — `include!` compiles a file's text into the binary at build time, which is a path this scan cannot follow
+
+=== split-path-attribute (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/lib.rs:9: source: contains `#[path` — a `#[path = …]` module compiles a file outside `src/`, which this scan never reads — the same unreadable-file class as `include!`
+
+=== split-cfg-unix & split-cfg-macro (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/lib.rs:8: source: carries `cfg` predicate `unix` — the only conditional compilation this crate may have is a `#[cfg(test)]` test module
+crates/blastit-lsp/src/lib.rs:9: source: carries `cfg` predicate `unix` — the only conditional compilation this crate may have is a `#[cfg(test)]` test module
+
+=== symlink-source (cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/sneaky.rs: source: resolves outside `crates/blastit-lsp/src` — symlinks out of `src/` are refused
+
+=== invented-spelling (`use ::r#std/* trivia */::r#os as o; o :: /* mid-path */ r#unix :: fs :: r#symlink(..)`, cargo check=0, guard exit=1) ===
+crates/blastit-lsp/src/lib.rs:8: source: names `std::os`, which is not one of the 10 pinned `std` paths …
+crates/blastit-lsp/src/lib.rs:11: source: names `std::os::unix::fs::symlink`, which is not one of the 10 pinned `std` paths …
 ```
 
-### Still honest about what a source scan cannot see
-
-1. **A `std` re-export from a dependency** — `use blastit_manifest::process;` would name no `std`
-   path. Checked today: neither `blastit-manifest` nor `blastit-sqlpolicy` has a `pub use std`.
-   Closing it in general means checking a dependency's public API — a different guard.
-2. **Generated code** — a proc-macro dependency or a `build.rs` could emit a spawn the scan never
-   reads. Both are refused `manifest`-side (`build.rs` forbidden, a third dependency a ceiling
-   breach), so an escape has to break that promise first.
-3. **`closure` is a named-set denylist** (round-2 finding 5): the ceiling makes the direct case
-   true, the transitive case is only as good as the list. Freezing the reviewed 60-name closure
-   is the recorded follow-up.
-
-## Acceptance
+### Load-Bearing Proof (6 Guard Mutations, Restored `cmp`-Identical)
 
 ```console
-$ PATH="$HOME/.local/bin:$PATH:$HOME/.cargo/bin" uv run --no-project tools/plan.py validate
+drop-allowlist-env-guard (exit=1) -> lsp-portable self-test: a `std::env` row added to `STD_ALLOWLIST`: expected the guard to fail, it exited 0 …
+drop-extern-crate-alias  (exit=1) -> lsp-portable self-test: the `split-extern-crate-env` escape: expected exactly ['environment', 'source'] to go red, got ['source'] …
+drop-target-path-check   (exit=1) -> lsp-portable self-test: the `lib-path-outside` escape: expected the guard to fail, it exited 0 …
+drop-cfg-token-check     (exit=1) -> lsp-portable self-test: the `cfg-unix` escape: expected the guard to fail, it exited 0 …
+drop-include-token-check (exit=1) -> lsp-portable self-test: the `include-macro` escape: expected the guard to fail, it exited 0 …
+allow-fs-read            (exit=1) -> lsp-portable self-test: the `literal-path` escape: expected the guard to fail, it exited 0 …
+cmp: byte-identical
+```
+
+### Scope Statement (Classes Still Outside a Single-Crate Lexical Scan)
+
+1. **Re-exports or macro bodies inside an allowed dependency:** `use blastit_manifest::…` naming a
+   hypothetical future `pub use std::…` inside `blastit-manifest` or `serde_json` emits no `std`
+   token in `crates/blastit-lsp/src/` (verified today: neither exposes one, and `manifest` forbids
+   both a third direct dependency and `build.rs`).
+2. **Transitive `closure` outside the 12 named crates:** `closure` checks the named serving and
+   privilege crates of design §1.3; freezing all 60 package IDs in a checked-in allowlist is a
+   recorded follow-up.
+
+## Acceptance Evidence
+
+```console
+$ PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" uv run --no-project tools/plan.py validate
 plan OK
-```
-
-```console
-$ PATH="$HOME/.local/bin:$PATH:$HOME/.cargo/bin" uv run --no-project scripts/check_lsp_portable.py
-lsp-portable: ok — crates/blastit-lsp: [dependencies] = ['blastit-manifest', 'serde_json'] with no build script, no target table and no feature; 3 source file(s) naming 10 of 10 pinned `std` paths and none of 9 foreign spellings, with no `cfg` but `#[cfg(test)]`; 60 packages in the normal closure, none of 12 forbidden; one home; `make check` runs this target
 exit=0
 ```
 
 ```console
-$ UV_OFFLINE=1 PATH="$HOME/.local/bin:$PATH:$HOME/.cargo/bin" uv run --no-project \
+$ PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" uv run --no-project scripts/check_lsp_portable.py
+lsp-portable: ok — crates/blastit-lsp: [dependencies] = ['blastit-manifest', 'serde_json'] with no build script, no target table, no feature and target paths under `src/`; 3 source file(s) naming 10 of 10 pinned `std` paths and none of 9 foreign constructs, with no `cfg` but `#[cfg(test)]`; 60 packages in the normal closure, none of 12 forbidden; one home; `make check` runs this target
+exit=0
+```
+
+```console
+$ UV_OFFLINE=1 PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" uv run --no-project \
     scripts/test_check_lsp_portable.py
-lsp-portable self-test: ok — 126 assertions over 32 fixtures
-exit=0     (10.6s: 15 `cargo check` runs included)
+lsp-portable self-test: ok — 229 assertions over 59 fixtures (43 cargo-checked)
+exit=0
 ```
 
 ```console
 $ make lsp-portable
 uv run --no-project scripts/check_lsp_portable.py
-lsp-portable: ok — crates/blastit-lsp: [dependencies] = ['blastit-manifest', 'serde_json'] with no build script, no target table and no feature; 3 source file(s) naming 10 of 10 pinned `std` paths and none of 9 foreign spellings, with no `cfg` but `#[cfg(test)]`; 60 packages in the normal closure, none of 12 forbidden; one home; `make check` runs this target
+lsp-portable: ok — crates/blastit-lsp: [dependencies] = ['blastit-manifest', 'serde_json'] with no build script, no target table, no feature and target paths under `src/`; 3 source file(s) naming 10 of 10 pinned `std` paths and none of 9 foreign constructs, with no `cfg` but `#[cfg(test)]`; 60 packages in the normal closure, none of 12 forbidden; one home; `make check` runs this target
 UV_OFFLINE=1 uv run --no-project scripts/test_check_lsp_portable.py
-lsp-portable self-test: ok — 126 assertions over 32 fixtures
+lsp-portable self-test: ok — 229 assertions over 59 fixtures (43 cargo-checked)
 exit=0
 ```
 
 ```console
-$ cargo tree -p blastit-lsp --edges normal | grep -nE '(^|[^a-z-])(libc|rustix|nix|pyo3|blastit-sys|blastit-php-sapi|blastit-py)( |$)'
-exit=1     (no output: none of the six names occurs; the full 132-line tree is in
-           docs/testing/E2E-MB.35.md §2)
+$ cargo tree -p blastit-lsp --edges normal | tail -n 20
+│   │   │   ├── serde_json v1.0.154 (*)
+│   │   │   └── thiserror v1.0.69
+│   │   │       └── thiserror-impl v1.0.69 (proc-macro)
+│   │   │           ├── proc-macro2 v1.0.107 (*)
+│   │   │           ├── quote v1.0.47 (*)
+│   │   │           └── syn v2.0.119 (*)
+│   │   ├── serde v1.0.229 (*)
+│   │   └── serde_json v1.0.154 (*)
+│   ├── regex v1.13.1
+│   │   ├── aho-corasick v1.1.5
+│   │   │   └── memchr v2.8.3
+│   │   ├── memchr v2.8.3
+│   │   ├── regex-automata v0.4.18
+│   │   │   ├── aho-corasick v1.1.5 (*)
+│   │   │   ├── memchr v2.8.3
+│   │   │   └── regex-syntax v0.8.11
+│   │   └── regex-syntax v0.8.11
+│   ├── serde v1.0.229 (*)
+│   └── thiserror v2.0.21 (*)
+└── serde_json v1.0.154 (*)
+# 132 lines total (full tree in docs/testing/E2E-MB.35.md §2); grep for
+# (libc|rustix|nix|pyo3|blastit-sys|blastit-php-sapi|blastit-py) exits 1 (0 matches).
 ```
 
 ```console
@@ -113,34 +163,21 @@ $ grep -n '^check:' Makefile
 ```
 
 ```console
-$ make check
-uv run --no-project tools/guard.py
-guard: OK (13 staged/untracked file(s) checked)
-uv run --no-project tools/critical_guard.py --base HEAD
-critical-guard: HEAD..working tree, 17 changed file(s)
-  no change to a protected critical test
-cargo fmt --all -- --check
-… cargo clippy --workspace --all-targets --locked --features python -- -D warnings
-… cargo doc --workspace --no-deps --locked --features python
-… cargo test --workspace --all-targets --locked --features python        (189 "test result: ok" lines)
-… make test-critical / py-lint / docs-unit / docs-check / docs-test
-48 fences: 30 executed, 18 accounted, 0 failed · 21.1s
-… rs-no-python / seam-check / platform-matrix-check / workflow-check / packaging-gates-test
-… doc-tone / manifest-purity
-… zed-check / test_check_zed_extension (44 tests, OK)
-uv run --no-project scripts/check_lsp_portable.py
-lsp-portable: ok — crates/blastit-lsp: [dependencies] = ['blastit-manifest', 'serde_json'] with no build script, no target table and no feature; 3 source file(s) naming 10 of 10 pinned `std` paths and none of 9 foreign spellings, with no `cfg` but `#[cfg(test)]`; 60 packages in the normal closure, none of 12 forbidden; one home; `make check` runs this target
-UV_OFFLINE=1 uv run --no-project scripts/test_check_lsp_portable.py
-lsp-portable self-test: ok — 126 assertions over 32 fixtures
-uv run --no-project tools/plan.py validate
-plan OK
-exit=0     (3m55s; 189 `test result: ok`, no failure)
-```
-
-```console
 $ make doc-tone docs-check docs-test
-… (docs-check: the site built with --strict, "No issues found")
-48 fences: 30 executed, 18 accounted, 0 failed · 23.3s
+uv run --no-project scripts/check_doc_tone.py
+doc-tone: ok — 30 user-facing page(s), no banned phrase
+uvx --offline zensical build --strict
+Build started
+No issues found
+Build finished in 0.23s
+…
+PASS  docs/reference/cli.md  fence 1  dev-flags             2.2s  each dev flag boots and stops (port 9000 was busy; ran the documented flag on 9001 (declared in inventory.toml))
+PASS  docs/reference/cli.md  fence 2  check-flags           4.1s  each check flag runs
+PASS  docs/reference/cli.md  fence 3  serve-flags           0.0s  production refuses closed; help lists the commands and presets
+PASS  docs/reference/cli.md  fence 4  usage                 0.0s  the documented fold signature exists
+PASS  docs/security.md  fence 1  static                0.0s  statically checked every command, flag and snippet (The e2e harnesses need Docker and root; the runnable-docs gate is unprivileged and Docker-free, so only the command names and the scripts they name are checked.)
+
+48 fences: 30 executed, 18 accounted, 0 failed · 27.6s
 exit=0
 ```
 
@@ -148,58 +185,50 @@ exit=0
 $ UV_OFFLINE=1 uv run --no-project --with pytest==9.2.0 python -m pytest \
     python/tests/test_docs_assets.py -q
 ....................................................                     [100%]
-52 passed in 1.66s
+52 passed in 1.67s
 exit=0
 ```
 
-## Is the redesign load-bearing?
-
-Three mutations on backup copies, each restored byte-identically (`cmp` clean):
-
 ```console
-allow-fs        -> lsp-portable self-test: the `literal-path` escape: expected the guard to fail, it exited 0 …
-allow-env-exact -> lsp-portable self-test: a clean fixture must be green, got 1:
-                   scripts/check_lsp_portable.py: environment: the allowlist holds `std::env::var` —
-                   no `std::env` path may be allowed …
-drop-use-parser -> lsp-portable self-test: the `brace-group` escape: the refusal does not say
-                   'names `std::fs`' — crates/blastit-lsp/src/lib.rs:9: source: names `std`, which is not …
+$ make check
+uv run --no-project tools/guard.py
+guard: OK (5 staged/untracked file(s) checked)
+uv run --no-project tools/critical_guard.py --base HEAD
+critical-guard: HEAD..working tree, 7 changed file(s)
+  no change to a protected critical test
+…
+platform-matrix: ok — 8 wheels, 4 archives, 12 shims, 5 lsp assets declared; built and exercised: 4/8 wheels, 2/4 archives, 6/12 shims, 1/5 lsp assets; reaches: served 6 of 12 shims, 0 probed, 0 refused, 6 unbuilt; 12 served once the aarch64 legs run; 0 leg(s) dropped
+UV_OFFLINE=1 uv run --no-project --locked scripts/check_workflows.py
+workflow-check: ok — 449 checks over 6 workflows and 1 actions, 0 problem(s)
+UV_OFFLINE=1 uv run --no-project scripts/test_packaging_gates.py
+packaging-gates-test: ok — 56 cases passed (workflow=19, matrix=14, wheel-tag=4, exec-env=12, test-seam=7)
+uv run --no-project scripts/check_doc_tone.py
+doc-tone: ok — 30 user-facing page(s), no banned phrase
+uv run --no-project scripts/check_manifest_purity.py
+manifest-purity: ok — 17 source file(s), no std::env
+uv run --no-project scripts/test_manifest_purity.py
+manifest-purity self-test: ok — 82 assertions, 37 fixtures proved, 17 real source file(s)
+uv run --no-project scripts/check_zed_extension.py
+zed-check: OK (59 properties checked)
+UV_OFFLINE=1 uv run --no-project scripts/test_check_zed_extension.py
+Ran 44 tests in 11.626s — OK
+uv run --no-project scripts/check_lsp_portable.py
+lsp-portable: ok — crates/blastit-lsp: [dependencies] = ['blastit-manifest', 'serde_json'] with no build script, no target table, no feature and target paths under `src/`; 3 source file(s) naming 10 of 10 pinned `std` paths and none of 9 foreign constructs, with no `cfg` but `#[cfg(test)]`; 60 packages in the normal closure, none of 12 forbidden; one home; `make check` runs this target
+UV_OFFLINE=1 uv run --no-project scripts/test_check_lsp_portable.py
+lsp-portable self-test: ok — 229 assertions over 59 fixtures (43 cargo-checked)
+uv run --no-project tools/plan.py validate
+plan OK
+exit=0
 ```
-
-The first says the allowlist *is* the gate; the second says the `environment` promise survives an
-edit to the list; the third says the `use`-tree flattening is what closes aliases and groups.
-
-## Rounds 1–3, kept because the reviewers saw them
-
-- **Round 1**: the guard, the `lsp-portable` target wired into `make check`, the E2E page with the
-  closure, the three byte-identical transcripts and the archive run from a clean directory.
-  One red `make check`: my own `cargo build -p blastit` (default features) replacing the shared
-  `target/debug/blastit`, restored with `--features python` (`LESSONS.md` line 80).
-- **Round 2**: five needles plus the bare-`std::process` ban with `main.rs` pinned by file; the
-  `delegation-dropped` / `second-edge` / `phony-dropped` twins; the verdict scoped to Linux
-  (`VERDICT: PASS — Linux x86_64 only; 4 legs NOT RUN`); the archive's 30-byte size note with the
-  binary's `sha256 8c27938b…`; the closure property documented as a named-set denylist.
-  Two attributed reds: a sibling node's concurrent `make check` truncating `target/docs-wheel`, and
-  `zed-check` red on their in-flight `editors/zed` edits.
-- **Round 3**: the alias/glob/path family closed one spelling at a time (18 needles, 8 twins with
-  `cargo check` proofs) — which is exactly the enumeration that this round replaced.
 
 ## Deviations
 
-1. **The guard is 755 lines, not the ~200 the brief estimated, and it grew again this round.** The
-   redesign bought a closed class instead of a shorter file: a tokenizer, a `use`-tree flattener,
-   a path collector and the allowlist. No function exceeds ~90 lines and every line is under 100
-   characters.
-2. **`VERDICT: PASS` is scoped to Linux x86_64** (`… — Linux x86_64 only; 4 legs NOT RUN`).
+1. **Guard size:** `scripts/check_lsp_portable.py` is a complete token-stream scanner, `use`/`extern crate` fixed-point alias resolver, target-path validator and `cargo metadata` closure walker rather than the ~200-line grep estimated in `NODE.md`, which is what closes the token-shaped escape class instead of chasing line spellings.
+2. **Scoped E2E verdict:** `VERDICT: PASS — Linux x86_64 only; 4 legs NOT RUN` in `docs/testing/E2E-MB.35.md`, matching `scripts/platform_matrix.py` (`1 of 5` proved locally; macOS/Windows/aarch64 `NOT RUN` with exact runner blockers).
 
 ## Follow-ups
 
-- **Freeze the reviewed closure** (60 package ids in a checked-in file) to close the transitive
-  half of `closure`.
-- **A dependency's `std` re-export** is unchecked; the two manifests the crate sees expose none.
-- `scripts/platform_matrix.py` keeps printing the four non-Linux legs as unproven until the first
-  CI run after the Release PR; `docs/testing/E2E-MB.35.md` §6 must gain that URL and job names.
-- `docs/testing/README.md` does not index the `E2E-*.md` records (neither this one nor
-  `E2E-MB.34.md`); an index is a one-line edit outside this node's paths.
-- The E2E's session driver lives at `/tmp/opencode/mb356/session.py` (a throwaway, like
-  `E2E-MB.34.md`'s `compact.py`); a permanent two-name comparison belongs beside
-  `scripts/lsp_smoke.py` as a `--compare` mode — a new node, not this leaf.
+- Freeze the reviewed 60-package normal closure in a checked-in file to turn the transitive half of `closure` from a 12-crate denylist into an allowlist.
+- Check allowed dependencies' public re-exports if `blastit-manifest` ever grows `pub use` surfaces beyond `blastfile`, `parameterize`, and model types.
+- Record the first post-Release-PR `.github/workflows/ci.yml` `lsp` matrix URL and job names in `docs/testing/E2E-MB.35.md` §6 so `platform_matrix.py` can advance from `1 of 5` to `5 of 5`.
+- Index `E2E-*.md` files in `docs/testing/README.md` (outside this node's `paths`).

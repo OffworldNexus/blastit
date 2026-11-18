@@ -2,7 +2,7 @@
 id: MB.35.6
 title: "Enforce blastit-lsp portability in make check and prove the documented commands end to end"
 kind: task
-status: ready
+status: review
 owner: implementer
 priority: 1
 depends_on: [MB.35.4, MB.35.5]
@@ -11,11 +11,11 @@ paths:
   - scripts/test_check_lsp_portable.py
   - Makefile
   - "docs/testing/E2E-MB.35.md"
-attempts: 4
+attempts: 5
 max_attempts: 5
 escalation: expert
 created: "2026-11-17T13:17"
-updated: "2026-11-18T09:18"
+updated: "2026-11-18T11:53"
 ---
 
 # Goal

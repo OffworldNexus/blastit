@@ -63,3 +63,23 @@ edited fields
 ## 2026-11-18T09:18 [lead]
 
 attempt 4/5 started
+
+## 2026-11-18T09:41 [lead]
+
+status ready -> active
+
+## 2026-11-18T09:41 [lead]
+
+attempt 5/5 started
+
+## 2026-11-18T09:41 [lead]
+
+attempt 5/5 (expert): independent mutation of the real tree found the round-4 guard still defeated by a line-split  (EXIT=0) because scan_sources compacts per line (check_lsp_portable.py:508) — the exact class the round claimed closed. base 1e96c03
+
+## 2026-11-18T09:41 [lead]
+
+attempt 5/5 (expert): an independent mutation of the real tree found round 4 still defeated by a line-split `extern crate std as s;` (EXIT=0), because scan_sources compacts per line (check_lsp_portable.py:508) — the exact class round 4 claimed closed. base 1e96c03
+
+## 2026-11-18T11:53 [lead]
+
+status active -> review

@@ -116,7 +116,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
         rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
-        packaging-gates-test doc-tone manifest-purity zed-check mutants-clean \
+        packaging-gates-test doc-tone manifest-purity zed-check lsp-portable mutants-clean \
         mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
@@ -176,6 +176,17 @@ manifest-purity: ## Refuse std::env under crates/blastit-manifest/src (R20/R24)
 zed-check: ## Static checks for editors/** (Zed extension + tree-sitter grammar)
 	$(UV) run --no-project scripts/check_zed_extension.py
 	UV_OFFLINE=1 $(UV) run --no-project scripts/test_check_zed_extension.py
+
+# The portable server's one invariant (`MB.35.6`, design §1.3). `blastit-lsp` is
+# the only artifact shipped for macOS and Windows, so its closure is
+# `blastit-manifest` + `serde_json` and its own code is `std` plus those two. The
+# guard reads the crate's manifest (every dependency table, not `[dependencies]`
+# alone), every file under its `src/`, `cargo metadata`'s unfiltered normal
+# closure and this Makefile; its negative twins mutate throwaway copies, so a
+# promise deleted from the guard fails here instead of passing silently.
+lsp-portable: ## Refuse a blastit-lsp dependency, source line or wiring that is not portable
+	$(UV) run --no-project scripts/check_lsp_portable.py
+	UV_OFFLINE=1 $(UV) run --no-project scripts/test_check_lsp_portable.py
 
 rs-format: ## Format Rust workspace
 	$(CARGO) fmt --all
@@ -820,4 +831,4 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test doc-tone manifest-purity zed-check plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test doc-tone manifest-purity zed-check lsp-portable plan-validate ## Full fast unprivileged check
