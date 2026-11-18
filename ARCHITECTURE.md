@@ -60,8 +60,9 @@ their position in the process tree. The exception is dbproxy, which is
 re-exec'd with `--role=dbproxy` (§4); that flag grants nothing by itself,
 because the secrets only arrive over an inherited pipe. CPython is embedded
 through `pyo3` for a Python route, the host's NTS `libphp` is `dlopen`ed in a
-PHP route (§2.6), a `static` mount is answered by the scheduler (§2.4), so
-an all-static site needs no interpreter at all. The database proxy is
+PHP route (§2.6), a `static` mount is answered by the scheduler through the
+`blastit-view-static` library (§2.4), so an all-static site needs no interpreter
+at all. The database proxy is
 built on the [`pregresql`](https://github.com/OffworldNexus/pregresql) crate,
 used as a library. On the Python side there is no framework integration at
 all: blastit loads one standard WSGI callable (`BLASTIT_APP`, or the file's
@@ -350,7 +351,13 @@ http.
 #### The static responder
 
 A `static` mount is answered by the scheduler itself: same process, same uid,
-same inherited listener — no new role, no new uid, no new socket. Each root's
+same inherited listener — no new role, no new uid, no new socket. The
+**resolution** (`static_asset`), the **decision** (`rewrite`) and the **head**
+(`static_response`) are `blastit-view-static`'s, a library called by the
+scheduler; the scheduler keeps admission, the slot and the descriptor pump, and
+the answer leaves as `blastit-frame`'s `RespHead`/`RespBody` frames through the
+scheduler's own `http.chan` writer — `blastit-view` reaches the scheduler only
+as the request-target decoder it re-exports. Each root's
 dirfd is opened once at boot (`O_PATH|O_DIRECTORY` on
 `manifest_dir.join(root)`); a request's path is resolved beneath that descriptor
 and never re-opened from a joined string.
@@ -438,7 +445,10 @@ its process.)
   is handed to a **pooled request thread** that attaches to the interpreter:
   one that has just finished a request parks and takes the next, retiring once
   it has been idle for a while, so a busy view does not create and destroy a
-  thread per request. That thread builds a standard WSGI `environ` and calls
+  thread per request. The pool, the WSGI `environ`, the response frames and the
+  loop are `blastit-view-python`'s; `blastit-view` carries the frames and the
+  credit windows, and `blastit` is the composition root that forks the view and
+  passes it the forker. That thread builds a standard WSGI `environ` and calls
   the WSGI callable, the same one in every process, so the app does its own
   routing and middleware as usual. It then streams the response back. Because
   a worker serves many requests, per-thread application state such as
@@ -474,12 +484,16 @@ which `BLASTIT_MAX_WORKERS` caps for the whole app and `BLASTIT_VIEW_MAX_WORKERS
 caps per view. Nothing in the `Blastfile` sets either: the scheduler owns
 parallelism.
 
-**One transport, one runtime.** The worker is an ordinary `WorkerRuntime`
-(`blastit-view`'s `PhpEmbedRuntime`) on the same unnamed `view.chan`
+**One transport, one runtime.** The worker is `blastit-view-php`'s concrete
+`PhpEmbedRuntime` — there is no runtime trait, because the interface a view has
+is `view.chan` and the process that speaks it — on the same unnamed `view.chan`
 `socketpair` and the same frames as a WSGI view (§3.1): the scheduler's
 upstream session forwards `ReqHead`/`ReqBody` — as `RawFrame`s wherever it does
 not need to decode them — the runtime answers `RESP_HEAD`/`RESP_BODY` under the
 response credit window, and the transport writes `RESP_END_COST` + `DONE`. The
+boot's discovery gate, the `(st_dev, st_ino)` pins and the probe child live in
+that crate too (`discovery`, `pinning`, `probe`); `blastit`'s stage 0 only
+builds their inputs and formats their sentences. The
 request body is buffered in full before PHP starts (the C ABI takes one slice),
 bounded by `max_body_bytes`; `app.output` lines from the request thread reach
 the log pipes like any view's stdout or stderr.
@@ -534,12 +548,15 @@ artifact needs neither.
 
 | Crate | Owns | Direct dependencies | Builds on |
 |---|---|---|---|
-| `blastit` | the composition root: `cli`, stage 0/1, the supervisor and every role below | every workspace crate, plus `libc`, `rustix`, `pyo3`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
+| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code** | every workspace crate (the view crates optional behind `php`/`python`), plus `libc`, `pyo3` (optional), `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
 | `blastit-sys` | the OS surface: fork/exec, uids, capabilities, seccomp, signals, `fanotify`, `/proc` | `libc`, `rustix`, `thiserror` | Linux |
 | `blastit-dbproxy` | the PostgreSQL broker: per-route listener, the query allowlist | `async-trait`, `blastit-events`, `blastit-sqlpolicy`, `blastit-sys`, `pregresql`, `rustix`, `serde`, `serde_json`, `thiserror`, `tokio`, `zeroize`, `tokio-postgres` (dev) | Linux |
-| `blastit-scheduler` | the routing table, the worker budget, fair queuing | `blastit-events`, `blastit-frame`, `blastit-ingress`, `blastit-manifest`, `rustix`, `serde_json`, `thiserror`, `tokio` | Linux |
+| `blastit-scheduler` | the routing table, the worker budget, fair queuing, the static mount's admission and dispatch (`static` feature) | `blastit-events`, `blastit-frame`, `blastit-ingress`, `blastit-manifest`, `blastit-view`, optional `blastit-view-static` (`static`, default here), `rustix`, `serde_json`, `thiserror`, `tokio` | Linux |
 | `blastit-http` | HTTP/1.1 head parsing, the listener, the client-address resolver | `blastit-events`, `blastit-frame`, `httparse`, `thiserror`, `tokio` | Linux (`#[cfg(unix)]`) |
-| `blastit-view` | the Python and PHP worker runtimes | `blastit-frame`, `blastit-php-sapi`, `pyo3`, `thiserror` | Linux |
+| `blastit-view` | **transport only**: `wire`, `flow`, `stream`, `loaded`, `error`, `config`, `sync`, `path` (the one request-target decoder) and `spawn` (the fork seam); no worker, no `pyo3`, no SAPI | `blastit-frame`, `blastit-sys`, `thiserror` | Linux |
+| `blastit-view-python` | the WSGI worker: `environ`, `input`, `request`, `response`, `serve` (the pool), `loaded` (the Python tracker), `immortal`, `zygote` (the fork and child half) | `blastit-frame`, `blastit-sys`, `blastit-view`, `pyo3` | Linux; `blastit` feature `python` |
+| `blastit-view-php` | the embedded worker: `worker` (`PhpEmbedRuntime`, `view.chan` loop), `discovery` (stage-0 ELF gate), `pinning` (library/shim + entry pins), `probe` (the boot probe child), `spawn` (the PHP fork and child half) | `blastit-frame`, `blastit-manifest`, `blastit-php-sapi`, `blastit-sys`, `blastit-view`, `rustix`, `serde_json` | Linux; `blastit` feature `php` |
+| `blastit-view-static` | `static_asset` (`openat2` resolution), `static_response` (MIME/`ETag`/`immutable`), `rewrite` (SPA answer) — a library the scheduler calls, no process | `blastit-manifest`, `blastit-view`, `rustix`, `thiserror` | Linux; `blastit-scheduler` feature `static` |
 | `blastit-py` | the `pyo3` module the wheel imports | `blastit`, `blastit-ingress`, `blastit-manifest`, `blastit-sqlpolicy`, `pyo3`, `serde_json` | Linux |
 | `blastit-php-sapi` | the C SAPI shim's Rust half (the shim is `dlopen`ed, never linked) | none at runtime — a build script compiles the per-minor C ABI | Linux |
 | `blastit-env` | the `BLASTIT_*` / `ALWAYS_STRIP` barrier and the swapped `envp` | `blastit-manifest`, `percent-encoding`, `thiserror`, `url`, `zeroize` | any |
@@ -644,7 +661,9 @@ Rules that apply to every channel:
 Channels ① and ③ use the same frame format: `u32 length | u8 type | u32 id |
 payload`, in little-endian, with a hard maximum frame size of
 `BLASTIT_FRAME_MAX` (default 1 MiB). Larger bodies are split into several
-`*_BODY` frames.
+`*_BODY` frames. The codec is `blastit-frame`'s; the flow-control primitives,
+the loaded-file datagram and the one request-target decoder are
+`blastit-view`'s, and no view crate implements a second framing (§2.7).
 
 | Direction | Frames |
 |---|---|
@@ -848,7 +867,10 @@ Two things hold at every step: init is single-threaded whenever it forks, and
 no secret exists in stage 1.
 
 Every view process is created the same way, whether at startup in eager mode
-or on demand:
+or on demand. The fork itself is `blastit-view-python`'s `zygote` for a WSGI
+view and `blastit-view-php`'s `spawn` for a PHP view; `blastit`'s `forking.rs`
+is the one `fork_for` they are handed, and the ordered child sequence below is
+`blastit_sys::child::enter`.
 
 ```mermaid
 sequenceDiagram
@@ -1479,8 +1501,9 @@ future.
   `EPERM` for every role, because a process may not reach for a namespace.
   `setsid` and `setpgid` are `EPERM` too: a worker cannot leave init's
   supervision by starting a new session or process group. A view's own
-  `setpgid(0, 0)` runs in child setup *before* the filter is installed, so the
-  call being refused is never the legitimate one.
+  `setpgid(0, 0)` runs inside `blastit_sys::child::enter`, between
+  `ChildIo::prepare` and the filter install, so the call being refused is never
+  the legitimate one.
 * **`SeccompRole::EmbeddedView` (a PHP view, §2.6)** keeps every rule above and
   the view's `socket()` families, and additionally refuses `execve`, `execveat`,
   `fork`, `vfork` and a `clone` without `CLONE_THREAD` with `EPERM`. Its workers
@@ -1939,7 +1962,10 @@ is written up in
     only thread and holds the GIL for its whole supervision loop, so it forks
     between `PyOS_BeforeFork()` and `PyOS_AfterFork_Parent()`, and the child
     inherits the GIL, calls `PyOS_AfterFork_Child()`, and then only calls
-    `blastit_view::serve`, which releases it for its I/O loop.
+    `blastit_view_python::serve`, which releases it for its I/O loop. The fork
+    lives in `blastit-view-python`'s `zygote`; `blastit` supplies the forker and
+    the child sequence (`blastit_sys::child::enter`), never a second
+    `PyOS_AfterFork_*` call.
 13. **Embedded CPython can't find the distro's `site-packages` by itself.**
     Append them to `sys.path` before the first import.
 

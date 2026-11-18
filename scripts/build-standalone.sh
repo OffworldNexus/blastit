@@ -5,10 +5,14 @@
 # The archive is `blastit-<target>.tar.gz` and holds:
 #
 #   * `blastit` — the interpreter-free binary. It is built with
-#     `--no-default-features --features php`, which is what makes "no Python" a
-#     property of the *artifact* and not of the manifest it is given: the
-#     capability is off, so a WSGI manifest is refused at exit 1 instead of
-#     failing later (see `crates/blastit/tests/no_python_build.rs`).
+#     `--no-default-features --features php,static`, which is what makes "no
+#     Python" a property of the *artifact* and not of the manifest it is given:
+#     the capability is off, so a WSGI manifest is refused at exit 1 instead of
+#     failing later (see `crates/blastit/tests/no_python_build.rs`). `static` is
+#     named too: it is a default feature of `blastit`, and
+#     `--no-default-features` would silently drop it, shipping an archive that
+#     compiles and then refuses every `static` mount
+#     (`SchedulerError::StaticNotCompiled`, `ADR-0016` decision 6).
 #   * `libblastit_php<digits>-<arch>-<libc>.so` — one shim per PHP minor this
 #     leg has built *and* probed (`scripts/platform_matrix.py` is the list).
 #   * `LICENSE`, and `SHA256SUMS` over everything in the archive.
@@ -95,7 +99,7 @@ host=$("${RUSTC:-rustc}" -vV | sed -n 's/^host: //p')
 target_args=()
 [ "$target" = "$host" ] || target_args=(--target "$target")
 
-echo "build-standalone: cargo build --release --no-default-features --features php ${target_args[*]:-}"
+echo "build-standalone: cargo build --release --no-default-features --features php,static ${target_args[*]:-}"
 if [ -n "$musl" ]; then
     # Dynamic musl, because a static musl binary cannot `dlopen` (`Dynamic loading
     # not supported`), and `dlopen(libphp)` is the whole `[route.php]` story.
@@ -109,10 +113,10 @@ if [ -n "$musl" ]; then
     echo "build-standalone: musl target, forcing a dynamic binary (crt-static off)"
     RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=-crt-static" \
         cargo build --release --locked -p blastit --bin blastit \
-        --no-default-features --features php ${target_args[@]+"${target_args[@]}"}
+        --no-default-features --features php,static ${target_args[@]+"${target_args[@]}"}
 else
     cargo build --release --locked -p blastit --bin blastit \
-        --no-default-features --features php ${target_args[@]+"${target_args[@]}"}
+        --no-default-features --features php,static ${target_args[@]+"${target_args[@]}"}
 fi
 
 # No host fallback: a `--target aarch64-...` whose artifact is missing must fail,
@@ -221,14 +225,30 @@ if [ -n "$musl" ]; then
 fi
 
 # The capability, not the manifest: `cargo tree -e normal` is "what the binary
-# links", so a `pyo3` here is a `libpython` the archive does not have.
-pyo3=$(cargo tree -p blastit -e normal --no-default-features --features php \
-    --target "$target" | grep -c pyo3 || true)
+# links", so a `pyo3` here is a `libpython` the archive does not have — and the
+# absence of `blastit-view-static` is a `static` mount this archive would refuse
+# with `SchedulerError::StaticNotCompiled` after a green build (`MB.36.6`).
+# Both directions are asserted: the negative (no interpreter) and the positive
+# (the responder is in the graph), because `--no-default-features` drops a
+# capability the spelling forgot.
+tree=$(cargo tree -p blastit -e normal --no-default-features --features php,static \
+    --target "$target" --prefix none)
+pyo3=$(printf '%s\n' "$tree" | grep -c pyo3 || true)
 if [ "$pyo3" -ne 0 ]; then
     echo "error: the standalone build depends on pyo3 ($pyo3): it would link libpython" >&2
     exit 1
 fi
 echo "build-standalone: 0 pyo3 dependencies (no libpython linked)"
+
+static=$(printf '%s\n' "$tree" | grep -c '^blastit-view-static v' || true)
+if [ "$static" -eq 0 ]; then
+    echo "error: this archive cannot serve a \`static\` mount: blastit-view-static is not in its dependency graph" >&2
+    echo "  fix: name every capability the artifact needs — this build is" >&2
+    echo "  \`--no-default-features --features php,static\`, and a dropped \`static\` is a boot refusal" >&2
+    echo "  (\`SchedulerError::StaticNotCompiled\`) a green build cannot see" >&2
+    exit 1
+fi
+echo "build-standalone: blastit-view-static present (a static mount is served)"
 
 stage=$(mktemp -d "${TMPDIR:-/var/tmp}/blastit-standalone-stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
@@ -301,8 +321,9 @@ fi
 cat > "$stage/$name/README.md" <<README
 # blastit — $target
 
-The interpreter-free artifact from \`ADR-0010\` §4: the \`php\` capability, no
-\`libpython\`. \`[route.php]\` works; a WSGI manifest is refused at exit 1 with
+The interpreter-free artifact from \`ADR-0010\` §4 and \`ADR-0016\` decision 6: the
+\`php\` and \`static\` capabilities, no \`libpython\`. \`[route.php]\` works, a
+\`static\` mount is served, and a WSGI manifest is refused at exit 1 with
 \`uv add blastit\` as the fix, because this build has no Python by design.
 
 ## Contents

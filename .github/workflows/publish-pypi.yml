@@ -247,9 +247,13 @@ jobs:
           pattern: shim-${{ matrix.name }}-*
           path: dist/shims
           merge-multiple: true
-      # `--no-default-features --features php` is the standalone artifact
-      # (`ADR-0010` §4): no `python`, so no `libpython`, and a WSGI manifest is
-      # refused at exit 1 by the capability gate instead of failing later.
+      # `--no-default-features --features php,static` is the standalone artifact
+      # (`ADR-0010` §4, `ADR-0016` decision 6): no `python`, so no `libpython`, and
+      # a WSGI manifest is refused at exit 1 by the capability gate instead of
+      # failing later; `static` is named because it is a default feature and
+      # `--no-default-features` would otherwise ship an archive that compiles and
+      # then refuses every `static` mount. `scripts/build-standalone.sh` is the
+      # one place that spelling lives; this leg only chooses the builder image.
       #
       # `MB.3.60`: the archive is built **inside `matrix.builder_image`**, whose
       # glibc *is* `matrix.glibc_floor`, and `--max-glibc` refuses the build if

@@ -641,6 +641,13 @@ impl PhpBoot {
 /// tree claim. One callback would silently drop the search-path refusal, which
 /// is the half a route uid can exploit by pointing the loader at its own
 /// directory.
+///
+/// The object callback is handed the claim's **noun** (`the NTS libphp`, `the
+/// embedded shim`) as well as its path, because only the callback can build the
+/// whole sentence's subject and path together. Formatting `{noun}: {detail}`
+/// here duplicated the noun (`the NTS libphp: the file (…) could be replaced`,
+/// the sentence `MB.36.5` recorded): the noun now reaches `Provenance` as the
+/// `Claim`'s name and [`deployment_refusal`] adds only the route prefix.
 #[derive(Clone)]
 pub struct Deployment<'a> {
     /// The uid init runs as: root, or init's own in `rootless` mode.
@@ -649,8 +656,8 @@ pub struct Deployment<'a> {
     /// `include_path` (`ADR-0010` §2).
     pub manifest_dir: PathBuf,
     /// Authorises one object a worker loads: ownership, no file capabilities, no
-    /// writable `DT_RPATH`/`DT_RUNPATH` entry.
-    pub is_protected_object: &'a dyn Fn(&Path) -> Result<(), String>,
+    /// writable `DT_RPATH`/`DT_RUNPATH` entry. Takes the claim's noun and path.
+    pub is_protected_object: &'a dyn Fn(&str, &Path) -> Result<(), String>,
     /// Authorises one tree a worker reads: ownership and permissions only.
     pub is_protected_tree: &'a dyn Fn(&Path) -> Result<(), String>,
 }
@@ -711,12 +718,11 @@ pub fn deployment_refusal(
         ("the NTS libphp", runtime.libphp.as_path()),
         ("the embedded shim", runtime.shim.as_path()),
     ] {
-        if let Err(detail) = (deployment.is_protected_object)(path) {
-            return Some(present_refusal(
-                &prefix,
-                &format!("{what}: {detail}"),
-                Some(runtime.version),
-            ));
+        // The callback owns the subject: `Provenance` names the claim it was
+        // given (`the NTS libphp (…) could be replaced…`), so the sentence reads
+        // once instead of `the NTS libphp: the file (…) could be replaced`.
+        if let Err(detail) = (deployment.is_protected_object)(what, path) {
+            return Some(present_refusal(&prefix, &detail, Some(runtime.version)));
         }
     }
     // One claim at a time, in this order: the first refusal wins, but a claim

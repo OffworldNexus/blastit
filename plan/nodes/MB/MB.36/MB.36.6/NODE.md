@@ -2,7 +2,7 @@
 id: MB.36.6
 title: "Finish the Cargo feature matrix (default php+static, wheel python+php+static), teach the guards the new members, and rewrite ARCHITECTURE.md's crate map while proving no libpython/libphp DT_NEEDED"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.36.5]
@@ -25,11 +25,13 @@ paths:
   - "docs/design/static-and-spa.md"
   - "docs/design/view-crates-architecture.md"
   - crates/blastit/src/stage1.rs
-attempts: 0
+  - crates/blastit/src/stage0.rs
+  - "crates/blastit-view-php/src/discovery.rs"
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-18T13:15"
+updated: "2026-11-18T17:14"
 ---
 
 # Goal

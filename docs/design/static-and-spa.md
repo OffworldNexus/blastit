@@ -284,7 +284,7 @@ each production module stays under the §8 500-line rule. `StaticRoot`'s fields 
 `pub`, and every one of them is in this section. All three modules diff cleanly against
 it today (`static_response.rs` landed with `MB.2.4.2`).
 
-`crates/blastit-scheduler/src/static_asset.rs` (`MB.2.4.1`) owns decoding to segments
+`crates/blastit-view-static/src/static_asset.rs` (`MB.2.4.1`) owns decoding to segments
 and the I/O; it never builds a header:
 
 ```rust
@@ -387,7 +387,7 @@ pub struct StaticFile {
 pub struct StaticMeta { pub size: u64, pub mtime_secs: i64, pub mtime_nsec: u32 }
 ```
 
-`crates/blastit-scheduler/src/static_response.rs` (`MB.2.4.2`) owns the head and the
+`crates/blastit-view-static/src/static_response.rs` (`MB.2.4.2`) owns the head and the
 body source; it takes the `StaticFile` by value and never re-opens the path:
 
 ```rust
@@ -416,7 +416,7 @@ pub fn http_date(unix_secs: i64) -> String;
 exists so a forged `StaticFile` can never make the responder promise bytes it will not
 stream (§4.6).
 
-`crates/blastit-scheduler/src/rewrite.rs` (`MB.2.5.1`) owns the precedence and the
+`crates/blastit-view-static/src/rewrite.rs` (`MB.2.5.1`) owns the precedence and the
 method/body gate, and is testable without a filesystem or a socket:
 
 ```rust
@@ -446,7 +446,7 @@ pub fn decide(outcome: StaticOutcome, method: &[u8], has_body: bool, has_app: bo
 pub fn declares_body(headers: &[(Vec<u8>, Vec<u8>)]) -> bool;
 ```
 
-`crates/blastit-scheduler/src/static_response.rs` (`MB.2.4.2`) owns `respond`, the
+`crates/blastit-view-static/src/static_response.rs` (`MB.2.4.2`) owns `respond`, the
 `ETag`/`Last-Modified`/`304` rules, the `(answer kind, answering path)` cache rule,
 the `Content-Type` table and `http_date`. It receives a `StaticFile` from `decide` and
 returns the `StaticResponse` the scheduler pushes.
@@ -1059,8 +1059,8 @@ executable unprivileged; it is `MB.2.7`'s.
 |---|---|---|
 | standard | `crates/blastit-manifest/tests/docs_fences.rs` (7 files) | the page's block parses, validates, and still has its shape |
 | critical (protected) | `crates/blastit-manifest/tests/critical_static_manifest.rs` (`MB.2.3`) | grammar, defaults, every fatal rule with its message, `check_static_roots` both directions |
-| critical (protected) | `crates/blastit-scheduler/tests/critical_static_resolve.rs` (`MB.2.4.1`) | rows 1–13, 15–17, 20–26, 39's refusal half, `segments`, `classify`, `same_inode`, `openat2` **and** `Walk` |
-| critical (protected) | `crates/blastit-scheduler/tests/critical_static_assets.rs` (`MB.2.4.2`) | 24 `200` response cases plus one `decide` status test (`400`/`404`/`405`/`413`/Forward/Serve): headers, `ETag`, `304`, `HEAD`, cache kinds, `Content-Type`, `http_date`; the refusal rows' `resolve` half stays in `critical_static_resolve.rs` and their statuses in `critical_rewrite.rs` |
+| critical (protected) | `crates/blastit-view-static/tests/critical_static_resolve.rs` (`MB.2.4.1`) | rows 1–13, 15–17, 20–26, 39's refusal half, `segments`, `classify`, `same_inode`, `openat2` **and** `Walk` |
+| critical (protected) | `crates/blastit-view-static/tests/critical_static_assets.rs` (`MB.2.4.2`) | 24 `200` response cases plus one `decide` status test (`400`/`404`/`405`/`413`/Forward/Serve): headers, `ETag`, `304`, `HEAD`, cache kinds, `Content-Type`, `http_date`; the refusal rows' `resolve` half stays in `critical_static_resolve.rs` and their statuses in `critical_rewrite.rs` |
 | critical (protected) | `crates/blastit-scheduler/tests/critical_rewrite.rs` (`MB.2.5.1` + `MB.2.5.2`) | the total order, `405`/`Allow`, `413`, denial-not-masked, forward, no view spawn, pump/timeout |
 | critical (protected) | `crates/blastit/tests/critical_static_cli.rs` (`MB.2.6`) | app-optional boot, bad/unreadable root before the listeners, all-static `check` exit `0`/`2`, `--json` shape, banner |
 | e2e | `e2e/static_assets.py` (`MB.2.7`) | the page's runnable fences in a container (§7.3), device row, real `curl` headers |
@@ -1095,8 +1095,9 @@ parked streams, and a further stream completes when one ends.
 | `R13`, `R14` | `config.rs`/`stage0.rs`/`check.rs` | `critical_static_cli.rs` | *(+)* all-static manifest boots `blastit dev` with no `app` and no pytest importable; 3-line banner with `1 route`; `check` exit `0`, empty stdout, no pytest spawn (a missing pytest proves it: `require_pytest` would have exited `2`); `--json` one document with `ok: true`, `findings: []`, `schema_version: 1`, `requests: 0`; mixed manifest with `app` unchanged.<br/>*(−)* missing root → exit `2` naming path+route+root, `stdout == b""`; root that is a file; unlistable/unreadable root (`geteuid != 0` asserted); mixed manifest without `app` → the old `BLASTIT_APP` message; `check --learn` on all-static → exit `2` |
 | `R15` | `MB.2.7` driver | `e2e/static_assets.py` | §7.3 |
 
-Mutation audit at the `MB` gate: `cargo-mutants -f static_asset.rs`, `-f
-static_response.rs` and `-f rewrite.rs` in `blastit-scheduler`, target ≥ 75 % killed
+Mutation audit at the `MB` gate: `make mutants-rust PKG=blastit-view-static`
+(`cargo-mutants -f static_asset.rs`, `-f static_response.rs` and `-f rewrite.rs`
+in the crate that now owns them), target ≥ 75 % killed
 (the `blastit-manifest` gate already holds for the new validation branches). The
 `resolve_with` substitution test is what kills the identity-check call-site mutant.
 
@@ -1129,7 +1130,7 @@ four leaves below. `MB.2.4.2` follows `MB.2.5.1` because its 24 response cases d
 the statuses **through `decide`**, which `MB.2.5.1` owns.
 
 **Depth-overlap override (accepted).** Response construction lives in
-`crates/blastit-scheduler/src/static_response.rs`, not in `static_asset.rs`, and the
+`crates/blastit-view-static/src/static_response.rs`, not in `static_asset.rs`, and the
 split is not to be re-litigated: `static_asset.rs` resolves, `rewrite.rs` decides,
 `static_response.rs` responds, `scheduler.rs` dispatches. `StaticRoot`'s fields are
 `pub(crate)` and its public surface is exactly §4.2, so the two modules stay under the

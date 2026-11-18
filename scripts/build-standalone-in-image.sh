@@ -288,6 +288,9 @@ echo "build-standalone-in-image: building as uid $(id -u):$(id -g), cache $CARGO
 echo "build-standalone-in-image: glibc $(getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version | head -1)"
 build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
        --max-glibc "$MAX_GLIBC" --builder-image "$BUILDER_IMAGE")
+# `scripts/build-standalone.sh` owns the feature spelling (`--no-default-features
+# --features php,static`): this script chooses *where* the archive is built, never
+# *what* it carries, so the shipped archive's capabilities have one home.
 if [ -n "$SHIM_DIR" ]; then
     build+=(--shim-dir "$SHIM_DIR")
 fi

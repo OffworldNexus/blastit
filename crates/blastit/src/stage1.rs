@@ -345,7 +345,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     if let Some(message) = crate::stage0::no_python_support(&config, &manifest, learn) {
         fail(&emitter, dev.as_ref(), &message);
     }
-    let mut routes: Vec<blastit_scheduler::RouteInfo> = match (&dev, learn) {
+    let routes: Vec<blastit_scheduler::RouteInfo> = match (&dev, learn) {
         (Some(_), true) => std::iter::once(blastit_scheduler::RouteInfo::new(
             crate::dev_learn::LEARN_FALLBACK_ROUTE,
             false,
@@ -437,7 +437,11 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     //
     // `#[cfg(feature = "php")]`: a build without the feature has no `php`
     // vector and no PHP route can exist (`stage0::no_python_support`'s twin
-    // gate refuses one).
+    // gate refuses one). The shadow keeps `routes` immutable in a build that
+    // never patches it, so the feature-less build has no `unused_mut` warning
+    // (`-D warnings` in `make rs-no-default`) and needs no `#[allow]`.
+    #[cfg(feature = "php")]
+    let mut routes = routes;
     #[cfg(feature = "php")]
     for (index, route) in routes.iter_mut().enumerate() {
         if php.get(index).is_some_and(Option::is_some) {

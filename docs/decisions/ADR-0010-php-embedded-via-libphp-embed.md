@@ -1,6 +1,6 @@
 # ADR-0010: Embedded PHP Execution via Host NTS `libphp.so` and Per-Minor SAPI Shims
 
-- **Status:** Accepted
+- **Status:** Accepted (superseded in part by [ADR-0016](ADR-0016-view-crates-over-wire.md): the distribution command spelling — the archive is built with `--features php,static` and the wheel carries `python, php, static`)
 - **Date:** 2026-11-14
 - **Node:** MB.12 (supersedes all FastCGI/pool decisions in [ADR-0008](ADR-0008-fastcgi-backend-and-param-lockdown.md); implements [ADR-0009](ADR-0009-runtime-providers-and-capability-gating.md) for `MB.3` / `MB.9`)
 - **Owner:** architect

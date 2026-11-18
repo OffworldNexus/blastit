@@ -13,7 +13,7 @@ Numbered 1-page records (`ADR-NNNN-<slug>.md`) of lasting UX, protocol, and secu
 | [ADR-0007](ADR-0007-static-asset-serving-and-rewriting.md) | Static Asset Serving and Rewrite Precedence Inside the Scheduler | Proposed | MB.2.2 |
 | [ADR-0008](ADR-0008-fastcgi-backend-and-param-lockdown.md) | Injected `Upstream` Contract (`Upstream` contract lives on in ADR-0009; the FastCGI/pool design it described was withdrawn before release) | Withdrawn (`ADR-0010` replaced it) | MB.3.3 / MB.3.32 |
 | [ADR-0009](ADR-0009-runtime-providers-and-capability-gating.md) | Runtime Providers, Capability-Gated Python, CPU Fair Queuing & Distribution | Accepted (superseded in part by `ADR-0016`) | MB.12 |
-| [ADR-0010](ADR-0010-php-embedded-via-libphp-embed.md) | Embedded PHP Execution via Host NTS `libphp.so` and Per-Minor SAPI Shims (`0.2.0`) | Accepted | MB.12 |
+| [ADR-0010](ADR-0010-php-embedded-via-libphp-embed.md) | Embedded PHP Execution via Host NTS `libphp.so` and Per-Minor SAPI Shims (`0.2.0`) | Accepted (superseded in part by `ADR-0016`: the distribution command spelling) | MB.12 |
 | [ADR-0011](ADR-0011-raw-ingress-boot-refusal.md) | `body = "raw"` Without `allow_raw = true` Refuses the Production Boot (supersedes `ADR-0006` decision 3) | Accepted | MB.3.53 |
 | [ADR-0012](ADR-0012-blastfile-dsl.md) | The Blastfile DSL: LL(1) grammar, no header, zero-dependency lexer/parser, lossless CST, and the `workers` removal | Accepted | MB.21 |
 | [ADR-0013](ADR-0013-blastfile-lsp-and-zed.md) | `blastit lsp` and the Zed Blastfile extension | Accepted | MB.22 |

@@ -18,7 +18,7 @@ to delete or add a second supervisor, uid and budget for a read-only file.
 ## Decision
 
 1. **The responder lives in the scheduler, as the scheduler's own uid.**
-   `crates/blastit-scheduler/src/static_asset.rs` resolves, `static_response.rs` builds
+   `crates/blastit-view-static/src/static_asset.rs` resolves, `static_response.rs` builds
    the answer, and `scheduler.rs` dispatches it on the existing `http.chan`. In production that is `UID_BASE+2`
    (`ARCHITECTURE.md` §2.4), with the seccomp role that may not call `socket()`: no new
    process, role, uid, socket, supervisor or filter. A static answer takes one existing

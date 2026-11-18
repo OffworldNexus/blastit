@@ -654,7 +654,7 @@ pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShim
     // i`) are not the uid that owns `$BLASTIT_EXEC`, the shims or
     // the `Blastfile`'s tree.
     let init_uid = current_uid();
-    let objects = |path: &Path| object_is_protected(init_uid, path);
+    let objects = |what: &str, path: &Path| object_is_protected(init_uid, what, path);
     let trees = |path: &Path| tree_is_protected(init_uid, path);
     let deployment = (scope == PhpShimScope::Deployment).then(|| Deployment {
         init_uid,
@@ -676,10 +676,10 @@ pub(crate) fn php_boot_gate(config: &Config, manifest: &Manifest, scope: PhpShim
 /// is why the gate takes a callback over it instead of re-implementing a
 /// per-path test: the search-path half is private to [`crate::host`].
 #[cfg(feature = "php")]
-fn object_is_protected(init_uid: u32, path: &Path) -> Result<(), String> {
+fn object_is_protected(init_uid: u32, what: &str, path: &Path) -> Result<(), String> {
     Provenance {
         init_uid,
-        objects: vec![Claim::new("the file", path)],
+        objects: vec![Claim::new(what, path)],
         trees: Vec::new(),
     }
     .check_objects()
@@ -747,7 +747,7 @@ pub fn deployment_boot_check(
         lib_dirs: Vec::new(),
     };
     let init_uid = current_uid();
-    let objects = |path: &Path| object_is_protected(init_uid, path);
+    let objects = |what: &str, path: &Path| object_is_protected(init_uid, what, path);
     let trees = |path: &Path| tree_is_protected(init_uid, path);
     let deployment = Deployment {
         init_uid,
@@ -3211,20 +3211,23 @@ view web regex '.*' {}
     /// file capabilities + the zero-writable `DT_RPATH`/`DT_RUNPATH` scan, the
     /// tree decision is ownership only (design §4.4 D5). A no-op closure here
     /// would silently invert every deployment case below.
-    /// One provenance callback as `Deployment` takes it.
-    type Check = Box<dyn Fn(&Path) -> Result<(), String>>;
+    /// One provenance callback as `Deployment` takes it: the object decision
+    /// receives the claim's noun as well as its path, and the tree decision
+    /// receives only the path.
+    type ObjectCheck = Box<dyn Fn(&str, &Path) -> Result<(), String>>;
+    type TreeCheck = Box<dyn Fn(&Path) -> Result<(), String>>;
 
     struct HostChecks {
         init_uid: u32,
-        objects: Check,
-        trees: Check,
+        objects: ObjectCheck,
+        trees: TreeCheck,
     }
 
     impl HostChecks {
         fn new(init_uid: u32) -> Self {
             Self {
                 init_uid,
-                objects: Box::new(move |path| object_is_protected(init_uid, path)),
+                objects: Box::new(move |what, path| object_is_protected(init_uid, what, path)),
                 trees: Box::new(move |path| tree_is_protected(init_uid, path)),
             }
         }

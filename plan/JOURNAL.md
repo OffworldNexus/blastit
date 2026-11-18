@@ -3390,3 +3390,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T15:52 [MB.36.5] (lead) edited fields
 - 2026-11-18T15:52 [MB.36.5] (lead) paths widened: crates/blastit/src/host.rs. The leaf gates `pub use crate::stage0::deployment_boot_check` with #[cfg(feature = "php")] (a php-less build has no g
 - 2026-11-18T16:17 [MB.36.5] (lead) status review -> done
+- 2026-11-18T16:17 [MB.36.6] (lead) edited fields
+- 2026-11-18T16:17 [MB.36.6] (lead) status ready -> active
+- 2026-11-18T16:17 [MB.36.6] (lead) attempt 1/3 started
+- 2026-11-18T16:17 [MB.36.6] (lead) attempt 1/3 started; base b42a6c9. Paths widened with crates/blastit-view-php/src/discovery.rs (the duplicated-noun refusal sentence MB.36.5 recorded) and crate
+- 2026-11-18T16:38 [MB.36.6] (lead) status active -> review
+- 2026-11-18T16:52 [MB.36.6] (lead) REVIEW FAIL (round 1): MAJOR - ARCHITECTURE.md:358 claims the static transport is blastit-view, but the scheduler uses only blastit_view::path and the head leav
+- 2026-11-18T16:52 [MB.36.6] (lead) status review -> ready
+- 2026-11-18T16:52 [MB.36.6] (lead) status ready -> active
+- 2026-11-18T16:52 [MB.36.6] (lead) attempt 2/3 started
+- 2026-11-18T17:14 [MB.36.6] (lead) status active -> done

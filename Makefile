@@ -111,7 +111,7 @@ CRITICAL_STAGE ?= $(CURDIR)/target/python-critical
 CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytest\.mark\.skip|pytest\.skip[[:space:]]*\(|importorskip[[:space:]]*\(|unittest\.skip
 
 .PHONY: help check clean guard critical-guard critical-skip-check plan-validate \
-        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python seam-check \
+        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check \
         no-inotify \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
@@ -205,9 +205,9 @@ rs-test: ## Run all unprivileged Rust unit, integration, and doc tests (python c
 	$(RUST_ENV) $(CARGO) test --workspace --doc --locked --features python
 
 # The default `cargo build -p blastit` **is** the standalone artifact (`MB.17`,
-# ADR-0010 §4): `blastit`'s default features are `php`, which needs nothing at
-# link time, while `python` links `libpython` and a `RUNPATH` into the uv
-# interpreter cache of whoever built it. This target is that build's guard — it
+# ADR-0010 §4): `blastit`'s default features are `php` and `static`, which need
+# nothing at link time, while `python` links `libpython` and a `RUNPATH` into the
+# uv interpreter cache of whoever built it. This target is that build's guard — it
 # compiles the default, inspects the ELF (`readelf`: no `libpython`, no
 # `RPATH`/`RUNPATH`), and runs the suites that need no interpreter. The
 # interpreter-bound suites belong to the python configuration, which `rs-test`
@@ -221,16 +221,23 @@ rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, 
 	@echo "scripts/check-no-inotify.sh                # the only watcher is fanotify (ADR-0014)"
 	scripts/check-no-inotify.sh "$(CURDIR)/target/debug/blastit"
 	scripts/check-no-inotify.sh --self-test
-	@echo "cargo check -p blastit-view --no-default-features"
-	$(CARGO) check -p blastit-view --no-default-features --locked
+	@echo "grep -c pyo3|blastit-php-sapi crates/blastit-view/Cargo.toml"
+	@echo "                                           # [dev-dependencies] is invisible to the ELF/tree checks"
+	@set -e; count=$$(grep -c -e pyo3 -e blastit-php-sapi crates/blastit-view/Cargo.toml || true); \
+	if [ "$$count" -ne 0 ]; then \
+		echo "error: crates/blastit-view names an interpreter ($$count line(s)): the transport crate must stay plain std" >&2; \
+		exit 1; \
+	fi; \
+	echo "blastit-view: 0 pyo3 / blastit-php-sapi lines"
+	@echo "cargo test  -p blastit-view --locked       # the transport crate has no features to turn off"
+	$(CARGO) test -p blastit-view --locked
 	@echo "cargo test  -p blastit --lib --locked      # the default configuration"
 	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --lib
 	@echo "cargo test  -p blastit --test no_python_build"
 	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --test no_python_build
-	$(CARGO) test -p blastit-view --no-default-features --locked --lib
 	@echo "clippy      -p blastit{,-view} (standalone)"
 	$(STANDALONE_ENV) $(CARGO) clippy -p blastit --all-targets --locked -- -D warnings
-	$(CARGO) clippy -p blastit-view --no-default-features --lib --locked -- -D warnings
+	$(CARGO) clippy -p blastit-view --lib --locked -- -D warnings
 	@count=$$($(CARGO) tree -p blastit -e normal \
 		| grep -c pyo3 || true); \
 	if [ "$$count" -ne 0 ]; then \
@@ -238,6 +245,33 @@ rs-no-python: ## Build + inspect the default (standalone) binary: no libpython, 
 		exit 1; \
 	fi; \
 	echo "default build: 0 pyo3 dependencies (no libpython linked)"
+
+# The other corner of `R13` (`MB.36.6`). A released artifact never takes this
+# configuration, and that is exactly why it needs a target: `--no-default-features`
+# is what proves the *feature edges* — not luck, not a dependency's defaults —
+# decide what the binary carries. It must compile (including every test target,
+# because `critical_php_embed` is `#![cfg(feature = "php")]` and a `--all-targets`
+# build is how that gate is witnessed), it must pull neither view crate nor
+# `pyo3`, and the one runtime branch the configuration compiles in — the
+# scheduler's mount refusal — must be exercised rather than compiled: the
+# `static_feature_off` suite is `#![cfg(not(feature = "static"))]`, so this is
+# the only target that runs it.
+rs-no-default: ## Build the feature-less binary and prove a static mount is refused
+	@echo "cargo build -p blastit --locked --no-default-features --all-targets"
+	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked --no-default-features --all-targets
+	@echo "cargo clippy -p blastit --locked --no-default-features --all-targets -- -D warnings"
+	$(STANDALONE_ENV) $(CARGO) clippy -p blastit --locked --no-default-features --all-targets -- -D warnings
+	@set -e; tree=$$($(CARGO) tree -p blastit --no-default-features --locked -e normal --prefix none); \
+	for crate in blastit-view-php blastit-view-static pyo3; do \
+		count=$$(printf '%s\n' "$$tree" | grep -c "^$$crate v" || true); \
+		if [ "$$count" -ne 0 ]; then \
+			echo "error: --no-default-features still pulls $$crate ($$count): a feature edge is inverted" >&2; \
+			exit 1; \
+		fi; \
+		echo "no-default build: 0 $$crate dependencies"; \
+	done
+	@echo "cargo test  -p blastit-scheduler --no-default-features --test static_feature_off"
+	$(CARGO) test -p blastit-scheduler --locked --no-default-features --test static_feature_off
 
 # The one watcher (`MB.23.3`, ADR-0014): `inotify` is banned outright — not as a
 # fallback, not behind a flag, not in a dependency — and `scripts/check-no-inotify.sh`
@@ -831,4 +865,4 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python seam-check platform-matrix-check workflow-check packaging-gates-test doc-tone manifest-purity zed-check lsp-portable plan-validate ## Full fast unprivileged check
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python rs-no-default seam-check platform-matrix-check workflow-check packaging-gates-test doc-tone manifest-purity zed-check lsp-portable plan-validate ## Full fast unprivileged check

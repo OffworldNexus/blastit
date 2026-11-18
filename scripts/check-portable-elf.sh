@@ -3,9 +3,9 @@
 # not run anywhere but the machine that produced it (`MB.17`).
 #
 # A plain `cargo build -p blastit` is the standalone artifact (`ADR-0010` §4): it
-# carries the `php` capability, and nothing it links needs an interpreter. Two
-# things make an artifact checkout-bound instead, and both are visible in
-# `readelf -d`:
+# carries the `php` and `static` capabilities, and nothing it links needs an
+# interpreter. Two things make an artifact checkout-bound instead, and both are
+# visible in `readelf -d`:
 #
 #   * `NEEDED libpython3.X.so` — the file only loads where that CPython is, so a
 #     server without Python gets "cannot open shared object file" before blastit
@@ -13,6 +13,10 @@
 #   * `RUNPATH`/`RPATH` into a build host path — the uv interpreter cache
 #     (`$HOME/.local/share/uv/python/...`) or any `$HOME`, which no other user,
 #     container, or server has.
+#
+# It also refuses `NEEDED libphp*` (`MB.36.6`): PHP is the host's NTS library a
+# worker `dlopen`s through a verified descriptor (`ADR-0010` §1), so linking it
+# would ship a second copy the discovery gate can neither pin nor verify.
 #
 # A *system* RUNPATH is refused too, on purpose: the standalone artifact is
 # `libc`/`libm`/`libgcc_s`/`ld-linux` and needs no search path at all, and "no
@@ -56,6 +60,19 @@ for artifact in "$@"; do
         printf '  %s\n' "$linked" >&2
         echo "  fix: build the standalone artifact (cargo build -p blastit --locked). The wheel enables" >&2
         echo "  the python capability explicitly through crates/blastit-py/Cargo.toml." >&2
+        artifact_status=1
+    fi
+
+    # `libphp` is never linked either (`ADR-0010` §1): a worker `dlopen`s the
+    # host's NTS library and its per-minor shim, so a `NEEDED libphp` is a
+    # second, unfixed copy of PHP the artifact would carry — and one the
+    # discovery gate cannot pin or verify.
+    php="$(printf '%s\n' "$dynamic" | grep -E 'NEEDED.*libphp' || true)"
+    if [ -n "$php" ]; then
+        echo "error: $artifact links libphp, so it carries its own PHP instead of loading the host's:" >&2
+        printf '  %s\n' "$php" >&2
+        echo "  fix: build without a crate that links it; a view dlopens libphp (ADR-0010 §1)," >&2
+        echo "  and the standalone archive is built by scripts/build-standalone.sh." >&2
         artifact_status=1
     fi
 

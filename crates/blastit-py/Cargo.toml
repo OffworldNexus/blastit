@@ -32,11 +32,13 @@ extension-module = ["pyo3/extension-module"]
 [dependencies]
 # The wheel is the artifact that *carries* the interpreter, so it is the one
 # place that turns `blastit`'s `python` capability on (`ADR-0010` §4: wheels are
-# `python, php`, the standalone archive is `php` only). Enabling it here rather
-# than in `blastit`'s defaults is what keeps `cargo build -p blastit` free of
-# `libpython` and of a `RUNPATH` into the build host's uv cache (`MB.17`), and it
-# is also what a from-source `pip install .` gets: that path builds *this* crate
-# and passes no `--features` at all.
+# `python, php, static`, the standalone archive is `php, static`). Enabling it
+# here rather than in `blastit`'s defaults is what keeps `cargo build -p blastit`
+# free of `libpython` and of a `RUNPATH` into the build host's uv cache (`MB.17`),
+# and it is also what a from-source `pip install .` gets: that path builds *this*
+# crate and passes no `--features` at all. `php` and `static` come from
+# `blastit`'s defaults, which a feature edge adds to instead of replacing; the
+# wheel therefore serves a `static` mount as well as a PHP route (`MB.36.6`).
 #
 # Cargo unifies features across a build graph, so a workspace-wide `cargo build`
 # (no `-p`) does still link `libpython` into `target/debug/blastit` because this

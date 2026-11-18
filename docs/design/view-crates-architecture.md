@@ -278,7 +278,7 @@ reports **≥ 7** (the lib binary also holds `worker`'s 22, so a bare total is v
 
 | Source | Lines | Cases | Destination |
 |---|---|---|---|
-| `crates/blastit-scheduler/src/static_asset.rs` | 800 | — | `src/static_asset.rs` (**byte for byte except its one `use crate::path` line**, which becomes `use blastit_view::path`). No runtime assertion is added: `resolve` keeps taking `&[&str]`, and `head_segments` stays the only caller of the decoder in this crate |
+| `crates/blastit-scheduler/src/static_asset.rs` | 800 | — | `src/static_asset.rs` (**byte for byte except its one `use crate::path` line**, which becomes `use blastit_view::path`). No runtime assertion is added: `resolve` keeps taking `&[&str]`, and `head_segments` stays the only caller of the decoder in this crate. `StaticRoot` gains the `with_max_bytes` setter (`MB.36.2`): the per-file ceiling the scheduler's `SchedulerConfig::static_max_bytes` applies at `StaticRoot::open`, so the constant is a default rather than a second knob. |
 | `crates/blastit-scheduler/src/static_response.rs` | 333 | — | `src/static_response.rs` |
 | `crates/blastit-scheduler/src/rewrite.rs` | 167 | — | `src/rewrite.rs` |
 | `crates/blastit-scheduler/tests/common/static_fixture.rs` | 259 | — | `tests/common/static_fixture.rs`; its `use blastit_scheduler::static_asset::…` becomes `use blastit_view_static::static_asset::…` (and any `blastit_scheduler::rewrite` line `blastit_view_static::rewrite`). The new crate's **normal** dependencies are `blastit-view`, `blastit-manifest` and `rustix`, which is what the fixture and the three suites import |
@@ -402,8 +402,9 @@ environment authoritative after the barrier. The rule lives where the mode exist
 `Config::seccomp` defaults to `true`), and `Filter::Off` only for an explicit
 `BLASTIT_SECCOMP=0`; the census
 `grep -rn -e 'Privileges::Shared' -e 'Filter::Off' crates/blastit/src crates/blastit-view/src crates/blastit-view-*/src` must
-return exactly **two** `Privileges::Shared` (the `dev` and `check` boots) and **one** `Filter::Off`
-(the explicit `BLASTIT_SECCOMP=0`), all three in `crates/blastit/src/stage1.rs` and none in a view
+return exactly **one** `Privileges::Shared` — stage 1's `dev` branch only (`check` constructs
+neither, and boots no stage 1) — and **one** `Filter::Off`
+(the explicit `BLASTIT_SECCOMP=0`), both in `crates/blastit/src/stage1.rs` and neither in a view
 crate (the `blastit-sys` match arms are out of scope). A `blastit` unit test pins that the
 production constructor produces `DropTo` + `Seccomp`. The
 crate then sets its own `HOME`/`TMPDIR`, loads, serves; `READY` is still `serve`'s first write.
