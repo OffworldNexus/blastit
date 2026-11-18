@@ -35,8 +35,8 @@ use super::syntax::{Cst, Element, NodeId, NodeKind};
 use super::tokens::{TokenKind, raw_value, str_value};
 use crate::error::{Location, ManifestError, Position, regex_message};
 use crate::model::{
-    BodyOwner, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, Route,
-    Spelling, StaticImmutable, StaticMount, StaticPattern, StaticPolicy, UnresolvedGrant,
+    BodyOwner, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName, QuerySite,
+    Route, Spelling, StaticImmutable, StaticMount, StaticPattern, StaticPolicy, UnresolvedGrant,
 };
 use crate::routing::compile_pattern;
 
@@ -581,6 +581,9 @@ impl<'a> Lowering<'a> {
     /// structure and never ends the clause.
     fn pg_grant(&self, node: NodeId) -> Result<PgGrant, ManifestError> {
         let mut queries: Vec<String> = Vec::new();
+        // §13.4.5: one site per `queries` entry, pushed in the same branch so
+        // the two vectors can never drift.
+        let mut sites: Vec<QuerySite> = Vec::new();
         let mut transaction_control = false;
         let mut tables: BTreeMap<String, TableGrant> = BTreeMap::new();
         let mut functions: Vec<String> = Vec::new();
@@ -672,21 +675,57 @@ impl<'a> Lowering<'a> {
                             *slot = Some(merge_columns(slot.take(), columns));
                         }
                         Some(NodeKind::Query) => {
-                            let text =
-                                self.cst.strings(child).next().ok_or_else(|| {
-                                    self.broken(child, "a `'…'` or `\"…\"` string")
-                                })?;
+                            let token = self
+                                .cst
+                                .child_tokens(child)
+                                .find(|token| {
+                                    matches!(
+                                        self.cst.token_kind(*token),
+                                        Some(TokenKind::Str | TokenKind::RawStr)
+                                    )
+                                })
+                                .ok_or_else(|| self.broken(child, "a `'…'` or `\"…\"` string"))?;
+                            let text = self.cst.token_text(token);
+                            let span = self
+                                .cst
+                                .token_span(token)
+                                .ok_or_else(|| self.broken(child, "a `'…'` or `\"…\"` string"))?;
+                            // §13.4.5: the origin is the first character
+                            // **inside** the opening quote, so an inner offset
+                            // of `0` is the statement's first character (and
+                            // `query ''` points at its closing quote), and
+                            // `interior` is that character's byte range up to
+                            // the closing quote.
+                            let start = span.start.saturating_add(1).min(span.end);
+                            let end = span.end.saturating_sub(1).max(start);
+                            let at = self.position_of(start);
                             // §13.1: either spelling is accepted and stored
                             // without its quotes, normalised by the one
-                            // `blastit_sqlpolicy::normalize`.
-                            let sql = if text.starts_with('\'') {
+                            // `blastit_sqlpolicy::normalize`. The site keeps
+                            // the decoded text *before* that pass, because the
+                            // normalised text's offsets are not the file's.
+                            let raw = if text.starts_with('\'') {
                                 raw_value(text).to_owned()
                             } else {
                                 str_value(text)
                             };
-                            let sql = normalize(&sql);
+                            let escapes = if text.starts_with('"') {
+                                escape_indices(text)
+                            } else {
+                                Vec::new()
+                            };
+                            let sql = normalize(&raw);
+                            // §13.4.5's dedupe: the first spelling of an entry
+                            // keeps the only site, so a duplicate has none and
+                            // gets no second diagnostic.
                             if !queries.contains(&sql) {
                                 queries.push(sql);
+                                sites.push(QuerySite {
+                                    at,
+                                    interior: start..end,
+                                    escapes,
+                                    raw,
+                                });
                             }
                         }
                         _ => {}
@@ -696,6 +735,7 @@ impl<'a> Lowering<'a> {
         }
 
         Ok(PgGrant::new(queries, transaction_control)
+            .with_query_sites(sites)
             .with_tables(TableGrants::new(tables, functions)))
     }
 
@@ -959,6 +999,37 @@ fn merge_columns(existing: Option<Columns>, other: Columns) -> Columns {
         }
         (None, other) => other,
     }
+}
+
+/// The decoded→source map of a `"…"` string (§13.4.5).
+///
+/// `str_value`'s four escapes — `\"`, `\\`, `\n`, `\t` — all cost two source
+/// characters for one decoded character, so the decoded character index of each
+/// is the whole map an inner offset needs; the `'…'` spelling has no escapes
+/// and gets an empty one. The indices are pushed in increasing order, which is
+/// what lets [`crate::QuerySite::position_at`] read them with one cursor.
+///
+/// A backslash before any other character is not an escape the lexer will hand
+/// over — it is [`crate::ManifestError::InvalidEscape`], refused before
+/// lowering — so the map never has to describe `str_value`'s two-character
+/// fallback.
+fn escape_indices(text: &str) -> Vec<u32> {
+    let Some(body) = text
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+    else {
+        return Vec::new();
+    };
+    let mut escapes = Vec::new();
+    let mut decoded: u32 = 0;
+    let mut characters = body.chars();
+    while let Some(character) = characters.next() {
+        if character == '\\' && characters.next().is_some() {
+            escapes.push(decoded);
+        }
+        decoded = decoded.saturating_add(1);
+    }
+    escapes
 }
 
 /// The first rule a mount's `root` breaks, or `None` (§9.1).

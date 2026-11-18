@@ -5,10 +5,11 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use blastit_ingress::IngressPolicy;
-use blastit_sqlpolicy::{Allowlist, TableGrants};
+use blastit_sqlpolicy::{Allowlist, TableGrants, redact_literals};
 use regex::Regex;
 
 use crate::blastfile::{compile_pattern_text, compile_regex_text};
@@ -157,27 +158,166 @@ impl Proxy {
     }
 }
 
+/// Where one `queries` entry was written (§13.4.5, `R34`).
+///
+/// [`PgGrant::query_sites`] has exactly one of these per
+/// [`PgGrant::queries`] entry, in the same order — always, including for a
+/// grant built by [`PgGrant::new`], whose single site has
+/// [`Position::NONE`]. `NONE` means "this entry has no site of its own", never
+/// "the grant came from no document": a programmatic grant still has one entry
+/// per query, so the two vectors are zipped, never searched.
+///
+/// The site holds no copy of the source: `at` is the position of the first
+/// character **inside** the opening quote (so offset `0` is the statement's
+/// first character), `interior` is that character's byte range up to the
+/// closing quote, `escapes` lists the decoded character indices whose source
+/// spelling is a two-character escape, and `raw` is the decoded statement
+/// before [`blastit_sqlpolicy::normalize`], which is what the template check
+/// and every offset run on.
+///
+/// **Bound.** One site is one `Position`, one `String` and one `u32` per
+/// escape. An escape costs two source characters, so a grant holds at most
+/// twice its own `query` text; the document is capped at
+/// [`crate::blastfile::MAX_SOURCE_BYTES`] and no second cap is added.
+#[derive(Clone, PartialEq, Eq)]
+pub struct QuerySite {
+    /// The position of the first character inside the opening quote.
+    ///
+    /// For `query ''` it is the closing quote — the empty statement's only
+    /// honest site — and [`Position::NONE`] for a programmatic grant.
+    pub at: Position,
+    /// The interior's source **byte** range: its start is `at`'s character and
+    /// its end is the closing quote, so `'`/`"` being one byte each makes this
+    /// `token.start + 1 .. token.end - 1`.
+    pub interior: Range<u32>,
+    /// The decoded→source map: the decoded character indices whose source
+    /// spelling is a two-character escape (`\"`, `\\`, `\n`, `\t`). Strictly
+    /// increasing, and empty for the `'…'` spelling, which has no escapes.
+    pub escapes: Vec<u32>,
+    /// The raw decoded statement, before [`blastit_sqlpolicy::normalize`].
+    pub raw: String,
+}
+
+impl QuerySite {
+    /// A site for a grant no document wrote: one entry, no position (§13.4.5).
+    fn unsited(query: String) -> Self {
+        Self {
+            at: Position::NONE,
+            interior: 0..0,
+            escapes: Vec::new(),
+            raw: query,
+        }
+    }
+
+    /// The position of a decoded character offset into [`QuerySite::raw`].
+    ///
+    /// The walk starts at [`QuerySite::at`] and counts **characters**, as
+    /// [`Position`] does: an escape costs two source columns, a raw newline
+    /// moves to the next line, and a `\n` *escape* costs two columns on the
+    /// same line because the source has no line break there. `escapes` is read
+    /// with one cursor, so the walk is `O(offset)`.
+    ///
+    /// [`Position::NONE`] stays `NONE` for every offset: a site with no
+    /// position of its own has no position for its characters either. An
+    /// offset past the end of [`QuerySite::raw`] is a bug in the caller, not a
+    /// site: it falls back to [`QuerySite::at`], the string's own origin,
+    /// rather than inventing a column (§13.4.5).
+    pub fn position_at(&self, offset: u32) -> Position {
+        if self.at.is_none() {
+            return Position::NONE;
+        }
+        let (mut line, mut column) = (self.at.line(), self.at.col());
+        let mut escapes = self.escapes.iter().copied().peekable();
+        let mut walked: u32 = 0;
+        for (index, character) in self.raw.chars().enumerate().take(offset as usize) {
+            if escapes.peek() == Some(&(index as u32)) {
+                escapes.next();
+                // The source spelled this character as `\x`: two columns.
+                column += 2;
+            } else if character == '\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+            walked = walked.saturating_add(1);
+        }
+        if walked < offset {
+            return self.at;
+        }
+        Position::at(line, column)
+    }
+}
+
+/// [`QuerySite`]'s `Debug` redacts the statement it carries (§13.4.5, §17.1).
+///
+/// [`PgGrant`] derives `Debug`, so a derived site would print a pasted value
+/// from any `{:?}` — the same rule [`blastit_sqlpolicy::redact_literals`]
+/// enforces on every other surface.
+impl fmt::Debug for QuerySite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuerySite")
+            .field("at", &self.at)
+            .field("interior", &self.interior)
+            .field("escapes", &self.escapes)
+            .field("raw", &redact_literals(&self.raw))
+            .finish()
+    }
+}
+
 /// The contents of a grant on a `postgresql` proxy (§5.2): the statements the
 /// route may run, whether transaction control is allowed, whether every
 /// statement is allowed instead (§6, `unrestricted = true`), and which tables,
 /// columns and functions its statements may touch (§6, D7).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// [`PartialEq`] compares the grant's **semantics** and not its
+/// [`QuerySite`]s: a site is source metadata, exactly as `route_lines` is, so
+/// [`Manifest::equivalent`] and the parity oracle keep passing on grants the
+/// builder produces. `Debug` derives, so `QuerySite`'s own `Debug` redacts.
+#[derive(Clone, Debug, Default)]
 pub struct PgGrant {
     queries: Vec<String>,
+    query_sites: Vec<QuerySite>,
     transaction_control: bool,
     unrestricted: bool,
     tables: TableGrants,
 }
 
+impl PartialEq for PgGrant {
+    fn eq(&self, other: &Self) -> bool {
+        self.queries == other.queries
+            && self.transaction_control == other.transaction_control
+            && self.unrestricted == other.unrestricted
+            && self.tables == other.tables
+    }
+}
+
+impl Eq for PgGrant {}
+
 impl PgGrant {
     /// Builds a grant from its manifest fields.
     pub fn new(queries: Vec<String>, transaction_control: bool) -> Self {
+        let query_sites = queries.iter().cloned().map(QuerySite::unsited).collect();
         Self {
             queries,
+            query_sites,
             transaction_control,
             unrestricted: false,
             tables: TableGrants::default(),
         }
+    }
+
+    /// The same grant with the sites its queries were written at (§13.4.5).
+    ///
+    /// `#[doc(hidden)]`: only the parser records sites, and it passes one per
+    /// `queries` entry. A length mismatch is not an error the model can report
+    /// — [`PgGrant::query_sites`] and `check_queries` read the site for an
+    /// index and fall back to [`Position::NONE`], so the worst case is a
+    /// refusal without a position, never a wrong one.
+    #[doc(hidden)]
+    pub fn with_query_sites(mut self, query_sites: Vec<QuerySite>) -> Self {
+        self.query_sites = query_sites;
+        self
     }
 
     /// The same grant with table and column grants (§6, D7).
@@ -198,6 +338,7 @@ impl PgGrant {
     pub fn unrestricted() -> Self {
         Self {
             queries: Vec::new(),
+            query_sites: Vec::new(),
             transaction_control: false,
             unrestricted: true,
             tables: TableGrants::default(),
@@ -222,6 +363,18 @@ impl PgGrant {
     /// Empty for an unrestricted grant, which allows by not listing.
     pub fn queries(&self) -> &[String] {
         &self.queries
+    }
+
+    /// Where each [`PgGrant::queries`] entry was written (§13.4.5, `R34`).
+    ///
+    /// Exactly one entry per query, in the same order, whatever built the
+    /// grant: a grant from a document carries the `line:col` of each string's
+    /// first character inside the opening quote, and one built by
+    /// [`PgGrant::new`] carries [`Position::NONE`] for every entry. The two
+    /// vectors are zipped, so an entry never has two sites and a duplicate
+    /// spelling that lowered to one entry keeps the first one.
+    pub fn query_sites(&self) -> &[QuerySite] {
+        &self.query_sites
     }
 
     /// The tables, columns and functions the grant allows beyond its queries
@@ -257,12 +410,23 @@ impl PgGrant {
     /// Unions `other` into `self`: queries are deduplicated in insertion order,
     /// transaction control and `unrestricted` are OR-ed, and table and column
     /// grants are unioned per table and column (§6).
+    ///
+    /// The sites follow their query, so the two vectors stay parallel: a query
+    /// `self` already has keeps **its** site, and a query only `other` has
+    /// brings `other`'s site along.
     pub fn merge_from(&mut self, other: &Self) {
         self.transaction_control |= other.transaction_control;
         self.unrestricted |= other.unrestricted;
-        for query in &other.queries {
+        for (index, query) in other.queries.iter().enumerate() {
             if !self.queries.contains(query) {
                 self.queries.push(query.clone());
+                self.query_sites.push(
+                    other
+                        .query_sites
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| QuerySite::unsited(query.clone())),
+                );
             }
         }
         self.tables.merge_from(&other.tables);

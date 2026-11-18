@@ -112,7 +112,7 @@ pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning, Positi
 pub use error::{clipped, escape_control};
 pub use model::{
     BodyOwner, Executor, Grant, Group, Manifest, PgGrant, PhpPolicy, Protocol, Proxy, ProxyName,
-    Route, StaticMount, StaticPolicy,
+    QuerySite, Route, StaticMount, StaticPolicy,
 };
 pub use routing::{
     Match, MountMatch, MountTable, REGEX_NEST_LIMIT, REGEX_SIZE_LIMIT, RoutingTable,

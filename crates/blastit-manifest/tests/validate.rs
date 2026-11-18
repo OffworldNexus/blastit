@@ -15,8 +15,9 @@ use std::collections::BTreeMap;
 
 use blastit_manifest::{
     Columns, Grant, Group, Location, Manifest, ManifestError, ManifestErrors, ManifestWarning,
-    PgGrant, ProxyName, Route, TableGrant, TableGrants,
+    PgGrant, Position, ProxyName, Route, TableGrant, TableGrants,
 };
+use blastit_sqlpolicy::TemplateKind;
 
 use common::{
     SECTION_5_1, SECTION_6, parse_errors, section_6, texts, validate_errors, validate_warnings,
@@ -1087,4 +1088,248 @@ fn table_grants_may_be_attached_to_a_trait() {
          view product-detail regex '/products/.*' {\n    use catalog\n}\n",
     );
     assert_eq!(warnings, vec![]);
+}
+
+//
+// §13.4.5 / §18.1: a `query`'s own span, and the template refusals.
+//
+
+/// One view with one `postgres` grant whose lines are `grants`.
+///
+/// The grant's first `query` is on line 5 with eight spaces of indent, so the
+/// first character inside its opening quote is column 16 — the hand-computed
+/// origin every case below starts from.
+fn query_grant(grants: &str) -> String {
+    format!(
+        "postgres $DATABASE_URL\n\n\
+         view notes \"/notes/\" {{\n    postgres {{\n        {grants}\n    }}\n}}\n"
+    )
+}
+
+#[test]
+fn a_typo_in_a_one_line_query_is_refused_at_its_first_character() {
+    // `SELCT` is the statement's first character, which is what `Syntax`'s
+    // pinned offset is: the origin, never `Position::NONE`.
+    let source = query_grant("query 'SELCT id FROM products WHERE price > $?'");
+    let errors = validate_errors(&source, 20_000);
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::QueryTemplate {
+            at: Position::at(5, 16),
+            kind: TemplateKind::Syntax,
+        }),
+        "one line, one statement, one sentence at the statement's own first character"
+    );
+    // The sentence is the page's, fixed and whole, with the site in its own
+    // column — and it never quotes the statement.
+    let rendered = errors.to_string();
+    assert_eq!(
+        rendered,
+        format!(
+            "{}: {}",
+            Position::at(5, 16),
+            TemplateKind::Syntax.sentence()
+        )
+    );
+    assert!(!rendered.contains("SELCT"), "{rendered}");
+}
+
+#[test]
+fn a_defect_on_the_third_line_of_a_query_follows_the_newline() {
+    // A raw newline inside the string moves the walk to the next line: the
+    // `...` is 9 + 1 + 13 + 1 + 14 characters in, from (5, 16), so it is
+    // (7, 15) — not the token's (5, 16).
+    let source = query_grant("query 'SELECT id\nFROM products\nWHERE price > ...'");
+    let errors = validate_errors(&source, 20_000);
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::QueryTemplate {
+            at: Position::at(7, 15),
+            kind: TemplateKind::StrayEllipsis,
+        }),
+        "the position follows the newline, not the token start"
+    );
+
+    // And a statement that *opens* with trivia: `Syntax` skips it, so the site
+    // is the `S` on the line below — offset 3 from an origin at (5, 16).
+    let leading = query_grant("query '\n  SELECT id FROM'");
+    assert_eq!(
+        validate_errors(&leading, 20_000),
+        ManifestErrors::from(ManifestError::QueryTemplate {
+            at: Position::at(6, 3),
+            kind: TemplateKind::Syntax,
+        }),
+        "trivia is skipped, and the skipped newline still moves the line"
+    );
+}
+
+#[test]
+fn an_escaped_double_quoted_query_points_at_the_sql_token() {
+    // `\"` costs two source columns for one decoded character, so the `...` is
+    // at column 16 + 31 + 2 = 49; an identity map would say 47, and the
+    // backslash before the first `\"` is at 23, not 49.
+    let source = query_grant("query \"SELECT \\\"name\\\" FROM t WHERE a > ...\"");
+    let errors = validate_errors(&source, 20_000);
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::QueryTemplate {
+            at: Position::at(5, 49),
+            kind: TemplateKind::StrayEllipsis,
+        }),
+        "the position is the SQL token, not the backslash"
+    );
+
+    // A second statement in the same string is refused on its own first
+    // character: `SELECT 1; ` is ten decoded characters.
+    let two = query_grant("query 'SELECT 1; SELECT 2'");
+    assert_eq!(
+        validate_errors(&two, 20_000),
+        ManifestErrors::from(ManifestError::QueryTemplate {
+            at: Position::at(5, 26),
+            kind: TemplateKind::MultipleStatements,
+        })
+    );
+}
+
+#[test]
+fn a_redacted_placeholder_and_an_inline_literal_carry_their_own_site() {
+    // The `…` is the seventh character of `SELECT … FROM cms_page`.
+    let redacted = query_grant("query 'SELECT … FROM cms_page'");
+    let errors = validate_errors(&redacted, 20_000);
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::RedactedQueryPlaceholder {
+            location: Location::Route {
+                index: 0,
+                name: "notes".to_string(),
+            },
+            proxy: ProxyName::from("db"),
+            rule: 0,
+            at: Position::at(5, 23),
+        })
+    );
+    assert!(!errors.errors()[0].position().is_none(), "{errors}");
+
+    // The literal's quote, not the statement's origin: `SELECT "id" FROM t
+    // WHERE a = ` is 29 decoded characters, and the two `\"` pairs before it
+    // add two more source columns each — so the `'` is at column 16 + 29 + 2.
+    let literal = query_grant("query \"SELECT \\\"id\\\" FROM t WHERE a = 'x'\"");
+    let errors = validate_errors(&literal, 20_000);
+    assert_eq!(
+        errors,
+        ManifestErrors::from(ManifestError::LiteralQuery {
+            location: Location::Route {
+                index: 0,
+                name: "notes".to_string(),
+            },
+            proxy: ProxyName::from("db"),
+            rule: 0,
+            at: Position::at(5, 47),
+        })
+    );
+    assert!(!errors.to_string().contains("'x'"), "{errors}");
+}
+
+#[test]
+fn a_duplicate_query_keeps_the_first_site_and_one_sentence() {
+    // Whitespace is not part of a statement, so these are one entry: one site,
+    // one sentence, and the line 6 spelling is never mentioned. The statement
+    // also fails to parse, so the one-sentence rule is under test here too.
+    let source = query_grant(
+        "query 'SELECT … FROM'\n\
+                 query '  SELECT   …   FROM  '",
+    );
+    let manifest = Manifest::from_blastfile_str(&source).expect("parses");
+    let sites = manifest
+        .route(0)
+        .expect("route")
+        .grant(&ProxyName::from("db"))
+        .expect("grant")
+        .as_postgresql()
+        .expect("postgresql")
+        .query_sites();
+    assert_eq!(sites.len(), 1, "one entry, one site");
+    assert_eq!(sites[0].at, Position::at(5, 16));
+
+    let errors = validate_errors(&source, 20_000);
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert_eq!(errors.errors()[0].position(), Position::at(5, 23));
+    assert!(
+        !errors.to_string().contains("6:"),
+        "the duplicate gets no diagnostic: {errors}"
+    );
+}
+
+#[test]
+fn a_file_past_the_parse_cap_is_refused_at_the_entry_past_it() {
+    // §13.4.2: 4096 distinct entries are parsed; the 4097th is refused at its
+    // own origin instead, which is what keeps a huge file from costing one
+    // parse per entry on every publish.
+    let mut grants = String::new();
+    for index in 0..=4096 {
+        grants.push_str(&format!("query 'SELECT {index}'\n        "));
+    }
+    let source = query_grant(grants.trim_end());
+    let errors = validate_errors(&source, 20_000);
+    assert_eq!(errors.len(), 1, "{errors}");
+    assert_eq!(
+        errors.errors()[0],
+        ManifestError::QueryTemplate {
+            // The 4097th query line: line 5 + 4096, still eight spaces in.
+            at: Position::at(4101, 16),
+            kind: TemplateKind::TooManyQueries,
+        }
+    );
+}
+
+#[test]
+fn a_query_site_never_renders_the_statement_it_carries() {
+    // §13.4.5: the site keeps the raw text so an offset can be computed, and
+    // `Debug` is hand-written to redact it — `PgGrant` derives `Debug`, so a
+    // `{:?}` in a log line must not print the value a `query` may hold.
+    let source = query_grant("query \"SELECT 's3cr3t' FROM t\"");
+    let manifest = Manifest::from_blastfile_str(&source).expect("parses");
+    let grant = manifest
+        .route(0)
+        .expect("route")
+        .grant(&ProxyName::from("db"))
+        .expect("grant")
+        .as_postgresql()
+        .expect("postgresql");
+    assert!(
+        grant.query_sites()[0].raw.contains("s3cr3t"),
+        "the value is what the site carries"
+    );
+    let rendered = format!("{:?}", grant.query_sites());
+    assert!(
+        !rendered.contains("s3cr3t"),
+        "Debug leaked a value: {rendered}"
+    );
+    assert!(rendered.contains("SELECT … FROM t"), "{rendered}");
+}
+
+#[test]
+fn a_site_points_at_the_origin_when_the_offset_is_past_the_text() {
+    // §13.4.5's fallback: a walk that cannot be built — here an offset no
+    // caller can produce from a document, so the model's only builder cannot
+    // reach it — falls back to the string's own origin rather than inventing a
+    // column. The fields are public, so the state is constructible on purpose.
+    let site = blastit_manifest::QuerySite {
+        at: Position::at(5, 16),
+        interior: 0..0,
+        escapes: Vec::new(),
+        raw: "SELECT".to_string(),
+    };
+    assert_eq!(site.position_at(0), Position::at(5, 16));
+    assert_eq!(
+        site.position_at(6),
+        Position::at(5, 22),
+        "the end is a real offset"
+    );
+    assert_eq!(
+        site.position_at(7),
+        Position::at(5, 16),
+        "past the end: the origin"
+    );
+    assert_eq!(site.position_at(u32::MAX), Position::at(5, 16));
 }

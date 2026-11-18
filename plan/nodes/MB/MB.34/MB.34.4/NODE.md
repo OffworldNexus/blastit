@@ -2,7 +2,7 @@
 id: MB.34.4
 title: "blastit-manifest: carry each query's raw text and string Position, validate the template, and put every query refusal at its exact inner line:col"
 kind: task
-status: ready
+status: review
 owner: implementer
 priority: 1
 depends_on: [MB.34.3]
@@ -11,13 +11,15 @@ paths:
   - "crates/blastit-manifest/src/model.rs"
   - "crates/blastit-manifest/src/validate.rs"
   - "crates/blastit-manifest/src/blastfile/lower.rs"
+  - "crates/blastit-manifest/src/lib.rs"
   - "crates/blastit-manifest/tests/validate.rs"
   - "crates/blastit-manifest/tests/critical_manifest_011.rs"
-attempts: 0
+  - "crates/blastit-manifest/tests/critical_query_sites.rs"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T04:04"
 ---
 
 # Goal

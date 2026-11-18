@@ -1,17 +1,20 @@
 //! Validation of a parsed manifest: everything that needs the whole document
 //! (§6).
 
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, HashSet, btree_map::Entry};
 
 use crate::error::{
-    Location, ManifestError, ManifestErrors, ManifestWarning, quoted, regex_message,
+    Location, ManifestError, ManifestErrors, ManifestWarning, Position, quoted, regex_message,
 };
 use crate::model::{Manifest, PgGrant, PhpPolicy, ProxyName, Route, StaticPolicy};
 use crate::routing::compile_pattern;
 use crate::uid::UidLayout;
 
 use blastit_ingress::{BodyCodec, IngressPolicy};
-use blastit_sqlpolicy::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, is_system_table, normalize};
+use blastit_sqlpolicy::{
+    KNOWN_STATIC_SETUP_SQL, MAX_TEMPLATE_PARSES, TemplateError, check_template, has_quoted_literal,
+    is_system_table, literal_offset, normalize,
+};
 
 /// The fixed rules a `[route.static]` value can break (`R2`, `R3`, `R5`).
 ///
@@ -251,7 +254,8 @@ fn check_table_grants(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
 }
 
 /// A `queries` entry may never hold a redacted `…` placeholder or an inline
-/// quoted literal (`R24`, `ADR-0003`).
+/// quoted literal (`R24`, `ADR-0003`), and it has to parse as one statement
+/// once its template is expanded (`R31`–`R35`, §13.4.3).
 ///
 /// An exact grant is compared and run as written, so a statement carrying a
 /// value would both commit that value to the repository and match only that one
@@ -259,34 +263,28 @@ fn check_table_grants(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
 /// `KNOWN_STATIC_SETUP_SQL` is the one fixed pair of protocol statements that
 /// may keep its literal. Neither message prints the entry: printing it is what
 /// the rule forbids.
+///
+/// The checks run in one `if … else if … else` chain — redacted `…`, then
+/// inline literal, then the template — because **one entry gets one sentence**
+/// (§18.1): a statement holding `…` does not parse, so running the template
+/// check after it would print two sentences for one defect. Every site comes
+/// from the entry's [`crate::QuerySite`] and the offset the check reported; a
+/// grant no document wrote has `Position::NONE` and renders without a prefix.
 fn check_queries(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
-    let mut check = |location: &Location, proxy: &ProxyName, grant: &PgGrant| {
-        for (rule, query) in grant.queries().iter().enumerate() {
-            // The two fixed setup statements are exempt in their normalised
-            // form: `SET TIME ZONE 'UTC'` and its `$1` spelling are the same
-            // statement on the wire and in the manifest.
-            let query = normalize(query);
-            if query.contains('…') {
-                errors.push(ManifestError::RedactedQueryPlaceholder {
-                    location: location.clone(),
-                    proxy: proxy.clone(),
-                    rule,
-                });
-            } else if has_quoted_literal(&query)
-                && !KNOWN_STATIC_SETUP_SQL.contains(&query.as_str())
-            {
-                errors.push(ManifestError::LiteralQuery {
-                    location: location.clone(),
-                    proxy: proxy.clone(),
-                    rule,
-                });
-            }
-        }
-    };
+    // §13.4.2's parse cap is per file, so the set of statements already parsed
+    // is shared by every grant the two loops below visit. The keys borrow the
+    // document, so the set costs one pointer per distinct entry.
+    let mut parsed: HashSet<&str> = HashSet::new();
     for (name, group) in manifest.groups() {
         for (proxy, grant) in group.grants() {
             if let Some(grant) = grant.as_postgresql() {
-                check(&Location::Group(name.clone()), proxy, grant);
+                check_grant_queries(
+                    &Location::Group(name.clone()),
+                    proxy,
+                    grant,
+                    &mut parsed,
+                    errors,
+                );
             }
         }
     }
@@ -297,10 +295,79 @@ fn check_queries(manifest: &Manifest, errors: &mut Vec<ManifestError>) {
         };
         for (proxy, grant) in route.grants() {
             if let Some(grant) = grant.as_postgresql() {
-                check(&location, proxy, grant);
+                check_grant_queries(&location, proxy, grant, &mut parsed, errors);
             }
         }
     }
+}
+
+/// The query rules of one grant, in the order §18.1 pins.
+fn check_grant_queries<'a>(
+    location: &Location,
+    proxy: &ProxyName,
+    grant: &'a PgGrant,
+    parsed: &mut HashSet<&'a str>,
+    errors: &mut Vec<ManifestError>,
+) {
+    for (rule, query) in grant.queries().iter().enumerate() {
+        let site = grant.query_sites().get(rule);
+        // The raw text the developer wrote, before `normalize`: its offsets are
+        // the file's, while the normalised text's are not (§13.4.5).
+        let raw = site.map_or(query.as_str(), |site| site.raw.as_str());
+        let at = |offset: u32| site.map_or(Position::NONE, |site| site.position_at(offset));
+        // The two shape refusals keep reading the normalised statement, which
+        // is what they have always compared; only their site comes from `raw`.
+        let normalised = normalize(query);
+        if normalised.contains('…') {
+            errors.push(ManifestError::RedactedQueryPlaceholder {
+                location: location.clone(),
+                proxy: proxy.clone(),
+                rule,
+                at: at(redaction_offset(raw)),
+            });
+        } else if has_quoted_literal(&normalised)
+            && !KNOWN_STATIC_SETUP_SQL.contains(&normalised.as_str())
+        {
+            errors.push(ManifestError::LiteralQuery {
+                location: location.clone(),
+                proxy: proxy.clone(),
+                rule,
+                // The first literal's quote, or the statement's own origin
+                // when there is none: never `NONE` for a parsed document
+                // (§18.1).
+                at: at(literal_offset(raw).unwrap_or(0)),
+            });
+        } else if parsed.insert(raw) {
+            // §13.4.2: the 4097th distinct entry in a file is refused at its
+            // own origin instead of being parsed, which keeps a huge file from
+            // costing one parse per entry.
+            if parsed.len() > MAX_TEMPLATE_PARSES {
+                let refusal = TemplateError::too_many_queries();
+                errors.push(ManifestError::QueryTemplate {
+                    at: at(refusal.offset()),
+                    kind: refusal.kind(),
+                });
+            } else if let Err(error) = check_template(raw) {
+                errors.push(ManifestError::QueryTemplate {
+                    at: at(error.offset()),
+                    kind: error.kind(),
+                });
+            }
+        }
+    }
+}
+
+/// The character offset of the first `…` in a statement, for the
+/// `RedactedQueryPlaceholder` refusal's site (§18.1).
+///
+/// A `…` is not transitive through any escape, so the first one is the
+/// placeholder a copied `sql.denied` line left behind. There is none only for a
+/// grant built by [`PgGrant::new`], whose stored text an author never wrote.
+fn redaction_offset(raw: &str) -> u32 {
+    raw.chars()
+        .position(|character| character == '…')
+        .and_then(|index| u32::try_from(index).ok())
+        .unwrap_or(0)
 }
 
 /// Route names, path regexes and method tokens.

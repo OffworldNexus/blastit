@@ -4,6 +4,8 @@
 use std::fmt;
 use std::fmt::Write as _;
 
+use blastit_sqlpolicy::TemplateKind;
+
 use crate::model::ProxyName;
 
 /// Longest value quoted in an error message before it is cut short.
@@ -411,9 +413,14 @@ pub enum ManifestError {
     /// would allow a shape, not a statement. The entry itself is never printed
     /// — it may still hold a value next to the placeholder — so the message
     /// names its position instead.
+    ///
+    /// `at` is the `…` inside the statement (`§18.1`): the sentence does not
+    /// move, because the prefix of [`Position::NONE`] is empty, so a grant no
+    /// document wrote renders byte-identically.
     #[error(
-        "{location}: queries[{rule}] holds a redacted `…` placeholder (grant on proxy {}); \
+        "{}{location}: queries[{rule}] holds a redacted `…` placeholder (grant on proxy {}); \
          grant the exact statement, with `$?` where the values bind",
+        prefix(*at),
         quoted(.proxy)
     )]
     RedactedQueryPlaceholder {
@@ -423,6 +430,8 @@ pub enum ManifestError {
         proxy: ProxyName,
         /// Index of the entry in the grant's `queries` list.
         rule: usize,
+        /// Where in the file the `…` is.
+        at: Position,
     },
     /// A `queries` entry inlines a quoted literal outside
     /// [`blastit_sqlpolicy::KNOWN_STATIC_SETUP_SQL`] (`R24`, `ADR-0003`).
@@ -430,10 +439,13 @@ pub enum ManifestError {
     /// An exact grant is trusted and run as written, so a statement that
     /// carries a value is a value committed to the repository — and the grant
     /// would only ever match that one value. The entry is never printed, since
-    /// printing it is the very thing the rule forbids.
+    /// printing it is the very thing the rule forbids. `at` is the literal's
+    /// own quote (`§18.1`), so the squiggle sits on the value, not on the
+    /// statement.
     #[error(
-        "{location}: queries[{rule}] inlines a quoted literal (grant on proxy {}); \
+        "{}{location}: queries[{rule}] inlines a quoted literal (grant on proxy {}); \
          bind the value with `$?` instead of writing it in the statement",
+        prefix(*at),
         quoted(.proxy)
     )]
     LiteralQuery {
@@ -443,6 +455,26 @@ pub enum ManifestError {
         proxy: ProxyName,
         /// Index of the entry in the grant's `queries` list.
         rule: usize,
+        /// Where in the file the first literal's quote is.
+        at: Position,
+    },
+    /// A `queries` entry is not one statement PostgreSQL parses once the
+    /// template is expanded (`R31`–`R33`, §13.4.3, §18.1).
+    ///
+    /// The sentence is [`TemplateKind::sentence`]'s, word for word, and the
+    /// site is the offset [`blastit_sqlpolicy::check_template`] reported run
+    /// through the entry's [`crate::QuerySite`]. The variant carries no
+    /// `location`, `proxy` or `rule`: the page quotes these sentences whole
+    /// with their site in the page's own column, and `queries[2]` is a tool's
+    /// index rather than something an author can count.
+    ///
+    /// The statement is never rendered, stored or logged — `Syntax` included.
+    #[error("{}{kind}", prefix(*at))]
+    QueryTemplate {
+        /// Where in the file the defect is.
+        at: Position,
+        /// Which defect, and so which fixed sentence.
+        kind: TemplateKind,
     },
     /// A `static "<prefix>"` mount's prefix is not a URL prefix the router can
     /// match (§9.1).
@@ -1446,7 +1478,10 @@ impl ManifestError {
             | Self::PatternStarPosition { at, .. }
             | Self::PatternTooLong { at, .. }
             | Self::PhpEntrypointInvalid { at, .. }
+            | Self::QueryTemplate { at, .. }
             | Self::QuotedStore { at, .. }
+            | Self::RedactedQueryPlaceholder { at, .. }
+            | Self::LiteralQuery { at, .. }
             | Self::RegexNeedsRawString { at, .. }
             | Self::RegexWithoutRawString { at, .. }
             | Self::StaticRootMissing { at, .. }
@@ -1504,8 +1539,6 @@ impl ManifestError {
             | Self::UnrestrictedWithQueries { .. }
             | Self::UnrestrictedWithContent { .. }
             | Self::UnusableTable { .. }
-            | Self::RedactedQueryPlaceholder { .. }
-            | Self::LiteralQuery { .. }
             | Self::StaticMountPrefixInvalid { .. }
             | Self::StaticFallbackInvalid { .. }
             | Self::StaticRootInvalid { .. }

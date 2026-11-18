@@ -626,6 +626,7 @@ fn the_wire_spelling_of_the_fixed_setup_statement_is_exempt() {
             location,
             proxy,
             rule: 0,
+            at: Position::at(5, 34),
         })
     );
 }
@@ -641,6 +642,7 @@ fn a_redacted_placeholder_cannot_be_granted() {
             location,
             proxy,
             rule: 0,
+            at: Position::at(5, 72),
         })
     );
 
@@ -664,6 +666,7 @@ fn an_inline_literal_is_refused_and_never_echoed() {
             location: location.clone(),
             proxy: proxy.clone(),
             rule: 0,
+            at: Position::at(5, 84),
         })
     );
     // The message names the position and the fix, never the value: an error is
@@ -684,6 +687,7 @@ fn an_inline_literal_is_refused_and_never_echoed() {
             location: Location::Group("session".to_string()),
             proxy: ProxyName::from("db"),
             rule: 0,
+            at: Position::at(4, 23),
         })
     );
     assert!(!errors.to_string().contains("secret"));
@@ -710,6 +714,7 @@ fn every_literal_form_in_a_grant_is_refused() {
                 location,
                 proxy,
                 rule: 0,
+                at: Position::at(5, 23),
             }),
             "a literal-bearing grant slipped through: {query:?}"
         );
