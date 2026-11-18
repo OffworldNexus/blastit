@@ -26,6 +26,11 @@ php = ["dep:blastit-php-sapi"]
 
 [dependencies]
 blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
+# The child's identity, filter and `RLIMIT_*` (`SpawnContext`), the `Fork` a
+# forker answers with, and the one documented order of the child sequence
+# (design §4.4 D1/D2). The view crates get the privileged primitives from the
+# crate that owns them, never from a second spelling.
+blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
 # The frozen `blastit_php_abi_v1` surface and the one `dlopen` module. Optional:
 # a build with no PHP route pays for neither.
 blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }

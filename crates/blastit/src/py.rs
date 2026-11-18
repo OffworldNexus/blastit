@@ -13,6 +13,16 @@
 //! [`Python`] as a token that can never be attached to anything, instead of a
 //! second copy of every signature. Every interpreter-facing function is
 //! compiled out by the same feature, so a token is all that is left to carry.
+//!
+//! # Why this module is still here
+//!
+//! The *worker* code that needs a real interpreter — the WSGI request path, the
+//! child half of the view fork, the immortalisation pass — lives in
+//! `blastit-view-python`, which re-exports the interpreter's own `Python` type.
+//! This module is the **composition root's** token: stage 1 and the supervisor
+//! carry it, and a build with no interpreter carries a phantom so the same
+//! signatures compile. It cannot move into a view crate: the no-interpreter
+//! token belongs to the crate that decides whether an interpreter exists at all.
 
 /// The calling thread's attachment to the interpreter, or the token of a build
 /// that has none.

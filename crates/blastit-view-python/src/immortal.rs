@@ -54,6 +54,21 @@
 //!
 //! Immortal objects are never freed, which §9.2 #7 accepts for a heap that
 //! lives as long as the container.
+//!
+//! # `unsafe` in this module, and nowhere else in the crate
+//!
+//! Writing CPython's reference count and its `ob_flags` is raw memory, so this
+//! module carries the crate's **one** `#[allow(unsafe_code)]` and the crate is
+//! `deny(unsafe_code)` rather than `forbid`. Everything else here — the
+//! version policy, the decision, the walk — is safe Rust, and the marker write
+//! is a function whose documented precondition is "a live object with the GIL
+//! held".
+//!
+//! `BLASTIT_IMMORTALIZE`'s parsing is the composition root's
+//! (`blastit/src/config.rs`); [`Setting`] is the local spelling it maps into,
+//! so this crate never names a root type.
+
+#![allow(unsafe_code)]
 
 use std::collections::{HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -62,7 +77,24 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 
-use crate::config::Immortalize;
+/// When §9.2 #7's heap immortalisation runs.
+///
+/// This is the interpreter crate's own spelling of the operator setting; the
+/// composition root maps `BLASTIT_IMMORTALIZE` (`blastit::config::Immortalize`)
+/// into it in six lines, so nothing here reads the environment and nothing here
+/// knows about the root's configuration document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    /// Immortalise wherever the marker is known — CPython 3.12 to 3.14, as
+    /// [`supported`] decides — and skip it everywhere else. The default.
+    Auto,
+    /// The same interpreters as [`Setting::Auto`], asked for by an operator
+    /// rather than assumed: `1` says the pass must run, and the interpreter
+    /// still has the last word about whether its marker is known at all.
+    On,
+    /// Never immortalise, whatever the interpreter.
+    Off,
+}
 
 /// The low-32-bit marker on CPython 3.12 and 3.13, where `ob_refcnt` is the
 /// whole 64-bit word and `0xFFFFFFFF` is `_Py_IMMORTAL_REFCNT`
@@ -102,7 +134,7 @@ pub struct Marker {
 /// that will read it.
 ///
 /// This is the whole version policy of the pass, and a pure function of the
-/// facts [`probe`] reads, so every branch is unit-testable without that build
+/// facts the probe reads, so every branch is unit-testable without that build
 /// being installed.
 ///
 /// The count alone is the marker on 3.12 and 3.13: `Py_INCREF` adds one to the
@@ -275,8 +307,8 @@ impl Decision {
 /// so an operator who turned the pass off is told that, and only then what a
 /// version could not do. Every [`Decision::Off`] ends with what skipping costs,
 /// so the sentence reads as one line in the log whatever the reason.
-pub fn decide(interpreter: &Interpreter, setting: Immortalize) -> Decision {
-    if setting == Immortalize::Off {
+pub fn decide(interpreter: &Interpreter, setting: Setting) -> Decision {
+    if setting == Setting::Off {
         return Decision::Off(format!(
             "BLASTIT_IMMORTALIZE=0: heap immortalisation is off{SKIPPED_COST}"
         ));
@@ -321,7 +353,7 @@ impl Outcome {
 /// Whatever importing `gc` or calling it raises, when the decision was to run
 /// the pass. A caller that decided to run and cannot must not start: a view
 /// would then copy the shared heap. A skipped pass never fails.
-pub fn apply(py: Python<'_>, setting: Immortalize) -> PyResult<Outcome> {
+pub fn apply(py: Python<'_>, setting: Setting) -> PyResult<Outcome> {
     let decision = decide(&probe(py), setting);
     if !decision.is_on() {
         return Ok(Outcome {
@@ -395,7 +427,7 @@ fn trace_refs(py: Python<'_>) -> bool {
 /// (`sysconfig.get_config_var("Py_GIL_DISABLED")` — the same flag pyo3's
 /// `Py_GIL_DISABLED` cfg is derived from, readable here without a build script
 /// of our own) and the runtime switch (`sys._is_gil_enabled`, 3.13+). A
-/// question that cannot be asked means "not free-threaded"; [`check`] still
+/// question that cannot be asked means "not free-threaded"; [`supported`] still
 /// refuses any version it does not know.
 fn free_threaded(py: Python<'_>) -> bool {
     let from_sysconfig = || -> Option<bool> {
@@ -762,7 +794,7 @@ mod tests {
             },
         ] {
             let problem = supported(&unsupported).unwrap_err();
-            for setting in [Immortalize::Auto, Immortalize::On] {
+            for setting in [Setting::Auto, Setting::On] {
                 let decision = decide(&unsupported, setting);
                 assert!(!decision.is_on(), "{unsupported:?} with {setting:?}");
                 let reason = decision.reason().unwrap();
@@ -780,14 +812,14 @@ mod tests {
         // §9.2 #7: every version blastit knows has a marker that holds its
         // reference counts still, 3.14 included, so both spellings run it.
         for minor in [MIN_MINOR, 13, MAX_MINOR] {
-            assert_eq!(decide(&interpreter(minor), Immortalize::Auto), Decision::On);
-            assert_eq!(decide(&interpreter(minor), Immortalize::On), Decision::On);
+            assert_eq!(decide(&interpreter(minor), Setting::Auto), Decision::On);
+            assert_eq!(decide(&interpreter(minor), Setting::On), Decision::On);
         }
 
         // A version outside the range is skipped with the interpreter's own
         // reason, whichever spelling asked for the pass.
         for minor in [MIN_MINOR - 1, MAX_MINOR + 1] {
-            for setting in [Immortalize::Auto, Immortalize::On] {
+            for setting in [Setting::Auto, Setting::On] {
                 let off = decide(&interpreter(minor), setting);
                 assert!(!off.is_on(), "3.{minor} with {setting:?}");
                 let reason = off.reason().unwrap();
@@ -798,7 +830,7 @@ mod tests {
 
         // `0` never runs the pass, and says so before anything else.
         for minor in [MIN_MINOR, 13, MAX_MINOR] {
-            let off = decide(&interpreter(minor), Immortalize::Off);
+            let off = decide(&interpreter(minor), Setting::Off);
             assert!(!off.is_on());
             assert!(
                 off.reason().unwrap().contains("BLASTIT_IMMORTALIZE=0"),
@@ -879,7 +911,7 @@ mod tests {
             let marker = held.get_item("marker").unwrap();
             assert!(!is_immortal(marker.as_ptr()));
 
-            let outcome = apply(py, Immortalize::Off).unwrap();
+            let outcome = apply(py, Setting::Off).unwrap();
             assert!(!outcome.decision.is_on());
             assert_eq!(outcome.stats, None);
             assert_eq!(outcome.objects(), 0);
@@ -905,8 +937,8 @@ mod tests {
             // On this interpreter, `auto` runs the walk exactly when the pure
             // decision says it should: on every version blastit knows, which is
             // the point of the whole exercise — 3.14 included since C3c.
-            let outcome = apply(py, Immortalize::Auto).unwrap();
-            let expected = decide(&probe(py), Immortalize::Auto);
+            let outcome = apply(py, Setting::Auto).unwrap();
+            let expected = decide(&probe(py), Setting::Auto);
             assert_eq!(outcome.decision, expected);
             assert_eq!(outcome.stats.is_some(), expected.is_on());
             if expected.is_on() {
@@ -1036,6 +1068,11 @@ mod tests {
     /// [`marker_child`]'s name as libtest knows it, for the child's `--exact`
     /// filter: libtest names a unit test by its module path, with the crate
     /// name that [`module_path!`] starts with left off.
+    ///
+    /// `module_path!` spells the crate the way Rust does (`blastit_view_python`
+    /// here), while `CARGO_PKG_NAME` spells it the way Cargo does
+    /// (`blastit-view-python`), so the prefix is built from the package name
+    /// with its hyphens turned into underscores.
     const CHILD_TEST: &str = concat!(module_path!(), "::marker_child");
 
     /// How many times the child walks its marked objects in the round the
@@ -1097,14 +1134,13 @@ def drive(seq):
     /// Stops a child the walk kills from writing a core file: the signal is the
     /// evidence, the dump is not.
     fn no_core_dumps() {
-        let none = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        // SAFETY: `setrlimit` only lowers this process's own core-file limit,
-        // and the return value is the kernel's answer about a limit nothing
-        // here depends on.
-        unsafe { libc::setrlimit(libc::RLIMIT_CORE, &none) };
+        // `RLIMIT_CORE=0`, through the crate's own safe wrapper: the test module
+        // must not need `libc`, which this crate does not depend on.
+        let _ = blastit_sys::set_rlimits(blastit_sys::Rlimits {
+            nofile: None,
+            nproc: None,
+            core_zero: true,
+        });
     }
 
     /// [`the_3_14_wrap_is_survived_by_the_marker`]'s child: this same test
@@ -1223,11 +1259,10 @@ def drive(seq):
     /// [`CHILD_MARKER`].
     fn run_marker_child(which: &str) -> ChildRun {
         let binary = std::env::current_exe().expect("this test binary's own path");
-        // `module_path!` starts with the crate name; libtest's own test names
-        // do not.
-        let name = CHILD_TEST
-            .strip_prefix(concat!(env!("CARGO_PKG_NAME"), "::"))
-            .unwrap_or(CHILD_TEST);
+        // `module_path!` starts with the crate name (underscored); libtest's own
+        // test names do not.
+        let prefix = concat!(env!("CARGO_PKG_NAME"), "::").replace('-', "_");
+        let name = CHILD_TEST.strip_prefix(&prefix).unwrap_or(CHILD_TEST);
         let output = std::process::Command::new(binary)
             .args([name, "--exact", "--ignored", "--nocapture"])
             .env(CHILD_MARKER, which)

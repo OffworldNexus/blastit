@@ -26,6 +26,58 @@
 use std::io;
 
 use blastit_sys::Fork;
+use blastit_view::spawn::ForkProtocol;
+
+/// Forks for a view crate, refusing a protocol that disagrees with this image
+/// (`view-crates-architecture` §4.4 D1, S4).
+///
+/// A view crate cannot call [`fork`] itself — it does not own the protocol, and
+/// it cannot name `pyo3` — so the composition root hands it a `Forker` that
+/// ends here. `protocol` is what the caller's image needs and
+/// `interpreter_live` is what *this* image actually has; a pair that disagrees
+/// is an error, because the alternative is a silent bare `fork(2)` under a live
+/// interpreter (CPython's locks and thread bookkeeping would then describe a
+/// process that no longer exists) or a `PyOS_BeforeFork` with no interpreter
+/// behind it.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::Other`] for a mismatched protocol, and whatever [`fork`]
+/// refuses with — in particular [`blastit_sys::Error::NotSingleThreaded`].
+///
+/// A build without `python` forks no view at all, so its one caller (the WSGI
+/// arm of the supervisor) is compiled out and the function has no user there.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn fork_for(protocol: ForkProtocol, interpreter_live: bool) -> io::Result<Fork> {
+    match protocol {
+        ForkProtocol::InterpreterLive => {
+            // A build without `python` links no interpreter, so no caller can
+            // be in this case: naming it is a bug, and a bare fork is exactly
+            // what the protocol exists to prevent.
+            if !cfg!(feature = "python") {
+                return Err(io::Error::other(
+                    "fork protocol mismatch: the caller asked for a live interpreter and this \
+                     blastit build has none (it was built without the `python` feature)",
+                ));
+            }
+            if !interpreter_live {
+                return Err(io::Error::other(
+                    "fork protocol mismatch: the caller asked for a live interpreter and this \
+                     image reports none, so the fork would skip `PyOS_BeforeFork`",
+                ));
+            }
+        }
+        ForkProtocol::NoInterpreter => {
+            if interpreter_live {
+                return Err(io::Error::other(
+                    "fork protocol mismatch: an interpreter is live in this image, so this fork \
+                     must run `PyOS_BeforeFork` and its two matching halves",
+                ));
+            }
+        }
+    }
+    fork(interpreter_live)
+}
 
 /// Forks, holding the GIL and stopping the world when a live interpreter is in
 /// this image (§9.3).
@@ -82,4 +134,40 @@ pub fn fork(interpreter: bool) -> io::Result<Fork> {
         }
     }
     outcome
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// The mismatch refusal, which is the mechanism `ForkProtocol` has instead
+    /// of a type that could prove the GIL is held: the protocol cannot be
+    /// checked at compile time, so the one implementation refuses the wrong
+    /// answer. No case here forks — a fork would leave a child that never
+    /// returns.
+    #[test]
+    fn a_fork_whose_protocol_disagrees_with_the_image_is_refused() {
+        // An interpreter-live fork where the image says there is none.
+        let err = fork_for(ForkProtocol::InterpreterLive, false).unwrap_err();
+        assert!(err.to_string().contains("fork protocol mismatch"), "{err}");
+
+        // And the other way round: a bare fork while an interpreter is live.
+        let err = fork_for(ForkProtocol::NoInterpreter, true).unwrap_err();
+        assert!(err.to_string().contains("fork protocol mismatch"), "{err}");
+        assert!(err.to_string().contains("PyOS_BeforeFork"), "{err}");
+    }
+
+    /// A `python`-less build has no interpreter behind the protocol at all, so
+    /// even a caller that claims one is live is refused: a bare `fork(2)` under
+    /// that spelling is the silent case the enum exists to make impossible.
+    #[cfg(not(feature = "python"))]
+    #[test]
+    fn a_build_without_the_python_feature_refuses_an_interpreter_live_fork() {
+        let err = fork_for(ForkProtocol::InterpreterLive, true).unwrap_err();
+        assert!(
+            err.to_string().contains("without the `python` feature"),
+            "{err}"
+        );
+    }
 }

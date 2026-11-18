@@ -3371,3 +3371,14 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T13:21 [MB.36.3] (lead) attempt 1/3 started; base 016b592
 - 2026-11-18T13:37 [MB.36.3] (lead) status active -> review
 - 2026-11-18T13:55 [MB.36.3] (lead) status review -> done
+- 2026-11-18T13:55 [MB.36.4] (lead) status ready -> active
+- 2026-11-18T13:55 [MB.36.4] (lead) attempt 1/3 started
+- 2026-11-18T13:55 [MB.36.4] (lead) attempt 1/3 started; base 2910123
+- 2026-11-18T14:24 [MB.36.4] (lead) status active -> review
+- 2026-11-18T14:24 [MB.36.6] (lead) design correction owed here: `docs/design/view-crates-architecture.md` §4.4 D1 predicts "exactly two `Privileges::Shared` (the dev and check boots)"; MB.36.4 me
+- 2026-11-18T14:34 [MB.36.4] (lead) REVIEW FAIL (round 1): MAJOR — the design D1 pin is missing: no test proves the production constructor yields DropTo+Seccomp, so an inverted `dev.is_none()` wou
+- 2026-11-18T14:34 [MB.36.4] (lead) status review -> ready
+- 2026-11-18T14:34 [MB.36.4] (lead) status ready -> active
+- 2026-11-18T14:34 [MB.36.4] (lead) attempt 2/3 started
+- 2026-11-18T14:34 [MB.36.6] (lead) CORRECTION to the D1 census note above (reviewer, MB.36.4 round 1): `check` never boots stage 1 and forks no view, so the design sentence must read "one `Privil
+- 2026-11-18T15:14 [MB.36.4] (lead) status active -> done

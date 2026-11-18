@@ -12,7 +12,8 @@
 //!   scheduler or dbproxy is fatal, because a half-started sandbox is worse than
 //!   a crash loop the platform can see (§8).
 //! * **`SPAWN`** → the zygote forks a view and answers `SPAWNED` with the
-//!   scheduler's end of `view.chan` by `SCM_RIGHTS` ([`crate::zygote`]).
+//!   scheduler's end of `view.chan` by `SCM_RIGHTS`
+//!   ([`blastit_view_python::zygote`]).
 //! * **`RETIRE`** → `SIGKILL` that view. Views are retired when the scheduler
 //!   finds them idle, over their request cap or damaged (§2.4); the scheduler
 //!   logs `process.retired` itself, and init reports the exit when it is reaped.
@@ -59,8 +60,11 @@ use crate::dev_reload::{self, Class, Effect, Reload};
 use crate::dev_reload::{ReloadConfig, SystemClock};
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
 use crate::py::Python;
+use crate::stage1::ViewChildPlans;
 #[cfg(feature = "python")]
-use crate::zygote;
+use blastit_view::spawn::SpawnContext;
+#[cfg(feature = "python")]
+use blastit_view_python::zygote;
 
 /// How long the surviving children get after `SIGTERM` before `SIGKILL`, once
 /// the drain is over.
@@ -412,6 +416,11 @@ pub struct Parts {
     /// One entry per manifest route, in routing order: whether its view may
     /// reach the network (§7.3).
     pub egress: Vec<bool>,
+    /// One entry per manifest route, in routing order: the identity and the
+    /// filter its view child is forked with (`view-crates-architecture` §4.4
+    /// D1), decided by stage 1 where the boot mode exists. Laid out in every
+    /// build; only the WSGI fork reads it.
+    pub plans: ViewChildPlans,
     /// The imported WSGI callable. Only a build with an interpreter can import
     /// one, and only a WSGI view can be forked from it (`MB.3.11`).
     #[cfg(feature = "python")]
@@ -465,6 +474,11 @@ pub struct Supervisor<'a> {
     /// reads it, and only a build with an interpreter forks one (`MB.3.11`).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     egress: Vec<bool>,
+    /// The identity and the filter each route's view child is forked with
+    /// (`view-crates-architecture` §4.4 D1), from stage 1 — the only place the
+    /// boot mode exists. Read by the WSGI fork alone.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    plans: ViewChildPlans,
     /// The imported WSGI callable, in a build that has an interpreter.
     #[cfg(feature = "python")]
     app: Py<PyAny>,
@@ -622,6 +636,7 @@ impl<'a> Supervisor<'a> {
             #[cfg(feature = "php")]
             php: parts.php,
             egress: parts.egress,
+            plans: parts.plans,
             #[cfg(feature = "python")]
             app: parts.app,
             emitter,
@@ -1533,22 +1548,64 @@ impl<'a> Supervisor<'a> {
         }
         #[cfg(feature = "python")]
         {
+            // `view-crates-architecture` §4.4 D2: the root maps its own
+            // configuration into the view crate's values — this is the one
+            // place that knows both crates, so no view crate has to name
+            // `Config` or `RouteInfo`.
+            //
+            // The two per-slot vectors are built by stage 1 for exactly these
+            // routes, so a missing entry is a boot bug: the fork is refused
+            // rather than inventing an identity stage 1 did not decide.
+            let (Some(privileges), Some(filter)) = (
+                self.plans.privileges.get(index).copied(),
+                self.plans.filter.get(index).copied(),
+            ) else {
+                return Err(std::io::Error::other(format!(
+                    "route {:?} (slot {index}): this boot has no view child plan for the slot, \
+                     so no identity or filter was decided for it",
+                    info.name
+                )));
+            };
+            let ctx = SpawnContext {
+                route: info.name.clone(),
+                uid: info.uid,
+                frame_limits: self.limits,
+                rlimits: blastit_sys::Rlimits {
+                    // `dev` shares one uid with every other process of the
+                    // caller, where `RLIMIT_NPROC` would cap the developer's
+                    // whole session (`R21`, `ADR-0001`).
+                    nproc: drop_privileges.then(|| {
+                        self.cfg
+                            .view_worker_cap()
+                            .saturating_add(zygote::VIEW_PROCESS_MARGIN)
+                            as u64
+                    }),
+                    nofile: Some(zygote::VIEW_NOFILE),
+                    core_zero: true,
+                },
+                privileges,
+                filter,
+                egress,
+                mask: self.mask,
+            };
+            // The one CPython fork protocol is this crate's (`fork_for`): the
+            // view crate asks for the protocol its image needs and never calls
+            // `fork(2)` itself (§9.3, `view-crates-architecture` §4.4 D1).
+            let forker = |protocol| crate::forking::fork_for(protocol, interpreter_live(py));
             zygote::fork_view(
                 py,
                 zygote::ViewSpawn {
-                    cfg: &self.cfg,
-                    limits: self.limits,
-                    info,
+                    ctx,
                     app: &self.app,
-                    mask: self.mask,
-                    egress,
+                    script_name: crate::config::mount_point(self.cfg.script_name.as_deref()),
+                    max_threads: self.cfg.view_worker_cap(),
                     dir: dir.to_path_buf(),
-                    drop_privileges,
                     loaded: report.map(|report| blastit_view::LoadedReport {
                         socket: report.socket,
                         source: report.source,
                     }),
                 },
+                &forker,
             )
             .map(Forked::from)
             .map_err(|err| std::io::Error::other(format!("forking a view: {err}")))
@@ -2990,6 +3047,12 @@ mod tests {
                 #[cfg(feature = "php")]
                 php: Vec::new(),
                 egress: vec![false],
+                plans: ViewChildPlans {
+                    privileges: vec![crate::child::Privileges::DropTo(0)],
+                    filter: vec![crate::child::Filter::Seccomp(
+                        blastit_sys::SeccompRole::View { egress: false },
+                    )],
+                },
                 app,
                 ctl,
                 signals,
@@ -3338,6 +3401,12 @@ view plain regex '/plain/.*' {}
                     #[cfg(feature = "php")]
                     php: Vec::new(),
                     egress: vec![false],
+                    plans: ViewChildPlans {
+                        privileges: vec![crate::child::Privileges::DropTo(0)],
+                        filter: vec![crate::child::Filter::Seccomp(
+                            blastit_sys::SeccompRole::View { egress: false },
+                        )],
+                    },
                     app,
                     ctl: OwnedFd::from(ctl),
                     signals,
@@ -3534,6 +3603,12 @@ view plain regex '/plain/.*' {}
                 #[cfg(feature = "php")]
                 php: Vec::new(),
                 egress: vec![false],
+                plans: ViewChildPlans {
+                    privileges: vec![crate::child::Privileges::DropTo(0)],
+                    filter: vec![crate::child::Filter::Seccomp(
+                        blastit_sys::SeccompRole::View { egress: false },
+                    )],
+                },
                 app,
                 ctl: OwnedFd::from(ctl),
                 signals,

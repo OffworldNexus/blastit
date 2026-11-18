@@ -41,6 +41,11 @@ pub mod loaded;
 // and the static responder resolves on it, so there is never a second
 // implementation of what `%2F` means.
 pub mod path;
+// The composition root's seam to every view crate (`MB.36.4`, design §4.4
+// D1/D2): the boot data a forked child is made from, and the fork itself as an
+// injected parameter, so a view crate never calls `fork(2)` and never names
+// `blastit`.
+pub mod spawn;
 // Embedded PHP (`MB.3.13`): `PhpEmbedRuntime` and the single-request channel
 // loop. The crate stays `#![forbid(unsafe_code)]`; the `dlopen` and the C sink
 // trampolines are in `blastit-php-sapi`.

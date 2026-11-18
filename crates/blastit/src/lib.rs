@@ -14,6 +14,23 @@
 //! differs between the two installations: which program the two `execve`s of §4
 //! name, and whether stage 1 finds an interpreter that is already running.
 //!
+//! # This crate is the composition root
+//!
+//! The per-language worker code is not here any more: a WSGI view's child half
+//! is `blastit-view-python` (`zygote`, `immortal`), and an embedded-PHP worker
+//! is on its way to `blastit-view-php`. What stays is what only the root can
+//! know or do: the CLI, stage 0 and stage 1, the supervisor, the role wiring,
+//! `forking` — the one CPython fork protocol, handed to a view crate as a
+//! `Forker` — and the mapping from this crate's `Config` into the view crates'
+//! own boot values (`SpawnContext`). No view crate depends on this one
+//! (`ADR-0016`, design `view-crates-architecture.md` §4.4).
+//!
+//! `py` is part of that root role too: it is the token stage 1 and the
+//! supervisor carry down the call chain. In a `python` build it re-exports the
+//! interpreter's own type (which `blastit-view-python` also re-exports, as the
+//! crate that owns the interpreter); in a build without the feature it is a
+//! phantom token, so the same signatures compile with no interpreter anywhere.
+//!
 //! # Features
 //!
 //! `python` is every embedded-CPython role: the `BLASTIT_APP` import, the WSGI
@@ -51,14 +68,13 @@ pub mod mem_usage;
 mod child;
 mod dev_learn;
 mod forking;
-#[cfg(feature = "python")]
-mod immortal;
 mod logs;
 // Embedded PHP view workers (`MB.3.13`): the boot half that pins the host's
 // NTS `libphp` and its shim into a per-route binding, and the fork path
-// sibling to `zygote`'s WSGI one. It compiles only when PHP routes can be
-// served, and `libphp` itself is `dlopen`ed inside the worker, never linked
-// here. `init`'s `Ctl::Spawn` reads the binding this module built (`MB.3.13.3`).
+// sibling to `blastit-view-python`'s WSGI one. It compiles only when PHP
+// routes can be served, and `libphp` itself is `dlopen`ed inside the worker,
+// never linked here. `init`'s `Ctl::Spawn` reads the binding this module built
+// (`MB.3.13.3`).
 #[cfg(feature = "php")]
 mod php_view;
 mod py;
@@ -67,8 +83,6 @@ mod stage0;
 mod stage1;
 mod supervise;
 mod visibility;
-#[cfg(feature = "python")]
-mod zygote;
 
 // The worker transport (`view.chan` framing and flow control) is part of this
 // build from the start: `MB.3.13` drives it from the embedded-PHP worker. No

@@ -317,15 +317,15 @@ impl SpawnMode {
 /// When §9.2 #7's heap immortalisation runs (`BLASTIT_IMMORTALIZE`).
 ///
 /// Every CPython 3.12–3.14 has a marker that holds its reference counts still —
-/// 3.14's is its own, the split word `crate::immortal::marker` writes — so the
-/// default runs the pass on every interpreter blastit knows, and skips the ones
-/// it does not (32-bit, big-endian, free-threaded, `Py_TRACE_REFS`, or a
-/// version outside that range).
+/// 3.14's is its own, the split word `blastit_view_python::immortal::marker`
+/// writes — so the default runs the pass on every interpreter blastit knows,
+/// and skips the ones it does not (32-bit, big-endian, free-threaded,
+/// `Py_TRACE_REFS`, or a version outside that range).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Immortalize {
     /// Immortalise wherever the marker is known — CPython 3.12 to 3.14, as
-    /// `crate::immortal::supported` decides — and skip it everywhere else. The
-    /// default.
+    /// `blastit_view_python::immortal::supported` decides — and skip it
+    /// everywhere else. The default.
     Auto,
     /// The same interpreters as [`Immortalize::Auto`], asked for by an operator
     /// rather than assumed: `1` says the pass must run, and the interpreter
@@ -343,6 +343,22 @@ impl Immortalize {
             Self::Auto => "auto",
             Self::On => "on",
             Self::Off => "off",
+        }
+    }
+
+    /// The interpreter crate's own spelling of this setting.
+    ///
+    /// `blastit-view-python` owns the pass, so it owns the type, and it may not
+    /// name this crate's `Config`. The map is therefore here, in the
+    /// composition root: the environment variable is parsed where every other
+    /// one is, and the crate that acts on it is handed a value it already
+    /// knows.
+    #[cfg(feature = "python")]
+    pub(crate) fn setting(self) -> blastit_view_python::immortal::Setting {
+        match self {
+            Self::Auto => blastit_view_python::immortal::Setting::Auto,
+            Self::On => blastit_view_python::immortal::Setting::On,
+            Self::Off => blastit_view_python::immortal::Setting::Off,
         }
     }
 }

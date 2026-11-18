@@ -32,23 +32,37 @@
 //! * `loaded` — the dev-only loaded-file tracker: the module closure and the
 //!   `open` audit hook a view installs (and inherits across the fork). The
 //!   datagram it reports through is `blastit-view`'s codec.
+//! * [`zygote`] — the **child half** of the view fork: `enter`, the private
+//!   `HOME`/`TMPDIR`, and the hand-off of the inherited GIL to [`serve`]. The
+//!   fork syscall itself is injected (`blastit_view::spawn::Forker`), so the
+//!   one CPython fork protocol stays in the composition root.
+//! * [`immortal`] — §9.2 #7's heap immortalisation pass, its version policy and
+//!   its decision. It is the crate's only `unsafe` code (see below).
 //!
 //! # Code
 //!
-//! The crate is `#![forbid(unsafe_code)]`: everything that touches the C API
-//! goes through pyo3's safe wrappers, and nothing here starts or stops the
-//! interpreter.
+//! The crate is `#![deny(unsafe_code)]`, not `forbid`: everything that touches
+//! the C API goes through pyo3's safe wrappers and nothing here starts or stops
+//! the interpreter, with **one** exception — [`immortal`] writes CPython's
+//! reference-count and `ob_flags` words directly (that is the whole point of
+//! the pass), and its module carries the crate's only `#[allow(unsafe_code)]`.
+//!
+//! This crate never depends on `blastit`: the composition root passes the boot
+//! data in (`SpawnContext`) and receives the fork's result, so the arrow stays
+//! one-way (`ADR-0016`, design §4.4 D1/D2).
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod config;
 mod environ;
+pub mod immortal;
 mod input;
 mod loaded;
 mod request;
 mod response;
 mod serve;
+pub mod zygote;
 
 pub use crate::config::WsgiConfig;
 // The boot batch and its reporter (`MB.23.4`, `ADR-0014`): the Python half of
@@ -60,3 +74,8 @@ pub use crate::loaded::{LoadedReporter, LoadedTracker};
 // from having to name two crates for one result.
 pub use crate::serve::{serve, serve_reporting};
 pub use blastit_view::ViewError;
+// The interpreter token the composition root carries down its call chain. It is
+// re-exported here, from the crate that owns the interpreter, so a caller can
+// name it without a second `pyo3` path — `blastit/src/py.rs` stays behind only
+// as the *no-interpreter* token of a build without this crate.
+pub use pyo3::Python;

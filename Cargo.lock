@@ -282,6 +282,7 @@ version = "0.2.0"
 dependencies = [
  "blastit-frame",
  "blastit-php-sapi",
+ "blastit-sys",
  "thiserror 2.0.21",
 ]
 
@@ -290,8 +291,10 @@ name = "blastit-view-python"
 version = "0.2.0"
 dependencies = [
  "blastit-frame",
+ "blastit-sys",
  "blastit-view",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]

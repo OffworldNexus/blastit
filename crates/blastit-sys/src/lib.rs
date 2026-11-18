@@ -104,6 +104,12 @@
 //! [`kill`] and [`reap`] drive supervision, and [`SignalFd`] turns `SIGCHLD`,
 //! `SIGTERM`, `SIGINT` and `SIGHUP` into readable events.
 //!
+//! A **view** child does not spell that list out: [`child::enter`] runs it from
+//! a [`child::ChildPlan`] (`setpgid` between `prepare` and the privilege drop,
+//! when the plan asks for it), so the WSGI fork — and the PHP worker and probe
+//! forks once `MB.36.5` moves them here — cannot drift from each other or from
+//! this order. Init's own role children keep using the steps directly.
+//!
 //! # Example
 //!
 //! Passing the scheduler's end of a view channel back over `ctl.chan` (§3):
@@ -136,6 +142,7 @@ mod signal;
 mod sock;
 
 pub mod caps;
+pub mod child;
 pub mod fanotify;
 pub mod mem;
 
@@ -143,6 +150,7 @@ pub mod mem;
 pub mod testutil;
 
 pub use crate::caps::{CapSet, Capabilities, Capability, Held, PrivilegeMode};
+pub use crate::child::set_env;
 pub use crate::error::Error;
 pub use crate::exec::{exe_path, exec};
 pub use crate::fanotify::{Event, Readout, Watcher, WatcherError};

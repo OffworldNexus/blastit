@@ -2,7 +2,7 @@
 id: MB.36.4
 title: "Move immortal preload and the zygote fork into blastit-view-python behind the design's spawn-context seam, with no cycle back into blastit"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.36.3]
@@ -23,11 +23,11 @@ paths:
   - crates/blastit/src/lib.rs
   - crates/blastit/Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T15:57"
+updated: "2026-11-18T15:14"
 ---
 
 # Goal

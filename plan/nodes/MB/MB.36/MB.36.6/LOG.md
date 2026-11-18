@@ -19,3 +19,11 @@ edited fields
 ## 2026-11-18T13:15 [lead]
 
 edited fields
+
+## 2026-11-18T14:24 [lead]
+
+design correction owed here: `docs/design/view-crates-architecture.md` §4.4 D1 predicts "exactly two `Privileges::Shared` (the dev and check boots)"; MB.36.4 measured ONE, because dev and check share stage1.rs's single `dev.is_none()` branch (line ~394). Fix the design sentence to "one, serving both `dev` and `check`" so the census in the record matches the grep.
+
+## 2026-11-18T14:34 [lead]
+
+CORRECTION to the D1 census note above (reviewer, MB.36.4 round 1): `check` never boots stage 1 and forks no view, so the design sentence must read "one `Privileges::Shared` — stage 1's dev branch only (`check` constructs neither) — and one `Filter::Off`", not "serving both dev and check".

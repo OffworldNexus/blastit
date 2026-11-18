@@ -57,17 +57,17 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyBytes, PyDict};
 
-use crate::child::{ChildIo, child_exit, install_filter};
+use crate::child::{ChildIo, Filter, Privileges, child_exit, install_filter};
 use crate::config::{Config, LogFormat};
 #[cfg(feature = "python")]
 use crate::dev_reload::{MarkOutcome, Unavailable};
-#[cfg(feature = "python")]
-use crate::immortal::{Decision, Outcome};
 use crate::logs::{Emitter, output_event};
 use crate::mem_usage;
 use crate::py::Python;
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::{ComponentPipes, Parts, Supervisor};
+#[cfg(feature = "python")]
+use blastit_view_python::immortal::{Decision, Outcome};
 
 /// Whether stage 1 finds an interpreter already running (§4).
 pub enum Interpreter<'py> {
@@ -225,7 +225,7 @@ gc.collect()
 /// in every case. When the immortalisation pass runs, it runs *before* this,
 /// because an immortal object is never freed and its address can therefore
 /// never be reused by a later allocation; when the pass is skipped
-/// ([`crate::immortal::Decision::Off`]), the heap is frozen all the same.
+/// ([`Decision::Off`]), the heap is frozen all the same.
 #[cfg(feature = "python")]
 const FREEZE: &std::ffi::CStr = c"
 import gc
@@ -377,6 +377,13 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
             .map(|route| route.egress())
             .collect()
     };
+    // `view-crates-architecture` §4.4 D1: the view child's identity and its
+    // filter are decided **here**, where the boot mode exists, and travel into
+    // the view crate as values. Nothing downstream could decide them: a child
+    // runs after the `execve` barrier, where every `BLASTIT_*` is gone, and a
+    // child-side choice would be forgeable. [`view_child_plans`] is that
+    // decision, and its unit cases are the pin the design asks for.
+    let plans = view_child_plans(&routes, &egress, dev.as_ref(), config.seccomp);
     // `MB.3.64`: the debug-only test seam. Stage 0 recorded `(st_dev, st_ino)`
     // for the pair and carried `BLASTIT_TEST_SWAP_POINT` in the configuration
     // document; this is the one point between that record and the re-open below,
@@ -732,6 +739,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         php,
         declared_routes,
         egress,
+        plans,
         memory,
         ctl: ctl_end,
         signals,
@@ -809,6 +817,7 @@ fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
             #[cfg(feature = "php")]
             php: serving.php,
             egress: serving.egress,
+            plans: serving.plans,
             ctl: serving.ctl,
             signals: serving.signals,
             mask: serving.mask,
@@ -847,6 +856,11 @@ struct Serving {
     /// Only a build that forks a view reads it (`MB.3.11`).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     egress: Vec<bool>,
+    /// The identity and filter each route's view child keeps
+    /// (`view-crates-architecture` §4.4 D1), decided above where the boot mode
+    /// exists; a build without the `python` feature still lays them out, and
+    /// only the WSGI fork reads them (`fork_for` and the fork it feeds).
+    plans: ViewChildPlans,
     /// The memory reading taken before the fork, for §8 Sizing. Reported by the
     /// preload event, which only a build with an interpreter emits.
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -1033,6 +1047,7 @@ fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             #[cfg(feature = "php")]
             php: serving.php,
             egress: serving.egress,
+            plans: serving.plans,
             app,
             ctl: serving.ctl,
             signals: serving.signals,
@@ -1917,7 +1932,7 @@ fn restore_sys_path(py: Python<'_>, entries: &[Vec<u8>]) -> PyResult<()> {
 /// known here.
 ///
 /// The decision is `BLASTIT_IMMORTALIZE` against the running interpreter
-/// ([`crate::immortal::decide`]): every interpreter blastit knows gets the
+/// ([`Decision`]): every interpreter blastit knows gets the
 /// marker *it* reads — 3.14 CPython's own split word — and one whose marker
 /// blastit does not know is skipped, so the server starts rather than refusing
 /// and every view process simply copies more of the preloaded heap (§9.2 #6).
@@ -1933,7 +1948,7 @@ fn immortalize(
     emitter: &Emitter,
     dev: Option<&crate::dev_learn::Dev>,
 ) -> Outcome {
-    let outcome = match crate::immortal::apply(py, config.immortalize) {
+    let outcome = match blastit_view_python::immortal::apply(py, config.immortalize.setting()) {
         Ok(outcome) => outcome,
         Err(err) => python_fail(py, emitter, dev, "heap immortalisation", &err),
     };
@@ -2090,7 +2105,7 @@ fn python_fail(
         )
         .with_level(Level::Error),
     );
-    let text = crate::zygote::traceback_text(py, err);
+    let text = blastit_view_python::zygote::traceback_text(py, err);
     for line in text.lines() {
         emitter.emit(
             &output_event(Component::Init, None, Stream::Stderr, line).with_level(Level::Error),
@@ -2102,6 +2117,70 @@ fn python_fail(
     // SAFETY: init is exiting; `_exit` runs no handler and cannot deadlock with
     // the GIL held.
     unsafe { libc::_exit(1) }
+}
+
+/// The identity and the filter every view child is forked with
+/// (`view-crates-architecture` §4.4 D1) — the boot data a view crate receives,
+/// in routing order.
+///
+/// One struct instead of two vectors so the two can never be paired by index:
+/// a route's identity and its filter are decided together, in
+/// [`view_child_plans`], and travel together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewChildPlans {
+    /// One entry per manifest route: the identity its view child keeps.
+    pub privileges: Vec<Privileges>,
+    /// One entry per manifest route: the seccomp filter its view child
+    /// installs.
+    pub filter: Vec<Filter>,
+}
+
+/// The identity and the filter every view child is forked with
+/// (`view-crates-architecture` §4.4 D1) — the one place the boot mode is
+/// turned into the two values a view crate receives.
+///
+/// This is a **pure function of the boot**, deliberately: the decision is the
+/// security property (“production drops to the route's uid and installs a
+/// filter”), so it is not buried in the boot sequence where only an end-to-end
+/// run could see it. `crates/blastit/src/stage1.rs`'s `child_plans` cases pin
+/// the three rows (production, `dev`, an explicit `BLASTIT_SECCOMP=0`).
+///
+/// Two things are *not* decided here and must not be: the uid the child drops
+/// to is the route's own (`RouteInfo::uid`, laid out by stage 0), and the
+/// egress bit is the route's (`route.egress()`), so a route can never be given
+/// another route's identity or reach.
+fn view_child_plans(
+    routes: &[blastit_scheduler::RouteInfo],
+    egress: &[bool],
+    dev: Option<&crate::dev_learn::Dev>,
+    seccomp: bool,
+) -> ViewChildPlans {
+    let privileges = routes
+        .iter()
+        .map(|route| {
+            if dev.is_none() {
+                Privileges::DropTo(route.uid)
+            } else {
+                // `blastit dev`: every role shares the caller's uid, so the
+                // layout's per-route uids are not used at all (`R19`).
+                // (`check` never boots stage 1 and forks no view.)
+                Privileges::Shared
+            }
+        })
+        .collect();
+    let filter = egress
+        .iter()
+        .map(|egress| {
+            if seccomp {
+                Filter::Seccomp(SeccompRole::View { egress: *egress })
+            } else {
+                // Only the explicit `BLASTIT_SECCOMP=0` (`R18`, `S6`), which
+                // stage 0 already warned about.
+                Filter::Off
+            }
+        })
+        .collect();
+    ViewChildPlans { privileges, filter }
 }
 
 /// The limits http, the scheduler and dbproxy run under: a descriptor budget
@@ -2151,13 +2230,13 @@ mod tests {
 
     use super::*;
     use crate::config::Immortalize;
-    use crate::immortal::Outcome;
+    use blastit_view_python::immortal::Outcome;
 
     /// Runs `f` with an emitter on a pipe, and returns the lines it wrote.
     ///
     /// Nothing here touches the heap: the setting below is the one that never
     /// walks it, so these tests cannot race the whole-interpreter passes in
-    /// `crate::immortal`'s own tests.
+    /// `blastit_view_python::immortal`'s own tests.
     fn capture<T>(f: impl FnOnce(&Emitter) -> T) -> (String, T) {
         let (read, write) = pipe().unwrap();
         let emitter = Emitter::new(write.as_raw_fd(), LogFormat::Json, Level::Debug, false);
@@ -2276,7 +2355,7 @@ view b regex '/robots\\.txt' {}\n";
         let config = Config::default();
         let outcome = Outcome {
             decision: Decision::On,
-            stats: Some(crate::immortal::Stats {
+            stats: Some(blastit_view_python::immortal::Stats {
                 objects: 1_610_300,
                 elapsed: Duration::from_secs_f64(1.7854),
             }),
@@ -2599,5 +2678,147 @@ view b regex '/robots\\.txt' {}\n";
         assert!(error.contains("9 token(s), not 1..=8"), "{error}");
         let ok = stage1_program(Some(&long[..8])).expect("eight tokens are accepted");
         assert_eq!(ok.len(), 8);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod child_plans {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    /// A `blastit dev` root, removed when dropped.
+    ///
+    /// [`crate::dev_learn::Dev::adopt`] refuses anything that is not a `0700`
+    /// directory owned by the caller, so the fixture builds exactly that and
+    /// takes it away again even when an assertion fails.
+    struct DevRoot(std::path::PathBuf);
+
+    impl DevRoot {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "blastit-view-child-plans-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("the fixture's dev root");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                .expect("the fixture's dev root mode");
+            Self(path)
+        }
+
+        fn dev(&self) -> crate::dev_learn::Dev {
+            let host = std::net::IpAddr::V4(std::net::Ipv4Addr::from([127, 0, 0, 1]));
+            crate::dev_learn::Dev::adopt(self.0.clone(), host)
+                .expect("a 0700 dev root owned by the caller")
+        }
+    }
+
+    impl Drop for DevRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Two routes with **different** uids and different egress, so “every route
+    /// gets its own identity and its own reach” is asserted rather than implied
+    /// by a single-route fixture.
+    fn fixture() -> (Vec<blastit_scheduler::RouteInfo>, Vec<bool>) {
+        (
+            vec![
+                blastit_scheduler::RouteInfo::new("shop", false, 20_001),
+                blastit_scheduler::RouteInfo::new("api", false, 20_002),
+            ],
+            vec![false, true],
+        )
+    }
+
+    /// D1, row 1: a production boot drops each view to **its own** uid and
+    /// installs its own `View` filter.
+    ///
+    /// This is the pin the design asks for: inverting the boot-mode branch (or
+    /// swapping two routes' uids) fails here.
+    #[test]
+    fn a_production_boot_drops_each_view_to_its_own_uid_and_filters_it() {
+        let (routes, egress) = fixture();
+        let plans = view_child_plans(&routes, &egress, None, true);
+        assert_eq!(
+            plans.privileges.len(),
+            routes.len(),
+            "one identity per route"
+        );
+        assert_eq!(plans.filter.len(), routes.len(), "one filter per route");
+        assert_eq!(
+            plans.privileges,
+            vec![Privileges::DropTo(20_001), Privileges::DropTo(20_002)],
+            "each route drops to its own uid, in routing order"
+        );
+        assert_eq!(
+            plans.filter,
+            vec![
+                Filter::Seccomp(SeccompRole::View { egress: false }),
+                Filter::Seccomp(SeccompRole::View { egress: true }),
+            ],
+            "each route's filter keeps its own egress"
+        );
+    }
+
+    /// D1, row 2: a `blastit dev` boot shares the caller's uid and still
+    /// installs the filter — `dev` is filtered today (`Config::seccomp`
+    /// defaults to on).
+    ///
+    /// The shared variant is asserted as "not a per-route drop": `Privileges`
+    /// has exactly two variants, and the census that proves no view crate
+    /// constructs the shared one greps this directory — so the literal spelling
+    /// lives in `view_child_plans` alone and a test does not become a false
+    /// positive there.
+    #[test]
+    fn a_dev_boot_shares_the_uid_and_still_filters() {
+        let root = DevRoot::new("dev");
+        let dev = root.dev();
+        let (routes, egress) = fixture();
+        let plans = view_child_plans(&routes, &egress, Some(&dev), true);
+        assert_eq!(plans.privileges.len(), routes.len());
+        assert!(
+            plans
+                .privileges
+                .iter()
+                .all(|privileges| !matches!(privileges, Privileges::DropTo(_))),
+            "dev shares the caller's uid, whatever the layout says: {:?}",
+            plans.privileges
+        );
+        assert_eq!(
+            plans.filter,
+            vec![
+                Filter::Seccomp(SeccompRole::View { egress: false }),
+                Filter::Seccomp(SeccompRole::View { egress: true }),
+            ],
+            "dev is filtered: only the explicit BLASTIT_SECCOMP=0 is not"
+        );
+    }
+
+    /// D1, row 3: only the explicit `BLASTIT_SECCOMP=0` switches the filter
+    /// off, and it does so without changing the identity. Same spelling rule as
+    /// row 2: `Filter` has exactly two variants, so "not a `Seccomp`" *is* the
+    /// off variant, and the census stays clean.
+    #[test]
+    fn an_explicit_off_switch_installs_no_filter_but_keeps_the_identity() {
+        let (routes, egress) = fixture();
+        let plans = view_child_plans(&routes, &egress, None, false);
+        assert_eq!(
+            plans.privileges,
+            vec![Privileges::DropTo(20_001), Privileges::DropTo(20_002)],
+            "BLASTIT_SECCOMP=0 is not an identity switch"
+        );
+        assert_eq!(plans.filter.len(), routes.len());
+        assert!(
+            plans
+                .filter
+                .iter()
+                .all(|filter| !matches!(filter, Filter::Seccomp(_))),
+            "no route may keep a filter under BLASTIT_SECCOMP=0: {:?}",
+            plans.filter
+        );
     }
 }
