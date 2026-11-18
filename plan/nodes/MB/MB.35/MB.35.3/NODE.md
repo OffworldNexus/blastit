@@ -11,11 +11,11 @@ paths:
   - "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md"
   - "docs/design/blastfile-lsp-zed.md"
   - ARCHITECTURE.md
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T06:51"
 ---
 
 # Goal

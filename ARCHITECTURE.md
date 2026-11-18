@@ -55,7 +55,7 @@ Section 9 summarises the parts of both that matter here.
 
 ## 2. Components
 
-A single Rust binary, `blastit`, plays every role. Most roles are chosen by
+A single serving Rust binary, `blastit`, plays every role. Most roles are chosen by
 their position in the process tree. The exception is dbproxy, which is
 re-exec'd with `--role=dbproxy` (§4); that flag grants nothing by itself,
 because the secrets only arrive over an inherited pipe. CPython is embedded
@@ -67,7 +67,8 @@ used as a library. On the Python side there is no framework integration at
 all: blastit loads one standard WSGI callable (`BLASTIT_APP`, or the file's
 `entrypoint`). It knows nothing about the framework's routing. Which
 process serves which request comes from blastit's own routing table in the
-manifest (§6).
+manifest (§6). A second binary, `blastit-lsp`, is the **editor** surface: it
+plays no role in this process tree, and §2.7 says what it may and may not link.
 
 **Execution modes.** Four entry points:
 
@@ -522,6 +523,48 @@ cannot be forged by a script; a zero reading is `null`, never "free". A
 contained `exit()`/`die()`/fatal trapped by `zend_first_try`/`zend_catch` ends
 the request as `DoneOutcome::Bailed` (§2.4): the scheduler charges its wall time,
 and `view_died` keeps meaning only that the process died.
+
+### 2.7 The Rust workspace, crate by crate
+
+`members = ["crates/*"]`; the rows are the members, the one thing each owns, and the direct
+dependencies that decide where it can be built. "Any" means the crate's own code is
+platform-neutral — its transitive C library (`pg_query`'s `libpg_query`) is compiled by `cc` on
+each target, which is why a build host needs a C toolchain and `libclang` and an installed
+artifact needs neither.
+
+| Crate | Owns | Direct dependencies | Builds on |
+|---|---|---|---|
+| `blastit` | the composition root: `cli`, stage 0/1, the supervisor and every role below | every workspace crate, plus `libc`, `rustix`, `pyo3`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
+| `blastit-sys` | the OS surface: fork/exec, uids, capabilities, seccomp, signals, `fanotify`, `/proc` | `libc`, `rustix`, `thiserror` | Linux |
+| `blastit-dbproxy` | the PostgreSQL broker: per-route listener, the query allowlist | `async-trait`, `blastit-events`, `blastit-sqlpolicy`, `blastit-sys`, `pregresql`, `rustix`, `serde`, `serde_json`, `thiserror`, `tokio`, `zeroize`, `tokio-postgres` (dev) | Linux |
+| `blastit-scheduler` | the routing table, the worker budget, fair queuing | `blastit-events`, `blastit-frame`, `blastit-ingress`, `blastit-manifest`, `rustix`, `serde_json`, `thiserror`, `tokio` | Linux |
+| `blastit-http` | HTTP/1.1 head parsing, the listener, the client-address resolver | `blastit-events`, `blastit-frame`, `httparse`, `thiserror`, `tokio` | Linux (`#[cfg(unix)]`) |
+| `blastit-view` | the Python and PHP worker runtimes | `blastit-frame`, `blastit-php-sapi`, `pyo3`, `thiserror` | Linux |
+| `blastit-py` | the `pyo3` module the wheel imports | `blastit`, `blastit-ingress`, `blastit-manifest`, `blastit-sqlpolicy`, `pyo3`, `serde_json` | Linux |
+| `blastit-php-sapi` | the C SAPI shim's Rust half (the shim is `dlopen`ed, never linked) | none at runtime — a build script compiles the per-minor C ABI | Linux |
+| `blastit-env` | the `BLASTIT_*` / `ALWAYS_STRIP` barrier and the swapped `envp` | `blastit-manifest`, `percent-encoding`, `thiserror`, `url`, `zeroize` | any |
+| `blastit-manifest` | the `Blastfile`: lexer, parser, model, `validate`, `fmt`, warning sites, and the query vocabulary it re-exports from `blastit-sqlpolicy` | `blastit-ingress`, `blastit-sqlpolicy`, `regex`, `serde`, `thiserror` | any |
+| `blastit-sqlpolicy` | the SQL policy: `pg_query` parse, `parameterize`, table grants | `pg_query`, `serde`, `serde_json` | any |
+| `blastit-ingress` | body codecs and the ingress policy type | `percent-encoding`, `serde`, `serde_json`, `thiserror`, `url` | any |
+| `blastit-frame` | the internal frame codec (`RawFrame`, `Ctl`) | `thiserror` | any |
+| `blastit-events` | the log and event shapes | `serde_json`, `thiserror`, `time` | any |
+| **`blastit-lsp`** | the **editor surface** only: the LSP 3.17 subset on stdin/stdout for `Blastfile`s — bin `blastit-lsp`, lib `blastit_lsp::run()` | **exactly** `blastit-manifest` and `serde_json` | **Linux, macOS, Windows** — five targets |
+
+**The editor surface is cross-platform; serving is Linux-only.** `blastit-lsp` is the one artifact
+Blastit publishes for a developer's own machine rather than for a server: it reads framed LSP on
+stdin, writes it on stdout, opens no file or socket **in its own code**, executes nothing, and
+links no crate that can acquire a uid, a capability or a seccomp filter — `blastit-sys`, `rustix`,
+`nix`, the `libc` crate, `pyo3` and `blastit-php-sapi` are absent from its dependency graph. That
+is what makes the portable build honest (`docs/design/blastfile-lsp-zed.md` §1.3) and why it
+**cannot become a serving binary by accident**: the serving crates are not in its graph, so there
+is no listener to bind and no privilege to drop. It is supported unprivileged only: the release
+ships no file capabilities and no page installs it with `setcap` or `sudo`, and the linked
+manifest crate's file API and `libpg_query`'s parse-only C are in the image (the honest claim is
+about the code path the server runs, not about every symbol in the binary). `blastit lsp` is a
+delegation to the same `blastit_lsp::run()`
+(`crates/blastit/src/lib.rs`: `pub use blastit_lsp as lsp;`), so Linux has one server, not two.
+Everything in §2.1–§2.6 — uids, `execve`, seccomp, `libphp` — exists only on Linux, and the
+editor user must not read this table as a promise of a Windows server.
 
 ---
 

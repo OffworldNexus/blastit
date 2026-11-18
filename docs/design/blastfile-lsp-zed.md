@@ -88,10 +88,14 @@ Four crates' worth of surface, three files new in `crates/` (`lsp.rs`, `blastfil
 `tests/critical_lsp.rs`), one visibility change, **no path
 widening**. Nothing else moves.
 
+That is the 2026-11-17 shape, and the rows below stay as its record. The 2026-11-18 amendment
+(§1.3) moves row 1 — and only row 1 — into a crate of its own so the server can be built for
+macOS and Windows; the content of every row is unchanged by the move.
+
 | # | Code site | Owns | Does **not** own |
 |---|---|---|---|
-| 1 | `crates/blastit/src/lsp/{mod,hover}.rs` (**new**, ≤ 750 lines) | the frame reader/writer (§3), the lifecycle (§2), dispatch, the `documents` map, UTF-16 conversion (§4), diagnostics assembly (§5), formatting (§6), hover (§7) | manifest syntax, layout, or the meaning of any directive |
-| 2 | `crates/blastit/src/lib.rs` | one line: `pub mod lsp;` | — |
+| 1 | `crates/blastit/src/lsp/{mod,hover}.rs` (**new**, ~1.9k lines as shipped: 1591 + 337) | the frame reader/writer (§3), the lifecycle (§2), dispatch, the `documents` map, UTF-16 conversion (§4), diagnostics assembly (§5), formatting (§6), hover (§7) | manifest syntax, layout, or the meaning of any directive |
+| 2 | `crates/blastit/src/lib.rs` | one line: `pub mod lsp;` — which `MB.35.4` rewrites to `pub use blastit_lsp as lsp;`, so nothing else in the binary changes (§1.3) | — |
 | 3 | `crates/blastit/src/cli.rs` | `Command::Lsp` (+ `from_argv` arm `Some("lsp")`), `LSP_USAGE`, `parse_lsp`, the `main` arm, one added `USAGE` line, `LSP_FAILURE = 2`, and **one capability line**: the `Lsp` arm calls `blastit_sys::caps::hold_none()` before `lsp::run()` (§11 S3) | the protocol: `run_lsp` is `lsp::run()` and returns `u8` |
 | 4 | `crates/blastit/src/main.rs` | **unchanged** — `cli::main` already dispatches every subcommand | — |
 | 5 | `crates/blastit-manifest/src/error.rs` | `ManifestError::message()` — the `Display` sentence with the `prefix(position())` removed (§5.2) — and the replacement of `position()`'s wildcard arm with the explicit position-less list (§1 note) | any new variant, any new field on `ManifestWarning` |
@@ -99,6 +103,7 @@ widening**. Nothing else moves.
 | 7 | `crates/blastit-manifest/src/blastfile/mod.rs` | `MAX_SOURCE_BYTES` goes `pub(crate)` → `pub` (§3.1), and one new entry point `check(source, base)` that returns the manifest, its warnings **and** their sites (§5.5) | — |
 | 8 | `crates/blastit-manifest/src/model.rs` | **unchanged** — no span field, no new method (§5.5) | — |
 | 9 | `crates/blastit-manifest/src/validate.rs` | **unchanged**: triggers and emission order stay exactly as they are, so boot log lines and every existing test are untouched | — |
+| 10 | `crates/blastit-lsp/` (**new**, 2026-11-18, `MB.35.4`) | the crate row 1 becomes: `src/lib.rs` = today's `lsp/mod.rs`, `src/hover.rs` with its two `include_str!` doc paths one level shallower (`../../../docs/…`), `src/main.rs` = `#![forbid(unsafe_code)]` + `std::process::exit(blastit_lsp::run() as i32)`, `tests/critical_lsp_stdio.rs` (protected, new); its dependencies are **exactly** `blastit-manifest` + `serde_json` | any serving crate (`blastit`, `blastit-sys`, `blastit-dbproxy`, `blastit-scheduler`, `blastit-http`, `blastit-view`, `blastit-py`, `blastit-php-sapi`), any crate that can acquire a privilege (`rustix`, `nix`, `libc`, `pyo3`), or `std::os::unix` — the full forbidden set and its guard are §1.3 |
 
 The exact signatures the two halves share:
 
@@ -154,12 +159,19 @@ variant cannot be added without a decision, and no rendered sentence changes.
 
 ### 1.1 Why a subcommand, not a second crate or binary
 
+**Superseded in part, 2026-11-18 (`MB.35.3`).** This table answered "where does the server live?"
+for a reader whose editor ran on a Linux machine that already had `blastit`. The owner's mandate
+puts the editor on macOS and Windows, where there is no `blastit` to be a subcommand of, so the
+second column is the answer for the editor — and for the editor only. The rows below stay as the
+record of what the single binary bought; §1.3 states what each cost became, and `ADR-0013`'s
+`MB.35.3` amendment is the decision.
+
 | Property | `blastit lsp` (chosen) | a `blastit-lsp` binary |
 |---|---|---|
 | Release artifacts | one binary + one wheel, already shipped | a second artifact to build, sign, publish and keep in step |
 | Server resolution | `blastit` on `PATH`, or `uv run blastit lsp` — the extension needs **one** name | a second name for the extension, its error message and the docs to resolve |
 | Code sharing | `blastit-manifest` is already a dependency of `crates/blastit` | the same dependency, plus a crate to plumb it |
-| Privilege surface | the `Lsp` arm drops every file capability **before** it reads a byte (`blastit_sys::caps::hold_none()`, the call `--role=dbproxy` already makes at `cli.rs:638`), so the editor's bytes are parsed by a process holding nothing (§11 S3) | the same call in a second binary — the capabilities belong to the process image either way, so splitting the binary buys nothing here |
+| Privilege surface | the `Lsp` arm drops every file capability **before** it reads a byte (`blastit_sys::caps::hold_none()`, the call `--role=dbproxy` already makes at `cli.rs:747` (the `Lsp` arm's is `cli.rs:579`)), so the editor's bytes are parsed by a process holding nothing (§11 S3) | the same call in a second binary — the capabilities belong to the process image either way, so splitting the binary buys nothing here |
 | Python-free standalone | `make rs-no-python` already produces a `blastit` that speaks it | a second `--require-no-python` promise to keep |
 
 The subcommand is reachable from both installations by construction:
@@ -173,7 +185,7 @@ binary's `lsp` subcommand and asserts the handshake (§12.1).
 
 - `lsp.rs` may not name `crate::stage0`, `crate::stage1`, `crate::host::Host`,
   `crate::config`, `blastit_sys`, or `std::env` — one assertion in `critical_lsp.rs`
-  over `include_str!("../src/lsp.rs")` (`the_lsp_module_is_a_text_tool`) checks every
+  over `include_str!("../src/lsp/mod.rs")` (`the_lsp_module_is_a_text_tool`) checks every
   forbidden substring from a fixed list.
 - `lsp.rs` may not read `./Blastfile`, any other file, a directory entry or a socket:
   the only input is stdin. The list it is grep-checked against is
@@ -188,7 +200,124 @@ binary's `lsp` subcommand and asserts the handshake (§12.1).
 
 R-ids for this section: **R1** (subcommand in `cli.rs`), **R2** (three new files, one
 visibility change, **no path widening**, no dependency), **R3** (`lsp.rs` names no
-privilege/config/env/filesystem module), **R3a** (`position()` has no wildcard arm).
+privilege/config/env/filesystem module), **R3a** (`position()` has no wildcard arm), and the
+2026-11-18 crate boundary **R69–R76** (§1.3, §14).
+
+### 1.3 The `blastit-lsp` crate: two dependencies, one `run()`, and the guard (2026-11-18)
+
+The server's code is already portable; the binary that hosts it is not.
+`crates/blastit/src/lsp/**` imports `std`, `blastit_manifest`, `blastit_sqlpolicy::parameterize`
+and `serde_json`, and nothing else (`docs/research/2026-11-17-cross-platform-blastit-lsp.md`
+§4.3), while `crates/blastit`'s own manifest links `blastit-sys`, `rustix`, `libc`, `pyo3` and the
+PHP SAPI. A crate of its own is the only honest way to say "this program's closure is portable":
+the alternative — a `blastit` built without those dependencies on two platforms — is a second
+server under a `cfg`.
+
+**The crate.** `MB.35.4` writes exactly this shape (workspace keys and lints as every other
+crate uses them):
+
+```toml
+# crates/blastit-lsp/Cargo.toml
+[package]
+name = "blastit-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "blastit_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "blastit-lsp"
+path = "src/main.rs"
+
+[dependencies]
+blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+serde_json = "1.0.154"
+```
+
+**The dependency rule, stated so a guard can enforce it** (`MB.35.6` turns the five rows below
+into `make lsp-portable`, a prerequisite of `make check`; like `manifest-purity`, that target runs
+the guard **and** `scripts/test_check_lsp_portable.py`, so the negative twins are gated rather than
+merely written):
+
+| Rule | Why | Enforced by |
+|---|---|---|
+| `[dependencies]` is exactly `{ blastit-manifest, serde_json }`, and **every other dependency table** in `crates/blastit-lsp/Cargo.toml` — `[build-dependencies]`, `[target.'cfg(…)'.dependencies]`, `[target.…]` variants, `[features]`'s optional entries — is absent or empty; the crate has **no `build.rs`** | a third runtime dependency is a portability risk nobody reviewed, and a `[target.'cfg(windows)'.dependencies] libc` row would leave `[dependencies] == 2` true while breaking the five-target claim. `pg_query` is already transitive; its `cc` and `bindgen` are **build** dependencies of *that* crate, which is why the five targets need a C toolchain and `libclang` and nothing at runtime. A `build.rs` is the one place a build could acquire a platform edge outside every table | `scripts/check_lsp_portable.py` parses the manifest with `tomllib`, iterating every table, and asserts the file is absent; one negative twin is a `[target.'cfg(windows)'.dependencies]` row |
+| the forbidden set is **named**, not an allowlist: `blastit`, `blastit-sys`, `blastit-dbproxy`, `blastit-scheduler`, `blastit-http`, `blastit-view`, `blastit-py`, `blastit-php-sapi`, `rustix`, `nix`, `libc`, `pyo3` | an allowlist hides the next crate someone adds; the message must name the crate and the reason class | the same script, over `cargo metadata --offline --locked`'s **unfiltered** closure of `blastit-lsp` — unfiltered, because a host-filtered `cargo tree` proves the Linux edges only — and, where the host resolves them, `--filter-platform` for each of the five targets; the failure prints the dependency path that brought it in |
+| no line in **any** file under `crates/blastit-lsp/src/**` except the pinned `src/main.rs` — i.e. `lib.rs`, `hover.rs`, and any file a later change adds — contains any token of §1.2's list — `std::fs`, `std::path`, `std::process`, `std::net`, `std::os::unix`, `std::os::linux`, `std::os::windows`, `std::os::unix::net`, `libc`, `rustix`, `nix`, `pyo3`, `blastit_sys`, `crate::stage0`, `crate::stage1`, `crate::host`, `crate::config`, `std::env`, `include!` — nor **any `#[cfg(…)]`, `#[cfg_attr(…)]` or `cfg!(…)` other than `#[cfg(test)]` on a test module** (so `#[cfg(all(unix, target_arch = …))]` is a hit), nor `#[path`, an unsafe item or block (`unsafe {`, `unsafe fn`, `unsafe impl`, `unsafe trait`), or `extern "C"` — `#[cfg(test)]` stays legal, and the guard also asserts that `#![forbid(unsafe_code)]` **is present** in `lib.rs` and `main.rs` (a positive check, so deleting the attribute is a red) | one code path on three platforms: a `cfg` here is a second behaviour, and each banned token is one half of a claim other sections make — "opens no path", "opens no socket", "executes nothing", "reads no environment". `std::process::Command` is the one that would execute; `std::fs`/`std::net` are the ones that would touch a path or bind, and §1.2's list already names them | the token scan **classifies `use` items and paths by origin**, the way `scripts/check_manifest_purity.py` does, so `use std::{fs, net};`, `use std::process as p;` and `p::Command::new(..)` are hits and not just the literal `std::fs`; and **the manifest API is allowlisted**: only `blastfile::{check, fmt}`, `blastfile::MAX_SOURCE_BYTES`, `Manifest`, `Manifest::from_blastfile_str`, `ManifestError`, `ManifestWarning`, `Position`, `QuerySite`, `UidLayout` and `parameterize` may be used, so `blastfile::read`/`write` and `blastit_manifest::edit` — which open paths — are a red. Plus the compiler half: `#![forbid(unsafe_code)]` at the top of `src/lib.rs` **and** `src/main.rs`, so an `extern "C"` declaration (which needs `unsafe`) cannot be added even without a crate. The attribute itself is not a hit: the rule bans unsafe **items and blocks**, not the string `unsafe` in `forbid(unsafe_code)`. `src/main.rs` is otherwise pinned to one shape — the attribute, one `fn main()`, one `std::process::exit(blastit_lsp::run() as i32)` — so the legitimate `std::process::exit` cannot weaken the grep |
+| `cargo tree -p blastit-lsp --edges normal` shows no `libc` crate, `rustix`, `nix` or `pyo3` | the tree is the claim, and a reviewer reads it. The `libc` **crate** is the check; `std` still links the C library on every platform, which is why the unsafe-item/`extern "C"` half of row 3 exists | recorded in `docs/testing/E2E-MB.35.md` (`MB.35.6`) |
+| the server has one home: `crates/blastit/src/lsp/` does not exist, `crates/blastit/src/lib.rs` contains `pub use blastit_lsp as lsp;`, and `crates/blastit/Cargo.toml` names `blastit-lsp` exactly once | a re-added copy under `crates/blastit/src/lsp/` would pass every behavioural test in §14.2 — the suites would each drive one of two identical implementations — so identity needs a structural assertion, not a transcript | the same script (a source read of `crates/blastit/src/lib.rs`) and the new crate's protected suite |
+
+**Why two dependencies are enough.** The Quick Fix's rewrite is `blastit_sqlpolicy::parameterize`
+(§7A.3), so `blastit-manifest` re-exports it beside the `TableGrant`/`Columns` it already
+re-exports (`crates/blastit-manifest/src/lib.rs:108`) — the same argument as `IngressPolicy`
+there: a caller that asks the manifest for a `query`'s canonical `$?` text should not have to
+name a second crate. That is one added line, `pub use blastit_sqlpolicy::parameterize;`, in
+`crates/blastit-manifest/src/lib.rs`. **`MB.35.4` owns it and its `paths` must be widened to name
+that file** (today's list does not, so the leaf would otherwise have to choose between a third
+dependency and a lane violation); `blastit-manifest` still learns nothing about editors (no
+`Uri`, no LSP type, no `version`), and `lsp`'s `use blastit_manifest::parameterize;` is the only
+import row 1 changes.
+
+**Two binaries, one `run()`.** `crates/blastit-lsp/src/main.rs` is `#![forbid(unsafe_code)]` plus
+`fn main() { std::process::exit(blastit_lsp::run() as i32) }` — and `crates/blastit/src/lib.rs`
+replaces `pub mod lsp;` with `pub use blastit_lsp as lsp;`, so `cli.rs`'s arm (including
+`blastit_sys::caps::hold_none()` before the call, §11 S3) compiles untouched. The equivalence
+obligations are:
+
+1. The **assertion bodies and the property lists** of `crates/blastit/tests/critical_lsp.rs` stay
+   unchanged, and it keeps spawning `env!("CARGO_BIN_EXE_blastit") lsp`. **Four** `include_str!`
+   path literals must follow the move, because the moved code reads its own repository paths at
+   compile time: two in `hover.rs` (`../../../../docs/reference/blastfile.md` →
+   `../../../docs/reference/blastfile.md`, twice) and two in `critical_lsp.rs`
+   (`../src/lsp/{mod,hover}.rs` → `../../blastit-lsp/src/{lib,hover}.rs`). `hover.rs` is already
+   in `MB.35.4`'s paths; **`critical_lsp.rs` must join them**, `tools/critical_guard.py` sees the
+   change as declared, and the oracle is a diff whose every changed line is one of those literals
+   (`git diff <pre-node> -- crates/blastit/tests/critical_lsp.rs` changes only the four literals and
+the comment that names the old paths — eight lines, read by a reviewer; `critical_guard.py --base
+<pre-node> --node MB.35.4` is the machine record of that diff, and it is report-only, so the
+review of the body is the oracle), not `git diff --exit-code`, which compares the working tree to
+the index and cannot police a committed edit. Without the `hover.rs` half, `cargo test -p blastit-lsp` — an
+   acceptance command — fails to build.
+2. `crates/blastit-lsp/tests/critical_lsp_stdio.rs` (protected, new) spawns
+   `env!("CARGO_BIN_EXE_blastit-lsp")` and replays the minimum session — `initialize` (the
+   capability document), `didOpen` of a `query` typo (severity 1 at the exact `line:col`),
+   `shutdown` + `exit` → `0` — with a cleared environment, and one `--bogus` case that proves the
+   portable binary ignores an argument (reads stdin, exits `1` at EOF) rather than exiting `2`
+   like `blastit lsp`.
+3. No message, sentence, bound or capability changes, and the **only** exit-code difference is
+   the documented one: the portable binary ignores an argument and exits `1` at end of input,
+   where `blastit lsp --bogus` exits `2`. Anything else that differs is a bug `MB.35.4` did not
+   ask for, and `git diff --find-renames` must show the move.
+4. Both names answer one session identically; the transcript `diff` is `MB.35.6`'s proof, and
+   the pages' two commands are documented as the same server (`MB.35.2`).
+5. Identity is checked as well as behaviour (row 5 above): no `lsp` module under
+   `crates/blastit/src/`, one `blastit-lsp` edge in `crates/blastit/Cargo.toml`.
+
+**The security position.** The server is a text tool: a framed JSON-RPC stream on stdin,
+`blastit-manifest`'s parse of one buffer, and a frame on stdout — nothing in a document is
+executed, and in the editor a `Blastfile` is **untrusted data** rather than the policy of a boot
+(§11). It links **no privilege crate**: `blastit-sys`, `rustix`, `nix`, the `libc` crate, `pyo3`
+and `blastit-php-sapi` are absent from its dependency graph, so none of the server's own code can
+call `capset`, `setresuid`, `seccomp`, `fork` or `execve`, and `#![forbid(unsafe_code)]` refuses
+the `extern "C"` shortcut that would add one without a crate. The artifact is **supported
+unprivileged only**, and that is a statement about the build, not an assumption: `MB.35.5`
+asserts `getcap` is empty for every Linux asset, no page installs it with `setcap` or `sudo`, and
+the design does not claim a privileged invocation would be inert — the linked
+`blastit-manifest` file API and `libpg_query`'s C parser are in the image, so the honest claim is
+that the *server's own code path* opens no path, no socket and no child. It **cannot become a
+serving binary by accident**, because the serving crates are not in its graph: there is no
+listener to bind, no stage 0 to enter, and no `std::process` with which to spawn one. Linux keeps
+the capability drop it already had, because `blastit lsp` is still that binary's arm and still
+calls `hold_none()` before it reads a byte.
 
 <!-- APPEND -->
 ## 2. The exact message set, the capability document, and the error codes
@@ -435,7 +564,7 @@ instead of a dead session (§11 S5, S9). The deny list above is `lsp.rs`'s own;
 why the guard exists rather than a promise.
 
 **Assertion:** a complete session with a valid file writes **zero** bytes to stderr,
-and `include_str!("../src/lsp.rs")` contains `set_hook` and the literal
+and `include_str!("../src/lsp/mod.rs")` contains `set_hook` and the literal
 `internal error`.
 
 ### 3.4 The five endings
@@ -1446,6 +1575,13 @@ Blastfile = "blastfile"
 
 ### 8.3 `src/lib.rs`: resolve `blastit`, then `uv`, through the worktree
 
+**Superseded 2026-11-18 (`MB.35.3`; implemented by `MB.33`).** The order below is the record of
+the 2026-11-17 decision, and its `--no-sync` finding still holds: a bare `uv run` spawned by an
+editor syncs the project, i.e. runs a cloned repository's build backend with the developer's
+environment in `environ`. §8.3a *replaces* the order — settings → `$PATH` → one download — because
+the server is now its own binary on three platforms and `uv` is not part of the editor path at
+all. The rows below stay as written.
+
 **The problem this section exists for.** Zed is normally launched from the desktop, not
 from a terminal, so it does not inherit the `PATH` a login shell builds. A bare
 `Command { command: "blastit" }` therefore fails on exactly the machine the docs
@@ -1512,6 +1648,91 @@ pinned build ever exposes a struct instead, the one fix is
 inside the same field expression; the guard's `shell_env()` count (exactly one) still
 holds.
 
+### 8.3a The resolution order and the five assets (2026-11-18)
+
+`MB.33` implements this order and nothing else. Of the accepted pages, only
+`editors/zed/README.md`'s table already states all four rows in this order; two sentences are
+still the pre-`MB.35` shape and are `MB.33`'s to align: `docs/local.md` `## Editors` step 2 says
+"Once the release ships `blastit-lsp`, the extension finds the server itself, in a fixed order
+([the order](reference/cli.md#blastit-lsp))", and `docs/reference/cli.md` `## blastit-lsp`
+says "the extension runs it when `blastit` is on the `PATH` it sees, and downloads otherwise" —
+both leave out the settings step and `blastit-lsp`'s precedence. The README also still carries
+"Until the release that ships `blastit-lsp`, this extension runs a `blastit`/`uv` already on
+`PATH`", which contradicts decision 5 and must go. A user with Zed and **no `uv`**, no PyPI
+package and no checkout gets a working server on all five targets.
+
+| Step | What it resolves | Arguments | When it is used |
+|---|---|---|---|
+| 1. Settings | `zed::settings::LspSettings::for_worktree("blastit-lsp", worktree)`'s `binary.path` — an unpacked archive, `target/release/blastit-lsp`, or the Linux `blastit` | `binary.arguments`, defaulting to `[]` when unset. `binary.env` is **ignored** | always first: an explicit path is the user's decision. A reader who points `path` at the Linux `blastit` binary adds `"arguments": ["lsp"]`; the README says so in one line and the CLI page says `"arguments"` never belongs beside `blastit-lsp` |
+| 2. `$PATH` | `worktree.which("blastit-lsp")`, else `worktree.which("blastit")` | none, or `["lsp"]` for the second name | the portable archive on any platform, `~/.local/bin`, `uv tool install blastit`'s console script, a distro package |
+| 3. One download | `zed::latest_github_release("OffworldNexus/blastit", …)` by `zed::current_platform()` | the asset for the pair, extracted by `zed::download_file` | last, once per extension version: the file is cached under the extension's work directory and a second start does no network I/O |
+
+**`<version>` is `latest_github_release(…).version`**, interpolated into **both** the
+`download_file` destination and the relaunch path, so the cached directory and the command cannot
+diverge (a local build reached through step 1 or 2 never passes through either).
+
+**What the extension does not filter, stated plainly.** `LspSettings::for_worktree` returns the
+merged settings for the worktree, and the extension API gives no way to tell which layer a key
+came from — nor does any research fact establish that Zed withholds `lsp` keys from project
+settings. The design therefore **does not rely on any such filtering**: if a repository's
+`.zed/settings.json` can name `binary.path`/`binary.arguments`, opening an untrusted clone can run
+the binary it names, and that is Zed's own trust model for `lsp` settings (the same file that
+already chooses a formatter or a task) rather than something a wasm extension can fix. What this
+design *can* remove, it removes: `binary.env` is not honoured (the server reads no environment, so
+the field has no purpose and is the one loader-hijack vector — `LD_PRELOAD`, `LD_AUDIT`,
+`DYLD_INSERT_LIBRARIES`, `GCONV_PATH` — a settings file could add), and the child gets an
+**allowlist**, `PATH` plus `SYSTEMROOT` on Windows, never the whole `worktree.shell_env()` and
+never the `BLASTIT_*` names. The accepted pages keep the setting to `zed: open settings` (per
+user); the project-file alternative in `docs/reference/cli.md` `## blastit-lsp` is `MB.33`'s to
+remove, and it is listed as a follow-up on this node.
+
+| `current_platform()` | Asset | File type | Executable, relative to the extension's work directory |
+|---|---|---|---|
+| `(Linux, X8664)` | `blastit-lsp-x86_64-unknown-linux-gnu.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-x86_64-unknown-linux-gnu/blastit-lsp` |
+| `(Linux, Aarch64)` | `blastit-lsp-aarch64-unknown-linux-gnu.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-aarch64-unknown-linux-gnu/blastit-lsp` |
+| `(Mac, Aarch64)` | `blastit-lsp-aarch64-apple-darwin.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-aarch64-apple-darwin/blastit-lsp` |
+| `(Mac, X8664)` | `blastit-lsp-x86_64-apple-darwin.tar.gz` | `GzipTar` | `blastit-lsp-<version>/blastit-lsp-x86_64-apple-darwin/blastit-lsp` |
+| `(Windows, X8664)` | `blastit-lsp-x86_64-pc-windows-msvc.zip` | `Zip` | `blastit-lsp-<version>/blastit-lsp-x86_64-pc-windows-msvc/blastit-lsp.exe` |
+
+| Rule | Why | Assertion (in `scripts/check_zed_extension.py` unless named) |
+|---|---|---|
+| each asset is `blastit-lsp-<target>.tar.gz` on Linux/macOS and `.zip` on Windows, and the archive's one top-level directory is `blastit-lsp-<target>/` holding exactly the executable, `LICENSE` and a `SHA256SUMS` over those files (no `README.md`: the LSP has no page of its own) | Zed extracts **verbatim** — no top-directory stripping (`crates/util/src/archive.rs:20-47`) — so the extension must name the directory it extracts, and the archive's shape is what makes that one expression: `format!("blastit-lsp-{version}/blastit-lsp-{target}/{exe}")` | `lib: asset map` asserts the five literal names and their `GzipTar`/`Zip` types; `lib: executable` asserts the one joined path shape and `blastit-lsp.exe` only on Windows; `MB.35.5`'s acceptance extracts an archive and asserts exactly those three entries, then smokes the extracted file |
+| the Linux assets are built in `quay.io/pypa/manylinux_2_28_<arch>` with a measured `--max-glibc 2_28` floor and smoke-tested on Debian 12, and `scripts/check_workflows.py` learns `scripts/build-lsp.sh` (its floor rule matches only `build-standalone.sh` today, so an `ubuntu-latest` LSP build would pass `make workflow-check` green) | `ubuntu-24.04` would give every Linux asset `GLIBC_2.39`, which refuses to start on Debian 12 — the portability promise this epic exists for, and the defect `MB.3.60` recorded for the serving archives | `make workflow-check` and `MB.35.5`'s `packaging-gates-test`; `docs/testing/E2E-MB.35.md`'s recorded floor |
+| the CI leg takes its matrix from a preceding `matrix` job's output (`needs.matrix.outputs.lsp`), never from a shell command inside `fromJSON(...)`; `scripts/check_workflows.py`'s `OUTPUT_SPECS` gains `lsp`; and the release job gains `needs` for the LSP legs, a `download-artifact` with `pattern: lsp-*`, a `--count lsp` assertion, the archive globs named explicitly (`blastit-*-unknown-linux-*.tar.gz` for the archives, `blastit-lsp-*` for the new family) so neither count swallows the other (today's `blastit-*.tar.gz` matches `blastit-lsp-*.tar.gz`), the LSP archives in the final `SHA256SUMS`, and the per-leg `dist/SHA256SUMS.<target>` rename | the reviewer must be able to see that a new family joined the one publishing step without silently widening or skipping its checksum rule; `fromJSON(<command>)` is not an Actions expression and a workflow using it is rejected before any leg runs | `make workflow-check` and `MB.35.5`'s `packaging-gates-test`; the matrix-output pattern and the per-leg rename already exist for the standalone job (`publish-pypi.yml:160-187`, `:299-301`) |
+| **Trust root, stated:** the `SHA256SUMS` inside an archive is for a human who unpacked it and authenticates nothing; the extension's only control is HTTPS to `github.com` (the release-level `SHA256SUMS` asset is for CI and for a reader who verifies by hand — the wasm never fetches it); **0.2.0 ships no signature** | ADR-0013's old table describes a second artifact "to build, sign, publish": the signing half is not met, and a reader must not infer notarization or Authenticode from the word, nor a checksum check the extension does not perform | the row is prose; §14.3's macOS sentence says quarantine applies to a browser download, not to Zed's fetch; a signature is a follow-up, not a promise |
+| `zed::download_file(&asset.download_url, "blastit-lsp-<version>", kind)` extracts into that relative destination | `download_file` takes a **directory** path: `"blastit-lsp.zip"` would become a directory of that name | `lib: download destination` asserts the versioned literal |
+| `make_file_executable` is called unconditionally after extraction | it is a no-op `Ok(())` off Unix (`crates/util/src/fs.rs:94-111`), so there is **no** `if cfg!(windows)` and no second code path | `lib: executable` asserts the call and asserts no `cfg!` near it |
+| `Zip` only on `Os::Windows`, `GzipTar` otherwise | one arm per platform pair; the wrong type fails at extraction on the user's machine | `lib: zip windows` asserts the two types and their match arms |
+| **no `[[capabilities]]` block anywhere under `editors/zed/`** | the `download_file` gate is a **user setting** (`host = "*"`, `path = ["**"]` by default) checked on the **pre-redirect** URL; the manifest is never consulted, so a block is inert, and naming the CDN host would fail closed. This is a guardrail, not an egress sandbox: `fetch` performs no capability check | `lib: no capabilities` greps extension.toml and `src/lib.rs`; `docs/research/2026-11-17-cross-platform-blastit-lsp.md` §3 is the citation |
+| the target `github.com` release URL only; no CDN host is named | the browser URL 302s to `release-assets.githubusercontent.com`, which no document names, and the capability check runs before the redirect | `lib: asset url` asserts `OffworldNexus/blastit` appears once and no `githubusercontent` host does |
+| an unsupported pair, a failed download, or no release asset → one `Err` naming the supported targets and `lsp.blastit-lsp.binary.path`, reported through `set_language_server_installation_status(…, Downloading)` then `Failed(msg)` | a Mac on an unbuilt target must be told which machines have a server, not get a server that validates nothing | `lib: failure` asserts the message's two halves; the negative twins are `scripts/test_check_zed_extension.py`'s |
+| no `uv`, no `process::Command`, no `--version` probe | `uv` in the editor path was the owner's defect; executing from the wasm needs `process:exec` **and** a user grant. The check must be **positive** — the new order's own names and argv are present and no `uv` step is constructed — because a repo-wide `git grep which("uv") -- docs/design docs/decisions` can never pass while the accepted record still describes the old order | `lib: no uv` asserts the two `which` names in order and the absence of a `uv` argument vector in `src/lib.rs`; `lib: no process` greps `Command::new` |
+
+**The child's environment is an allowlist.** Steps 1 and 2 hand the server `PATH` (plus
+`SYSTEMROOT` on Windows) and nothing else — not `worktree.shell_env()`, not `binary.env`, not a
+`BLASTIT_*` name. `which` still searches the shell `PATH` Zed captured (a GUI launch has no
+terminal `PATH`), but the process it starts cannot read a token the developer exported: the
+server reads no environment (`§1.2`, `§1.3`'s `std::env` rule), and step 3's binary has no reason
+to inherit one. `MB.33`'s guard gains `lib: order` (the settings read precedes both `which` calls, and the download arm is last — a download-first extension is red) and `lib: env allowlist`: no `shell_env()` assignment to
+`Command.env`, no `Settings`, and the allowlist is a literal pair of names. R37's old "one
+`shell_env()` assignment" property becomes "the child env is built from an allowlist".
+
+**`MB.33`'s brief is stale on four points and this section wins.** Its Context paragraph says
+"Zed 2026 gates the download with a capability manifest … declare **exactly** the capabilities the
+code can reach (github.com and the redirect host it follows)" — the gate is a user setting checked
+pre-redirect and the manifest is never consulted, so the block is inert and a host list would fail
+closed (research §3). Its download destination is written `<workdir>/blastit-lsp-<version>`
+(absolute-looking) where `download_file` takes a **relative directory** path. Its Windows row says
+"**no** `make_file_executable`" where the call is unconditional and a no-op off Unix: the call
+itself is safe on Windows, and an `if cfg!(windows)` is the second code path this design removes. The fourth is the
+environment: its step 1 still merges `binary.env` over `shell_env()`, where this design ignores
+`binary.env` and hands the child a `PATH`/`SYSTEMROOT` allowlist. `MB.33`'s own note — "if the design's table and this brief disagree, the
+design wins and this brief is corrected" — is the rule to apply, and the brief is listed as a
+follow-up on this node.
+
+R-ids: **R72** (the three-step order, the five assets, and the guard properties above), **R75**
+(the trust root and the per-leg checksums).
+
 ### 8.4 `languages/blastfile/config.toml`, complete
 
 ```toml
@@ -1557,6 +1778,11 @@ paths), **R36** (the `extension.toml` table's nine rules), **R37** (`lib.rs`: `w
 order, the six argv literals, one `shell_env()` assignment, no process execution, no
 capability), **R38** (`config.toml`'s **eight** keys, `path_suffixes` exact), **R39** (the
 user/build split of §8.5).
+
+**R37 is superseded in part, 2026-11-18 (`MB.35.3`).** Its "six argv literals" are the `uv`
+argv decision 5 removed, and its "one `shell_env()` assignment" becomes "the child env is built
+from the `PATH`/`SYSTEMROOT` allowlist, and `binary.env` is ignored". R35, R36, R38 and R39 stand;
+§8.3a and §14.1's R72 are the current contract for the resolution order.
 
 <!-- APPEND -->
 ## 9. The grammar: `editors/tree-sitter-blastfile/`
@@ -2187,12 +2413,17 @@ the allowlist), **R50** (`outline.scm` `@item`+`@name`, `indents.scm` `@indent`,
 <!-- APPEND -->
 ## 11. Security and failure modes
 
-`blastit lsp` is a **text tool on the developer's own machine**, spawned by the
-developer's editor, reading the developer's own buffer on stdin. It is not a trust
-boundary, and this section's job is to prove it never becomes one. The manifest crate's
-own doc says why that is sound: "A `Blastfile` is policy, not input: whoever can write
-it can already grant `unrestricted`" (`blastfile/mod.rs:4`). The editor therefore
-inherits the manifest's threat model and adds no new asset.
+`blastit lsp` and `blastit-lsp` are one **text tool on the developer's own machine**, spawned by
+the developer's editor, reading the buffer the editor sends on stdin. It is not a trust boundary,
+and this section's job is to prove it never becomes one. **In a boot a `Blastfile` is policy; in
+the editor it is untrusted data** — a clone, a review or a downloaded archive is written by
+someone else, which the manifest crate's own sentence ("whoever can write it can already grant
+`unrestricted`", `blastfile/mod.rs:4`) does not cover, because the developer has not applied it.
+The editor therefore adds one asset to the manifest's threat model: a parse of unrecognised bytes
+by `blastit-manifest` (safe Rust) and by `libpg_query`'s C parser (parse-only, and the statement
+is never executed — no interpreter is linked and no `std::process` exists). Its canon stays the
+CLI's: one sentence per error, no SQL text in any log line, and no path named by a document is
+ever opened.
 
 ### 11.1 The properties, each with its test
 
@@ -2202,13 +2433,14 @@ inherits the manifest's threat model and adds no new asset.
 | S2 | **A document is parsed, never executed.** No `fork`/`execve`, no interpreter, no WASM engine, no path from a document | a `Blastfile` holds a `query '…'` string; running it would be a new attack surface | the *only* deterministic oracle: a document holding `view v "/x" {\n  postgres $DATABASE_URL\n  postgres { query "COPY x FROM PROGRAM 'sh'" }\n}` publishes **exactly** the `LiteralQuery` diagnostic (severity 1, `source: "blastit"`), stderr is empty, and `/proc/<server_pid>/task/<tid>/children` is empty before and after — `/proc/self/task` is the **test** process's thread table and proves nothing |
 | S3 | **No privilege, no configuration on the LSP path.** The `Lsp` arm calls `caps::hold_none()` before it reads a byte, and `lsp.rs` reads no environment, no path, no socket | the binary may be `setcap`'d in a deploy; capabilities belong to the process image, not to a code path, so "the arm returns early" alone is not enough | (a) `the_lsp_arm_drops_capabilities` greps `cli.rs` for `hold_none()` occurring before `lsp::run()`; (b) a session spawned with `.env_clear()` completes the handshake and one diagnostic (so no environment is needed, `BLASTIT_EXEC` included) |
 | S4 | **A `Blastfile` is never opened.** Only `stdin` is read; `uri`/`rootUri` are opaque strings | reading a path from a `uri` is a traversal surface with zero benefit | (a) the §1.2 grep for `std::fs`/`std::path`/`File::open`; (b) a document whose `uri` names a **FIFO with no writer** (`mkfifo`) — `open(2)` for reading blocks, so a reply within 2 s proves the path was never opened |
-| S5 | **No panic escapes a document.** `deny(unwrap_used, expect_used, panic, todo, indexing_slicing)` in `lsp.rs` (enforced by `clippy -D warnings`), a `panic::set_hook` that writes one fixed line, and `catch_unwind` around every `blastit-manifest` call per document | Zed does not restart a server that dies on its own, and the default hook prints the payload — which can quote document text | (a) `include_str!("../src/lsp.rs")` contains `set_hook` and `catch_unwind`; (b) 2 000 framed bodies from a fixed xorshift generator (`serde_json` shapes, truncated UTF-8, `Content-Length` over the cap, every `id` type) leave the process alive with every reply one well-formed frame |
+| S5 | **No panic escapes a document.** `deny(unwrap_used, expect_used, panic, todo, indexing_slicing)` in `lsp.rs` (enforced by `clippy -D warnings`), a `panic::set_hook` that writes one fixed line, and `catch_unwind` around every `blastit-manifest` call per document | Zed does not restart a server that dies on its own, and the default hook prints the payload — which can quote document text | (a) `include_str!("../src/lsp/mod.rs")` contains `set_hook` and `catch_unwind`; (b) 2 000 framed bodies from a fixed xorshift generator (`serde_json` shapes, truncated UTF-8, `Content-Length` over the cap, every `id` type) leave the process alive with every reply one well-formed frame |
 | S6 | **Bounded allocation.** Header ≤ 8 KiB **before** allocation; body allocated only after `N ≤ MAX_FRAME_BODY_BYTES`; a refused body costs one 8 KiB scratch | a `Content-Length: 4294967295` must not become a 4 GiB `Vec` | a `Content-Length: 33619969` frame answers `-32700` and exits `1` within 2 s (the `-32700` proves the header was parsed and the refusal happened before the read); the bound itself is the code path of §3.2 step 3, asserted by review and by `MAX_FRAME_BODY_BYTES == 33_619_968` in `lsp.rs`'s unit tests |
 | S7 | **stdout is protocol.** `deny(clippy::print_stdout)`; the only writer is `write_message` | one stray line desynchronises the client permanently | a full session's stdout is split on `Content-Length` and reassembled to exactly the expected messages, byte for byte, and its declared lengths are re-checked as UTF-8 bytes |
 | S8 | **No document text in logs.** stderr is the four fixed sentences (§11.3) and nothing else; no `uri`, no text, no value | a log line is still a log line, and a `Blastfile` holds SQL | two sessions. (a) The fixture whose SQL is `SELECT secret_token FROM api_keys`: stderr contains none of `secret_token`, `SELECT`, `api_keys`, the uri. (b) The **fuzz** session of S5, which necessarily writes `the input ended inside a frame`: every stderr line in both sessions is one of the four literals, so the alphabet is not vacuously true |
 | S9 | **A broken document is not a broken server.** Parse/format failure → diagnostics and `null`; the loop continues | the accepted page's "`1` only if the client disappears" | F4 and the D-loop tests: after `null`, the next request answers |
 | S10 | **Exit codes.** `0` only after `shutdown`; `1` for EOF, an unframeable stream, or a failed `caps::hold_none()` (§2.4); `2` for a bad argument (the `check`/`fmt` CLI-error convention) | the reference page documents `0`/`1` for the session; §12.8 hands it the two extra causes | seven sessions: clean → `0`; EOF mid-session → `1`; over-cap body → `1`; `exit` without `shutdown` → `1`; `shutdown` then EOF → `0`; `lsp --bogus` → `2`; a binary carrying a capability → `1` (rootless e2e only) |
-| S11 | **No second reader.** The server never re-implements the lexer, the parser, `fmt` or the warning triggers | a second reader is a second set of refusals to keep in step | `lsp.rs` contains `blastfile::check` and `blastfile::fmt` and none of `"fn lex"`, `"fn parse"`, `"fn lower"`; the token-scan names are greped out |
+| S11 | **No second reader.** The server never re-implements the lexer, the parser, `fmt` or the warning triggers | a second reader is a second set of refusals to keep in step | `lsp.rs` (after `MB.35.4`: `blastit-lsp`'s `src/lib.rs`) contains `blastfile::check` and `blastfile::fmt` and none of `"fn lex"`, `"fn parse"`, `"fn lower"`; the token-scan names are greped out |
+| S12 | **The portable artifact links no privilege crate, opens no path or socket and executes nothing** (2026-11-18): its normal dependency closure holds no `blastit-sys`, `rustix`, `nix`, the `libc` crate, `pyo3`, `blastit-php-sapi`; every file under `src/**` except the pinned `main.rs` holds no `std::fs`, `std::path`, `std::net`, `std::process`, `std::env`, `libc`, `include!`, `#[path` or unsafe item/`extern "C"` (the full token list is §1.3's third row, and `#![forbid(unsafe_code)]` is the compiler half); `src/main.rs` is the attribute plus one `fn main` with one `std::process::exit` call | a `setcap`/`sudo` run of the editor's server is unsupported and buys nothing the design defends; the linked manifest API and `libpg_query` are in the image, so the claim is about the server's own code path, and "executes nothing" is what keeps an editor start out of a clone's build code | `make lsp-portable` (`scripts/check_lsp_portable.py`, `MB.35.6`): every dependency table, the named forbidden set over the **unfiltered** `cargo metadata` closure, the source greps, one negative twin per token, and the structural identity check (§1.3); `cargo tree -p blastit-lsp --edges normal` recorded in `docs/testing/E2E-MB.35.md` |
 
 **§1.2's grep list, verbatim** (one assertion, one list, used by R3 / `the_lsp_module_is_a_text_tool`):
 `["std::fs", "std::path", "std::process", "std::os::unix::net", "libc", "rustix",
@@ -2229,7 +2461,7 @@ inherits the manifest's threat model and adds no new asset.
 | save a mis-indented line | the line snaps back, one undo step | an error dialog |
 | save a broken line | nothing happens; the squiggle stays | "language server error" |
 | save a CRLF file | the file becomes LF, once (§6.3) | a file that `blastit fmt --check` then fails |
-| `blastit` not installed | the extension's one-line error naming `uv add blastit` | silence, then "language server not running" |
+| no server can run (no file, no asset for the pair) | the extension's one-line error naming the supported targets and `lsp.blastit-lsp.binary.path` | silence, then "language server not running" |
 | the editor writes garbage on stdin | `-32700` and, if unframeable, exit `1` | a panic, or a hung server |
 
 ### 11.3 The four stderr sentences, verbatim
@@ -2247,7 +2479,7 @@ frame" line, because the stream is gone either way. **S8's assertion** is (a) ev
 stderr line is one of these four literals and (b) none contains the fixture's SQL, its
 uri, or the string `SELECT`.
 
-R-ids: **S1–S11** as numbered; they are cross-referenced from §12's matrix.
+R-ids: **S1–S12** as numbered; they are cross-referenced from §12's matrix.
 
 ## 12. Testing matrix and release
 
@@ -2289,7 +2521,7 @@ frames, reads frames, and asserts.
 | `definition_is_declined_and_unadvertised` | `textDocument/definition` → `null`, and the capability document has no `definitionProvider` | R33, R34 |
 | `lsp_subcommand_is_reachable` | `lsp --help` exits `0` with `usage: blastit lsp` first; a bad argument exits `2` | R1 |
 | `the_lsp_arm_drops_capabilities` | `include_str!("../src/cli.rs")` has `hold_none()` before `lsp::run()` in the `Lsp` arm | S3 |
-| `the_lsp_module_is_a_text_tool` | `include_str!("../src/lsp.rs")` contains none of §11.1's list and contains `blastfile::check` + `blastfile::fmt` | R3, S1, S11 |
+| `the_lsp_module_is_a_text_tool` | `include_str!("../src/lsp/mod.rs")` contains none of §11.1's list and contains `blastfile::check` + `blastfile::fmt` | R3, S1, S11 |
 | `no_position_of_a_validation_error_is_invented` | `include_str!("../../blastit-manifest/src/error.rs")` does not contain `_ => Position::NONE` | R3a |
 | `a_document_is_never_executed` | S2's `LiteralQuery` fixture, empty stderr, and `/proc/<server_pid>/task/<tid>/children` empty before and after | S2 |
 | `no_path_from_a_document_is_opened` | S4's FIFO-with-no-writer `uri` answers within 2 s | S4 |
@@ -2527,7 +2759,8 @@ or a `codeAction` reuses it and the per-publish parse is the only one a keystrok
 | R48–R52 | §10 | the four `tree-sitter query` runs and (b)–(d)'s three `grep`s |
 | R53–R59 | §12 | the commands of §12.1–§12.5; §12.6–§12.7 are human-only and recorded in `MB.22.5`'s `RESULT.md`; all seven are stated in §12.9 |
 | R60–R68 | §4.6, §7.6, §7A, §9.2a, §10, §13 | §13.2's table: `critical_lsp.rs` (P7, H7–H8, C1–C8), the two manifest/sqlpolicy suites, the grammar corpus, `make zed-check` |
-| S1–S11 | §11 | `critical_lsp.rs` and the guard, one row each (§11.1) |
+| R69–R76 | §1.3, §8.3a, §14 | §14.2's table: `make lsp-portable` over the crate manifest and unfiltered closure (pending `MB.35.6`; interim proof is `MB.35.4`'s `cargo tree` line), `critical_lsp_stdio.rs`, `critical_lsp.rs`'s unchanged assertions, `make zed-check` (after `MB.33`), `make platform-matrix-check` (after `MB.35.5` adds the `lsp` family), and `docs/testing/E2E-MB.35.md` |
+| S1–S12 | §11 | `critical_lsp.rs` and the guard, one row each (§11.1); S12 is `make lsp-portable` |
 
 Four fresh-context critics read this document and `ADR-0013` blind and wrote
 `docs/design/blastfile-lsp-zed.review-<lens>.md`. Every finding is answered below:
@@ -2539,7 +2772,7 @@ deferred silently.
 
 | # | Grade | Resolution |
 |---|---|---|
-| B1 | BLOCKER | **accepted** → §1 row 3, §1.1, §11 S3, §12.1: the `Lsp` arm calls `blastit_sys::caps::hold_none()` before it reads a byte (the call `--role=dbproxy` already makes at `cli.rs:638`), so editor bytes are parsed by a process holding no capability. Capabilities belong to the process image, so "the arm returns early" was true and insufficient. |
+| B1 | BLOCKER | **accepted** → §1 row 3, §1.1, §11 S3, §12.1: the `Lsp` arm calls `blastit_sys::caps::hold_none()` before it reads a byte (the call `--role=dbproxy` already makes at `cli.rs:747` (the `Lsp` arm's is `cli.rs:579`)), so editor bytes are parsed by a process holding no capability. Capabilities belong to the process image, so "the arm returns early" was true and insufficient. |
 | B2 | BLOCKER | **accepted** → §8.3, ADR §6: the `uv` argv is `run --frozen --no-sync --quiet blastit lsp`; a bare `uv run` syncs the project, i.e. runs the worktree's build backend with `shell_env()`. The error string now names `uv sync`, and the guard asserts the six literals and `--no-sync`. |
 | B3 | BLOCKER | **accepted** → §2.2, §2.5, §12.1: `didOpen` is the only insertion point; a `didChange` for an unknown `uri` publishes the "no open document" notice and inserts nothing, so the map cannot pass `MAX_DOCUMENTS`. |
 | M1 | MAJOR | **accepted** → §11 S3: the property is restated precisely (`lsp.rs` reads no environment; the `Lsp` arm runs before any privilege/config path) and names the two reads that happen before dispatch (`Host::binary()`'s `BLASTIT_EXEC`, `_blastit.main`'s dbproxy stat); the test is now `.env_clear()`, which kills both. |
@@ -2701,3 +2934,189 @@ parse, one per edit (LSP §13.3); S9 the C3 `"…"` fixture (LSP §7A.5); S10 th
 PROGRAM` example is the literal form (§13.4.1). Its MINORs are folded: S11 the manual
 `Debug` (§13.4.5), S12 the offset-0 narrowing (the page now says "the statement's first token"), S13 every `pg_query::Error`
 variant maps to `Syntax` (§13.4.1).
+
+## 14. The `MB.35.3` amendment: the portable binary, its boundary and its proofs (2026-11-18)
+
+This section adds no protocol message and changes no sentence: it records what the extraction
+(`MB.35.4`) and the packaging (`MB.35.5`) implement, so `MB.33` can code against a name, a format
+and an invariant instead of a guess. §1.3 is the boundary, §8.3a the resolution order; this section
+is the requirement set and the proofs. `ADR-0013`'s `MB.35.3` amendment is the decision, and the
+accepted pages (`docs/reference/cli.md` `## blastit-lsp`, `docs/local.md` `## Editors`,
+`editors/zed/README.md`) are the DX it serves.
+
+### 14.1 Requirements
+
+| R | Requirement | Proved by |
+|---|---|---|
+| **R69** | `crates/blastit-lsp` exists with `[[bin]] name = "blastit-lsp"`, `[lib] name = "blastit_lsp"`, the public surface `blastit_lsp::run() -> u8`, and **every** dependency table in its manifest empty or exactly `{ blastit-manifest, serde_json }`; `blastit-manifest` re-exports `parameterize` (one line, `pub use blastit_sqlpolicy::parameterize;`, owned by `MB.35.4` once that file is in its `paths`) so the crate names no third dependency | §1.3's `make lsp-portable`; `cargo metadata --offline --locked`'s unfiltered closure; `cargo build -p blastit-lsp --locked` |
+| **R70** | One `run()` behind both binaries: `crates/blastit/src/lib.rs` is `pub use blastit_lsp as lsp;`, `cli.rs` compiles unchanged (including `hold_none()` before the call), the *assertion bodies* of the protected `critical_lsp.rs` are unchanged against `blastit lsp` (four `include_str!` path literals change — two in the file, two in `hover.rs` — plus the comment that names them, i.e. eight changed lines in the protected file; `crates/blastit/tests/critical_lsp.rs` must join `MB.35.4`'s `paths`), and no second `lsp` module exists under `crates/blastit/src/` | `cargo test -p blastit --test critical_lsp`; `cargo test -p blastit-lsp`; a diff against the pre-node commit whose only changed lines are those four literals (`tools/critical_guard.py --base <pre-node-commit>`); `critical_lsp_stdio.rs`; §1.3's structural identity rule |
+| **R71** | The portability rule is enforced, not remembered: `[dependencies]` **and** `[build-dependencies]`/`[target.*]`/optional entries, the **named** forbidden set over the **unfiltered** normal closure (plus `--filter-platform` per target where resolvable), and the source greps of §1.3's third row — each token with a negative twin driven by the guard's own token table, so a new token cannot land without one | `make lsp-portable` (a prerequisite of `make check`) and `scripts/test_check_lsp_portable.py` (`MB.35.6`); `MB.35.6`'s brief has to be corrected to this rule first — §14.4 lists the hand-off |
+| **R72** | The editor's order is settings → `which("blastit-lsp")` / `which("blastit") lsp` → one Release download; the five assets, their file types and the relaunch path under the work directory are §8.3a's table verbatim; `binary.env` is ignored and the child env is the `PATH`/`SYSTEMROOT` allowlist; **no** `[[capabilities]]` is declared | `make zed-check` after `MB.33`, whose guard asserts §8.3a's properties, `lib: env allowlist`, and the absence of a capability block |
+| **R73** | The portable artifact **cannot become a serving binary by accident**: no serving crate in its dependency graph, no privilege crate, every file under `src/**` except the pinned `main.rs` holds no `std::fs`/`std::path`/`std::net`/`std::process`/`std::env`/`include!` and no unsafe item or `extern "C"`, with `#![forbid(unsafe_code)]` in `lib.rs` and `main.rs`, and `blastit lsp` keeps its capability drop | R69's closure check, R71's greps, `critical_lsp_stdio.rs`'s cleared environment, and §11 S3 for the Linux arm |
+| **R74** | The counts live in one place: `ADR-0010` §4 carries the `lsp` family row with the one numeric claim (`5` lsp assets), and `MB.35.5` adds the family to `scripts/platform_matrix.py` — its own legs list (`enabled`/`dropped_because`), the page noun `lsp assets?` in `CLAIM`/`PROVEN_CLAIM` and the key `lsp asset` in `declared_of`/`proven_of` (what `family.lower().rstrip("s")` produces) with `--count lsp` mapping to it — a literal `"lsp"` key would `KeyError` — and the `declared_keys` union in `check()` (or its `PROVEN` entries are refused), and `lsp` in `--matrix`/`--count`/`--leg`/`--summary` | `make platform-matrix-check` (it reads the family once `MB.35.5` declares it and prints its line then); `MB.35.5`'s `--summary` |
+| **R75** | The release path and its trust root are decided: each asset carries `LICENSE` and an in-archive `SHA256SUMS` (which authenticates nothing), the release job counts the family, checksums every archive at release level, renames the per-leg `dist/SHA256SUMS.<target>`, and **0.2.0 ships no signature** — said in one sentence, not implied | `make workflow-check`; `MB.35.5`'s `packaging-gates-test`; the per-leg `sha256sum -c` on each archive |
+| **R76** | The editor's document is **untrusted data**, and the only parsers a *document* reaches are `blastit-manifest`'s safe Rust and `libpg_query`'s parse-only C (`serde_json` parses the LSP envelope, never a `Blastfile`); the tree is pinned by `Cargo.lock` (`pg_query` resolves to one version, and `cargo update` is what moves it), and the closure is recorded with **no advisory gate claimed** — 0.2.0 has no `cargo audit`/`cargo deny` target, which is stated rather than implied | §11's first paragraph; the guard asserts the `Cargo.lock` line (`pg_query` resolves to one version), and the closure is recorded in `docs/testing/E2E-MB.35.md` (`MB.35.6`); a future advisory gate is a follow-up, not a promise |
+
+### 14.2 The tests this amendment adds
+
+| Test | Where | Asserts | Fails when |
+|---|---|---|---|
+| `the_standalone_binary_speaks_the_same_session` | `crates/blastit-lsp/tests/critical_lsp_stdio.rs` (protected, new; `MB.35.4`) | the capability document after `initialize`, one `didOpen` of a `query` typo as a severity-1 diagnostic at the exact range, `shutdown` + `exit` → `0`, all with `.env_clear()`; and `--bogus` reads stdin and exits `1` at EOF (the portable binary ignores an argument, where `blastit lsp` exits `2`) | a second protocol, any read of the environment, or the two binaries' argv contract drifting |
+| the delegation, assertions unchanged | `crates/blastit/tests/critical_lsp.rs` (protected; four path literals and the comment that names them change, nothing else) | R4–R68's assertions, still against `env!("CARGO_BIN_EXE_blastit") lsp`; the source-grep test now reads `../../blastit-lsp/src/{lib,hover}.rs` | any behavioural change during the move, or a changed property list |
+| the identity | `scripts/check_lsp_portable.py` (structural rule 5, §1.3) | R70's identity: no `crates/blastit/src/lsp/`, `pub use blastit_lsp as lsp;` present, one `blastit-lsp` edge | the server being copied back as a second module — which passes every behavioural test |
+| `make lsp-portable` | `scripts/check_lsp_portable.py` + `scripts/test_check_lsp_portable.py` (`MB.35.6`) | R69, R71, R73 | a third or target-scoped dependency, a `build.rs`, a forbidden crate in the closure, any banned token, and one mutated source per token. The token table is **pinned** in the test file (a token deleted from the guard is a red, the way `scripts/platform_matrix.py` pins its own lines), and the twins run from the same table. The protected `critical_lsp.rs`'s 13-token source grep stays as the *behaviour-side* record and is deliberately not widened: the artifact-level gate is this guard, which `make check` runs |
+| the extension's order | `scripts/check_zed_extension.py` + `scripts/test_check_zed_extension.py` (`MB.33`), and before it lands `MB.35.5`'s `ls dist/` compared with §8.3a's five literals | R72 | `uv` reappearing, a wrong asset name or type, a `make_file_executable` under a `cfg`, a `[[capabilities]]` block, `shell_env()` assigned to `Command.env` |
+| the packaging matrix | `scripts/platform_matrix.py --check` (`make platform-matrix-check`) | R74 (`MB.35.5`'s family) | a stated `lsp` count above the declared family, a dropped leg without `dropped_because`, a count noun that lets an LSP asset be read against the standalone family |
+| the archive extraction | `MB.35.5`'s `scripts/build-lsp.sh` acceptance (extract to a temp dir, assert the three entries, then smoke **the extracted file**) | the producer's archive matches the consumer's join, on all five targets | a zip whose root is bare, a nested directory, or a missing executable — today only `tar -tzf` by eye |
+| the two transcripts | `docs/testing/E2E-MB.35.md` (`MB.35.6`) | `blastit lsp` and `blastit-lsp` answer one session identically; the released archive runs from a clean directory with no `PATH` entry; the Linux asset starts on Debian 12; per-platform smoke; and **`cargo test -p blastit-lsp` runs on the Windows and Linux-aarch64 legs too** — only the two Apple legs make it a drop condition, because they are the ones upstream does not prove | a difference between the transcripts, a platform without evidence, or a leg that only built |
+| the evidence states | `docs/testing/E2E-MB.35.md` + a checkable rule in `MB.35.6` (`scripts/check_lsp_portable.py --evidence <file>`, in `make lsp-portable`) | **three** states, defined once: `PASS` = one CI URL per **enabled** leg and zero `NOT RUN`, with every dropped leg carrying `dropped_because`; `INCOMPLETE` = at least one enabled leg without a run; `FAIL` = a failing leg. Every target in the `lsp` family appears exactly once | `VERDICT: PASS` written beside a `NOT RUN` row — the likeliest outcome for the Apple legs, and the reason the word is a gate, not a note |
+
+### 14.3 What a developer gets on each target
+
+One sentence per target, and the same sentence the accepted page carries (`MB.35.2`):
+
+- **Linux x86_64** — everything: `dev`, `check`, `fmt`, `lsp` with no download, and `blastit-lsp`
+  for an editor that prefers a file.
+- **Linux aarch64** — the same, once `MB.35.5`'s arm64 leg is green; until a smoke run exists it
+  is **declared, unbuilt**, and the archive the release publishes is the claim under test.
+- **macOS Apple silicon** — the editor only: colours, SQL diagnostics at the CLI's `line:col`,
+  Quick Fixes, hover, format-on-save; no `blastit`, no `dev`, no `check`, and no serving server.
+- **macOS Intel** — the same, built and tested on native `macos-15-intel`, because cross-plus-
+  Rosetta is not `cargo test`-grade evidence.
+- **Windows x86_64** — the same, as `blastit-lsp.exe` unpacked from a `.zip`; no `chmod` (the
+  API's `make_file_executable` is a no-op off Unix), and no Windows server.
+
+The boundary sentence those five share: **macOS and Windows get the editor only**, because serving
+needs Linux — per-route uids, seccomp and the host's `libphp` — so `dev`, `check`, `fmt` and `lsp`
+do not exist there and the audit runs in CI or a Linux container.
+
+Two install facts a reader of §8.3a needs and the CLI page already states: the Linux assets are
+built against glibc 2.28 and run on Debian 12 or newer, and a **browser** download on macOS is
+quarantined (`xattr -d com.apple.quarantine blastit-lsp`), while the extension's own
+`download_file` produces no quarantine attribute.
+
+### 14.4 Hand-offs: the four leaf briefs this design corrects
+
+This node owns no plan file, so the corrections below are recorded here and as follow-ups on
+`MB.35.3`; the lead applies them before the leaf starts. Each is a difference between the leaf's
+`NODE.md` and this design, and the design wins (`MB.33`'s own rule says so).
+
+| Leaf | Its brief currently says | This design requires |
+|---|---|---|
+| `MB.35.4` | `paths` without `crates/blastit-manifest/src/lib.rs` or `crates/blastit/tests/critical_lsp.rs`; "the 1880-line `critical_lsp.rs` stays **byte-identical**"; three stale line counts (1174/254/1880; the files are 1591/337/2477); no `#![forbid(unsafe_code)]`; no identity assertion | add both paths (one re-export line; four `include_str!` literals); "assertion bodies unchanged, four literals moved"; correct or drop the counts; `#![forbid(unsafe_code)]` in `lib.rs` and `main.rs`; `use blastit_sqlpolicy::parameterize;` becomes `use blastit_manifest::parameterize;` (the one import line the move changes); the structural identity check of §1.3 |
+| `MB.35.5` | `tar -tzf … # one dir, one executable` by eye; no glibc floor; no per-leg `SHA256SUMS` rename; no `--count lsp` | stage `blastit-lsp-<target>/blastit-lsp` + `LICENSE` + an in-archive `SHA256SUMS` (the build writes all three), extract into `blastit-lsp-<version>/`, assert exactly those entries, then smoke **the extracted file** (the command is in §14.4.1); build Linux in `manylinux_2_28` with `--max-glibc 2_28` and smoke on Debian 12; `getcap` empty on every Linux asset; a third `download-artifact` (`pattern: lsp-*`) and a `--count lsp` assertion, with archive globs named explicitly (`blastit-*-unknown-linux-*.tar.gz`, `blastit-lsp-*`) so neither count swallows the other; the `lsp` family in `--matrix`/`--summary`/`--check`/`--leg` with the page noun `lsp assets?`, the key `lsp asset`, and the matching entries in `check()`'s `declared_keys`; the CI matrix from `needs.matrix.outputs.lsp` (never `fromJSON(<command>)`) plus `lsp` in `check_workflows.py`'s `OUTPUT_SPECS`; the floor rule extended to `scripts/build-lsp.sh`; and the Windows `.zip` extracted with `Expand-Archive` on its leg |
+| `MB.35.6` | a ten-token source list, `[dependencies]` only, two negative twins, no identity rule, `VERDICT: PASS` beside `NOT RUN`; acceptance piped to bare `python3` | §1.3's row 3 **exactly** (the §1.2 list plus `std::net`, `std::fs`, `std::path`, `std::process`, `include!`, `#[path`, origin-classified `use` trees, the manifest-API allowlist, blanket `#[cfg(…)]`/`#[cfg_attr]`/`cfg!(…)` except `#[cfg(test)]`, unsafe items and `extern "C"`; the file set is **every file under `src/**` except the pinned `main.rs`**, and `#![forbid(unsafe_code)]` is asserted present), every dependency table, one twin per token from the guard's own table, the identity rule, the `--evidence` states, and `uv run --no-project python` (AGENTS rule 9) |
+| *a dropped leg* | the ADR says the matrix, the design, two pages and `ADR-0010` change "in the same commit" | `MB.35.5` owns the matrix family and the workflow; its `paths` forbid `docs/**`, so the page and ADR edits are the lead's amendment or a dispatched doc leaf — and **until they land, `make check` is red at `platform-matrix-check` by design** (a dropped leg with a now-false page claim), which is the `MB.3.18` rule rather than a leaf bug |
+
+#### 14.4.1 `MB.35.5`'s archive acceptance, as a command
+
+```console
+$ tmp=$(mktemp -d)
+$ mkdir -p "$tmp/blastit-lsp-<version>"
+$ tar -xzf blastit-lsp-<target>.tar.gz -C "$tmp/blastit-lsp-<version>"
+$ ( cd "$tmp/blastit-lsp-<version>/blastit-lsp-<target>" \
+      && ls | sort | tr '\n' ',' )
+LICENSE,SHA256SUMS,blastit-lsp,
+$ uv run --no-project scripts/lsp_smoke.py \
+      --binary "$tmp/blastit-lsp-<version>/blastit-lsp-<target>/blastit-lsp"
+```
+
+The third command's output is the assertion (comma-joined, sorted, so order cannot drift); the
+Windows leg does the same with `Expand-Archive` and `blastit-lsp.exe`.
+
+| `MB.33` | a `[[capabilities]]` block for `github.com` and the CDN host; `<workdir>/` download destination; Windows-only `make_file_executable`; `binary.env` merged over `shell_env()`; the CLI page offers a project's `.zed/settings.json`; the pages' three sentences are the pre-`MB.35` shape | no `[[capabilities]]` block (the gate is a user setting, checked pre-redirect); a relative destination; an unconditional `make_file_executable`; `binary.env` ignored and the `PATH`/`SYSTEMROOT` allowlist; the project-file alternative removed from `docs/reference/cli.md`; `docs/local.md` step 2, the CLI page's Linux sentence and the README's "Until the release … `uv`" paragraph rewritten to the four-row order; the guard's property names/total recomputed (the pinned total moves) |
+
+
+## Review Resolution — the `MB.35.3` amendment (2026-11-18)
+
+The reports are under `docs/design/`:
+`portable-lsp-arch.review-security{,.round2,.round3,.final,.closeout}.md`,
+`…review-testability{,.round2,.round3,.final,.closeout}.md`,
+`…review-implementability{,.round2,.final,.closeout}.md`, and `…review-consistency.md`. A second
+consistency pass returned its findings inline (that agent hit its step cap before writing the
+file) and they are resolved below too; the node's `RESULT.md` records which report belongs to
+which round. No round ended with a `BLOCKER` open, and every `MAJOR` is either resolved here or
+handed to a named leaf in §14.4 — the residual `MINOR`s are answered (`answered`), folded, or
+recorded as the plan's business, never deferred silently.
+
+### Security (round 1: 2 BLOCKER / 5 MAJOR / 5 MINOR; round 2: 1 / 6 / 7; round 3: 0 / 3 / 10; final: 0 / 3 / 9; close-out: 0 / 1 / 2)
+
+| Finding | Resolution |
+|---|---|
+| r1 B1, r2 B1 (guard tokens) | **accepted → §1.3 row 3, §14.1 R71, §14.4.** The source rule is §1.2's list verbatim plus `std::net`, `std::fs`, `std::path`, `std::process`, `include!`, `#[path`, `#[cfg(not(`, `target_family`, `cfg_attr`, unsafe items and `extern "C"`, over **every** file under `src/**` except the pinned `main.rs`; `#![forbid(unsafe_code)]` is asserted present. `MB.35.6`'s brief is corrected by §14.4 — the design cannot edit the plan, and saying so is the honest fix |
+| r1 B2, r2 M4/M5 (project settings, `binary.env`) | **accepted in part → §8.3a, ADR decision 5, §14.4.** `binary.env` is ignored, the child env is a `PATH`/`SYSTEMROOT` allowlist, and the layer boundary is stated without claiming Zed filters project settings (no research fact establishes it). The residual — a clone's `.zed/settings.json` can name a binary — is Zed's own contract, said plainly instead of implied away; the page sentences are `MB.33`'s hand-off |
+| r1 M1, r2 M1, r2 B1 (leaf `paths`) | **accepted → §1.3, R69/R70, §14.4.** `crates/blastit-manifest/src/lib.rs` and `crates/blastit/tests/critical_lsp.rs` are named as required path additions, with the one re-export line and the four `include_str!` literals quoted |
+| r1 M2, r2 M2 | **accepted → §1.3 obligation 1, R70, ADR decision 3.** "Byte-identical" is replaced by "assertion bodies unchanged, four literals moved", with the diff oracle bounded to those literals and `critical_guard.py --base` |
+| r1 M3, r2 M1 (setcap/root, image-level claims) | **accepted → ADR cost table, §1.3 security position, §11 S12, §14.1 R73, ADR-0010 §4.** The claim is now "supported unprivileged only; the server's own code path opens no path, no socket and no child", `getcap` empty is `MB.35.5`'s assertion, and the linked manifest API and `libpg_query` are named |
+| r1 M4, r2 M6 (trust root) | **accepted → §8.3a trust row, §14.1 R75, ADR consequences.** Only control is HTTPS to `github.com`; the release-level checksum is for CI/humans, not fetched; no signature in 0.2.0 |
+| r1 M5 (untrusted data) | **accepted → §11 opening, §14.1 R76.** In the editor a `Blastfile` is untrusted data; the parsers are safe Rust plus `libpg_query`'s parse-only C, pinned by `Cargo.lock`; no advisory gate is claimed |
+| r1 m1–m5, r2 m1–m7, r3 M2/M3 + minors | **accepted → §1.3, §8.3a, §11.2, ADR.** Present tense fixed; identifier-boundary matching; `build.rs` and `#[path` banned; §11.2's stale `uv add blastit` error replaced; `cli.rs:579`/`:747` citations corrected; `File::open` is covered by `std::fs` (any spelling imports it) — **answered** |
+
+### Testability (round 1: 2 BLOCKER / 6 MAJOR / 5 MINOR; round 2: 1 / 5 / 5; round 3: 0 / 6 / 4; final: 0 / 6 / 5; close-out: 0 / 4 / 4)
+
+| Finding | Resolution |
+|---|---|
+| r1 B1, r2 B1 (protected suite) | **accepted → §1.3 obligation 1, R70, §14.4.** Four `include_str!` literals (two in `hover.rs`, two in the test) are the only edit; `critical_lsp.rs` joins `MB.35.4`'s `paths`; the oracle is a bounded diff plus `critical_guard.py --base`, not `git diff --exit-code` |
+| r1 B2, r2 M1 | **accepted → §1.3, R69, §14.4.** The re-export's ownership is explicit and its path named |
+| r1 M1–M6, r2 M2, M5 | **accepted → §1.3 rows 1–5, R71, R74, §14.2, §14.4.** Every dependency table, the unfiltered closure, one twin per token from a pinned token table, `make lsp-portable` running guard **and** twins, the structural identity rule, the `lsp` family seam in `platform_matrix.py` with its own noun and a numeric claim, and the three evidence states (`PASS`/`INCOMPLETE`/`FAIL`) |
+| r2 M3 (unsafe token) | **accepted → §1.3 row 3.** The rule bans unsafe **items and blocks**, so the required `forbid(unsafe_code)` attribute is not a false red |
+| r2 M4 (R76) | **accepted → §14.1 R76.** The advisory gate is removed from the promise and the pin (`Cargo.lock`, one `pg_query`) is the proof |
+| r2 m1–m5 | **accepted → §14.2, §14.4.** Token table pinned; twins gated; the `--bogus` exit-code exception stated in obligation 3; the archive-extraction acceptance command added; `MB.35.4`'s stale line counts flagged (the design's own `~1.9k` replaces the old `≤ 750`) |
+
+### Implementability (round 1: 2 BLOCKER / 5 MAJOR / 5 MINOR; round 2: 0 / 2 / 7; final: 0 / 2 / 5; close-out: 0 / 2 / 2)
+
+| Finding | Resolution |
+|---|---|
+| r1 B1/B2 (= security M1/M2) | **accepted → §1.3, §14.4** |
+| r1 M1 (release job) | **accepted → ADR consequences, §8.3a release row.** `pattern: lsp-*`, `--count lsp`, explicit archive globs, the final `SHA256SUMS`, the per-leg rename, and the matrix from `needs.matrix.outputs.lsp` (never `fromJSON(<command>)`) with `lsp` in `check_workflows.py`'s `OUTPUT_SPECS` |
+| r1 M2, r2 M1 (matrix family) | **accepted → R74, §8.3a, ADR-0010 §4.** The seam is enumerated (`CLAIM`/`PROVEN_CLAIM` noun, `declared_of`/`proven_of`, `declared_keys`, `--matrix`/`--count`/`--leg`), and the one numeric claim (`5` `blastit-lsp` assets) lives in ADR-0010 §4 |
+| r1 M3, r2 M3 (glibc floor) | **accepted → §8.3a, ADR platform table, ADR-0010 §4, §14.4.** `manylinux_2_28` + `--max-glibc 2_28`, a Debian 12 smoke, and `check_workflows.py` taught `scripts/build-lsp.sh` (its floor rule matches only `build-standalone.sh` today) |
+| r1 M4 (musl) | **accepted → ADR.** `*-musl` serves and keeps `blastit lsp`; it gains no separate asset |
+| r1 M5 (MB.33 brief) | **accepted → §8.3a (four stale points), §14.4.** No capability block, relative destination, unconditional `make_file_executable`, ignore `binary.env`, rewrite the three page sentences |
+| r2 M2 (drop-a-leg edits) | **accepted → §14.4.** The matrix/workflow commit is `MB.35.5`'s; the page and ADR edits are the lead's amendment or a doc leaf, because `MB.35.5`'s `paths` forbid `docs/**` |
+| r1 m1–m5, r2 minors | **accepted → §8.3a, §14.4.** Archive contents (`LICENSE`, in-archive `SHA256SUMS`, no `README.md`); `<version>` defined; file set for the two token lists; `LIBCLANG_PATH` fallback; `uv run --no-project python` |
+
+### Consistency (round 1: 2 BLOCKER / 8 MAJOR / 10 MINOR; round 2: 0 / 5 / 12, returned inline)
+
+| Finding | Resolution |
+|---|---|
+| C1 (env contract vs `MB.33`, "three points") | **accepted → §8.3a ("four points"), §14.4, §8.4's R37 note.** The env allowlist and `binary.env` are the fourth stale point; R37's old "one `shell_env()` assignment" is marked superseded by §8.3a |
+| C2 (leaf `paths`, `byte-identical`, import) | **accepted → §1.3, §14.4** (also security M1/M2). The import line `use blastit_manifest::parameterize;` is named |
+| M1 (`hover.rs` unchanged) | **accepted → §1 row 10, §1.3 obligation 1, R70** |
+| M2 (pages do not state the order; `uv` sentence) | **accepted → §8.3a, §14.4.** `local.md` step 2, the CLI page's Linux sentence and the README's "Until the release … `uv`" paragraph are `MB.33`'s edits; the design no longer claims the pages already match |
+| M3–M7 (archive contents, count noun, `getcap`, guard subset, `MB.33` acceptance) | **accepted → §14.4, §8.3a.** Archive staging, the `lsp` noun and `--count lsp`, `getcap` in the leaf's acceptance, the guard's full rule, and a **positive** `no uv` property (a repo-wide `git grep` against the record can never pass) |
+| M8 (musl), m1–m10 | **accepted → ADR, §11.1 S3/S5, ADR-0010 §4 header, §14.3.** musl keeps `blastit lsp`; the post-move `lsp.rs` references and the "no server" wording are corrected; the R69–R76 reference, the "six places" drop list and the per-family node in ADR-0010's header are fixed. **Answered:** the ADR's `MB.34.2` "Proposed" status and `MB.35.2`'s plan status are the plan's, not this node's |
+
+### The final round's three MAJORs
+
+| Finding | Resolution |
+|---|---|
+| security final M1 (`use std::{fs, net}`; `blastfile::read`) | **accepted → §1.3 row 3.** The token scan now classifies `use` trees and paths by origin (the `check_manifest_purity.py` mechanism), and the manifest API is allowlisted — `blastfile::{check, fmt}`, `Manifest::from_blastfile_str`, `ManifestError`, `Position`, `QuerySite`, `parameterize` — so `blastfile::read`/`write` and `edit` are red |
+| security final M2 (`cfg` enumeration) | **accepted → §1.3 row 3.** The rule is structural: no `#[cfg(…)]`, `#[cfg_attr(…)]` or `cfg!(…)` except `#[cfg(test)]` on a test module, so `all(…)`, `any(…)`, `target_env` and `target_family` are all covered |
+| security final M3 (two-file set vs crate-wide) | **accepted → §14.1 R73, §11 S12, §14.4.** All three now say "every file under `src/**` except the pinned `main.rs`", matching §1.3's row — the `mod helper;` evasion has one rule, not two |
+| testability final M1 (diff oracle) | **accepted → §1.3 obligation 1.** The bounded diff is stated as eight lines (four literals plus the comment naming the old paths), reviewed by a human; `critical_guard.py --base <commit> --node MB.35.4` is the machine record and is report-only, which the text now says |
+| testability final M3 (extraction acceptance) | **accepted → §14.4.** The command asserts the three-entry set and the consumer's `<version>/<target>/` join, and the Windows `.zip` is extracted and smoked on its own leg |
+| testability final M4 (evidence states) | **accepted → §14.2.** `PASS` is defined over **enabled** legs plus `dropped_because` on every dropped one, and `MB.35.6` grows `--evidence <file>` inside `make lsp-portable`, so the word is checked |
+| implementability final M1 (drop path) | **accepted → ADR, §14.4.** "In the same commit" becomes "in the same change set, a doc edit by whoever owns those files", and §14.4 says `make check` is red between the matrix edit and the doc edit **by design** (the `MB.3.18` rule) |
+| implementability final M2 (count noun) | **accepted → R74, ADR-0010 §4.** The page noun is `lsp assets` (not a backticked span the `CLAIM` qualifier would swallow), the claim reads "`5` lsp assets", and `declared_of`/`proven_of` gain the `lsp` key, so the token, the key and the claim agree |
+| testability final M2 (R76 advisory) | **accepted → §14.1 R76, ADR consequences.** The advisory gate is removed from the promise: the pin is `Cargo.lock` and one `pg_query`, the closure is recorded, and 0.2.0 has no `cargo audit`/`cargo deny` |
+
+**MINORs answered rather than changed.** §7.2's "three `..`" and the `../src/lsp/mod.rs` spellings
+in §11 are the 2026-11-17 record and are labelled as such by §1.3/§14.2; `File::open` is covered
+because any spelling imports `std::fs`; the protected suite's 13-token list is the behaviour-side
+record and the artifact gate is `make lsp-portable` (§14.2); the ADR's `MB.34.2` "Proposed" status
+and `MB.35.2`'s plan status are the plan's to move, not this node's; `docs/VISION.md` gaining one
+sentence about the editor artifact is a follow-up for the strategist; `[capabilities]`/`[[capabilities]]`
+spellings are the manifest's, quoted once each way.
+
+### Close-out rounds (all three lenses: 0 BLOCKER, 1–4 MAJOR — text inconsistencies, fixed)
+
+| Finding | Resolution |
+|---|---|
+| security close-out M1 (§14.4 still named a two-file set) | **accepted → §14.4.** The `MB.35.6` row now carries §1.3's row 3 **exactly**: every file under `src/**` except the pinned `main.rs`, the blanket `cfg` rule, the origin-classified `use` trees, the manifest-API allowlist, and the positive `forbid(unsafe_code)` assertion. ADR-0013's summary says the same |
+| security close-out m1, m2 | **accepted → §1.3.** The allowlist also names `Manifest`, `ManifestWarning`, `UidLayout` and `blastfile::MAX_SOURCE_BYTES`, which the extracted server imports today, so legitimate code is not a red |
+| testability close-out M1 (R70/§14.2 still said "two literals") | **accepted → R70, §14.2.** Four literals **plus the comment that names them** — eight changed lines in the protected file — with the bounded diff and the report-only `critical_guard.py --base <commit> --node MB.35.4` record |
+| testability close-out M2 (entry-set assertion unsatisfiable) | **accepted → §14.4.** The directory list is sorted and comma-joined before comparison with `LICENSE,SHA256SUMS,blastit-lsp,`, and the Windows leg asserts its own entries and `.exe` |
+| testability close-out M3 (no step-order assertion; R76 pin) | **accepted → §8.3a, R72, R76.** A `lib: order` property asserts the settings read first and the download last; R76 says a *document* reaches only the two parsers (`serde_json` is the envelope) and the pin is the `Cargo.lock` line the guard reads |
+| implementability close-out M1 (dropped-leg gate state) | **accepted → §14.4.** The row says the gate is red by design until the doc edit lands, which is the `MB.3.18` rule, not a leaf bug |
+| implementability close-out M2 (`declared_of` key) | **accepted → R74.** The key is `lsp asset` (what `family.lower().rstrip("s")` produces), the noun is `lsp assets`, and the claim in `ADR-0010` §4 reads `5` lsp assets — so noun, key and claim agree |
