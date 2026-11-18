@@ -19,6 +19,12 @@ Everything below is a file with an `app`.
 
 ## What it fails on
 
+A `query` that does not parse is not a finding and has no row below. The file does
+not load, so `check` exits `2`, writes the refusal to stderr — one line per
+problem, with the `line:col` before the sentence — and prints nothing on stdout:
+`--json` included, and an empty stdout is a refusal, never a clean audit. The
+refusal adds no `kind` and no `fix.action`; edit the line it names and rerun.
+
 | Finding | Meaning | Fix |
 |---|---|---|
 | `unrouted_request` | a path no view matches | add a view, or widen a pattern |

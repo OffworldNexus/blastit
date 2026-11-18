@@ -255,18 +255,64 @@ view catalog GET "/products/{id:int}" {
 | `insert orders(id, total)` | inserting those columns |
 | `update orders(status)` | updating those columns, and row locks |
 | `delete orders` | deleting rows |
-| `query 'SELECT …'` | one exact statement; repeat the directive for more |
+| `query 'SELECT id FROM products WHERE price > $?'` | one exact PostgreSQL statement, matched as a template (three shapes below); repeat the directive for more |
 
 * A store with no grant in a view gets no listener: the view cannot reach it.
 * A grant is the union of the view's own blocks and every attached trait;
   `transactions` is on when any contributor turns it on.
-* An exact `query` is trusted as written and runs without further checking. Read
-  it before pasting: `pg_read_file`, `COPY … PROGRAM`, `dblink` and `lo_import`
-  are file or network capabilities, not ordinary statements. Matching normalises
-  the text: comments and whitespace are ignored, `$1` and `$?` are the same, a
-  placeholder list after `IN` collapses, and identical `VALUES` rows collapse.
-* A statement that inlines a literal cannot be learned; bind the value (`$?`).
-  An exact `query` you write yourself may hold one — read it before pasting.
+
+Matching reads the string as a template. Three shapes, and the statement
+PostgreSQL receives:
+
+| Template | PostgreSQL receives |
+|---|---|
+| `$?` | the next `$n`: `$1`, `$2`, … in statement order |
+| `IN ($?)`, `IN ($?, ...)` | `IN ($1, $2, $n)` — one `$n` per value, at any length; `NOT IN` too: one grant covers every list |
+| `($?, $?), ...` | two or more identical `VALUES` rows, any count — one row needs its own `query`; every copy still reaches PostgreSQL |
+
+* `$1` to `$n` written by hand is accepted as it stands: PostgreSQL parses it, and
+  matching drops the numbering, so `$1` and `$?` are one grant.
+* One `query` is one PostgreSQL statement, parsed after those expansions: a single
+  trailing `;` is allowed; a typo, a missing `FROM` or a stray `)` is a
+  `Blastfile:line:col` diagnostic at the statement's first token, from `blastit
+  check`, the editor and the production boot — never a runtime `sql.denied`.
+* An exact `query` is matched on the text you wrote, with comments, whitespace and
+  `$n` folded, and gets no table or column analysis. Read it before pasting:
+  `pg_read_file`, `COPY … PROGRAM`, `dblink` and `lo_import` are file or network
+  capabilities, not ordinary statements.
+
+In the editor, hovering either token inside a `query` says exactly this:
+
+> `$?` is one bind placeholder: the app sends one value for it, and the wire sees
+> `$1, $2, …` in the order the placeholders appear. `IN ($?, ...)` binds any number
+> of values with one grant — the list length is not part of the grant.
+
+> `...` is Blastit's variadic marker, not SQL: it is legal only as `IN ($?, ...)`
+> (any number of values) or after a `VALUES` row, `($?, $?), ...` (any number of
+> rows). `blastit check` refuses it anywhere else.
+
+Each refusal prints its site in front of the sentence:
+
+| Written | Site | The CLI prints |
+|---|---|---|
+| `query ''` | `9:16` | ``this `query` is empty; write the one statement it grants`` |
+| `query 'SELECT 1; SELECT 2'` | `11:26` | ``a `query` is one statement; this one starts a second`` |
+| `query 'SELECT id FROM ...'` | `13:31` | `` `...` is only valid in `IN`/`NOT IN ($?, ...)` and after a `VALUES` row `` |
+| `query 'SELCT id FROM t'` | `9:16` | ``the statement does not parse; check it for a typo, a missing `FROM` or a stray `)` `` |
+| a `query` of 65 537 characters | its first character | ``a `query` is 65536 characters at most; split it, or grant the tables and columns instead`` |
+| a 1 025th `$?` | that `$?` | ``a `query` holds 1024 bind placeholders at most; grant the tables and columns instead`` |
+| the 4 097th distinct `query` in one file | its own `line:col` | ``a `Blastfile` validates 4096 `query` entries at most; fold the shared statements into a `trait` that many views `use` `` |
+
+* The parse's own message is not printed: it can quote the word it stopped at,
+  which can be a value.
+* Only two statements may keep a quoted literal: `SET TIME ZONE 'UTC'` and
+  `SELECT set_config('TimeZone', $?, false)` ([traits](#traits), [connection
+  setup](#connection-setup)). Any other quoted string — `'x'`, `E'x'`, a
+  dollar-quoted block — is refused at its own `line:col`, because a value cannot be
+  learned: bind it (`$?`) in the query and in the code that sends it. A number,
+  `true`, `NULL` and a quoted identifier are ordinary text.
+* A `…` in a `query` is refused: it is what redaction writes, and the value it
+  replaced is gone. Grant the exact statement, with `$?` where the values bind.
 * Table grants allow a statement no exact `query` lists when every table, column
   and function it touches is granted. Reading a column anywhere — a `WHERE`, an
   `ORDER BY`, a join — is reading it. `count(*)` reads no column, and a table
@@ -592,7 +638,8 @@ rewrites the file: `blastit fmt --check` is its own CI step.
 ## Limits
 
 A `Blastfile` is policy, not input, so these budgets exist to bound a generated
-file, never to refuse a real one. Each refusal is one line and names the budget.
+file, never to refuse a real one. Each refusal is one line and names the budget; a
+`query`'s three caps are under [Grants](#grants).
 
 | Budget | Value | Refused with |
 |---|---|---|
@@ -613,11 +660,12 @@ widens what the scheduler will compile.
 
 Every syntax or whole-file check error is one line,
 `<file>:<line>:<col>: <what is wrong and how to write it>`. A parse error names
-the token; a whole-file check names the view and the directive. A refusal with no
-position — an unset `$IDENT`, a missing `root`, a refused `body raw` — names the
-view and the fix instead. A file, token stream, list or pattern over a [limit
-above](#limits) is refused by that budget's sentence, and the advice it carries
-is an edit this one file can take.
+the token; a whole-file check names the view and the directive — except a `query`
+refusal, which prints its site and its sentence ([grants](#grants)). A refusal
+with no position — an unset `$IDENT`, a missing `root`, a refused `body raw` —
+names the view and the fix instead. A file, token stream, list or pattern over a
+[limit above](#limits) is refused by that budget's sentence, and the advice it
+carries is an edit this one file can take.
 
 | Written | The message names |
 |---|---|

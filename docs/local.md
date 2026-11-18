@@ -117,12 +117,14 @@ PostgreSQL's permission error (`42501`) — uncaught, a `500`. One line says why
 15:41:02.118 WARN  sql.denied  products  db  parse  SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?
 ```
 
-`sql` is the statement as normalised, with quoted literals replaced by `…`: exactly
-what a grant has to contain, and safe to paste into a ticket. The JSON form adds
-`reason`, separating a missing table or column from an unlisted statement. Two answers:
+`sql` is the statement as normalised, with each quoted literal replaced by `…`:
+replace every `…` with `$?` (the value is gone) and it is exactly what a grant has
+to contain, safe to paste into a ticket; bind it in the code that sends it. The
+JSON form adds `reason`, separating a missing table or column from an unlisted
+statement. Two answers:
 
 * **It belongs there.** Replace the empty `postgres {}` in that view with the
-  normalised statement:
+  normalised statement, each `…` bound as `$?`:
 
   ```text
   view products regex '/products/.*' {
@@ -132,9 +134,9 @@ what a grant has to contain, and safe to paste into a ticket. The JSON form adds
   }
   ```
 
-  An exact `query` is trusted as written: paste only a statement you have read.
-  `pg_read_file`, `COPY … PROGRAM`, `dblink` and `lo_import` are file or network
-  capabilities, not ordinary queries.
+  An exact `query` is taken as written — parsed, not analysed: paste only a
+  statement you have read. `pg_read_file`, `COPY … PROGRAM`, `dblink` and
+  `lo_import` are file or network capabilities, not ordinary queries.
 
 * **It does not.** You have found a view that does more than you thought. Give
   the code path its own view, or narrow this view's pattern until it is unreachable.
@@ -146,9 +148,13 @@ store, including the ones reading password hashes.
 
 1. Zed ≥ 0.205: `zed: extensions`, install **Blastfile**. Not listed yet: `zed:
    install dev extension` on the repo's `editors/zed` — the only step needing `cargo`.
-2. Open `./Blastfile`: colours, bracket matching, an outline, and a squiggle for each
-   syntax error, in the words `blastit check` prints, at the same line and column.
-   The extension starts `blastit lsp` itself, from `PATH` or through `uv run`.
+2. Open `./Blastfile`: colours (SQL inside a `query '…'` only: a `query "…"` is
+   one string), bracket matching, an outline, and a squiggle, inside the string,
+   at the `line:col` `blastit check` prints. Quick Fix **Parameterize SQL for
+   Blastfile ($?)** turns a pasted literal or `$1…$n` into `$?`, and an
+   `IN ($1, $2)` list into `IN ($?, ...)` ([grants](reference/blastfile.md#grants)
+   has the shapes). Hovering `$?` or `...` explains each. The extension starts
+   `blastit lsp` itself, from `PATH` or through `uv run`.
 3. Merge this into `.zed/settings.json` to turn format-on-save on: Zed's default is
    `off` and an extension cannot set it. Blastit's repo commits that file; save a
    mis-indented line and it snaps back.

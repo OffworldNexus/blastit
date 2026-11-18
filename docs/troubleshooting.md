@@ -37,12 +37,13 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | Symptom | Fix |
 |---|---|
 | a statement is not granted | add `query '<sql>'` to that view's `postgres` block, or rerun with `--learn` |
+| a `query` squiggle I cannot place | a statement that does not parse is marked at its first token, with ``the statement does not parse; check it for a typo, a missing `FROM` or a stray `)` ``; otherwise the column counts from the line's first character (a `query` at 8 spaces puts its SQL at 16) and sits on the token you wrote, not the expanded text |
 | a setup statement (`SELECT set_config(…)`, `SET …`, `SHOW …`) is not granted | it runs on whichever view opens the connection: one trait serves them all — `trait connection { postgres { … } }`, `use connection` in every view that connects ([traits](reference/blastfile.md#traits)) |
 | a grant is never used | delete it, or test the code path it covers |
 | a view is never exercised | add a test, or delete the view |
 | a view took a body and declares no `body` | write `body json`, `form`, `none`, or `raw unvalidated` |
 | `blastit check` reports `raw_ingress` | the view declares `body raw` without `unvalidated`: acknowledge it knowingly, or pick `json` or `form` — the production boot refuses the same view |
-| exit `2` | the `Blastfile` or the configuration did not parse; run `blastit dev` once to see the message |
+| exit `2` | the `Blastfile` or the configuration did not load: the refusal is already on stderr, one line per problem — fix what it names |
 | exit `3` and the suite failed | fix the suite: Blastit reports no audit for a run that never got there |
 | pytest exits `5`, "no tests ran" | nothing was collected, so `blastit check` exits `3` with no audit: add a test, or bootstrap with `blastit dev --learn` |
 
@@ -75,6 +76,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `DECLARE "_django_curs_…"` refused | a named cursor, new per request: turn server-side cursors off |
 | everything is denied at once | the app inlines its parameters; [what an app must do](frameworks/python/index.md#bind-parameters-server-side) |
 | the statement looks identical to the grant | `$1` compares as `$?`, whitespace collapses; a different column list misses |
+| PostgreSQL rejects a statement the grant allows | run it as written, each `$?` as a value of that column's type and the trailing `, ...` dropped: `psql -c '<statement>'` |
 
 ## The app sees it differently
 
