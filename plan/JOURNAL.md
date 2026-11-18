@@ -3400,3 +3400,31 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T16:52 [MB.36.6] (lead) status ready -> active
 - 2026-11-18T16:52 [MB.36.6] (lead) attempt 2/3 started
 - 2026-11-18T17:14 [MB.36.6] (lead) status active -> done
+- 2026-11-18T17:14 [MB.36.7] (lead) status ready -> active
+- 2026-11-18T17:14 [MB.36.7] (lead) attempt 1/3 started
+- 2026-11-18T17:14 [MB.36.7] (lead) attempt 1/3 started; base 6977bd0
+- 2026-11-18T18:05 [MB.36.7.1] (test-curator) created (task) Protect the view.chan transport: a critical suite for the decoder, the credit window and the frame writer
+- 2026-11-18T18:05 [MB.36.7.2] (test-curator) created (task) Run the view-crate mutation campaigns against the tests that cover them (--test-package)
+- 2026-11-18T18:05 [MB.36.7.3] (test-curator) created (task) Close the blastit-view-static survivors: declares_body, pre-1970 dates, trim_ows and the CLOEXEC flags
+- 2026-11-18T18:05 [MB.36.7.4] (test-curator) created (task) Guard the artifacts: the wheel's DT_NEEDED set (R12) and the deleted transport trait names (R3)
+- 2026-11-18T18:05 [MB.36.8] (test-curator) created (task) Protect the view.chan transport: a critical suite for the decoder, the credit window and the frame writer
+- 2026-11-18T18:05 [MB.36.9] (test-curator) created (task) Run the view-crate mutation campaigns against the tests that cover them (--test-package)
+- 2026-11-18T18:05 [MB.36.10] (test-curator) created (task) Close the blastit-view-static survivors: declares_body, pre-1970 dates, trim_ows and the CLOEXEC flags
+- 2026-11-18T18:05 [MB.36.11] (test-curator) created (task) Guard the artifacts: the wheel's DT_NEEDED set (R12) and the deleted transport trait names (R3)
+- 2026-11-18T18:13 [MB.36.7] (test-curator) Attempt 1: audit + dx_capture/dx_invariance + replay (24 captures, empty diff) + wheel/Docker/rootless e2e + three mutation campaigns; gaps filed as MB.36.8-MB.
+- 2026-11-18T18:14 [MB.36.7] (lead) status active -> review
+- 2026-11-18T18:23 [MB.26.25] (lead) created (task) Protect the view.chan transport: a critical suite for the decoder, the credit window and the frame writer
+- 2026-11-18T18:23 [MB.26.26] (lead) created (task) Run the view-crate mutation campaigns against the tests that cover them (--test-package)
+- 2026-11-18T18:23 [MB.26.27] (lead) created (task) Close the blastit-view-static survivors: declares_body, pre-1970 dates, trim_ows and the CLOEXEC flags
+- 2026-11-18T18:23 [MB.36.8] (lead) status proposed -> superseded
+- 2026-11-18T18:23 [MB.36.9] (lead) status proposed -> superseded
+- 2026-11-18T18:23 [MB.36.10] (lead) status proposed -> superseded
+- 2026-11-18T18:23 [MB.36.8] (lead) re-filed as MB.26.25 — superseded means re-filed here, not dropped
+- 2026-11-18T18:23 [MB.36.9] (lead) re-filed as MB.26.26 — superseded means re-filed here, not dropped
+- 2026-11-18T18:23 [MB.36.10] (lead) re-filed as MB.26.27 — superseded means re-filed here, not dropped
+- 2026-11-18T18:23 [MB.36] (lead) Triage of the audit's four gap nodes against this epic's own Acceptance: MB.36.11 lands (R12 "no libpython/libphp DT_NEEDED" is in the epic title, and R3's dele
+- 2026-11-18T18:27 [MB.26.28] (test-curator) created (task) Close the blastit-view loaded.rs survivors: exact-cap boundaries, chunk counts, rebuilds and the two Display sentences
+- 2026-11-18T18:27 [MB.26.29] (test-curator) created (task) Prove the static open flags: O_DIRECTORY at the root, O_NONBLOCK against a FIFO swap, CLOEXEC across execve
+- 2026-11-18T18:35 [MB.36] (lead) JOURNAL CORRECTION: the 18:05 lines recording `MB.36.7.1`-`.4` creations name nodes that do not exist. The test-curator created them under the *task* `MB.36.7`,
+- 2026-11-18T18:51 [MB.26.27] (lead) edited fields
+- 2026-11-18T18:54 [MB.36.7] (lead) status review -> done

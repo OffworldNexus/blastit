@@ -2,7 +2,7 @@
 id: MB.36.7
 title: "Prove MB.36 end to end: wheel smoke, Docker + rootless e2e, the DX-invariance replay, relocated critical suites, and a per-crate mutation audit (test-curator)"
 kind: task
-status: ready
+status: done
 owner: "test-curator"
 priority: 2
 depends_on: [MB.36.6]
@@ -15,11 +15,11 @@ paths:
   - "crates/blastit-view-python/tests/**"
   - "crates/blastit-view-php/tests/**"
   - "crates/blastit-view-static/tests/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T14:07"
+updated: "2026-11-18T18:54"
 ---
 
 # Goal

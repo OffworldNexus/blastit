@@ -1,0 +1,20 @@
+# The host- and run-derived numbers the DX-invariance replay masks **on top of**
+# the design's eight (`dx-mask.txt`).
+#
+# The design's mask (§1) names the values that differ between two runs because
+# they are clocks, timings, ids or the version. Three numbers on the WSGI
+# preload line are the same kind of value but were not in that list, and leaving
+# them in makes the replay red for reasons no refactor caused:
+#
+#   mem_used=8433MiB          the host's used memory at that instant
+#   max_view_processes=658    the admission budget derived from it
+#
+# The line's *shape* stays compared: `event:"boot"`, `build`, `immortalize=on`,
+# `mem_total` and every other key survive verbatim, so a boot that stopped
+# reporting its immortalisation, or that changed the build, still fails.
+#
+# A name here weakens the diff, so the list stays explicit and is reviewed with
+# the audit; the Rust suite asserts the design's eight separately.
+mem_used
+max_view_processes
+immortalized

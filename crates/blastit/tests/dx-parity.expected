@@ -1,0 +1,11 @@
+  blastit dev · single-uid · 127.0.0.1:18999
+<ts> INFO  boot        stage0  seccomp=on  privilege=unprivileged-dev
+{"duration_ms":"<masked>","event":"request","level":"info","mem_used":"<masked>","pid":"<masked>","request_id":"<masked>","route":"app","status":200,"ts":"<masked>"}
+<ts> INFO  process.spawned app  pid=<masked> uid=1000  fork=<duration>  mem_used=<masked>
+ETag: "<hex>-<hex>"
+<pytest summary>
+<version banner>
+<ts> INFO  process.exited -  pid=<masked> uid=0  signal=15
+<ts> INFO  process.exited home  pid=<masked> uid=1000  signal=15
+GET /index.html → (unmatched)  200  <duration>
+{"cost_ns":"<masked>","cpu_ns":"<masked>","event":"shutdown","fork_ms":"<masked>","ts":"<masked>","wall_ns":"<masked>"}
