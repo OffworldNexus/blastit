@@ -83,3 +83,11 @@ attempt 5/5 (expert): an independent mutation of the real tree found round 4 sti
 ## 2026-11-18T11:53 [lead]
 
 status active -> review
+
+## 2026-11-18T11:58 [lead]
+
+status review -> done
+
+## 2026-11-18T11:58 [lead]
+
+committed 3d0d235 (expert token-stream rewrite + symlink-dir fix; make check EXIT=0)

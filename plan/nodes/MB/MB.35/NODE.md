@@ -2,7 +2,7 @@
 id: MB.35
 title: "Separate cross-platform blastit-lsp binary for Linux, macOS and Windows while blastit stays Linux-only"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.32]
 paths: []
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:18"
+updated: "2026-11-18T11:58"
 ---
 
 # Goal

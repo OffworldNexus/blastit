@@ -3340,3 +3340,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T09:18 ESCALATION #13 -> expert for MB.35.6 by lead: 4 cheap attempts, each closing a spelling class and each revealing a new one: the source property is a line-based scanne
 - 2026-11-18T09:18 [MB.35.6] (lead) edited fields
 - 2026-11-18T09:18 [MB.35.6] (lead) attempt 4/5 started
+- 2026-11-18T09:41 [MB.35.6] (lead) status ready -> active
+- 2026-11-18T09:41 [MB.35.6] (lead) attempt 5/5 started
+- 2026-11-18T09:41 [MB.35.6] (lead) attempt 5/5 (expert): independent mutation of the real tree found the round-4 guard still defeated by a line-split  (EXIT=0) because scan_sources compacts per l
+- 2026-11-18T09:41 [MB.35.6] (lead) attempt 5/5 (expert): an independent mutation of the real tree found round 4 still defeated by a line-split `extern crate std as s;` (EXIT=0), because scan_sour
+- 2026-11-18T11:53 [MB.35.6] (lead) status active -> review
+- 2026-11-18T11:58 [MB.35.6] (lead) status review -> done
+- 2026-11-18T11:58 [MB.35.6] (lead) committed 3d0d235 (expert token-stream rewrite + symlink-dir fix; make check EXIT=0)
+- 2026-11-18T11:58 [MB.35] (lead) Gate: all six leaves done. Acceptance run at this tree: make check EXIT=0 (189 suites, lsp-portable inside), make e2e EXIT=0 (411 checks / 0 failures), plan.py 
+- 2026-11-18T11:58 [MB.35] (lead) status ready -> done
