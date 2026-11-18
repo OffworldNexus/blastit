@@ -39,3 +39,11 @@ status review -> review
 ## 2026-11-18T05:23 [lead]
 
 post-review: 8/8 MINORs applied (verdict wording now "five planned, Windows + Linux x86_64 proven, both Apple legs unproven until MB.35.5"; which/PATHEXT, platform_matrix, extension_settings and libclang-order citations corrected; gh caveats quoted; prior-art prose folded). 352 lines, stated plainly.
+
+## 2026-11-18T05:51 [lead]
+
+status review -> done
+
+## 2026-11-18T05:51 [lead]
+
+committed 8dc0fab

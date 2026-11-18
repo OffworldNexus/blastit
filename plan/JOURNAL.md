@@ -3198,3 +3198,73 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T05:03 [MB.35.1] (lead) status ready -> active
 - 2026-11-18T05:03 [MB.35.1] (lead) attempt 1/3 started
 - 2026-11-18T05:03 [MB.35.1] (lead) base d5e43e9
+- 2026-11-18T05:11 [MB.35.1] (lead) status active -> review
+- 2026-11-18T05:11 [MB.35.1] (lead) owner done: GO on all five targets (windows-latest proven at job level in pg_query.rs CI 36765631562; macOS buildable but unproven upstream = the one leg MB.35.
+- 2026-11-18T05:11 [MB.35.2] (lead) status ready -> active
+- 2026-11-18T05:11 [MB.35.2] (lead) attempt 1/3 started
+- 2026-11-18T05:11 [MB.35.2] (lead) base d5e43e9
+- 2026-11-18T05:19 [MB.34.7] (lead) status active -> review
+- 2026-11-18T05:19 [MB.34.7] (lead) owner done: parity 5:16/6:16/8:54/9:54 (CLI) == (4,15)/(5,15)/(7,53)/(8,53) (LSP); --json prints no document for a broken query (exit 2) and its shape is unchan
+- 2026-11-18T05:21 [MB.33] (lead) PLAN CORRECTION from MB.35.1 + its reviewer (this NODE.md is wrong; the brief you will receive overrides it): (a) an extension must declare NO download capabili
+- 2026-11-18T05:23 [MB.35.1] (lead) status review -> review
+- 2026-11-18T05:23 [MB.35.1] (lead) post-review: 8/8 MINORs applied (verdict wording now "five planned, Windows + Linux x86_64 proven, both Apple legs unproven until MB.35.5"; which/PATHEXT, platf
+- 2026-11-18T05:30 [MB.34.7] (lead) reviewer: VERDICT PASS (2 MINOR). Corrected the README hazard: build-wheel.sh copies it aside and restores on EXIT (trap restore_readme), so gates PRESERVE a pr
+- 2026-11-18T05:45 [MB.34.7.1] (test-curator) created (task) Protect the published query squiggle: the LSP range must equal the CLI's line:col
+- 2026-11-18T05:45 [MB.34.7.2] (test-curator) created (task) Protect the QuerySite Debug redaction (a query value must never reach {:?})
+- 2026-11-18T05:45 [MB.34.7.3] (test-curator) created (task) Assert the reference page's 9:16/11:26/13:31 sites and a non-zero UidLayout base
+- 2026-11-18T05:45 [MB.34.7.4] (test-curator) created (task) Cover codeAction's inverted range and the escaped double-quoted interior end to end
+- 2026-11-18T05:45 [MB.34.7.5] (test-curator) created (task) Protect the 4096-parse cap: TooManyQueries at its own site
+- 2026-11-18T05:45 [MB.34.7.6] (test-curator) created (task) Gate the CI refusal contract: check --json exits 2 with empty stdout
+- 2026-11-18T05:46 [MB.34.7.7] (test-curator) created (task) Run the tree-sitter corpus expectations inside make zed-check
+- 2026-11-18T05:46 [MB.34.7.8] (test-curator) created (task) Protect position_at's past-the-end fallback (the critical tier's one surviving mutant)
+- 2026-11-18T05:46 [MB.34.9] (lead) created (task) Protect the published QueryTemplate/LiteralQuery squiggle range against the CLI's line:col (AUDIT-MB.34 G1)
+- 2026-11-18T05:46 [MB.34.10] (lead) created (task) Protect the QuerySite Debug redaction of the statement it carries (AUDIT-MB.34 G2)
+- 2026-11-18T05:46 [MB.34.11] (lead) created (task) Pin the reference page's 9:16 / 11:26 / 13:31 literals and a non-zero base (AUDIT-MB.34 G3)
+- 2026-11-18T05:46 [MB.34.12] (lead) created (task) Cover the codeAction inverted range and the escaped double-quoted interior end to end (AUDIT-MB.34 G4)
+- 2026-11-18T05:46 [MB.34.13] (lead) created (task) Protect the file-wide parse cap enforcement at the 4097th query (AUDIT-MB.34 G5)
+- 2026-11-18T05:46 [MB.34.14] (lead) created (task) Make check --json's refusal contract a test: exit 2, empty stdout, one line:col on stderr (AUDIT-MB.34 G6)
+- 2026-11-18T05:46 [MB.34.15] (lead) created (task) Run the tree-sitter corpus expectations in the zed gate (AUDIT-MB.34 G7)
+- 2026-11-18T05:46 [MB.34.16] (lead) created (task) Protect the position_at past-the-end fallback so the surviving < mutant dies (AUDIT-MB.34 G8)
+- 2026-11-18T05:46 [MB.34.9] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.7] (test-curator) edited fields
+- 2026-11-18T05:46 [MB.34.7] (test-curator) test-curator MB.34 gate audit: 8 follow-up tasks filed under this node (MB.34.7.1-8) from docs/testing/AUDIT-MB.34.md. Node converted task->epic because the pla
+- 2026-11-18T05:46 [MB.34.7] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.9] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.10] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.11] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.12] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.13] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.14] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.15] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.16] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.9] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.10] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.11] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.12] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.13] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.14] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.15] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.16] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.7] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.7.1] (lead) status proposed -> superseded
+- 2026-11-18T05:46 [MB.34.7] (lead) edited fields
+- 2026-11-18T05:46 [MB.34.9] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.10] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.11] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.12] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.13] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.14] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.15] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.16] (lead) status ready -> superseded
+- 2026-11-18T05:46 [MB.34.7.2] (lead) status proposed -> ready
+- 2026-11-18T05:46 [MB.34.7.3] (lead) status proposed -> ready
+- 2026-11-18T05:46 [MB.34.7.4] (lead) status proposed -> ready
+- 2026-11-18T05:46 [MB.34.7.5] (lead) status proposed -> ready
+- 2026-11-18T05:46 [MB.34.7.6] (lead) status proposed -> ready
+- 2026-11-18T05:46 [MB.34.7.7] (lead) status proposed -> ready
+- 2026-11-18T05:46 [MB.34.7.8] (lead) status proposed -> ready
+- 2026-11-18T05:47 [MB.34.7] (lead) Proof accepted (reviewer VERDICT PASS). The audit filed eight gap tasks; the plan tool parents them here, so this node is now an epic whose children are the aud
+- 2026-11-18T05:47 [MB.34.7.9] (test-curator) created (task) Protect the published query squiggle: the LSP range must equal the CLI's line:col
+- 2026-11-18T05:47 [MB.34.7] (test-curator) G1 re-filed as MB.34.7.9: MB.34.7.1 and the lead's MB.34.9 were both superseded in the 05:46 reconciliation, leaving the LSP-squiggle gap with no live node.
+- 2026-11-18T05:51 [MB.35.1] (lead) status review -> done
+- 2026-11-18T05:51 [MB.35.1] (lead) committed 8dc0fab

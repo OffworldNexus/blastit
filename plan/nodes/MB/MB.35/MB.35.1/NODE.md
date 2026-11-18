@@ -2,7 +2,7 @@
 id: MB.35.1
 title: "Verify pg_query on Windows MSVC and both Apple targets, plus the Zed download/Zip/which facts, with citations"
 kind: task
-status: review
+status: done
 owner: researcher
 priority: 1
 depends_on: [MB.32]
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T05:23"
+updated: "2026-11-18T05:51"
 ---
 
 # Goal
