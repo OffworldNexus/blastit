@@ -59,6 +59,12 @@ nav = [
 
 extra_css = ["brand/brand.css", "stylesheets/extra.css"]
 
+# The Blastfile highlighter (`MB.32.1`): one classic script, no build step and no
+# network. It loads after the theme bundle on every page, including the pages
+# `navigation.instant` swaps in, and colours only a `Blastfile` fence; a
+# `text` block that is not one is left exactly as rendered.
+extra_javascript = ["javascripts/blastfile-highlight.js"]
+
 # `archive/` and `spikes/` are working material, not pages, and so are the brand
 # files a human works with rather than reads. Everything else under `brand/` is
 # published, because the site serves it: the logo, the favicons, the social

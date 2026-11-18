@@ -37,8 +37,12 @@ the scanned set by construction — it is why the name can be recognised at all.
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 import sys
+import tomllib
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -1219,4 +1223,971 @@ def test_the_retired_manifest_guard_scans_a_real_tree():
     ), "no record still names the retired manifest: the exemption has no subject"
     assert RETIRED_MANIFEST_NAME not in text_of(Path(__file__)), (
         "this module must compose the name, not carry it"
+    )
+
+
+# --- The Blastfile highlighter (MB.32.1) ------------------------------------
+#
+# Pygments has no `Blastfile` lexer, so every `Blastfile` fence on the site is
+# `language-text` and renders as one grey run. `MB.32.1` ships one offline
+# script that wraps the tokens in the span classes Zensical's own Pygments CSS
+# styles, and this half of the file is the record of what it must do: which
+# fences it may touch, that it never rebuilds the markup, that its SQL interior
+# tokens are the contract's, and that every colour it paints reaches WCAG AA on
+# the code surface of its own scheme.
+#
+# The rules live in the asset, not here. The lexer is executed through Node in a
+# sandbox (`globalThis.BlastfileLexer`), so these tests cannot drift into a
+# second, divergent implementation: a hand edit to the lexer changes what the
+# assertions see.
+
+HIGHLIGHTER = ROOT / "docs" / "javascripts" / "blastfile-highlight.js"
+EXTRA_CSS = ROOT / "docs" / "stylesheets" / "extra.css"
+ZENSICAL = ROOT / "zensical.toml"
+SITE_HIGHLIGHTER = ROOT / "site" / "javascripts" / "blastfile-highlight.js"
+#: WCAG 2.2 SC 1.4.3 (text contrast) is 4.5:1; the code surface is the body it
+#: sits on, `--md-code-bg-color`, which `brand.css` maps to `--blastit-surface`.
+CODE_CONTRAST = 4.5
+#: The one class set the lexer may emit, and the one `extra.css` must colour.
+#: Every name is styled by Zensical's bundled Pygments CSS (`.highlight .X`).
+TOKEN_CLASSES = (
+    "k",
+    "kd",
+    "kc",
+    "kt",
+    "nf",
+    "nv",
+    "s1",
+    "s2",
+    "se",
+    "c1",
+    "p",
+    "mi",
+    "o",
+)
+#: One SQL keyword set, matching the reference page and the Zed grammar. The
+#: asset test reads the array out of the asset and compares it to this tuple, so
+#: a second list (or a dropped word) is a failing name, never a quiet fork.
+SQL_KEYWORDS = (
+    "ALL",
+    "AND",
+    "AS",
+    "BEGIN",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "COMMIT",
+    "CONFLICT",
+    "COUNT",
+    "DELETE",
+    "DISTINCT",
+    "DO",
+    "ELSE",
+    "END",
+    "EXISTS",
+    "FROM",
+    "GROUP",
+    "HAVING",
+    "IN",
+    "INNER",
+    "INSERT",
+    "INTO",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "NOT",
+    "NOTHING",
+    "NULL",
+    "OFFSET",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "RETURNING",
+    "RIGHT",
+    "ROLLBACK",
+    "SELECT",
+    "SET",
+    "THEN",
+    "UNION",
+    "UPDATE",
+    "VALUES",
+    "WHEN",
+    "WHERE",
+    "WITH",
+)
+
+#: `page -> its `text` fences in reading order`, each `(first significant line,
+#: is a Blastfile)`. The 33 blocks measured with
+#: `python/tests/runnable_docs/fences.py`: 29 carry a Blastfile (12
+#: `text title="Blastfile"` documents and 17 keyword-led statement lists) and
+#: the four named below stay plain.
+#:
+#: The key is the fence's first non-blank, non-comment line, **never its line
+#: number**: another node edits the prose above these fences (MB.34.8 already
+#: moved seven of them), and a `(page, line)` pin is stale the moment it does.
+#: A prose edit therefore changes nothing here; a fence that is added, removed,
+#: reordered or reclassified still fails, naming the page and the line it sits
+#: on now.
+EXPECTED_FENCES: dict[str, tuple[tuple[str, bool], ...]] = {
+    "README.md": (('app "hello"', True),),
+    "docs/blastfile.md": (('app "shop"', True),),
+    "docs/ci.md": (("trait connection {", True),),
+    "docs/deploy/digitalocean-paas.md": (("postgres {", True),),
+    "docs/frameworks/php/index.md": (
+        ('app "shop"', True),
+        (
+            "sudo apt install libphp-embed php-pgsql # Debian 13, Ubuntu 24.04+",
+            False,
+        ),
+    ),
+    "docs/frameworks/php/laravel.md": (('app "shop"', True),),
+    "docs/frameworks/php/symfony.md": (('app "shop"', True),),
+    "docs/frameworks/python/django.md": (('app "myshop"', True),),
+    "docs/frameworks/python/flask.md": (('app "shop"', True),),
+    "docs/frameworks/python/index.md": (('app "shop"', True),),
+    "docs/frameworks/static-and-spa.md": (('static "/" {', True),),
+    "docs/getting-started.md": (('app "hello"', True),),
+    "docs/how-it-works.md": (
+        ("/run/blastit/views/<uid>/ 0700, owned by the view uid", False),
+    ),
+    "docs/index.md": (('app "myshop"', True),),
+    "docs/local.md": (
+        ('app "shop"', True),
+        ("view products regex '/products/.*' {", True),
+    ),
+    "docs/reference/blastfile.md": (
+        ("file \u2192 app? entrypoint? section*", False),
+        ('static "/" {', True),
+        ('app "shop"', True),
+        ('entrypoint php "public/index.php"', True),
+        ('app "shop"', True),
+        ("postgres $DATABASE_URL # the default store, one libpq URL", True),
+        ('view products GET "/products", "/products/{id:int}" {', True),
+        ("view cart {", True),
+        ('view catalog GET "/products/{id:int}" {', True),
+        ("trait connection {", True),
+        ("trait session {", True),
+        ('view products GET "/products" {', True),
+        ('static "/" {', True),
+        ('app "shop"', True),
+        ('view products GET "/products/{id:int}" {', True),
+        (
+            (
+                "Blastfile:3:9: `=` is not Blastfile syntax; write the value after "
+                "the keyword"
+            ),
+            False,
+        ),
+    ),
+}
+
+HIGHLIGHT_DETAIL = (
+    "the Blastfile highlighter is progressive enhancement: fix the classifier, "
+    "not the page"
+)
+SQL_KIND = (
+    "the SQL a `query` string carries: one statement, bound values, no inline literal"
+)
+
+#: The Node bridge. It runs the shipped asset in a sandbox and reports only what
+#: the asset's own API returns. `dom` mode builds the shape Zensical renders
+#: (`<code><span id="__span-0-N"><a id="__codelineno-0-N"></a>line\n</span>`),
+#: so the text-node walk is exercised, not just the tokenizer.
+NODE_DRIVER = r"""
+const fs = require("fs");
+const vm = require("vm");
+
+const source = fs.readFileSync(process.argv[2], "utf8");
+const payload = JSON.parse(fs.readFileSync(process.argv[3], "utf8"));
+
+function textOf(node) {
+  if (node.nodeType === 3) {
+    return node.nodeValue;
+  }
+  return node.childNodes.map(textOf).join("");
+}
+
+function makeNode(tag) {
+  const node = {
+    nodeType: 1,
+    childNodes: [],
+    parentNode: null,
+    className: "",
+    id: "",
+    attrs: {},
+    appendChild(child) {
+      child.parentNode = node;
+      node.childNodes.push(child);
+      return child;
+    },
+    insertBefore(child, before) {
+      const at = node.childNodes.indexOf(before);
+      child.parentNode = node;
+      node.childNodes.splice(at < 0 ? node.childNodes.length : at, 0, child);
+      return child;
+    },
+    removeChild(child) {
+      const at = node.childNodes.indexOf(child);
+      if (at >= 0) {
+        node.childNodes.splice(at, 1);
+        child.parentNode = null;
+      }
+      return child;
+    },
+    hasAttribute(name) {
+      return Object.prototype.hasOwnProperty.call(node.attrs, name);
+    },
+    setAttribute(name, value) {
+      node.attrs[name] = value;
+    },
+  };
+  Object.defineProperty(node, "textContent", {
+    get() {
+      return textOf(node);
+    },
+  });
+  Object.defineProperty(node, "innerHTML", {
+    get() {
+      return textOf(node);
+    },
+    set() {
+      throw new Error("innerHTML rebuilds the line anchors");
+    },
+  });
+  return node;
+}
+
+function makeText(value) {
+  return { nodeType: 3, nodeValue: value, data: value, parentNode: null };
+}
+
+function walk(node, visit) {
+  for (const child of node.childNodes) {
+    if (child.nodeType === 1) {
+      visit(child);
+      walk(child, visit);
+    }
+  }
+}
+
+const context = {
+  document: {
+    querySelectorAll: () => [],
+    addEventListener: () => {},
+    createElement: (tag) => makeNode(tag),
+    createTextNode: (value) => makeText(value),
+  },
+};
+vm.createContext(context);
+vm.runInContext(source, context);
+const lexer = context.BlastfileLexer;
+if (!lexer) {
+  throw new Error("the asset did not publish globalThis.BlastfileLexer");
+}
+
+const answer = {};
+if (payload.classify) {
+  answer.classify = payload.classify.map((text) => lexer.classify(text));
+}
+if (payload.roundtrip) {
+  answer.roundtrip = payload.roundtrip.map((text) => lexer.tokenize(text));
+}
+if (payload.dom) {
+  const code = makeNode("code");
+  payload.dom.forEach((line, index) => {
+    const span = makeNode("span");
+    span.id = "__span-0-" + (index + 1);
+    const anchor = makeNode("a");
+    anchor.id = "__codelineno-0-" + (index + 1);
+    span.appendChild(anchor);
+    span.appendChild(makeText(line));
+    code.appendChild(span);
+  });
+  const idsBefore = [];
+  walk(code, (node) => {
+    if (node.id) {
+      idsBefore.push(node.id);
+    }
+  });
+  const before = textOf(code);
+  lexer.highlightCode(code);
+  const idsAfter = [];
+  const classes = {};
+  walk(code, (node) => {
+    if (node.id) {
+      idsAfter.push(node.id);
+    }
+    if (node.className) {
+      classes[node.className] = (classes[node.className] || 0) + 1;
+    }
+  });
+  answer.dom = {
+    idsBefore: idsBefore,
+    idsAfter: idsAfter,
+    before: before,
+    after: textOf(code),
+    classes: classes,
+    marked: code.hasAttribute(lexer.MARK),
+  };
+}
+answer.tokenClasses = lexer.TOKEN_CLASSES;
+process.stdout.write(JSON.stringify(answer));
+"""
+
+
+def run_lexer(tmp_path: Path, payload: dict) -> dict:
+    """Run the shipped asset's own API in Node and return its JSON answer."""
+    node = shutil.which("node")
+    assert node, (
+        f"node is not installed, so {label_of(ROOT, HIGHLIGHTER)} cannot be "
+        "executed; install Node.js 20 or newer (the docs CI runner ships it)"
+    )
+    driver = tmp_path / "drive.js"
+    driver.write_text(NODE_DRIVER, encoding="utf-8")
+    inputs = tmp_path / "payload.json"
+    inputs.write_text(json.dumps(payload), encoding="utf-8")
+    done = subprocess.run(
+        [node, str(driver), str(HIGHLIGHTER), str(inputs)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, (
+        f"{label_of(ROOT, HIGHLIGHTER)} did not run:\n{done.stderr}"
+    )
+    return json.loads(done.stdout)
+
+
+def segments(answer: list[dict]) -> list[tuple[str, str | None]]:
+    """The `(text, class)` pairs of one tokenized fence, in document order."""
+    return [(item["text"], item["cls"]) for item in answer]
+
+
+def classes_of(answer: list[dict]) -> list[tuple[str, str]]:
+    """Only the coloured pairs; the plain runs carry no evidence."""
+    return [(text, cls) for text, cls in segments(answer) if cls is not None]
+
+
+def joined(answer: list[dict]) -> str:
+    """The input the asset read back, rebuilt from its own segments."""
+    return "".join(text for text, _ in segments(answer))
+
+
+def css_block(css: str, selector: str) -> str:
+    """The declarations of the rule whose selector starts at `selector`."""
+    at = css.index(selector) + len(selector)
+    return block_at(css, css.index("{", at))
+
+
+def text_blocks() -> list[tuple[str, int, str]]:
+    """Every `text` fence of the public pages: `(page, line, body)`."""
+    blocks = []
+    for page in fences.public_pages(ROOT, text_of(ZENSICAL)):
+        text = text_of(ROOT / page)
+        for block in fences.scan_page(page, text)[0]:
+            if block.language == "text":
+                blocks.append((page, block.line, block.body))
+    return blocks
+
+
+def fence_key(body: str) -> str:
+    """A fence's first non-blank, non-comment line, whitespace-normalised."""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            return " ".join(stripped.split())
+    return ""
+
+
+def fence_rows() -> list[tuple[str, int, str, str]]:
+    """Every `text` fence as `(page, line, key, body)`, in reading order."""
+    return [(page, line, fence_key(body), body) for page, line, body in text_blocks()]
+
+
+def blocks_for(highlight: bool) -> list[tuple[str, int, str]]:
+    """The measured fences that `EXPECTED_FENCES` marks highlighted (or plain)."""
+    wanted = [
+        (page, key)
+        for page, entries in EXPECTED_FENCES.items()
+        for key, verdict in entries
+        if verdict is highlight
+    ]
+    found = []
+    for page, line, key, body in fence_rows():
+        if (page, key) in wanted:
+            wanted.remove((page, key))
+            found.append((page, line, body))
+    assert not wanted, (
+        f"`EXPECTED_FENCES` names fences the pages no longer carry: {wanted}"
+    )
+    return found
+
+
+def excluded_asset_paths() -> list[str]:
+    """The `exclude_docs` patterns the site build applies to `docs/`."""
+    project = tomllib.loads(text_of(ZENSICAL))["project"]
+    return fences._exclude_patterns(str(project.get("exclude_docs", "")))
+
+
+def test_the_highlighter_is_one_offline_script():
+    """No network, no module system, no dynamic code: one classic script."""
+    source = text_of(HIGHLIGHTER)
+    forbidden = {
+        "a URL": re.compile(r"https?://"),
+        "fetch": re.compile(r"\bfetch\s*\("),
+        "a module import": re.compile(r"(?m)^\s*import\b"),
+        "a module require": re.compile(r"\brequire\s*\("),
+        "a dynamic import": re.compile(r"\bimport\s*\("),
+        "eval": re.compile(r"\beval\s*\("),
+        "new Function": re.compile(r"\bnew\s+Function\b"),
+        "XMLHttpRequest": re.compile(r"\bXMLHttpRequest\b"),
+        "WebSocket": re.compile(r"\bWebSocket\b"),
+        "sendBeacon": re.compile(r"\bnavigator\s*\.\s*sendBeacon\s*\("),
+    }
+    found = [where for where, pattern in forbidden.items() if pattern.search(source)]
+    assert not found, (
+        f"{label_of(ROOT, HIGHLIGHTER)} uses {', '.join(found)}: the site is "
+        "built and served offline, so the asset must be self-contained"
+    )
+    assert len(source.splitlines()) > 40, "the highlighter is a stub, not a lexer"
+
+
+def test_the_highlighter_runs_on_first_load_and_instant_navigation():
+    """`navigation.instant` swaps the document, so both entry paths are needed."""
+    source = text_of(HIGHLIGHTER)
+    subscribes = re.search(r"document\$\.subscribe\(\s*highlight\s*\)", source)
+    assert subscribes, (
+        "no `document$.subscribe(highlight)` call: an instant-navigation page "
+        "swap would render every Blastfile plain"
+    )
+    first_load = re.search(
+        r"addEventListener\(\s*\"DOMContentLoaded\"\s*,\s*highlight\s*\)", source
+    )
+    assert first_load, (
+        "no `DOMContentLoaded` listener for `highlight`: the first page load "
+        "would render plain"
+    )
+    assert "data-blastfile-highlighted" in source, (
+        "no idempotence marker: instant navigation runs the lexer twice and the "
+        "second run would wrap the spans it already made"
+    )
+    assert "setAttribute(MARK" in source, (
+        "nothing sets the idempotence marker, so a second run re-wraps the spans"
+    )
+    assert "hasAttribute(MARK)" in source, (
+        "the marker is never read, so it does not make the lexer idempotent"
+    )
+
+
+def test_the_highlighter_never_rebuilds_the_markup():
+    """`code.innerHTML = …` destroys `<span id="__span-…">` and the copy source."""
+    source = text_of(HIGHLIGHTER)
+    rebuilds = {
+        "an innerHTML assignment": re.compile(r"\.\s*innerHTML\s*="),
+        "an outerHTML assignment": re.compile(r"\.\s*outerHTML\s*="),
+        "insertAdjacentHTML": re.compile(r"\binsertAdjacentHTML\s*\("),
+        "document.write": re.compile(r"\bdocument\s*\.\s*write\s*\("),
+    }
+    found = [where for where, pattern in rebuilds.items() if pattern.search(source)]
+    assert not found, (
+        f"{label_of(ROOT, HIGHLIGHTER)} uses {', '.join(found)}: rebuilding the "
+        "markup drops the line anchors and the copy button's text"
+    )
+    assert "createTextNode" in source and "insertBefore" in source, (
+        "the highlighter does not split Text nodes, so it cannot preserve the "
+        "rendered markup it was given"
+    )
+
+
+def test_the_highlighter_is_wired_and_published():
+    """`extra_javascript` is what loads it, and nothing excludes it from `site/`."""
+    project = tomllib.loads(text_of(ZENSICAL))["project"]
+    assert project.get("extra_javascript") == ["javascripts/blastfile-highlight.js"], (
+        "zensical.toml must name the asset in `extra_javascript`, or no page "
+        f"ever loads it (found {project.get('extra_javascript')!r})"
+    )
+    assert HIGHLIGHTER.is_file(), f"{label_of(ROOT, HIGHLIGHTER)} is missing"
+    relative = HIGHLIGHTER.relative_to(ROOT / "docs").as_posix()
+    assert not fences._excluded(relative, excluded_asset_paths()), (
+        f"an `exclude_docs` rule drops {relative} from the build, so the site "
+        "would link a script that was never copied"
+    )
+    if SITE_HIGHLIGHTER.is_file():
+        assert SITE_HIGHLIGHTER.read_bytes() == HIGHLIGHTER.read_bytes(), (
+            "site/javascripts/blastfile-highlight.js is stale: rebuild the site "
+            "(`make docs-check`)"
+        )
+
+
+def test_every_text_block_classifies_as_measured(tmp_path):
+    """The 29 + 4 split, matched by first line so a prose edit cannot break it."""
+    rows = fence_rows()
+    verdicts = run_lexer(tmp_path, {"classify": [body for *_, body in rows]})[
+        "classify"
+    ]
+    measured: dict[str, list[tuple[str, bool]]] = {}
+    where: dict[tuple[str, int], int] = {}
+    for row, verdict in zip(rows, verdicts, strict=True):
+        page, line, key, _body = row
+        measured.setdefault(page, []).append((key, verdict))
+        where[(page, len(measured[page]) - 1)] = line
+    problems = []
+    for page in sorted(set(measured) | set(EXPECTED_FENCES)):
+        got = measured.get(page, [])
+        expected = list(EXPECTED_FENCES.get(page, ()))
+        for index in range(max(len(got), len(expected))):
+            actual = got[index] if index < len(got) else None
+            pinned_entry = expected[index] if index < len(expected) else None
+            if actual != pinned_entry:
+                problems.append(
+                    f"{page}:{where.get((page, index), '?')}: expected "
+                    f"{pinned_entry}, classified {actual}"
+                )
+    pinned = sum(len(entries) for entries in EXPECTED_FENCES.values())
+    unmatched = [
+        (page, key)
+        for page, entries in EXPECTED_FENCES.items()
+        for key, _verdict in entries
+    ]
+    surplus = []
+    for page, line, key, _body in rows:
+        if (page, key) in unmatched:
+            unmatched.remove((page, key))
+        else:
+            surplus.append(f"{page}:{line} {key!r}")
+    assert len(rows) == pinned, (
+        f"the public pages carry {len(rows)} `text` blocks, not {pinned}: a fence "
+        f"was added or removed, and this task ships none. Surplus "
+        f"{surplus or 'none'}, missing {unmatched or 'none'}"
+    )
+    assert not problems, "\n".join(problems) + f"\n{HIGHLIGHT_DETAIL}"
+    highlighted = sum(
+        1 for entries in measured.values() for _, verdict in entries if verdict
+    )
+    assert (highlighted, len(rows) - highlighted) == (29, 4), (
+        f"{highlighted} fences highlighted and {len(rows) - highlighted} plain, "
+        "not 29 + 4"
+    )
+
+
+def test_every_highlighted_fence_really_colours_something(tmp_path):
+    """Anti-vacuity: the classifier says yes, so the lexer must paint a token."""
+    blocks = blocks_for(highlight=True)
+    assert len(blocks) == 29, f"{len(blocks)} highlighted fences, not 29"
+    answers = run_lexer(tmp_path, {"roundtrip": [body for _, _, body in blocks]})[
+        "roundtrip"
+    ]
+    for (page, line, body), answer in zip(blocks, answers, strict=True):
+        assert joined(answer) == body, f"{page}:{line}: the lexer lost or added text"
+        coloured = classes_of(answer)
+        assert any(cls == "k" for _, cls in coloured), (
+            f"{page}:{line} is classified as a Blastfile but no keyword was "
+            f"coloured: {coloured}"
+        )
+
+
+def test_every_token_colour_meets_aa_in_both_schemes():
+    """Each token, in each scheme, on the code surface it actually renders on."""
+    css = text_of(EXTRA_CSS)
+    scheme_only = re.findall(
+        r'\[data-md-color-scheme="[a-z]+"\]\s+\.highlight\s+\.', css
+    )
+    assert not scheme_only, (
+        f"{len(scheme_only)} palette rule(s) are scheme-scoped only, so they "
+        "would recolour every `console`, `python` and `json` fence on the site: "
+        "each rule needs `code[data-blastfile-highlighted]` between `.highlight` "
+        "and the token class"
+    )
+    rule = re.compile(
+        r'\[data-md-color-scheme="(?P<scheme>default|slate)"\]\s+'
+        r"\.highlight\s+code\[data-blastfile-highlighted\]\s+"
+        r"\.(?P<token>[a-z0-9]+)\s*\{[^}]*?"
+        r"color:\s*(?P<colour>#[0-9a-fA-F]{6})"
+    )
+    found = [
+        (match["scheme"], match["token"], match["colour"])
+        for match in rule.finditer(css)
+    ]
+    palette: dict[str, dict[str, str]] = {"default": {}, "slate": {}}
+    for scheme, token, colour in found:
+        assert token not in palette[scheme], (
+            f".{token} is coloured twice in {scheme}: the later rule wins, so "
+            "the tested value is not the rendered one"
+        )
+        palette[scheme][token] = colour
+    for scheme in ("default", "slate"):
+        assert set(palette[scheme]) == set(TOKEN_CLASSES), (
+            f"{scheme} colours {sorted(palette[scheme])}, not "
+            f"{sorted(TOKEN_CLASSES)}: every class the lexer emits needs a value"
+        )
+
+    brand = text_of(BRAND / "brand.css")
+    assert "--md-code-bg-color: var(--blastit-surface)" in brand, (
+        "the code surface is no longer `--blastit-surface`: this test measures "
+        "the wrong colour"
+    )
+    surface_rule = re.compile(r"--blastit-surface:\s*(#[0-9a-fA-F]{6})")
+    surface = {
+        scheme: surface_rule.search(css_block(brand, selector)).group(1)
+        for scheme, selector in (
+            ("default", ':root,\n[data-md-color-scheme="default"]'),
+            ("slate", '[data-md-color-scheme="slate"]'),
+        )
+    }
+    assert surface == {"default": "#fffcf5", "slate": "#1b232c"}, (
+        f"the code surfaces moved to {surface}: re-measure every token"
+    )
+    short = [
+        f"{scheme} .{token} {colour} is {contrast(colour, surface[scheme]):.2f}:1 "
+        f"on {surface[scheme]}"
+        for scheme in ("default", "slate")
+        for token in TOKEN_CLASSES
+        if (colour := palette[scheme][token])
+        and contrast(colour, surface[scheme]) < CODE_CONTRAST
+    ]
+    assert not short, (
+        f"WCAG AA needs {CODE_CONTRAST}:1 on the code surface; below that are: "
+        + "; ".join(short)
+    )
+
+
+def test_the_sql_keyword_set_is_one_set():
+    """The keyword list is the contract's; a second list is a fork."""
+    source = text_of(HIGHLIGHTER)
+    declared = re.findall(r"SQL_KEYWORDS\s*=\s*lookup\(\[(.*?)\]\)", source, re.DOTALL)
+    assert len(declared) == 1, (
+        f"the SQL keyword set is declared {len(declared)} times: one set, shared "
+        "by the lexer and the reference page"
+    )
+    words = re.findall(r'"([A-Z_]+)"', declared[0])
+    repeated = sorted({word for word in words if words.count(word) > 1})
+    assert not repeated, (
+        f"the SQL keyword set repeats {repeated}: `lookup` would silently "
+        "collapse the duplicates"
+    )
+    assert tuple(sorted(words)) == SQL_KEYWORDS, (
+        "the SQL keyword set changed: "
+        f"missing {sorted(set(SQL_KEYWORDS) - set(words))}, "
+        f"extra {sorted(set(words) - set(SQL_KEYWORDS))}"
+    )
+
+
+#: `(fence, expected coloured segments)` for the SQL interior. The expected
+#: pairs are the whole coloured sequence: a token that loses its class or gains
+#: the wrong one changes the list, and the wrapper proves the closing quote is
+#: still the string's own token.
+SQL_FIXTURES = [
+    (
+        "uppercase keywords, an IN list and the variadic marker",
+        (
+            "view v {\n    postgres {\n        query 'SELECT id FROM products "
+            "WHERE id IN ($?, ...)'\n    }\n}\n"
+        ),
+        [
+            ("view", "k"),
+            ("v", "nf"),
+            ("{", "p"),
+            ("postgres", "k"),
+            ("{", "p"),
+            ("query", "k"),
+            ("'", "s1"),
+            ("SELECT", "k"),
+            ("FROM", "k"),
+            ("WHERE", "k"),
+            ("IN", "k"),
+            ("$?", "se"),
+            ("...", "nv"),
+            ("'", "s1"),
+            ("}", "p"),
+            ("}", "p"),
+        ],
+    ),
+    (
+        "lowercase keywords, `$1` and `$12`",
+        "query 'select * from products where price > $1 and id = $12'\n",
+        [
+            ("query", "k"),
+            ("'", "s1"),
+            ("select", "k"),
+            ("*", "o"),
+            ("from", "k"),
+            ("where", "k"),
+            (">", "o"),
+            ("$1", "nv"),
+            ("and", "k"),
+            ("=", "o"),
+            ("$12", "nv"),
+            ("'", "s1"),
+        ],
+    ),
+    (
+        "UPDATE … SET with bound values",
+        "query 'UPDATE t SET a = $1 WHERE b = $12'\n",
+        [
+            ("query", "k"),
+            ("'", "s1"),
+            ("UPDATE", "k"),
+            ("SET", "k"),
+            ("=", "o"),
+            ("$1", "nv"),
+            ("WHERE", "k"),
+            ("=", "o"),
+            ("$12", "nv"),
+            ("'", "s1"),
+        ],
+    ),
+    (
+        "INSERT … VALUES rows",
+        "query 'INSERT INTO t (a, b) VALUES ($?, $?), ...'\n",
+        [
+            ("query", "k"),
+            ("'", "s1"),
+            ("INSERT", "k"),
+            ("INTO", "k"),
+            ("VALUES", "k"),
+            ("$?", "se"),
+            ("$?", "se"),
+            ("...", "nv"),
+            ("'", "s1"),
+        ],
+    ),
+    (
+        "operator soup, a function and a `--` comment",
+        "query 'SELECT count(*), x FROM t -- note'\n",
+        [
+            ("query", "k"),
+            ("'", "s1"),
+            ("SELECT", "k"),
+            ("count", "k"),
+            ("*", "o"),
+            ("FROM", "k"),
+            ("-- note", "c1"),
+            ("'", "s1"),
+        ],
+    ),
+    (
+        "quoted identifiers, IS NOT NULL, `<>`, `||`, `::` and a number",
+        (
+            'query \'select "Order" from "orders" where total >= 10.5 '
+            "and a IS NOT NULL and b <> 1 || c::text'\n"
+        ),
+        [
+            ("query", "k"),
+            ("'", "s1"),
+            ("select", "k"),
+            ("from", "k"),
+            ("where", "k"),
+            (">=", "o"),
+            ("10.5", "mi"),
+            ("and", "k"),
+            ("IS", "k"),
+            ("NOT", "k"),
+            ("NULL", "k"),
+            ("and", "k"),
+            ("<>", "o"),
+            ("1", "mi"),
+            ("||", "o"),
+            ("::", "o"),
+            ("'", "s1"),
+        ],
+    ),
+]
+
+
+def test_the_sql_inside_a_query_string_is_tokenized(tmp_path):
+    """Keywords, `$?`, `$n`, `...`, numbers, operators and comments, in order."""
+    answers = run_lexer(
+        tmp_path, {"roundtrip": [fixture[1] for fixture in SQL_FIXTURES]}
+    )["roundtrip"]
+    for (label, fence, expected), answer in zip(SQL_FIXTURES, answers, strict=True):
+        assert joined(answer) == fence, f"{label}: the lexer lost or added text"
+        assert classes_of(answer) == expected, f"{label}: {SQL_KIND}"
+
+
+def test_a_query_comment_never_swallows_the_closing_quote(tmp_path):
+    """`--` runs to the end of the line, and the string still ends on its quote."""
+    fence = "query 'SELECT id -- note'\n}\n"
+    answer = run_lexer(tmp_path, {"roundtrip": [fence]})["roundtrip"][0]
+    assert classes_of(answer) == [
+        ("query", "k"),
+        ("'", "s1"),
+        ("SELECT", "k"),
+        ("-- note", "c1"),
+        ("'", "s1"),
+        ("}", "p"),
+    ], SQL_KIND
+    assert joined(answer) == fence
+
+
+def test_an_escaped_query_finds_its_tokens_and_ends_on_its_quote(tmp_path):
+    """`\\"` is an escape, not the end of the string; the closing `"` still ends it."""
+    fence = 'query "SELECT \\"name\\" FROM t WHERE a = $?"\n'
+    answer = run_lexer(tmp_path, {"roundtrip": [fence]})["roundtrip"][0]
+    assert classes_of(answer) == [
+        ("query", "k"),
+        ('"', "s2"),
+        ("SELECT", "k"),
+        ('\\"', "se"),
+        ('\\"', "se"),
+        ("FROM", "k"),
+        ("WHERE", "k"),
+        ("=", "o"),
+        ("$?", "se"),
+        ('"', "s2"),
+    ], SQL_KIND
+    assert joined(answer) == fence
+
+
+def test_nothing_outside_a_query_string_is_sql(tmp_path):
+    """A view named `select`, and a `query` inside a comment, colour no SQL."""
+    fixtures = [
+        (
+            "a view named `select`",
+            "view select {\n    postgres { select carts(id) }\n}\n",
+            [
+                ("view", "k"),
+                ("select", "nf"),
+                ("{", "p"),
+                ("postgres", "k"),
+                ("{", "p"),
+                ("select", "k"),
+                ("(", "p"),
+                (")", "p"),
+                ("}", "p"),
+                ("}", "p"),
+            ],
+        ),
+        (
+            "a `query` inside a comment",
+            "# query 'SELECT 1'\nview v { }\n",
+            [
+                ("# query 'SELECT 1'", "c1"),
+                ("view", "k"),
+                ("v", "nf"),
+                ("{", "p"),
+                ("}", "p"),
+            ],
+        ),
+    ]
+    answers = run_lexer(tmp_path, {"roundtrip": [fence for _, fence, _ in fixtures]})[
+        "roundtrip"
+    ]
+    for (label, fence, expected), answer in zip(fixtures, answers, strict=True):
+        assert joined(answer) == fence, f"{label}: the lexer lost or added text"
+        assert classes_of(answer) == expected, f"{label}: only a `query` string is SQL"
+
+
+def test_the_plain_fences_stay_plain_with_a_query_line_appended(tmp_path):
+    """The refusal is the block's, not the line's: a `query` line cannot rescue it."""
+    bodies = blocks_for(highlight=False)
+    assert len(bodies) == 4, f"{len(bodies)} plain fences, not 4"
+    appended = [body + "\nquery 'SELECT 1'\n" for _, _, body in bodies]
+    verdicts = run_lexer(tmp_path, {"classify": appended})["classify"]
+    wrong = [
+        f"{page}:{line}"
+        for (page, line, _body), verdict in zip(bodies, verdicts, strict=True)
+        if verdict
+    ]
+    assert not wrong, (
+        "a plain `text` block that gains a `query` line is still not a Blastfile: "
+        f"{wrong}\n{HIGHLIGHT_DETAIL}"
+    )
+
+
+def test_the_dom_walk_keeps_every_anchor_and_every_byte(tmp_path):
+    """The line ids, the `__span` wrappers and `code.textContent` all survive."""
+    lines = [
+        'app "shop"\n',
+        "\n",
+        'view products GET "/products/{id:int}" {\n',
+        "    postgres { select products(id, name, price) }\n",
+        "}\n",
+    ]
+    answer = run_lexer(tmp_path, {"dom": lines})["dom"]
+    assert answer["marked"] is True, (
+        "the processed `<code>` carries no idempotence marker, so instant "
+        "navigation would tokenize it twice"
+    )
+    assert answer["idsAfter"] == answer["idsBefore"], (
+        f"the line anchors changed: {answer['idsBefore']} became {answer['idsAfter']}"
+    )
+    assert answer["after"] == answer["before"], (
+        "`code.textContent` changed, so the copy button would read different "
+        f"text: {answer['before']!r} became {answer['after']!r}"
+    )
+    assert set(answer["classes"]) <= set(TOKEN_CLASSES), (
+        f"the walk emitted classes the theme does not style: "
+        f"{sorted(set(answer['classes']) - set(TOKEN_CLASSES))}"
+    )
+    assert answer["classes"].get("k"), "no keyword span was created at all"
+
+
+def test_the_emitted_classes_are_the_styled_and_coloured_set(tmp_path):
+    """One class list: what the lexer emits is exactly what `extra.css` colours."""
+    answer = run_lexer(tmp_path, {"roundtrip": [SQL_FIXTURES[0][1]]})
+    assert tuple(answer["tokenClasses"]) == TOKEN_CLASSES, (
+        f"the lexer emits {answer['tokenClasses']}, not {list(TOKEN_CLASSES)}: "
+        "a class outside this list renders as plain text"
+    )
+
+
+def test_a_raw_regex_string_keeps_its_backslash(tmp_path):
+    r"""`'…'` has no escapes, so `'\.php$'` is one `.s1` run, not a `.se` escape."""
+    fence = 'static "/" {\n    root "public"\n    immutable regex \'\\.php$\'\n}\n'
+    answer = run_lexer(tmp_path, {"roundtrip": [fence]})["roundtrip"][0]
+    assert joined(answer) == fence, "the lexer lost or added text"
+    assert classes_of(answer) == [
+        ("static", "k"),
+        ('"', "s2"),
+        ("/", "s2"),
+        ('"', "s2"),
+        ("{", "p"),
+        ("root", "kd"),
+        ('"', "s2"),
+        ("public", "s2"),
+        ('"', "s2"),
+        ("immutable", "kd"),
+        ("'", "s1"),
+        ("\\.php$", "s1"),
+        ("'", "s1"),
+        ("}", "p"),
+    ], "a raw string has no escapes: the whole body is .s1"
+
+
+def test_a_prose_edit_above_the_fences_keeps_every_identity(tmp_path):
+    """The table keys on the first line, so prose above a fence shifts nothing.
+
+    `MB.34.8` edits `docs/reference/blastfile.md` while this node runs and has
+    already moved seven of its fences. Re-parsing the real page with a
+    paragraph prepended — in memory only, the page is never written — must
+    yield the same identity sequence and the same verdicts.
+    """
+    page = "docs/reference/blastfile.md"
+    shifted = "## A new section\n\nOne more paragraph above the fences.\n\n" + text_of(
+        ROOT / page
+    )
+    blocks = [
+        block
+        for block in fences.scan_page(page, shifted)[0]
+        if block.language == "text"
+    ]
+    assert [block.line for block in blocks] != [
+        block.line
+        for block in fences.scan_page(page, text_of(ROOT / page))[0]
+        if block.language == "text"
+    ], "the prepended prose did not move the fences: this test proves nothing"
+    keys = tuple(fence_key(block.body) for block in blocks)
+    assert keys == tuple(key for key, _ in EXPECTED_FENCES[page]), (
+        "a prose edit changed a fence identity: the key must be the fence's own "
+        "first line, and nothing positional"
+    )
+    verdicts = run_lexer(tmp_path, {"classify": [block.body for block in blocks]})[
+        "classify"
+    ]
+    assert tuple(verdicts) == tuple(verdict for _, verdict in EXPECTED_FENCES[page]), (
+        "a prose edit changed a fence verdict"
     )
