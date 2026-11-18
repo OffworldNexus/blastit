@@ -323,7 +323,7 @@ struct View {
     /// from the frames the process itself wrote, so the two can arrive in
     /// either order. The frames are the answer: a view that writes
     /// `RESP_HEAD`/`RESP_END_COST`/`DONE` and then retires **by design** (a
-    /// contained bailout, `php.rs`) must be read before its requests are
+    /// contained bailout, `blastit-view-php`) must be read before its requests are
     /// failed. Nothing new is dispatched to an exited view, and
     /// [`Scheduler::expire_exited_views`] bounds the wait.
     exited: Option<Instant>,
@@ -332,8 +332,8 @@ struct View {
     /// (`MB.26.8`).
     ///
     /// `Bailed` is the handler never returning — a contained `exit()`/`die()`/
-    /// fatal — and the runtime retires the process after it (the view's
-    /// `WorkerRuntime::recycle`, `crates/blastit-view/src/php.rs`). So the
+    /// fatal — and the runtime retires the process after it (the PHP worker's
+    /// `recycle`, `crates/blastit-view-php/src/worker.rs`). So the
     /// worker has just said it cannot serve another request, one `ctl.chan`
     /// report before [`View::exited`] arrives: without this, the pump between
     /// `DONE` and the close dispatches the queued head into a process that has

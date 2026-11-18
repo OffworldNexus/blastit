@@ -2,7 +2,7 @@
 id: MB.36.5
 title: "Extract crates/blastit-view-php (worker, SAPI, discovery, pinning, probe), delete WorkerRuntime/runtime.rs, and shrink stage0.rs by the PHP half"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.36.4]
@@ -15,6 +15,7 @@ paths:
   - crates/blastit/src/stage0.rs
   - crates/blastit/src/stage1.rs
   - crates/blastit/src/config.rs
+  - crates/blastit/src/host.rs
   - crates/blastit/src/supervise.rs
   - crates/blastit/src/check.rs
   - crates/blastit/src/lib.rs
@@ -22,15 +23,14 @@ paths:
   - crates/blastit/tests/critical_php_embed.rs
   - "crates/blastit/tests/common/**"
   - crates/blastit/tests/critical_parallel_views.rs
-  - crates/blastit/tests/critical_loaded_files.rs
   - "crates/blastit-scheduler/src/scheduler.rs"
   - crates/blastit/Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T15:57"
+updated: "2026-11-18T16:17"
 ---
 
 # Goal
@@ -69,15 +69,18 @@ back to being an orchestrator.
   Python audit hook); the `WorkerRuntime` trait itself **is deleted**, and
   `PhpEmbedRuntime::serve_forever` / the WSGI pool each own their loop. Update the stale
   `WorkerRuntime::recycle` mention in `crates/blastit-scheduler/src/scheduler.rs`.
-- End state of `crates/blastit-view/Cargo.toml`: `blastit-frame`, `thiserror` and nothing
-  else; **no `pyo3`** (also not in `[dev-dependencies]`), **no `blastit-php-sapi`**, no
-  `python`/`php` features. `blastit`'s features become
-  `python = ["dep:pyo3", "dep:blastit-view-python"]`, `php = ["dep:blastit-view-php"]`,
-  `static = ["dep:blastit-view-static"]`.
+- End state of `crates/blastit-view/Cargo.toml`: `blastit-frame`, `thiserror`, `blastit-sys`
+  and nothing else; **no `pyo3`** (also not in `[dev-dependencies]`), **no `blastit-php-sapi`**,
+  no `python`/`php` features. `blastit`'s features become
+  `python = ["dep:pyo3", "dep:blastit-view-python"]`, `php = ["dep:blastit-view-php"]`, and
+  `static = ["blastit-scheduler/static"]` — **already landed** in `MB.36.2` and the shape design
+  §4.2.5 of record chose (the static responder is the scheduler's optional dependency, not
+  `blastit`'s); do not re-point it at `blastit-view-static` here.
 - Protected files this leaf may relocate (its `paths` must name the **old** globs):
   `crates/blastit/tests/critical_php_backend.rs`, `critical_php_embed.rs`,
-  `critical_loaded_files.rs`, `crates/blastit-view/tests/php_native.rs`. Every case moves or
-  stays; none is dropped.
+  `crates/blastit-view/tests/php_native.rs`. (`critical_loaded_files.rs` left `crates/blastit`
+  in `MB.36.3`, so that `paths` entry is a no-op; nothing to move for it here.) Every case
+  moves or stays; none is dropped.
 
 # Acceptance
 

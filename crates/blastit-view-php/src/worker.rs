@@ -1,19 +1,30 @@
 //! Embedded PHP: [`PhpEmbedRuntime`] over `view.chan` (design §4.1, §4.3,
-//! ADR-0010 §1).
+//! `ADR-0010` §1, `ADR-0016` decision 2).
 //!
-//! The PHP worker is an ordinary view process. It runs one [`WorkerRuntime`] —
-//! this one — and it is the *only* place a `libphp` symbol is reachable: the
-//! crate stays `#![forbid(unsafe_code)]`, and the `dlopen`/`dlsym` and the
-//! `extern "C"` sink trampolines live in `blastit-php-sapi`'s `loader`.
+//! The PHP worker is an ordinary view process. It runs [`PhpEmbedRuntime`] — and
+//! it is the *only* place a `libphp` symbol is reachable: the crate stays
+//! `#![forbid(unsafe_code)]`, and the `dlopen`/`dlsym` and the `extern "C"` sink
+//! trampolines live in `blastit-php-sapi`'s `loader`.
 //!
 //! # One request at a time
 //!
-//! NTS `libphp` runs one request per OS process, so [`PhpEmbedRuntime::max_inflight`]
-//! is `1` and `serve` takes the process-wide handle behind a `Mutex`: the trait
-//! is `&self`, and two concurrent calls would corrupt PHP's globals. The
-//! scheduler forks `1..=workers` such processes instead of threading one.
+//! NTS `libphp` runs one request per OS process, so the worker serves one
+//! request at a time: `serve` takes the process-wide handle behind a `Mutex`,
+//! and two concurrent calls would corrupt PHP's globals. The scheduler forks
+//! `1..=workers` such processes instead of threading one.
 //!
-//! # The transport is single-threaded, and that is why `Credits` has `try_take`
+//! # The entry pin is a required value, not an adapter
+//!
+//! `ADR-0016` decision 2 supersedes `MB.36.5`'s original note: the runtime seam
+//! the pin used to wrap is gone, so [`PhpRuntimeConfig::new`] takes the
+//! [`EntryPin`] the boot recorded as a **required** argument. There is no
+//! `Option` and no `Default`: a runtime that could be built without a pin would
+//! be a fail-open seam, and a `SCRIPT_FILENAME` swapped in place must be a `500`
+//! (with the sentence on the worker's stderr) rather than a silent re-resolution
+//! to whatever is at the path now. The record is checked once at load and again
+//! before every request, beside the call into the shim.
+//!
+//! # The transport is single-threaded, and that is why `Credit` has `try_take`
 //!
 //! [`serve_forever`] reads `REQ_HEAD`, runs exactly one request, and writes
 //! `RESP_END_COST` + `DONE` from the [`RequestEnd`] — the shape of the WSGI
@@ -36,7 +47,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
 use std::io::{self, ErrorKind, Read, Write};
-use std::os::unix::net::{UnixDatagram, UnixStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -48,13 +59,14 @@ use blastit_php_sapi::abi::{OUTCOME_BAILOUT, OUTCOME_OK, RequestV1, ServerVarV1}
 use blastit_php_sapi::loader::bailed_out;
 use blastit_php_sapi::{FileSink, LoadError, Loaded, ServerVars, SharedObject, Sink};
 
-use crate::error::ViewError;
-use crate::flow::Flow;
-use crate::loaded::Reporter;
-use crate::runtime::{RequestEnd, RequestIo, WorkerRuntime};
-use crate::stream::{OUTPUT_LINE_CAP, OutputStream};
-use crate::sync::lock;
-use crate::wire::Writer;
+use blastit_view::ViewError;
+use blastit_view::flow::Flow;
+use blastit_view::loaded::{LoadedReport, Reporter};
+use blastit_view::stream::{OUTPUT_LINE_CAP, OutputStream};
+use blastit_view::sync::lock;
+use blastit_view::wire::Writer;
+
+use crate::pinning::{EntryPin, PhpBinding, verify_entry};
 
 /// How much of the channel is read at once.
 const READ_SIZE: usize = 64 * 1024;
@@ -63,8 +75,14 @@ const READ_SIZE: usize = 64 * 1024;
 const BODY_READ: usize = 64 * 1024;
 
 /// What a PHP view process is told about itself; fixed for its lifetime.
+///
+/// Built by [`PhpRuntimeConfig::new`] from one [`PhpBinding`], so the worker's
+/// view of the slot cannot drift from the descriptors and the record the boot
+/// verified.
 #[derive(Debug, Clone)]
 pub struct PhpRuntimeConfig {
+    /// The route whose entry is pinned, for the refusal sentence.
+    pub route: String,
     /// Absolute path of the script `SCRIPT_FILENAME` is pinned to — the path
     /// `entrypoint php` resolved to. Never request-derived (ADR-0010 §2).
     pub entry: PathBuf,
@@ -87,9 +105,44 @@ pub struct PhpRuntimeConfig {
     /// allocate without bound (the scheduler's own body limit is the first
     /// line, this is the worker's).
     pub max_body_bytes: usize,
+    /// The record of the resolved `entry` the boot took (`ADR-0010` §3,
+    /// `MB.3.56`): `(st_dev, st_ino)` plus the size/ctime content half, checked
+    /// once at load and again before every request.
+    ///
+    /// Private and **required**: `ADR-0016` decision 2 deleted the adapter that
+    /// used to re-check the pin outside the runtime, so a value that could be
+    /// left unset would be a fail-open seam. Nothing reads it back out — the
+    /// check is [`PhpEmbedRuntime`]'s.
+    pin: EntryPin,
 }
 
 impl PhpRuntimeConfig {
+    /// The worker's configuration for one PHP slot.
+    ///
+    /// Everything the worker is told about itself comes from the binding the
+    /// boot verified — the two pinned descriptors, the resolved entry, the INI
+    /// blob, the scratch directory and the two budgets — plus the mount point
+    /// the composition root normalised and the entry's record.
+    ///
+    /// `pin` is a required argument rather than a field read back out of
+    /// `binding`, because that is the value the check is about: a runtime built
+    /// without one would run whatever is at `SCRIPT_FILENAME` now
+    /// (`ADR-0016` decision 2).
+    #[must_use]
+    pub fn new(binding: &PhpBinding, script_name: String, pin: EntryPin) -> Self {
+        Self {
+            route: binding.route.clone(),
+            entry: binding.entry.clone(),
+            document_root: binding.document_root.clone(),
+            script_name,
+            ini: binding.ini.clone(),
+            view_tmp: binding.view_tmp.clone(),
+            max_requests: binding.max_requests,
+            max_body_bytes: binding.max_body_bytes,
+            pin,
+        }
+    }
+
     /// Refuses a configuration the worker could not serve, at boot.
     ///
     /// # Errors
@@ -176,23 +229,12 @@ struct PhpWorker {
     bailed: bool,
 }
 
-/// The dev-only loaded-file report a PHP view is handed (`MB.23.4.2`,
-/// `ADR-0014`).
-///
-/// The socket is the write end of this view's own `AF_UNIX SOCK_DGRAM`
-/// socketpair: the supervisor keeps the read end, which is how a datagram is
-/// attributed (the `source` in the payload is a self-check for logging and the
-/// per-source `seq` space, never a route to restart). The socketpair is created
-/// before the fork and reaches the view as an inherited descriptor in the
-/// child's keep list, exactly like `view.chan` — never through the environment,
-/// which stage 0 strips and the application must not see anyway.
-#[derive(Debug)]
-pub struct PhpLoadedReport {
-    /// The write end of the view's report socketpair.
-    pub socket: UnixDatagram,
-    /// The id this view's batches name: its route index.
-    pub source: u16,
-}
+// The dev-only loaded-file report a PHP view is handed (`MB.23.4.2`,
+// `ADR-0014`) is the transport's: one `LoadedReport` type for every backend, and
+// `MB.36.5` deleted this crate's duplicate of it (design §4.2.1). The socket is
+// the write end of this view's own `AF_UNIX SOCK_DGRAM` socketpair — created
+// before the fork, inherited in the child's keep list, never passed through the
+// environment.
 
 /// One PHP view's report (`MB.23.4.2`): the datagram sender and the
 /// compiled→source memo, over the sink the *loader* owns.
@@ -228,7 +270,7 @@ struct FileReportState {
 
 impl PhpFileReport {
     /// Wraps the view's socket, or `None` when it cannot be made non-blocking.
-    fn new(report: PhpLoadedReport) -> Option<Self> {
+    fn new(report: LoadedReport) -> Option<Self> {
         let reporter = Reporter::new(report.socket, report.source).ok()?;
         Some(Self {
             state: Mutex::new(FileReportState {
@@ -268,10 +310,11 @@ impl PhpFileReport {
     }
 }
 
-/// `[route.php]`'s [`WorkerRuntime`]: NTS `libphp` behind the shim's vtable.
+/// `entrypoint php`'s worker: NTS `libphp` behind the shim's vtable.
 pub struct PhpEmbedRuntime {
-    /// The process-wide handle. `Mutex` because the trait's `serve` is `&self`
-    /// and `libphp` is not re-entrant.
+    /// The process-wide handle. `Mutex` because `serve` takes `&self` (the
+    /// scheduler's request path never owns the runtime) and `libphp` is not
+    /// re-entrant.
     worker: Mutex<PhpWorker>,
     /// What every request is built from.
     cfg: PhpRuntimeConfig,
@@ -321,7 +364,7 @@ impl PhpEmbedRuntime {
         libphp: SharedObject,
         shim: SharedObject,
         cfg: PhpRuntimeConfig,
-        report: Option<PhpLoadedReport>,
+        report: Option<LoadedReport>,
     ) -> Result<Self, PhpError> {
         cfg.validate().map_err(PhpError::Config)?;
         let mut handle = Loaded::load(libphp, shim)?;
@@ -357,16 +400,24 @@ impl PhpEmbedRuntime {
     }
 }
 
-impl WorkerRuntime for PhpEmbedRuntime {
-    fn kind(&self) -> &'static str {
-        "php"
-    }
-
-    fn max_inflight(&self) -> u32 {
-        1
-    }
-
-    fn serve(&self, req: ReqHead, io: &mut dyn RequestIo) -> RequestEnd {
+impl PhpEmbedRuntime {
+    /// Runs one dispatched request to completion.
+    ///
+    /// Blocking, on the transport's request thread, with `&self`: the
+    /// process-wide handle is taken behind a lock, because `libphp` is not
+    /// re-entrant and an NTS worker runs one request per OS process. The
+    /// response is written through `io` before this returns; the loop that owns
+    /// the channel writes `RESP_END_COST` and `DONE` from the [`RequestEnd`].
+    ///
+    /// The entry pin is re-checked **here**, before the body is read and before
+    /// `libphp` opens `SCRIPT_FILENAME` (`MB.3.56`, `ADR-0010` §3): a mismatch
+    /// answers an empty `500` with the sentence on the worker's stderr, never in
+    /// the response.
+    pub fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
+        if let Err(sentence) = verify_entry(&self.cfg.route, &self.cfg.entry, self.cfg.pin) {
+            return refuse(io, &sentence);
+        }
+        let req = io.head().clone();
         let mut worker = lock(&self.worker);
         worker.served = worker.served.saturating_add(1);
         let prepared = match Prepared::new(&self.cfg, &req) {
@@ -457,10 +508,36 @@ impl WorkerRuntime for PhpEmbedRuntime {
         RequestEnd::new(outcome, cpu_ns)
     }
 
-    fn recycle(&self) -> bool {
+    /// Whether the worker must exit now instead of taking another request.
+    ///
+    /// A fatal bailout left the interpreter in a state it cannot reuse, and
+    /// `max_requests` is the boot's recycling rule; the supervisor respawns
+    /// lazily, and a `max_requests` exit is a clean `0`.
+    #[must_use]
+    pub fn recycle(&self) -> bool {
         let worker = lock(&self.worker);
         should_recycle(worker.bailed, worker.served, self.cfg.max_requests)
     }
+}
+
+/// The answer a per-request refusal gets: an empty `500` and the sentence on
+/// the worker's stderr.
+///
+/// The reason belongs in the log, not in an answer a client can steer. The
+/// outcome is `Completed` when the empty head reached the wire: the request was
+/// answered, just not with the application's output.
+fn refuse(io: &mut dyn RequestIo, sentence: &str) -> RequestEnd {
+    io.output(OutputStream::Stderr, sentence);
+    let head = RespHead {
+        status: 500,
+        reason: Vec::new(),
+        headers: Vec::new(),
+    };
+    let outcome = match io.write_head(head).and_then(|()| io.flush_response()) {
+        Ok(()) => DoneOutcome::Completed,
+        Err(_) => DoneOutcome::Aborted,
+    };
+    RequestEnd::new(outcome, None)
 }
 
 /// What `serve` reports for one shim result: the `DONE` outcome, and whether
@@ -713,9 +790,26 @@ fn cpu(result: &blastit_php_sapi::abi::ResultV1) -> Option<u64> {
 /// [`ViewError`]: the channel could not be read or written, the bytes are not a
 /// frame stream, or the scheduler sent a frame a request may not receive.
 pub fn serve_forever(
-    mut chan: UnixStream,
-    runtime: Arc<dyn WorkerRuntime>,
+    chan: UnixStream,
+    runtime: PhpEmbedRuntime,
     limits: Limits,
+) -> Result<(), ViewError> {
+    serve_loop(chan, limits, |io| runtime.serve(io), || runtime.recycle())
+}
+
+/// [`serve_forever`], with the two things the loop needs from the worker as
+/// parameters: run one request, and say whether to retire.
+///
+/// It is private because the public seam is the concrete [`PhpEmbedRuntime`]
+/// (`ADR-0016` decision 2): a worker process owns its loop, and there is no
+/// cross-crate trait object left to implement. The unit cases below drive this
+/// function with a stand-in that answers requests without a loaded `libphp`;
+/// nothing outside `#[cfg(test)]` can name it.
+fn serve_loop(
+    mut chan: UnixStream,
+    limits: Limits,
+    mut serve: impl FnMut(&mut dyn RequestIo) -> RequestEnd,
+    mut recycle: impl FnMut() -> bool,
 ) -> Result<(), ViewError> {
     let writer = Arc::new(Writer::new(chan.try_clone()?, limits));
     writer.write_frame(&Frame::Ready, 0)?;
@@ -737,7 +831,7 @@ pub fn serve_forever(
             Some((_, other)) => {
                 return Err(ViewError::Protocol(format!(
                     "a PHP view may not receive {} before a REQ_HEAD",
-                    crate::frame_kind(&other)
+                    blastit_view::frame_kind(&other)
                 )));
             }
         };
@@ -756,9 +850,8 @@ pub fn serve_forever(
             cancelled: false,
             error: None,
         };
-        let request = io.head.clone();
         let started = Instant::now();
-        let mut end = runtime.serve(request, &mut io);
+        let mut end = serve(&mut io);
         let wall_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
         // A runtime that did not read the whole body (a PHP script killed
         // before it looked at it) must not leave `REQ_BODY`/`REQ_END` queued:
@@ -786,10 +879,112 @@ pub fn serve_forever(
             },
             id,
         )?;
-        if runtime.recycle() {
+        if recycle() {
             return Ok(());
         }
     }
+}
+
+/// How one dispatched request ended.
+///
+/// The same two facts `RESP_END`/`RESP_END_COST` and `DONE` carry: how the
+/// request ended — completed, abandoned, errored, or bailed out of a handler
+/// that never returned (`DoneOutcome::Bailed`, `MB.3.41`) — and what the request
+/// cost in CPU time. The wall time on the wire is the transport's business, and
+/// the scheduler ignores it (`R18`), so it is not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestEnd {
+    /// What to report in `DONE`, which is what frees the scheduler's slot.
+    pub outcome: DoneOutcome,
+    /// The request's CPU time, or `None` when the runtime could not measure it.
+    ///
+    /// Absent is not zero: a measurement of zero is a claim about the request,
+    /// and a runtime with no readable clock (`CLOCK_PROCESS_CPUTIME_ID` here)
+    /// makes no claim at all. The scheduler charges a `None` as its kernel
+    /// floor, never as zero (`ADR-0009`).
+    pub cpu_ns: Option<u64>,
+}
+
+impl RequestEnd {
+    /// A request that ended with `outcome` and cost `cpu_ns`.
+    #[must_use]
+    pub const fn new(outcome: DoneOutcome, cpu_ns: Option<u64>) -> Self {
+        Self { outcome, cpu_ns }
+    }
+}
+
+/// The transport, as one request sees it: the `view.chan` framing and nothing
+/// underneath it.
+///
+/// Implemented here by the channel loop and by the unit cases'
+/// stand-ins. Every method is a frame or a flow-control operation on
+/// `view.chan` — `REQ_BODY`/`WINDOW` for the body, `RESP_HEAD`, `RESP_BODY` and
+/// the window for the response — so the runtime never holds a socket, a file
+/// descriptor or a scheduler handle, and cannot write to another request's
+/// stream.
+///
+/// The methods are `&mut self` because a request owns its stream for its
+/// lifetime; the implementation is free to share the process-wide writer behind
+/// it, as `view.chan` requires one writer per frame.
+pub trait RequestIo {
+    /// The head the scheduler dispatched.
+    fn head(&self) -> &ReqHead;
+
+    /// Read request-body bytes.
+    ///
+    /// Returns the number of bytes read, or `Ok(0)` when the body has ended.
+    /// Paced by the request-body credit window (§3.1): a runtime that reads
+    /// slowly is granted more credit slowly, so a slow application slows its
+    /// own client and no one else. Consuming bytes is what returns the credit.
+    ///
+    /// # Errors
+    ///
+    /// The channel could not be read, the stream was cancelled, or the body
+    /// exceeded its window.
+    fn read_body(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// Send the response head.
+    ///
+    /// At most once per request: the head must precede the body, and a second
+    /// head is a protocol error the transport refuses.
+    ///
+    /// # Errors
+    ///
+    /// The frame could not be encoded or written, or the stream was cancelled.
+    fn write_head(&mut self, head: RespHead) -> io::Result<()>;
+
+    /// Write response-body bytes.
+    ///
+    /// Paced by the response credit window (§3.1): a runtime that has spent its
+    /// credit blocks here until the scheduler grants more, as it would on a
+    /// slow client's socket, rather than buffering without bound. A cancelled
+    /// stream wakes the write and reports it as an error.
+    ///
+    /// # Errors
+    ///
+    /// The channel could not be written, or the stream was cancelled.
+    fn write_body(&mut self, data: &[u8]) -> io::Result<()>;
+
+    /// Record one line of the runtime's own output.
+    ///
+    /// Not the response: this is the runtime's `STDOUT`/`STDERR` —
+    /// PHP's output outside the response — where a Zend notice goes.
+    /// Implementations keep at most [`OUTPUT_LINE_CAP`] bytes of each line, so
+    /// one huge `echo` cannot bury the log it lands in, and they never fail the
+    /// request for an output error: losing a diagnostic line is better than
+    /// failing a response that was otherwise fine.
+    fn output(&mut self, stream: OutputStream, line: &str);
+
+    /// Push everything written so far onto the channel.
+    ///
+    /// Called once, at the end of a request, so the response a runtime reports
+    /// is on the wire before the caller closes the request with
+    /// `RESP_END`/`DONE`.
+    ///
+    /// # Errors
+    ///
+    /// The channel could not be written, or the stream was cancelled.
+    fn flush_response(&mut self) -> io::Result<()>;
 }
 
 /// Read one frame from `chan`, or `None` at a clean end of channel.
@@ -944,7 +1139,7 @@ impl ChanIo<'_> {
                 other => {
                     let message = format!(
                         "unexpected {} while draining a request body",
-                        crate::frame_kind(&other)
+                        blastit_view::frame_kind(&other)
                     );
                     self.fail(ViewError::Protocol(message));
                     return;
@@ -991,7 +1186,7 @@ impl ChanIo<'_> {
             Frame::Cancel => Err(self.cancel()),
             other => Err(self.fail(ViewError::Protocol(format!(
                 "unexpected {} during a PHP request",
-                crate::frame_kind(&other)
+                blastit_view::frame_kind(&other)
             )))),
         }
     }
@@ -1030,7 +1225,7 @@ impl RequestIo for ChanIo<'_> {
                 other => {
                     return Err(self.fail(ViewError::Protocol(format!(
                         "unexpected {} while reading a request body",
-                        crate::frame_kind(&other)
+                        blastit_view::frame_kind(&other)
                     ))));
                 }
             }
@@ -1433,22 +1628,31 @@ mod tests {
     use blastit_frame::INITIAL_WINDOW;
     use blastit_php_sapi::abi::ResultV1;
     use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::net::{UnixDatagram, UnixStream};
+
+    /// The two things [`serve_loop`] needs from a worker, for the stand-ins
+    /// below.
+    ///
+    /// It is the test module's own and cannot leave `#[cfg(test)]`: the public
+    /// seam is the concrete [`PhpEmbedRuntime`], and a loaded `libphp` is what
+    /// that needs. There is no `kind`, no concurrency claim and no trait object
+    /// on any wire — only the call the loop makes and the retirement rule.
+    trait StandIn: Send + Sync + 'static {
+        /// Run one request against a recording transport.
+        fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd;
+        /// Whether the loop must return after this request.
+        fn recycle(&self) -> bool;
+    }
 
     /// A runtime that answers every request with the body it read.
     struct Echo {
         requests: Mutex<u32>,
     }
 
-    impl WorkerRuntime for Echo {
-        fn kind(&self) -> &'static str {
-            "php"
-        }
-        fn max_inflight(&self) -> u32 {
-            1
-        }
-        fn serve(&self, req: ReqHead, io: &mut dyn RequestIo) -> RequestEnd {
+    impl StandIn for Echo {
+        fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
             *lock(&self.requests) += 1;
+            let req = io.head().clone();
             let mut buf = [0u8; 16];
             let mut got = Vec::new();
             while let Ok(n) = io.read_body(&mut buf) {
@@ -1460,7 +1664,7 @@ mod tests {
             let head = RespHead {
                 status: 200,
                 reason: Vec::new(),
-                headers: vec![(b"X-Method".to_vec(), req.method.clone())],
+                headers: vec![(b"X-Method".to_vec(), req.method)],
             };
             if io.write_head(head).is_err() || io.write_body(&got).is_err() {
                 return RequestEnd::new(DoneOutcome::Errored, None);
@@ -1547,13 +1751,25 @@ mod tests {
         )
     }
 
-    /// Runs `serve_forever` on its own thread and returns the join handle.
+    /// Runs [`serve_loop`] on its own thread and returns the join handle.
+    ///
+    /// [`serve_forever`] takes a concrete [`PhpEmbedRuntime`] — which needs a
+    /// loaded `libphp` — so the loop's unit cases drive the same function
+    /// through this seam with a stand-in.
     fn serve_in_background(
         worker: UnixStream,
-        runtime: Arc<dyn WorkerRuntime>,
+        runtime: Arc<dyn StandIn>,
         limits: Limits,
     ) -> std::thread::JoinHandle<Result<(), ViewError>> {
-        std::thread::spawn(move || serve_forever(worker, runtime, limits))
+        let serving = Arc::clone(&runtime);
+        std::thread::spawn(move || {
+            serve_loop(
+                worker,
+                limits,
+                move |io| serving.serve(io),
+                move || runtime.recycle(),
+            )
+        })
     }
 
     fn wait_for(peer: &mut Peer, wanted: usize) -> Vec<(u32, Frame)> {
@@ -1637,14 +1853,8 @@ mod tests {
         let (worker, mut peer) = pair(limits);
         let body = vec![0x5au8; INITIAL_WINDOW as usize + 4096];
         struct Big(Vec<u8>);
-        impl WorkerRuntime for Big {
-            fn kind(&self) -> &'static str {
-                "php"
-            }
-            fn max_inflight(&self) -> u32 {
-                1
-            }
-            fn serve(&self, _req: ReqHead, io: &mut dyn RequestIo) -> RequestEnd {
+        impl StandIn for Big {
+            fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
                 let _ = io.write_head(RespHead::default());
                 if io.write_body(&self.0).is_err() {
                     return RequestEnd::new(DoneOutcome::Aborted, None);
@@ -1695,11 +1905,7 @@ mod tests {
         let runtime = Arc::new(Echo {
             requests: Mutex::new(0),
         });
-        let handle = serve_in_background(
-            worker,
-            Arc::clone(&runtime) as Arc<dyn WorkerRuntime>,
-            limits,
-        );
+        let handle = serve_in_background(worker, Arc::clone(&runtime) as Arc<dyn StandIn>, limits);
         let _ = wait_for(&mut peer, 1);
         peer.send(9, Frame::ReqHead(ReqHead::default()));
         peer.send(9, Frame::Cancel);
@@ -1873,21 +2079,45 @@ mod tests {
         assert!(!foreign_err.contains(&debug_bytes), "{foreign_err}");
     }
 
+    /// A worker configuration for a fixture entry, pinned the way a boot pins
+    /// one: `(st_dev, st_ino)`, `st_size` and `st_ctime` of the file the
+    /// configuration names.
+    fn config(
+        entry: PathBuf,
+        document_root: PathBuf,
+        script_name: &str,
+        ini: &str,
+        view_tmp: PathBuf,
+    ) -> PhpRuntimeConfig {
+        let pin = EntryPin::of(&std::fs::metadata(&entry).unwrap_or_else(|err| {
+            panic!("the fixture entry {} must exist: {err}", entry.display())
+        }));
+        PhpRuntimeConfig {
+            route: "app".to_string(),
+            entry,
+            document_root,
+            script_name: script_name.to_string(),
+            ini: ini.to_string(),
+            view_tmp,
+            max_requests: 100,
+            max_body_bytes: 1024 * 1024,
+            pin,
+        }
+    }
+
     #[test]
     fn a_configuration_that_could_not_serve_is_refused_both_ways() {
         let dir = std::env::temp_dir().join(format!("blastit-php-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let entry = dir.join("index.php");
         std::fs::write(&entry, b"<?php echo 'x';").expect("entry");
-        let good = PhpRuntimeConfig {
-            entry: entry.clone(),
-            document_root: dir.clone(),
-            script_name: String::new(),
-            ini: "memory_limit=256M\n".to_string(),
-            view_tmp: dir.clone(),
-            max_requests: 100,
-            max_body_bytes: 1024 * 1024,
-        };
+        let good = config(
+            entry.clone(),
+            dir.clone(),
+            "",
+            "memory_limit=256M\n",
+            dir.clone(),
+        );
         assert!(good.validate().is_ok(), "the accepted twin must pass");
 
         let missing = PhpRuntimeConfig {
@@ -1958,14 +2188,11 @@ mod tests {
         let err = PhpEmbedRuntime::load(
             SharedObject::Path(fake),
             SharedObject::Path(dir.join("shim.so")),
-            PhpRuntimeConfig {
-                entry,
-                document_root: dir.clone(),
-                script_name: String::new(),
-                ini: "memory_limit=256M\n".to_string(),
-                view_tmp: dir.clone(),
-                max_requests: 1,
-                max_body_bytes: 1024,
+            {
+                let mut cfg = config(entry, dir.clone(), "", "memory_limit=256M\n", dir.clone());
+                cfg.max_requests = 1;
+                cfg.max_body_bytes = 1024;
+                cfg
             },
         )
         .err()
@@ -2003,7 +2230,11 @@ mod tests {
             ],
             ..ReqHead::default()
         };
+        // `Prepared` reads only the values a request is built from, so the
+        // record here is present but never compared: this case is about the
+        // environment, not about the pin (which has its own cases).
         let cfg = PhpRuntimeConfig {
+            route: "app".to_string(),
             entry: PathBuf::from("/srv/app/index.php"),
             document_root: PathBuf::from("/srv/app"),
             script_name: "/app".to_string(),
@@ -2011,6 +2242,13 @@ mod tests {
             view_tmp: PathBuf::from("/tmp"),
             max_requests: 1,
             max_body_bytes: 1024,
+            pin: EntryPin {
+                dev: 0,
+                ino: 0,
+                size: 0,
+                ctime_s: 0,
+                ctime_ns: 0,
+            },
         };
         let prepared = Prepared::new(&cfg, &head).expect("prepared");
         let names: Vec<&str> = prepared.vars.iter().map(|var| var.name()).collect();
@@ -2161,14 +2399,8 @@ mod tests {
         // `max_requests`/bailout exit: `serve_forever` returns `Ok` right after
         // the request's `DONE`, without waiting for the channel to close.
         struct Once(Mutex<u32>);
-        impl WorkerRuntime for Once {
-            fn kind(&self) -> &'static str {
-                "php"
-            }
-            fn max_inflight(&self) -> u32 {
-                1
-            }
-            fn serve(&self, _req: ReqHead, io: &mut dyn RequestIo) -> RequestEnd {
+        impl StandIn for Once {
+            fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
                 *lock(&self.0) += 1;
                 let _ = io.write_head(RespHead::default());
                 RequestEnd::new(DoneOutcome::Completed, None)
@@ -2199,14 +2431,8 @@ mod tests {
     #[test]
     fn a_response_body_before_the_head_is_a_protocol_error() {
         struct BodyFirst;
-        impl WorkerRuntime for BodyFirst {
-            fn kind(&self) -> &'static str {
-                "php"
-            }
-            fn max_inflight(&self) -> u32 {
-                1
-            }
-            fn serve(&self, _req: ReqHead, io: &mut dyn RequestIo) -> RequestEnd {
+        impl StandIn for BodyFirst {
+            fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
                 let _ = io.write_body(b"without a head");
                 RequestEnd::new(DoneOutcome::Errored, None)
             }
@@ -2349,13 +2575,15 @@ mod tests {
             .to_string()
     }
 
-    fn report_datagrams(peer: &UnixDatagram) -> Vec<crate::loaded::Batch> {
+    fn report_datagrams(peer: &UnixDatagram) -> Vec<blastit_view::loaded::Batch> {
         peer.set_nonblocking(true).expect("non-blocking peer");
         let mut out = Vec::new();
-        let mut buf = [0u8; crate::loaded::MAX_BATCH_BYTES];
+        let mut buf = [0u8; blastit_view::loaded::MAX_BATCH_BYTES];
         loop {
             match peer.recv(&mut buf) {
-                Ok(n) => out.push(crate::loaded::decode(&buf[..n]).expect("the codec's own wire")),
+                Ok(n) => {
+                    out.push(blastit_view::loaded::decode(&buf[..n]).expect("the codec's own wire"))
+                }
                 Err(err) if err.kind() == ErrorKind::WouldBlock => return out,
                 Err(err) => panic!("recv: {err}"),
             }
@@ -2368,7 +2596,7 @@ mod tests {
         let included = scratch.write("included.php", "<?php\n");
         let helper = scratch.write("helper.php", "<?php\n");
         let (ours, peer) = UnixDatagram::pair().expect("socketpair");
-        let report = PhpFileReport::new(PhpLoadedReport {
+        let report = PhpFileReport::new(LoadedReport {
             socket: ours,
             source: 7,
         })
@@ -2442,7 +2670,7 @@ mod tests {
         let plain = scratch.write("plain.php", "<?php echo 1;\n");
 
         let (ours, peer) = UnixDatagram::pair().expect("socketpair");
-        let report = PhpFileReport::new(PhpLoadedReport {
+        let report = PhpFileReport::new(LoadedReport {
             socket: ours,
             source: 3,
         })

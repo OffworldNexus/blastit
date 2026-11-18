@@ -122,6 +122,14 @@
 //! body, never the `502` with `"outcome":"view_died"` a queued request got when
 //! it was dispatched to the worker it had queued behind. Twenty batches make it
 //! a rate; it is a real-pair leg too.
+// The suite drives `entrypoint php` end to end — a real boot, the
+// `deployment_boot_check` seam, `BLASTIT_LIBPHP` and the probe — and a build
+// without this feature has no PHP at all: `blastit::host::deployment_boot_check`
+// exists only with it (`MB.36.5`'s `#[cfg(feature = "php")]` on the re-export),
+// because a `php`-less build refuses an `entrypoint php` with
+// `stage0::no_php_support` instead. Under the default features (`php` + `static`)
+// it runs its whole tier.
+#![cfg(feature = "php")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::BTreeMap;
@@ -890,9 +898,67 @@ const PROBES: [(&str, Option<&str>); 13] = [
 /// which runs in this binary too.
 #[test]
 fn the_probe_table_matches_stage0() {
-    if let Err(drift) = libphp_probes::assert_matches(&PROBES, include_str!("../src/stage0.rs")) {
+    if let Err(drift) = libphp_probes::assert_matches(
+        &PROBES,
+        include_str!("../../blastit-view-php/src/discovery.rs"),
+    ) {
         panic!("{drift}");
     }
+}
+
+/// `ADR-0016` decision 2 / `R6`: the worker **cannot be built without** the
+/// entry pin.
+///
+/// `MB.36.5` deleted `PinnedEntryRuntime` — the adapter that used to re-check
+/// the entry from outside the runtime — and made the record a required argument
+/// of [`PhpRuntimeConfig::new`](blastit_view_php::PhpRuntimeConfig::new). The
+/// property is structural rather than behavioural, so it is asserted on the
+/// crate's own source: the field is a plain `EntryPin` and **private**, the
+/// constructor takes it by value, there is no `Default`, and `serve` re-checks
+/// it before a request runs.
+///
+/// The mutation this kills is the fail-open seam itself: make the field an
+/// `Option` (or give the type a `Default`) and the worker compiles, boots, and
+/// runs whatever is at `SCRIPT_FILENAME` now — every other leg in this file
+/// stays green, because the per-request refusal still fires for a *pinned*
+/// runtime that was built with a record. It reads a file in this workspace, needs
+/// no host PHP, and runs on every `make check`.
+#[test]
+fn the_worker_cannot_be_built_without_the_entry_pin() {
+    let worker = include_str!("../../blastit-view-php/src/worker.rs");
+    assert!(
+        worker.contains("\n    pin: EntryPin,\n"),
+        "the configuration's pin must be a plain `EntryPin` field"
+    );
+    for forbidden in [
+        "pin: Option<EntryPin>",
+        "pub pin:",
+        "impl Default for PhpRuntimeConfig",
+    ] {
+        assert!(
+            !worker.contains(forbidden),
+            "the entry pin may not be optional, public or defaulted: found `{forbidden}`"
+        );
+    }
+    assert!(
+        worker.contains("pub fn new(binding: &PhpBinding, script_name: String, pin: EntryPin)"),
+        "`PhpRuntimeConfig::new` takes the record as a required argument"
+    );
+    assert!(
+        worker.contains("verify_entry(&self.cfg.route, &self.cfg.entry, self.cfg.pin)"),
+        "`serve` re-checks the recorded entry before a request runs"
+    );
+    // The boot's half, same rule: the record is taken from the resolved entry,
+    // never reconstructed per request.
+    let pinning = include_str!("../../blastit-view-php/src/pinning.rs");
+    assert!(
+        pinning.contains("fn pin_entry(entry: &Path, route: &str, declared: &str)"),
+        "the boot records the resolved entry, naming the route and the declaration"
+    );
+    assert!(
+        !pinning.contains("entry_pin: Option"),
+        "a binding without its record is the fail-open seam"
+    );
 }
 
 /// `BLASTIT_LIBPHP` when it is a file, else the version-major probe order in the

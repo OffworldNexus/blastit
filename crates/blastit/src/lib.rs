@@ -69,14 +69,11 @@ mod child;
 mod dev_learn;
 mod forking;
 mod logs;
-// Embedded PHP view workers (`MB.3.13`): the boot half that pins the host's
-// NTS `libphp` and its shim into a per-route binding, and the fork path
-// sibling to `blastit-view-python`'s WSGI one. It compiles only when PHP
-// routes can be served, and `libphp` itself is `dlopen`ed inside the worker,
-// never linked here. `init`'s `Ctl::Spawn` reads the binding this module built
-// (`MB.3.13.3`).
-#[cfg(feature = "php")]
-mod php_view;
+// Embedded PHP lives in `blastit-view-php` (`MB.36.5`): the worker, the boot's
+// discovery gate, the `(st_dev, st_ino)` pins and the probe child. Nothing about
+// PHP is left in this crate but the wiring — `stage 0` resolves the host's
+// library through the gate, `stage 1` builds the `PhpSlot`s and the bindings,
+// and `init`'s `Ctl::Spawn` reads the binding (`ADR-0016`).
 mod py;
 mod roles;
 mod stage0;

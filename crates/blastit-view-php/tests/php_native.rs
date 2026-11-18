@@ -6,7 +6,7 @@
 //! $ make php-sapi
 //! $ BLASTIT_LIBPHP=/usr/lib/libphp8.4.so \
 //!   BLASTIT_PHP_SHIM="$PWD/target/php-sapi/libblastit_php84-<arch>-<libc>.so" \
-//!   cargo test -p blastit-view --features php --test php_native -- --ignored --nocapture
+//!   cargo test -p blastit-view-php --test php_native -- --ignored --nocapture
 //! ```
 //!
 //! `<arch>-<libc>` is this build's tuple (`x86_64-gnu` on this host);
@@ -14,19 +14,18 @@
 //!
 //! It is a harness, not a skip: run with `--ignored` and a missing variable, it
 //! fails with that usage instead of reporting success.
-#![cfg(feature = "php")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use blastit_frame::{Decoder, DoneOutcome, Frame, HEADER_LEN, Limits, ReqHead, Scheme};
 use blastit_php_sapi::{Egress, IniPolicy, SharedObject};
-use blastit_view::php::{PhpEmbedRuntime, PhpRuntimeConfig, serve_forever};
+use blastit_sys::child::{Filter, Privileges};
+use blastit_view_php::{EntryPin, PhpBinding, PhpEmbedRuntime, PhpRuntimeConfig, serve_forever};
 
 /// A required environment variable, or the usage line.
 fn required(name: &str) -> PathBuf {
@@ -69,24 +68,39 @@ fn a_php_route_answers_two_requests_through_view_chan() {
     };
     let libphp = pin(&libphp);
     let shim = pin(&shim);
-    let runtime = Arc::new(
-        PhpEmbedRuntime::load(
-            SharedObject::Fd(libphp.as_raw_fd()),
-            SharedObject::Fd(shim.as_raw_fd()),
-            PhpRuntimeConfig {
-                entry: entry.clone(),
-                document_root: app.clone(),
-                script_name: String::new(),
-                ini: ini.as_str().to_owned(),
-                view_tmp,
-                // Two requests, then the worker retires: the second request
-                // proves reuse, and the clean exit proves `max_requests`.
-                max_requests: 2,
-                max_body_bytes: 1024 * 1024,
-            },
-        )
-        .unwrap_or_else(|err| panic!("{err}")),
-    );
+    // The binding the boot would have built for this slot (`MB.36.5`): the
+    // worker's configuration is made from it, and its entry record is the value
+    // every request re-checks — so this harness exercises the pin's accepted
+    // path as well as the load.
+    let entry_pin = EntryPin::of(&std::fs::metadata(&entry).expect("the entry's metadata"));
+    let binding = PhpBinding {
+        libphp,
+        shim,
+        entry: entry.clone(),
+        entry_pin,
+        entry_fd: OwnedFd::from(std::fs::File::open(&entry).expect("the entry")),
+        document_root: app.clone(),
+        ini: ini.as_str().to_owned(),
+        view_tmp,
+        // Two requests, then the worker retires: the second request proves
+        // reuse, and the clean exit proves `max_requests`.
+        max_requests: 2,
+        max_body_bytes: 1024 * 1024,
+        route: "app".to_string(),
+        // The worker never reads the uid: the probe child and the fork do, and
+        // this harness owns neither.
+        uid: 0,
+        script_name: String::new(),
+        privileges: Privileges::Shared,
+        filter: Filter::Off,
+    };
+    let config = PhpRuntimeConfig::new(&binding, binding.script_name.clone(), entry_pin);
+    let runtime = PhpEmbedRuntime::load(
+        SharedObject::Fd(binding.libphp.as_raw_fd()),
+        SharedObject::Fd(binding.shim.as_raw_fd()),
+        config,
+    )
+    .unwrap_or_else(|err| panic!("{err}"));
     assert_eq!(
         runtime.php_version().split('.').take(2).collect::<Vec<_>>(),
         ["8", "4"]

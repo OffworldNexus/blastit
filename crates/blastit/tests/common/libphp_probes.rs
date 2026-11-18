@@ -130,7 +130,7 @@ mod tests {
     use super::{assert_matches, probes_in};
 
     /// The declaration the suites' tables are copies of, read at compile time.
-    const STAGE0: &str = include_str!("../../src/stage0.rs");
+    const STAGE0: &str = include_str!("../../../blastit-view-php/src/discovery.rs");
 
     /// The table `critical_php_embed.rs` and `critical_php_backend.rs` both
     /// carry, written out here so this module's own tests have an oracle that is

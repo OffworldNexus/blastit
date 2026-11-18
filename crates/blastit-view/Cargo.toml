@@ -11,18 +11,13 @@ publish.workspace = true
 workspace = true
 
 [features]
-# No WSGI feature and no default feature: the framing, the credit windows and
-# the loaded-file codec are plain `std` and always compiled, while the
-# embedded CPython worker is `blastit-view-python` — a crate of its own — so a
-# `--workspace` build or another crate's defaults can no longer drag
-# `libpython` into an artifact that serves no WSGI route
-# (`docs/knowledge/LESSONS.md` `MB.17`, `ADR-0016`).
+# No features at all (`MB.36.5`): the framing, the credit windows and the
+# loaded-file codec are plain `std` and always compiled, and each view kind is a
+# sibling crate — `blastit-view-python` (CPython), `blastit-view-php` (`libphp`)
+# and `blastit-view-static` (the responder). A `--workspace` build or another
+# crate's defaults therefore cannot drag `libpython` or `libphp` into an artifact
+# that serves no view (`docs/knowledge/LESSONS.md` `MB.17`, `ADR-0016`).
 default = []
-# Embedded PHP: `PhpEmbedRuntime` over the same `view.chan` framing. It needs
-# `libphp` only through `dlopen` inside the worker (`MB.3.13`), so this feature
-# adds no link-time dependency and the standalone binary stays portable.
-# `MB.36.5` moves `php.rs` into `blastit-view-php` and deletes this line.
-php = ["dep:blastit-php-sapi"]
 
 [dependencies]
 blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
@@ -31,7 +26,4 @@ blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
 # (design §4.4 D1/D2). The view crates get the privileged primitives from the
 # crate that owns them, never from a second spelling.
 blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
-# The frozen `blastit_php_abi_v1` surface and the one `dlopen` module. Optional:
-# a build with no PHP route pays for neither.
-blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }
 thiserror = "2.0.21"

@@ -18,10 +18,6 @@
 //! window or a second meaning for `%2F` (design `view-crates-architecture.md`
 //! §4.2.1, `ADR-0016`).
 //!
-//! The worker-side runtime seam ([`WorkerRuntime`], [`RequestIo`],
-//! [`RequestEnd`]) is here because `php.rs` still implements it; it is deleted
-//! once no sibling uses it (`MB.36.5`).
-//!
 //! # Code
 //!
 //! The crate is `#![forbid(unsafe_code)]`: framing, credit and the datagram
@@ -46,12 +42,8 @@ pub mod path;
 // injected parameter, so a view crate never calls `fork(2)` and never names
 // `blastit`.
 pub mod spawn;
-// Embedded PHP (`MB.3.13`): `PhpEmbedRuntime` and the single-request channel
-// loop. The crate stays `#![forbid(unsafe_code)]`; the `dlopen` and the C sink
-// trampolines are in `blastit-php-sapi`.
-#[cfg(feature = "php")]
-pub mod php;
-mod runtime;
+// The output stream and its line cap (`MB.36.3`): the PHP worker writes a log
+// line through it, and a huge `echo` must not bury the log.
 pub mod stream;
 pub mod sync;
 pub mod wire;
@@ -66,9 +58,6 @@ pub use crate::loaded::{
     MAX_BATCH_BYTES, MAX_PATH_BYTES, MAX_PATHS, PRELOAD_SOURCE, Reporter, Sent, Sequence, Step,
     VERSION, chunks, decode,
 };
-// The worker-side runtime seam (`MB.3.23`, design §4.1): what a route worker
-// implements, so the scheduler never learns which language it is serving.
-pub use crate::runtime::{RequestEnd, RequestIo, WorkerRuntime};
 pub use crate::stream::{OUTPUT_LINE_CAP, OutputStream};
 
 use blastit_frame::{Frame, TypeCode};

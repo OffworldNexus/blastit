@@ -1,7 +1,7 @@
 //! A worker's two output streams, and the cap on one line of them.
 //!
 //! `wsgi.errors` and PHP's own `STDOUT`/`STDERR` are diagnostics: they reach
-//! the log through [`crate::RequestIo::output`], never the client's response,
+//! the log through the runtime worker's output sink, never the client's response,
 //! and the cap is what keeps one `echo` from burying a log line.
 
 /// Which of the worker's two output streams a line came from.
@@ -17,7 +17,7 @@ pub enum OutputStream {
     Stderr,
 }
 
-/// The most bytes of one output line that [`crate::RequestIo::output`] keeps.
+/// The most bytes of one output line that a view worker keeps.
 ///
 /// An application can print a megabyte on one line; the runtime hands it over
 /// in any number of calls, and the sink keeps this prefix and drops the rest

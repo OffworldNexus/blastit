@@ -3382,3 +3382,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T14:34 [MB.36.4] (lead) attempt 2/3 started
 - 2026-11-18T14:34 [MB.36.6] (lead) CORRECTION to the D1 census note above (reviewer, MB.36.4 round 1): `check` never boots stage 1 and forks no view, so the design sentence must read "one `Privil
 - 2026-11-18T15:14 [MB.36.4] (lead) status active -> done
+- 2026-11-18T15:14 [MB.36.5] (lead) status ready -> active
+- 2026-11-18T15:14 [MB.36.5] (lead) attempt 1/3 started
+- 2026-11-18T15:14 [MB.36.5] (lead) attempt 1/3 started; base df6a5bf. NODE Context corrected before dispatch:  stays blastit-scheduler/static (design 4.2.5, already landed), and critical_loaded_f
+- 2026-11-18T15:14 [MB.36.5] (lead) attempt 1/3 started; base df6a5bf. NODE Context corrected before dispatch: `static` stays blastit-scheduler/static (design 4.2.5, already landed in MB.36.2), an
+- 2026-11-18T15:51 [MB.36.5] (lead) status active -> review
+- 2026-11-18T15:52 [MB.36.5] (lead) edited fields
+- 2026-11-18T15:52 [MB.36.5] (lead) paths widened: crates/blastit/src/host.rs. The leaf gates `pub use crate::stage0::deployment_boot_check` with #[cfg(feature = "php")] (a php-less build has no g
+- 2026-11-18T16:17 [MB.36.5] (lead) status review -> done

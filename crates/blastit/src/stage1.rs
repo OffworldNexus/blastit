@@ -39,6 +39,8 @@ use std::time::Duration;
 
 #[cfg(feature = "python")]
 use blastit_events::ManifestWarning;
+#[cfg(feature = "php")]
+use blastit_events::Runtime;
 use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
 use blastit_frame::Limits;
 use blastit_http::HttpConfig;
@@ -398,8 +400,28 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // A file that moved between the two stages is refused here — before the
     // listener binds — never by a worker that loads something nobody inspected.
     // A host with no usable library never reaches stage 1: stage 0 refused it.
+    //
+    // `MB.36.5`: the two values travel as data (`PhpSlot`s), because a view
+    // crate may not name this module's `Config` or the scheduler's `RouteInfo`
+    // (`view-crates-architecture` §4.4 D2). The slots are keyed by **view
+    // slot**, so a `--learn` boot's fallback slot 0 keeps its numbering.
     #[cfg(feature = "php")]
-    let php = match crate::php_view::boot_bindings(&config, &manifest, &routes, dev.as_ref()) {
+    let php_slots = match php_slots(&config, &manifest, &routes, &plans, dev.as_ref()) {
+        Ok(slots) => slots,
+        Err(message) => fail(&emitter, dev.as_ref(), &message),
+    };
+    #[cfg(feature = "php")]
+    let php = match blastit_view_php::pinning::boot_bindings(
+        &manifest,
+        &php_slots,
+        config.php.as_ref(),
+        &config.manifest_dir,
+        blastit_view_php::PhpBootLimits {
+            request_timeout: config.request_timeout,
+            max_requests: php_max_requests(&config),
+            max_body_bytes: php_max_body_bytes(&config),
+        },
+    ) {
         Ok(bindings) => bindings,
         Err(message) => fail(&emitter, dev.as_ref(), &message),
     };
@@ -430,16 +452,32 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
     // `exit 1` with §4.1's sentence — never a worker's first request. The
     // `dlopen` happens below the fork; no `libphp` symbol is reachable here.
     #[cfg(feature = "php")]
-    if let Err(message) = crate::php_view::probe_bindings(crate::php_view::PhpProbeBoot {
-        cfg: &config,
-        routes: &routes,
-        bindings: &php,
-        egress: &egress,
-        timeout: php_probe_timeout,
-        interpreter_live: hosted,
-        drop_privileges: dev.is_none(),
-    }) {
-        fail(&emitter, dev.as_ref(), &message);
+    match blastit_view_php::probe::probe_bindings(
+        blastit_view_php::PhpProbeBoot {
+            slots: &php_slots,
+            bindings: &php,
+            limits: blastit_sys::Rlimits {
+                nproc: (dev.is_none()).then(|| {
+                    config
+                        .view_worker_cap()
+                        .saturating_add(blastit_view_php::spawn::VIEW_PROCESS_MARGIN)
+                        as u64
+                }),
+                nofile: Some(blastit_view_php::spawn::VIEW_NOFILE),
+                core_zero: true,
+            },
+            libphp: config.php.as_ref(),
+            timeout: php_probe_timeout,
+            protocol: if hosted {
+                blastit_view::spawn::ForkProtocol::InterpreterLive
+            } else {
+                blastit_view::spawn::ForkProtocol::NoInterpreter
+            },
+        },
+        &|protocol| crate::forking::fork_for(protocol, hosted),
+    ) {
+        Ok(report) => emit_php_runtime(&emitter, &config, report),
+        Err(message) => fail(&emitter, dev.as_ref(), &message),
     }
     let table = if dev.is_some() && learn {
         match learn_routing_table(&manifest) {
@@ -849,7 +887,7 @@ struct Serving {
     /// One entry per view slot: the embedded-PHP worker it forks, or `None`
     /// for a WSGI view (`ADR-0010` §1). Built and verified at boot.
     #[cfg(feature = "php")]
-    php: Vec<Option<crate::php_view::PhpBinding>>,
+    php: Vec<Option<blastit_view_php::PhpBinding>>,
     /// Number of views declared in the `Blastfile` (reported on `ready`).
     declared_routes: usize,
     /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
@@ -1372,7 +1410,7 @@ const MAX_ADOPTION_DOCUMENT: usize = 4096;
 ///
 /// Stage 0 read `BLASTIT_TEST_SWAP_POINT` before the barrier and carried the
 /// path in the configuration document; the wait itself
-/// ([`crate::php_view::await_test_swap`]) sits between stage 0's inode record
+/// ([`blastit_view_php::pinning::await_test_swap`]) sits between stage 0's inode record
 /// and the re-open `boot_bindings` performs, so a rename the test makes while
 /// the boot is paused is *in* the window by construction.
 ///
@@ -1381,7 +1419,7 @@ const MAX_ADOPTION_DOCUMENT: usize = 4096;
 #[cfg(all(debug_assertions, feature = "php"))]
 fn test_swap_pause(emitter: &Emitter, dev: Option<&crate::dev_learn::Dev>, point: Option<&Path>) {
     if let Some(point) = point
-        && let Err(message) = crate::php_view::await_test_swap(point)
+        && let Err(message) = blastit_view_php::pinning::await_test_swap(point)
     {
         fail(emitter, dev, &message);
     }
@@ -2136,7 +2174,143 @@ pub struct ViewChildPlans {
 }
 
 /// The identity and the filter every view child is forked with
-/// (`view-crates-architecture` §4.4 D1) — the one place the boot mode is
+/// The PHP slots stage 1 hands the boot's two PHP halves
+/// (`view-crates-architecture` §4.4 D2).
+///
+/// One entry per **view slot**, `None` for a slot no manifest route names — the
+/// `--learn` fallback slot 0 — so the binding vector keeps today's numbering.
+/// Everything here is a value: the route's name and uid, its private directory
+/// (the fork's `chdir` and PHP's `sys_temp_dir`, one value), its egress, the
+/// mount point, and the identity/filter [`view_child_plans`] decided — with the
+/// `EmbeddedView` role, which also refuses `execve` and process creation.
+///
+/// A PHP slot's filter is **not** the WSGI `View` role: `libphp` must never make
+/// those calls, and no script may reach them through an extension.
+///
+/// # Errors
+///
+/// The routing-table disagreement the binding builder used to refuse: a manifest
+/// route with no view slot means the manifest and the scheduler's table were
+/// built from different inputs, which is a boot refusal rather than a guess.
+#[cfg(feature = "php")]
+fn php_slots(
+    config: &Config,
+    manifest: &Manifest,
+    routes: &[blastit_scheduler::RouteInfo],
+    plans: &ViewChildPlans,
+    dev: Option<&crate::dev_learn::Dev>,
+) -> Result<Vec<Option<blastit_view_php::PhpSlot>>, String> {
+    let mut slots: Vec<Option<blastit_view_php::PhpSlot>> = routes.iter().map(|_| None).collect();
+    let Some(php) = manifest.php() else {
+        return Ok(slots);
+    };
+    let offset = routes.len().saturating_sub(manifest.routes().len());
+    let script_name = crate::config::mount_point(config.script_name.as_deref());
+    for (index, route) in manifest.routes().iter().enumerate() {
+        let slot = index + offset;
+        let Some(info) = routes.get(slot) else {
+            return Err(format!(
+                "route {:?}: no view slot for entrypoint php {:?}; the manifest and the \
+                 scheduler's routing table disagree",
+                route.name(),
+                php.entry
+            ));
+        };
+        let (Some(privileges), Some(view_filter)) = (
+            plans.privileges.get(slot).copied(),
+            plans.filter.get(slot).copied(),
+        ) else {
+            return Err(format!(
+                "route {:?} (slot {slot}): this boot has no view child plan for the slot",
+                route.name()
+            ));
+        };
+        // The role, not the mode: `view_child_plans` decided the mode once
+        // (`BLASTIT_SECCOMP`, §7.3) and this names the PHP role. The `other` arm
+        // forwards the decision verbatim, so the design's D1 census keeps its
+        // single off-mode site — the explicit `BLASTIT_SECCOMP=0` — and this
+        // arm adds no second one.
+        let filter = match view_filter {
+            blastit_sys::child::Filter::Seccomp(_) => {
+                blastit_sys::child::Filter::Seccomp(blastit_sys::SeccompRole::EmbeddedView {
+                    egress: route.egress(),
+                })
+            }
+            other => other,
+        };
+        slots[slot] = Some(blastit_view_php::PhpSlot {
+            route: info.name.clone(),
+            uid: info.uid,
+            dir: match dev {
+                Some(dev) => dev.view_dir(slot),
+                None => crate::config::view_dir(info.uid),
+            },
+            egress: route.egress(),
+            script_name: script_name.clone(),
+            privileges,
+            filter,
+        });
+    }
+    Ok(slots)
+}
+
+/// Requests per worker before it retires. `0` means "no cap" in the
+/// configuration and `u32::MAX` in the worker, which is the same rule.
+#[cfg(feature = "php")]
+fn php_max_requests(config: &Config) -> u32 {
+    if config.view_max_requests == 0 {
+        u32::MAX
+    } else {
+        u32::try_from(config.view_max_requests).unwrap_or(u32::MAX)
+    }
+}
+
+/// The body the worker buffers before PHP runs (`post_max_size`'s twin).
+#[cfg(feature = "php")]
+fn php_max_body_bytes(config: &Config) -> usize {
+    usize::try_from(config.max_body_bytes)
+        .unwrap_or(usize::MAX)
+        .max(1)
+}
+
+/// §8.1's `runtime` line for a resolved `entrypoint php`, emitted by the process
+/// that *knows* it: the probe below the fork ran `php_module_startup`, so the
+/// `php.ini` it reports is the one PHP opened, not a search path re-derived from
+/// `PHPRC` (stripped), the cwd (`php_ini_ignore_cwd = 1`) or a guessed
+/// `PHP_CONFIG_FILE_PATH`. The version is the same child's `php_version()`, so
+/// the line carries the full `"8.4.27"` rather than the major.minor the
+/// discovery record states.
+///
+/// One line per resolution, so the latest line names what is serving. The
+/// library is public knowledge; the shim that carries the SAPI is internal and
+/// is never named here (`critical_php_backend`'s whole-boot scan keeps that
+/// true).
+///
+/// The probe returns the two facts as a value ([`blastit_view_php::PhpProbeReport`])
+/// because the event stream is this crate's: a view crate builds no events.
+#[cfg(feature = "php")]
+fn emit_php_runtime(
+    emitter: &Emitter,
+    config: &Config,
+    report: Option<blastit_view_php::PhpProbeReport>,
+) {
+    let Some((version, php_ini)) = report else {
+        return;
+    };
+    let Some(record) = config.php.as_ref() else {
+        return;
+    };
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::Runtime(Runtime::php(
+            version,
+            record.libphp.display().to_string(),
+            php_ini,
+        )),
+    ));
+}
+
+/// The identity and the filter every view child is forked with
 /// turned into the two values a view crate receives.
 ///
 /// This is a **pure function of the boot**, deliberately: the decision is the

@@ -63,10 +63,11 @@ use crate::audit_v1::{self, CheckObsV1, ObsError, Report};
 use crate::cli::CheckOptions;
 use crate::config::Config;
 use crate::host::{Host, Install};
-use crate::stage0::{
-    PhpBoot, PhpShimScope, is_static_only, php_boot_gate, static_app_refusal,
-    static_root_permission,
-};
+#[cfg(feature = "php")]
+use crate::stage0::php_boot_gate;
+use crate::stage0::{is_static_only, static_app_refusal, static_root_permission};
+#[cfg(feature = "php")]
+use blastit_view_php::discovery::{PhpBoot, PhpShimScope};
 
 /// The process exited cleanly: pytest passed and no finding fails the run.
 const CLEAN: u8 = 0;
@@ -158,9 +159,17 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     // does (`BLASTIT_PHP_SHIM_DIR`, the `target/php-sapi` `make php-sapi`
     // writes), because it runs on the machine that builds the site. A
     // configuration error is exit `2` with nothing on stdout.
+    #[cfg(feature = "php")]
     match php_boot_gate(&config, &manifest, PhpShimScope::Development) {
         PhpBoot::Absent | PhpBoot::Proceed(_) => {}
         PhpBoot::Refused(message) => return Err(message),
+    }
+    // A build without the `php` feature carries no gate to ask: the same one
+    // sentence the boot prints, so `check` fails for the same reason the server
+    // would (`R13`).
+    #[cfg(not(feature = "php"))]
+    if let Some(message) = crate::stage0::no_php_support(&manifest) {
+        return Err(message);
     }
     manifest
         .check_static_roots(&config.manifest_dir)

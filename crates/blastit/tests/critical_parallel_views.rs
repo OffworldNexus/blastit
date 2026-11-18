@@ -316,7 +316,10 @@ const PROBES: [(&str, Option<&str>); 13] = [
 /// host with cannot drift from the boot's own list.
 #[test]
 fn the_probe_table_matches_stage0() {
-    if let Err(drift) = libphp_probes::assert_matches(&PROBES, include_str!("../src/stage0.rs")) {
+    if let Err(drift) = libphp_probes::assert_matches(
+        &PROBES,
+        include_str!("../../blastit-view-php/src/discovery.rs"),
+    ) {
         panic!("{drift}");
     }
 }

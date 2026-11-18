@@ -69,6 +69,10 @@ pub const EXEC: &str = "BLASTIT_EXEC";
 /// never passes a deployment, and an unprivileged process cannot reach a
 /// `Production` boot at all (`LESSONS.md`, `MB.1.6`), so no other caller can
 /// exist. It lives in `host` because [`Provenance`] is the decision it applies.
+// A build without the `php` feature has no gate to expose: the deployable form
+// of it refuses an `entrypoint php` with one sentence instead
+// (`stage0::no_php_support`, `R13`).
+#[cfg(feature = "php")]
 #[doc(hidden)]
 pub use crate::stage0::deployment_boot_check;
 

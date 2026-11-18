@@ -21,6 +21,9 @@ use std::time::Duration;
 
 use blastit_events::{Level, Lifecycle};
 use blastit_frame::{ClientIpConfig, Limits, TrustedProxies, is_header_name};
+#[cfg(feature = "php")]
+use blastit_view_php::discovery::{PhpRuntime, PhpVersion};
+
 use blastit_manifest::Manifest;
 use blastit_scheduler::{
     FQ_BURST_DEFAULT, FQ_DEBT_TTL_DEFAULT, FQ_INNER_COOKIES_DEFAULT, FQ_INNER_HEADERS_DEFAULT,
@@ -662,167 +665,6 @@ impl Config {
     }
 }
 
-/// The PHP version a host `libphp` is, `major.minor` (`ADR-0010` §3).
-///
-/// Stage 0 derives it statically from the object it opened — its file name, its
-/// per-minor directory, or the compile-time version string the object carries —
-/// because the alternative (calling `php_version()`) is a `dlopen`, and a
-/// `dlopen` in stage 0 is exactly what `ADR-0010` §3 forbids. It is therefore
-/// *what the file says it is*, and the `(major, minor)` is checked against the
-/// shim's own `blastit_php_minor()` again in stage 1, where a wrong answer
-/// becomes a refusal rather than a crash.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PhpVersion {
-    major: u8,
-    minor: u8,
-}
-
-impl PhpVersion {
-    /// The version `major.minor`, when both fit a `u8`.
-    #[must_use]
-    pub const fn new(major: u8, minor: u8) -> Self {
-        Self { major, minor }
-    }
-
-    /// The version a `libphp` file name states, in every spelling a distro
-    /// ships: `libphp8.4.so`, `libphp-8.4.so`, a soname such as
-    /// `libphp8.4.so.0`, and the **packed** name Alpine's 8.3 package installs
-    /// — `libphp83.so` (`MB.3.59`; Alpine's 8.4 states the minor in its
-    /// `/usr/lib/php84` directory instead).
-    ///
-    /// The packed form needs exactly two digits before the first dot, so
-    /// `libphp8.so` (major only) and `libphp841.so` are still `None`. `None`
-    /// for a name that carries no version (`libphp.so`): the shim is chosen by
-    /// this number, and stating nothing is a refusal rather than a guess.
-    #[must_use]
-    pub fn parse(name: &str) -> Option<Self> {
-        let name = name.rsplit('/').next()?;
-        let rest = name.strip_prefix("libphp")?;
-        let rest = rest.strip_prefix('-').unwrap_or(rest);
-        let mut parts = rest.split('.');
-        let first = parts.next()?;
-        let second = parts.next();
-        let major_is_digits = !first.is_empty() && first.bytes().all(|b| b.is_ascii_digit());
-        if let (Some(second), true) = (second, major_is_digits)
-            && let Some(minor) = digits_prefix(second)
-        {
-            return Some(Self {
-                major: first.parse().ok()?,
-                minor,
-            });
-        }
-        Self::packed(first)
-    }
-
-    /// The version `php84` (Alpine's per-minor directory) or the digits of a
-    /// packed file name state: exactly two ASCII digits, `major` then `minor`.
-    ///
-    /// `None` for anything else — `php`, `php8`, `php844`, `20240924` — so a
-    /// directory that is not per-minor never becomes a version.
-    #[must_use]
-    pub fn packed(digits: &str) -> Option<Self> {
-        let bytes = digits.as_bytes();
-        if bytes.len() != 2 || !bytes.iter().all(u8::is_ascii_digit) {
-            return None;
-        }
-        Some(Self {
-            major: bytes.first()?.checked_sub(b'0')?,
-            minor: bytes.get(1)?.checked_sub(b'0')?,
-        })
-    }
-
-    /// The version a path component states when it is a per-minor directory:
-    /// `php84` (Alpine's `/usr/lib/php84`), `php83`.
-    #[must_use]
-    pub fn parse_directory(component: &str) -> Option<Self> {
-        Self::packed(component.strip_prefix("php")?)
-    }
-
-    /// The major version.
-    #[must_use]
-    pub const fn major(self) -> u8 {
-        self.major
-    }
-
-    /// The minor version.
-    #[must_use]
-    pub const fn minor(self) -> u8 {
-        self.minor
-    }
-
-    /// `"8.4"`, for messages, `(PHP 8.4, …)` tuples and package names.
-    #[must_use]
-    pub fn dotted(self) -> String {
-        format!("{}.{}", self.major, self.minor)
-    }
-
-    /// The version `"8.4"` states, the form the stage-1 document carries.
-    #[must_use]
-    pub fn from_dotted(text: &str) -> Option<Self> {
-        let (major, minor) = text.split_once('.')?;
-        Some(Self {
-            major: major.parse().ok()?,
-            minor: minor.parse().ok()?,
-        })
-    }
-
-    /// Whether this build ships a shim for this minor (`ADR-0010` §4.1).
-    ///
-    /// The supported set is `8.3`, `8.4` and `8.5` — the minors
-    /// `crates/blastit-php-sapi` has an ABI for. A host on any other minor is
-    /// refused with one sentence naming that set, never with the `.dynsym`
-    /// story of a symbol it may or may not export.
-    #[must_use]
-    pub const fn supported(self) -> bool {
-        self.major == 8 && self.minor >= 3 && self.minor <= 5
-    }
-
-    /// `"84"`, the `libblastit_php84-<arch>-<libc>.so` infix.
-    #[must_use]
-    pub fn number(self) -> String {
-        format!("{}{}", self.major, self.minor)
-    }
-}
-
-/// The leading decimal run of `text`, as a byte value (`"4.27"` -> `4`).
-///
-/// One component only: a dotted version's minor is the run before the next
-/// dot, and a run that does not fit a `u8` is not a version this build states.
-fn digits_prefix(text: &str) -> Option<u8> {
-    let run = text.split(|c: char| !c.is_ascii_digit()).next()?;
-    if run.is_empty() {
-        return None;
-    }
-    run.parse().ok()
-}
-
-/// What stage 0 resolved for `entrypoint php` before a listener was bound
-/// (`ADR-0010` §3).
-///
-/// Both objects — the NTS `libphp` and the shim for its tuple — carry their
-/// identity (`dev`, `ino`) beside their path because stage 1 re-opens each
-/// `O_RDONLY | O_CLOEXEC | O_NOFOLLOW` and compares the two: a path that
-/// changed between the stages is a boot refusal, never a load of whatever is
-/// there now.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PhpRuntime {
-    /// The absolute path of the NTS `libphp` stage 0 opened and inspected.
-    pub libphp: PathBuf,
-    /// `st_dev` of that inode.
-    pub dev: u64,
-    /// `st_ino` of that inode.
-    pub ino: u64,
-    /// The version the resolved library is: from its file name, its per-minor
-    /// directory, or its own compile-time version string (see [`PhpVersion`]).
-    pub version: PhpVersion,
-    /// The absolute path of the shim for `(version, target arch, target libc)`.
-    pub shim: PathBuf,
-    /// `st_dev` of the shim's inode.
-    pub shim_dev: u64,
-    /// `st_ino` of the shim's inode.
-    pub shim_ino: u64,
-}
-
 /// Everything `BLASTIT_*` and `PORT` describe (§8.2).
 ///
 /// The defaults are the ones §8.2 documents; each field names the variable it
@@ -1016,6 +858,11 @@ pub struct Config {
     /// only carries the settings, while the discovery needs the manifest (does a
     /// route ask for PHP at all?) and the filesystem. Stage 1 reads this to
     /// re-open the recorded inode and load the exact shim (`ADR-0010` §3).
+    ///
+    /// `#[cfg(feature = "php")]`: the record's type lives in the crate that owns
+    /// PHP, and a build without that feature has no worker to hand it to
+    /// (`R13`).
+    #[cfg(feature = "php")]
     pub php: Option<PhpRuntime>,
     /// D6: the privilege mode init detected, and the capabilities it holds.
     ///
@@ -1101,6 +948,7 @@ impl Default for Config {
             cwd: None,
             libphp: None,
             php_shim_dir: None,
+            #[cfg(feature = "php")]
             php: None,
             privilege: None,
             preset: None,
@@ -1812,29 +1660,32 @@ impl Config {
                 .map(|path| Value::from(path.to_string_lossy().into_owned()))
                 .unwrap_or(Value::Null),
         );
-        object.insert(
-            "php".into(),
-            match &self.php {
-                None => Value::Null,
-                Some(runtime) => {
-                    let mut php = Map::new();
-                    php.insert(
-                        "libphp".into(),
-                        Value::from(runtime.libphp.to_string_lossy().into_owned()),
-                    );
-                    php.insert("dev".into(), Value::from(runtime.dev));
-                    php.insert("ino".into(), Value::from(runtime.ino));
-                    php.insert("version".into(), Value::from(runtime.version.dotted()));
-                    php.insert(
-                        "shim".into(),
-                        Value::from(runtime.shim.to_string_lossy().into_owned()),
-                    );
-                    php.insert("shim_dev".into(), Value::from(runtime.shim_dev));
-                    php.insert("shim_ino".into(), Value::from(runtime.shim_ino));
-                    Value::Object(php)
-                }
-            },
-        );
+        #[cfg(feature = "php")]
+        {
+            object.insert(
+                "php".into(),
+                match &self.php {
+                    None => Value::Null,
+                    Some(runtime) => {
+                        let mut php = Map::new();
+                        php.insert(
+                            "libphp".into(),
+                            Value::from(runtime.libphp.to_string_lossy().into_owned()),
+                        );
+                        php.insert("dev".into(), Value::from(runtime.dev));
+                        php.insert("ino".into(), Value::from(runtime.ino));
+                        php.insert("version".into(), Value::from(runtime.version.dotted()));
+                        php.insert(
+                            "shim".into(),
+                            Value::from(runtime.shim.to_string_lossy().into_owned()),
+                        );
+                        php.insert("shim_dev".into(), Value::from(runtime.shim_dev));
+                        php.insert("shim_ino".into(), Value::from(runtime.shim_ino));
+                        Value::Object(php)
+                    }
+                },
+            );
+        }
         object.insert(
             "script_name".into(),
             self.script_name.clone().map_or(Value::Null, Value::from),
@@ -2103,7 +1954,10 @@ impl Config {
         config.manifest_dir = PathBuf::from(json_string(value, "manifest_dir")?);
         config.libphp = optional_path(value, "libphp")?;
         config.php_shim_dir = optional_path(value, "php_shim_dir")?;
-        config.php = php_runtime_from_json(value)?;
+        #[cfg(feature = "php")]
+        {
+            config.php = php_runtime_from_json(value)?;
+        }
         config.script_name = json_opt_string(value, "script_name")?;
         config.log_format = match json_string(value, "log_format")?.as_str() {
             "json" => LogFormat::Json,
@@ -2949,6 +2803,7 @@ fn optional_path(value: &Value, name: &'static str) -> Result<Option<PathBuf>, C
 /// `ADR-0010` §3 records the path, the inode identity and the shim, so stage 1
 /// can re-open the same file and load the same shim rather than rediscover
 /// either.
+#[cfg(feature = "php")]
 fn php_runtime_from_json(value: &Value) -> Result<Option<PhpRuntime>, ConfigError> {
     let Some(php) = value.get("php") else {
         return Ok(None);
@@ -4529,52 +4384,10 @@ mod tests {
 /// version a file name does not state, and a shim directory outside the
 /// absolute-path rule. The accepted twins are the distro spellings and a full
 /// round trip of a resolved `libphp` + shim.
-#[cfg(test)]
+#[cfg(all(test, feature = "php"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod php_settings {
     use super::*;
-
-    #[test]
-    fn a_version_is_read_from_the_distro_spellings() {
-        for (name, expected) in [
-            ("libphp8.4.so", PhpVersion::new(8, 4)),
-            ("libphp-8.4.so", PhpVersion::new(8, 4)),
-            ("libphp8.3.so", PhpVersion::new(8, 3)),
-            ("libphp8.4.so.0", PhpVersion::new(8, 4)),
-            // Alpine's packed names and per-minor directories (`MB.3.59`).
-            ("libphp83.so", PhpVersion::new(8, 3)),
-            ("libphp84.so", PhpVersion::new(8, 4)),
-            ("/usr/lib/libphp83.so", PhpVersion::new(8, 3)),
-            (
-                "/usr/lib/x86_64-linux-gnu/libphp8.5.so",
-                PhpVersion::new(8, 5),
-            ),
-        ] {
-            assert_eq!(PhpVersion::parse(name), Some(expected), "{name}");
-        }
-        for name in ["libphp.so", "libphp8.so", "php8.4.so", "libphp.so.8"] {
-            assert_eq!(PhpVersion::parse(name), None, "{name}");
-        }
-        // A packed spelling is exactly two digits, never a run of them.
-        assert_eq!(PhpVersion::parse("libphp841.so"), None);
-        for (component, expected) in [
-            ("php84", PhpVersion::new(8, 4)),
-            ("php83", PhpVersion::new(8, 3)),
-        ] {
-            assert_eq!(
-                PhpVersion::parse_directory(component),
-                Some(expected),
-                "{component}"
-            );
-        }
-        for component in ["php", "php8", "php844", "php84x", "20240924"] {
-            assert_eq!(PhpVersion::parse_directory(component), None, "{component}");
-        }
-        assert_eq!(PhpVersion::new(8, 4).dotted(), "8.4");
-        assert_eq!(PhpVersion::new(8, 4).number(), "84");
-        assert_eq!(PhpVersion::from_dotted("8.4"), Some(PhpVersion::new(8, 4)));
-        assert_eq!(PhpVersion::from_dotted("8"), None);
-    }
 
     /// A relative path is refused by the configuration, before any discovery
     /// could open it; absolute ones are what the boot documents.

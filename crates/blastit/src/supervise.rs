@@ -61,7 +61,9 @@ use crate::dev_reload::{ReloadConfig, SystemClock};
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
 use crate::py::Python;
 use crate::stage1::ViewChildPlans;
-#[cfg(feature = "python")]
+#[cfg(feature = "php")]
+use blastit_view::spawn::ForkProtocol;
+#[cfg(any(feature = "php", feature = "python"))]
 use blastit_view::spawn::SpawnContext;
 #[cfg(feature = "python")]
 use blastit_view_python::zygote;
@@ -217,20 +219,12 @@ struct Spawn<'a> {
 
 /// What `spawn_now` hands the view fork: its own report socket, or nothing.
 ///
-/// One crate-local shape for both backends: a WSGI view's `LoadedReport` and a
-/// PHP worker's `PhpLoadedReport` are the same two things (the write end of a
-/// `SOCK_DGRAM` socketpair and the source its batches name), and each fork
-/// converts it at its own boundary. `None` is every boot with nothing to report
-/// to — production, `check`, `--no-reload`.
-type ViewReport = Option<ViewReportEnd>;
-
-/// The write end of a view's report socketpair, before a backend claims it.
-struct ViewReportEnd {
-    /// The view's end of the datagram socketpair.
-    socket: std::os::unix::net::UnixDatagram,
-    /// The id its batches name: the route slot, for logging and `seq` only.
-    source: u16,
-}
+/// One shape for both backends, and it is the transport's own
+/// [`blastit_view::LoadedReport`] — the write end of a `SOCK_DGRAM` socketpair
+/// and the source its batches name. `MB.36.5` deleted the PHP crate's duplicate
+/// of that type, so neither fork converts anything at its boundary. `None` is
+/// every boot with nothing to report to — production, `check`, `--no-reload`.
+type ViewReport = Option<blastit_view::LoadedReport>;
 
 /// A freshly forked worker of either runtime, as the parent sees it.
 /// `ForkedView` (WSGI) and `ForkedPhpView` (embedded PHP) describe the same
@@ -259,8 +253,8 @@ impl From<zygote::ForkedView> for Forked {
 }
 
 #[cfg(feature = "php")]
-impl From<crate::php_view::ForkedPhpView> for Forked {
-    fn from(view: crate::php_view::ForkedPhpView) -> Self {
+impl From<blastit_view_php::ForkedPhpView> for Forked {
+    fn from(view: blastit_view_php::ForkedPhpView) -> Self {
         Self {
             pid: view.pid,
             scheduler_end: view.scheduler_end,
@@ -409,10 +403,11 @@ pub struct Parts {
     /// One entry per route slot, in routing order: the embedded-PHP worker this
     /// slot forks, or `None` for a WSGI slot (`ADR-0010` §1, design §4.3).
     ///
-    /// Built and verified at boot by [`crate::php_view::boot_bindings`], so the
-    /// `SPAWN` path is a lookup and never a question about the backend kind.
+    /// Built and verified at boot by
+    /// [`blastit_view_php::pinning::boot_bindings`], so the `SPAWN` path is a
+    /// lookup and never a question about the backend kind.
     #[cfg(feature = "php")]
-    pub php: Vec<Option<crate::php_view::PhpBinding>>,
+    pub php: Vec<Option<blastit_view_php::PhpBinding>>,
     /// One entry per manifest route, in routing order: whether its view may
     /// reach the network (§7.3).
     pub egress: Vec<bool>,
@@ -469,7 +464,7 @@ pub struct Supervisor<'a> {
     /// One entry per route slot: the PHP worker it forks, decided at boot
     /// (`ADR-0010` §1). Empty slots are WSGI views.
     #[cfg(feature = "php")]
-    php: Vec<Option<crate::php_view::PhpBinding>>,
+    php: Vec<Option<blastit_view_php::PhpBinding>>,
     /// Whether each route's view may reach the network: only the view fork
     /// reads it, and only a build with an interpreter forks one (`MB.3.11`).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -1484,7 +1479,7 @@ impl<'a> Supervisor<'a> {
             .reports()
             .register(read.into(), source, Class::Loaded, false);
         Ok((
-            Some(ViewReportEnd {
+            Some(blastit_view::LoadedReport {
                 socket: write,
                 source,
             }),
@@ -1518,28 +1513,48 @@ impl<'a> Supervisor<'a> {
         } = spawn;
         #[cfg(feature = "php")]
         if let Some(binding) = self.php.get(index).and_then(Option::as_ref) {
-            // The same wire the WSGI arm gets (`MB.23.4.2`'s sink is the PHP
-            // half): the worker reports the files each request included, and
-            // its first batch is the source's `boot` set.
-            let loaded = report.map(|report| blastit_view::php::PhpLoadedReport {
-                socket: report.socket,
-                source: report.source,
-            });
-            return crate::php_view::fork_php_view(
-                crate::php_view::PhpViewSpawn {
-                    cfg: &self.cfg,
-                    limits: self.limits,
-                    info,
+            // The same wire the WSGI arm gets, and the same value
+            // (`MB.23.4.2`'s sink is the PHP half): the worker reports the
+            // files each request included, and its first batch is the source's
+            // `boot` set.
+            // `view-crates-architecture` §4.4 D2: the boot data travels as
+            // values. The identity and the filter are the binding's — the two
+            // stage 1 decided when it built this slot (`PhpSlot`) — so a fork
+            // cannot be given a pair the boot did not verify.
+            let forker = |protocol| crate::forking::fork_for(protocol, interpreter_live(py));
+            return blastit_view_php::fork_php_view(
+                blastit_view_php::PhpViewSpawn {
+                    ctx: SpawnContext {
+                        route: info.name.clone(),
+                        uid: info.uid,
+                        frame_limits: self.limits,
+                        rlimits: blastit_sys::Rlimits {
+                            // `dev` shares one uid with every other process of
+                            // the caller, where `RLIMIT_NPROC` would cap the
+                            // developer's whole session (`R21`, `ADR-0001`).
+                            nproc: drop_privileges.then(|| {
+                                self.cfg
+                                    .view_worker_cap()
+                                    .saturating_add(blastit_view_php::spawn::VIEW_PROCESS_MARGIN)
+                                    as u64
+                            }),
+                            nofile: Some(blastit_view_php::spawn::VIEW_NOFILE),
+                            core_zero: true,
+                        },
+                        privileges: binding.privileges,
+                        filter: binding.filter,
+                        egress,
+                        mask: self.mask,
+                    },
                     binding,
-                    mask: self.mask,
-                    egress,
-                    // The binding's directory is the one its INI pins as
-                    // `sys_temp_dir`, so the fork cannot disagree with it.
-                    dir: binding.view_tmp.clone(),
-                    drop_privileges,
-                    loaded,
+                    protocol: if interpreter_live(py) {
+                        ForkProtocol::InterpreterLive
+                    } else {
+                        ForkProtocol::NoInterpreter
+                    },
+                    loaded: report,
                 },
-                interpreter_live(py),
+                &forker,
             )
             .map(Forked::from)
             .map_err(|err| {
@@ -1600,10 +1615,7 @@ impl<'a> Supervisor<'a> {
                     script_name: crate::config::mount_point(self.cfg.script_name.as_deref()),
                     max_threads: self.cfg.view_worker_cap(),
                     dir: dir.to_path_buf(),
-                    loaded: report.map(|report| blastit_view::LoadedReport {
-                        socket: report.socket,
-                        source: report.source,
-                    }),
+                    loaded: report,
                 },
                 &forker,
             )

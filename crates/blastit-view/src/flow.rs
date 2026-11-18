@@ -148,8 +148,11 @@ impl Credit {
     /// `Some(0)` means the window is closed and empty (the stream is over);
     /// `None` means it is open but holds no credit yet, so a caller that can
     /// only make progress by reading more frames (a single-threaded worker
-    /// transport) can go and read them instead of parking here.
-    #[cfg(any(feature = "php", test))]
+    /// transport, which is `blastit-view-php`'s loop) can go and read them
+    /// instead of parking here.
+    ///
+    /// This crate has no features after `MB.36.5`: the PHP worker that needs it
+    /// is a sibling crate, so the method is always compiled.
     pub fn try_take(&self, want: usize) -> Option<usize> {
         let mut available = lock(&self.available);
         if *available > 0 {

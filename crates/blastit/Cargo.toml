@@ -29,11 +29,13 @@ default = ["php", "static"]
 # (ADR-0010 §4, `MB.3.11`). The WSGI worker itself is `blastit-view-python`, a
 # crate of its own: the feature pulls it (and `pyo3`) in, and nothing else can.
 python = ["dep:pyo3", "dep:blastit-view-python"]
-# Embedded PHP routes (`[route.php]`, ADR-0010). `libphp` is never linked: a
+# Embedded PHP routes (`entrypoint php`, ADR-0010). `libphp` is never linked: a
 # view `dlopen`s the host's NTS library and the per-minor shim, and the loader
-# that does it lives in `blastit-php-sapi`. The standalone binary therefore
-# carries no `DT_NEEDED` on `libphp` (`make rs-no-python`).
-php = ["blastit-view/php", "dep:blastit-php-sapi"]
+# that does it is `blastit-php-sapi`'s, reached through `blastit-view-php`. The
+# standalone binary therefore carries no `DT_NEEDED` on `libphp`
+# (`make rs-no-python`), and a build without this feature carries no discovery
+# gate either: it refuses an `entrypoint php` with one sentence (`R13`).
+php = ["dep:blastit-view-php"]
 # File-serving routes (`static "<prefix>"`, ARCHITECTURE.md §9.2). On by
 # default: a manifest with a mount must serve, and a build that leaves this
 # off refuses that manifest at boot (`SchedulerError::StaticNotCompiled`)
@@ -51,7 +53,10 @@ blastit-http = { version = "0.2.0", path = "../blastit-http" }
 blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
 blastit-lsp = { version = "0.2.0", path = "../blastit-lsp" }
 blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
-blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }
+# The PHP half of a view (`MB.36.5`): the embedded worker, the boot's discovery
+# gate, the `(st_dev, st_ino)` pins and the probe child. Optional, so a build
+# without `php` links neither this nor `blastit-php-sapi` (`R13`).
+blastit-view-php = { version = "0.2.0", path = "../blastit-view-php", optional = true }
 blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler", default-features = false }
 blastit-sqlpolicy = { version = "0.2.0", path = "../blastit-sqlpolicy" }
 blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
