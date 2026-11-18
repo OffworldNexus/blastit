@@ -354,6 +354,10 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "query_decl"
+        },
+        {
+          "type": "SYMBOL",
           "name": "directive"
         },
         {
@@ -377,6 +381,488 @@
           "name": "mode"
         }
       ]
+    },
+    "query_decl": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "query"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "CHOICE",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "sql_string"
+                },
+                {
+                  "type": "SYMBOL",
+                  "name": "string"
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        }
+      ]
+    },
+    "sql_string": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "'"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "sql_keyword"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "sql_parameter"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "sql_ellipsis"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "sql_number"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "sql_word"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "sql_operator"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "sql_other"
+              }
+            ]
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "'"
+        }
+      ]
+    },
+    "sql_keyword": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 2,
+        "content": {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "PATTERN",
+              "value": "[Ss][Ee][Ll][Ee][Cc][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ff][Rr][Oo][Mm]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ww][Hh][Ee][Rr][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ii][Nn][Ss][Ee][Rr][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ii][Nn][Tt][Oo]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Vv][Aa][Ll][Uu][Ee][Ss]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Uu][Pp][Dd][Aa][Tt][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ss][Ee][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Dd][Ee][Ll][Ee][Tt][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Rr][Ee][Tt][Uu][Rr][Nn][Ii][Nn][Gg]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ww][Ii][Tt][Hh]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Aa][Ss]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Oo][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Oo][Nn][Ff][Ll][Ii][Cc][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Dd][Oo]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Nn][Oo][Tt][Hh][Ii][Nn][Gg]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Jj][Oo][Ii][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ll][Ee][Ff][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Rr][Ii][Gg][Hh][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ii][Nn][Nn][Ee][Rr]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Oo][Uu][Tt][Ee][Rr]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ff][Uu][Ll][Ll]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Rr][Oo][Ss][Ss]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Gg][Rr][Oo][Uu][Pp]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Bb][Yy]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Oo][Rr][Dd][Ee][Rr]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ll][Ii][Mm][Ii][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Oo][Ff][Ff][Ss][Ee][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Hh][Aa][Vv][Ii][Nn][Gg]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Dd][Ii][Ss][Tt][Ii][Nn][Cc][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Uu][Nn][Ii][Oo][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Aa][Ll][Ll]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Aa][Ss][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ww][Hh][Ee][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Tt][Hh][Ee][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ee][Ll][Ss][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ee][Nn][Dd]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ii][Ss]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Nn][Uu][Ll][Ll]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Tt][Rr][Uu][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ff][Aa][Ll][Ss][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Nn][Oo][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Aa][Nn][Dd]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Oo][Rr]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ii][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ee][Xx][Ii][Ss][Tt][Ss]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ll][Ii][Kk][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ii][Ll][Ii][Kk][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Bb][Ee][Tt][Ww][Ee][Ee][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Aa][Ss][Cc]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Dd][Ee][Ss][Cc]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Bb][Ee][Gg][Ii][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Oo][Mm][Mm][Ii][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Rr][Oo][Ll][Ll][Bb][Aa][Cc][Kk]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ss][Aa][Vv][Ee][Pp][Oo][Ii][Nn][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Rr][Ee][Aa][Tt][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Tt][Aa][Bb][Ll][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ii][Nn][Dd][Ee][Xx]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Aa][Ll][Tt][Ee][Rr]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Dd][Rr][Oo][Pp]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Tt][Rr][Uu][Nn][Cc][Aa][Tt][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Oo][Pp][Yy]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Pp][Rr][Oo][Gg][Rr][Aa][Mm]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Gg][Rr][Aa][Nn][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Rr][Ee][Vv][Oo][Kk][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Tt][Ii][Mm][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Zz][Oo][Nn][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Aa][Ll][Ll]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ee][Xx][Pp][Ll][Aa][Ii][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Aa][Nn][Aa][Ll][Yy][Zz][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Vv][Aa][Cc][Uu][Uu][Mm]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Oo][Uu][Nn][Tt]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ss][Uu][Mm]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Mm][Ii][Nn]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Mm][Aa][Xx]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Cc][Oo][Aa][Ll][Ee][Ss][Cc][Ee]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Nn][Oo][Ww]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Ll][Oo][Ww][Ee][Rr]"
+            },
+            {
+              "type": "PATTERN",
+              "value": "[Uu][Pp][Pp][Ee][Rr]"
+            }
+          ]
+        }
+      }
+    },
+    "sql_parameter": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 2,
+        "content": {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "$?"
+            },
+            {
+              "type": "PATTERN",
+              "value": "\\$[0-9]+"
+            }
+          ]
+        }
+      }
+    },
+    "sql_ellipsis": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 2,
+        "content": {
+          "type": "STRING",
+          "value": "..."
+        }
+      }
+    },
+    "sql_number": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 2,
+        "content": {
+          "type": "PATTERN",
+          "value": "[0-9]+(\\.[0-9]+)?"
+        }
+      }
+    },
+    "sql_word": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 2,
+        "content": {
+          "type": "PATTERN",
+          "value": "[A-Za-z_][A-Za-z0-9_$]*"
+        }
+      }
+    },
+    "sql_operator": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 2,
+        "content": {
+          "type": "PATTERN",
+          "value": "[-+*\\/<>=~!@#%^&|?:.]+"
+        }
+      }
+    },
+    "sql_other": {
+      "type": "IMMEDIATE_TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 1,
+        "content": {
+          "type": "PATTERN",
+          "value": "[^']"
+        }
+      }
     },
     "directive": {
       "type": "SEQ",
@@ -856,10 +1342,6 @@
         {
           "type": "STRING",
           "value": "delete"
-        },
-        {
-          "type": "STRING",
-          "value": "query"
         },
         {
           "type": "STRING",

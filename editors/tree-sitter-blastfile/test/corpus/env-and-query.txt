@@ -31,12 +31,28 @@ postgres {
     (block
       (grant
         (block
-          (directive
-            (keyword)
+          (query_decl
             (string))
-          (directive
-            (keyword)
-            (raw_string))))))
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter)))))))
   (store_decl
     (block
       (directive

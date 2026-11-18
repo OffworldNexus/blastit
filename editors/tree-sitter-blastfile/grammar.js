@@ -13,6 +13,18 @@
  *  - a newline ends a statement, so newlines are NOT extras;
  *  - keywords are contextual, so a keyword is legal wherever a name is.
  */
+// One case-insensitive spelling per SQL keyword: `ci('SELECT')` is
+// `[Ss][Ee][Ll][Ee][Cc][Tt]`, i.e. all 2^6 spellings of the word as one token.
+// tree-sitter's regex dialect has no `i` flag, so the class is built from the
+// word itself (docs/design/blastfile-lsp-zed.md §9.2a decision 3).
+const ci = (word) =>
+  new RegExp(
+    word
+      .split('')
+      .map((c) => `[${c.toUpperCase()}${c.toLowerCase()}]`)
+      .join(''),
+  );
+
 module.exports = grammar({
   name: 'blastfile',
 
@@ -57,6 +69,7 @@ module.exports = grammar({
 
     block: $ => seq('{', repeat(choice($._terminator, $._statement)), '}'),
     _statement: $ => choice(
+      $.query_decl, // NEW (MB.34.6): `query` owns its value now, so it is a rule of its own
       $.directive,
       $.endpoint,
       $.grant,
@@ -64,6 +77,82 @@ module.exports = grammar({
       $.table_grant,
       $.mode,
     ),
+
+    // `query '…'` is the one directive whose value is SQL, and it is the one
+    // directive that does *not* go through the shared `keyword` rule: with
+    // `'query'` in `keyword` the state after `query` is shared with every other
+    // directive, `raw_string` (one token) is a valid token there, and the
+    // longest-match lexer always beat `sql_string`'s opening quote, so no
+    // `sql_string` node was ever produced (§9.2a decision 1). `query` is not a
+    // value anywhere, and `query` with a non-string value is already a parse
+    // error in `blastit-manifest` (`any_string`), so nothing is lost -- and the
+    // grammar stays *looser* than the language, never stricter.
+    //
+    // The value is `optional` on purpose: `query` is a legal *name* (a table, a
+    // function), and `blastit fmt` writes `functions query` and `select query`
+    // as canonical, so a bare `query` token must also be usable as one. With a
+    // required value, `query` leaving `keyword` (below) left no production that
+    // accepts the token in a value position, and those files -- accepted by
+    // `blastit fmt` and error-free under `MB.22.4`'s grammar -- became `ERROR`
+    // nodes (reviewer finding 1). A *valueless* `query` is refused by the
+    // manifest (`any_string`), so accepting it here is looseness, not a false
+    // green: the LSP owns the squiggle and the editor paints no red.
+    query_decl: $ => seq('query', optional(choice($.sql_string, $.string))),
+    // The `"…"` spelling keeps `$.string` and its `escape` children: an interior
+    // that may hold `\"` would need a second tokenizer that knows the escapes,
+    // and it would colour half a statement differently from the other half
+    // (§9.2a decision 5).
+    sql_string: $ => seq(
+      "'",
+      repeat(choice(
+        $.sql_keyword,
+        $.sql_parameter,
+        $.sql_ellipsis,
+        $.sql_number,
+        $.sql_word,
+        $.sql_operator,
+        $.sql_other,
+      )),
+      "'",
+    ),
+    // Every interior token is `token.immediate(prec(n, …))` with n > 0, i.e.
+    // ABOVE the extras' default precedence 0. That is what stops the `#` of a
+    // SQL operator (`#>`, `#>>`) from starting a Blastfile `comment` extra
+    // *inside* the literal and eating the closing quote: measured, `'a#b'`
+    // parses as word/operator/word with no ERROR and no MISSING (§9.2a
+    // decision 4).
+    //
+    // The keyword list is colour only: every entry also matches `sql_word`'s
+    // alphabet, so extending or trimming it changes which token is painted and
+    // never whether the file parses.
+    sql_keyword: $ => token.immediate(prec(2, choice(
+      ci('SELECT'), ci('FROM'), ci('WHERE'), ci('INSERT'), ci('INTO'), ci('VALUES'),
+      ci('UPDATE'), ci('SET'), ci('DELETE'), ci('RETURNING'), ci('WITH'), ci('AS'),
+      ci('ON'), ci('CONFLICT'), ci('DO'), ci('NOTHING'), ci('JOIN'), ci('LEFT'),
+      ci('RIGHT'), ci('INNER'), ci('OUTER'), ci('FULL'), ci('CROSS'), ci('GROUP'),
+      ci('BY'), ci('ORDER'), ci('LIMIT'), ci('OFFSET'), ci('HAVING'), ci('DISTINCT'),
+      ci('UNION'), ci('ALL'), ci('CASE'), ci('WHEN'), ci('THEN'), ci('ELSE'), ci('END'),
+      ci('IS'), ci('NULL'), ci('TRUE'), ci('FALSE'), ci('NOT'), ci('AND'), ci('OR'),
+      ci('IN'), ci('EXISTS'), ci('LIKE'), ci('ILIKE'), ci('BETWEEN'), ci('ASC'),
+      ci('DESC'), ci('BEGIN'), ci('COMMIT'), ci('ROLLBACK'), ci('SAVEPOINT'),
+      ci('CREATE'), ci('TABLE'), ci('INDEX'), ci('ALTER'), ci('DROP'), ci('TRUNCATE'),
+      ci('COPY'), ci('PROGRAM'), ci('GRANT'), ci('REVOKE'), ci('TIME'),
+      ci('ZONE'), ci('CALL'), ci('EXPLAIN'), ci('ANALYZE'), ci('VACUUM'),
+      ci('COUNT'), ci('SUM'), ci('MIN'), ci('MAX'), ci('COALESCE'), ci('NOW'),
+      ci('LOWER'), ci('UPPER'),
+    ))),
+    sql_parameter: $ => token.immediate(prec(2, choice('$?', /\$[0-9]+/))),
+    // Three dots in `IN (…, ...)` are one token, never three operators.
+    sql_ellipsis: $ => token.immediate(prec(2, '...')),
+    sql_number: $ => token.immediate(prec(2, /[0-9]+(\.[0-9]+)?/)),
+    sql_word: $ => token.immediate(prec(2, /[A-Za-z_][A-Za-z0-9_$]*/)),
+    sql_operator: $ => token.immediate(prec(2, /[-+*\/<>=~!@#%^&|?:.]+/)),
+    // The one-character fallback that makes `sql_string` accept exactly
+    // `'[^']*'`: precedence 1 still beats the extras (0) and loses every tie to a
+    // specific rule above, so nothing else is ever split by it. Its language is
+    // the structural proof of "never stricter than `raw_string`" (§9.2a
+    // decision 2) -- the corpus is the regression, this is the argument.
+    sql_other: $ => token.immediate(prec(1, /[^']/)),
 
     // Values are optional: `prefork` has none, `egress any` has one.
     directive: $ => seq($.keyword, optional($._values)),
@@ -121,9 +210,12 @@ module.exports = grammar({
       optional($.block),
     ),
 
+    // `query` is deliberately absent: it is `query_decl`, whose own rule keeps
+    // `sql_string` reachable (§9.2a decision 1). Everything else here is a
+    // directive keyword that may take values.
     keyword: $ => choice(
       'transactions', 'functions', 'unrestricted', 'select', 'insert', 'update', 'delete',
-      'query', 'body', 'preload', 'root', 'index', 'immutable', 'fallback', 'egress', 'any',
+      'body', 'preload', 'root', 'index', 'immutable', 'fallback', 'egress', 'any',
       'prefork', 'host', 'port', 'user', 'password', 'database', 'sslmode', 'ca_cert',
     ),
     codec: $ => choice('json', 'form', 'none', 'raw', 'unvalidated'),

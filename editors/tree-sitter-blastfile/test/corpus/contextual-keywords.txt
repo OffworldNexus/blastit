@@ -54,3 +54,41 @@ postgres view $DATABASE_URL
   (store_decl
     (name)
     (env_var)))
+
+==================
+a bare `query` is a legal function name and a legal granted table
+==================
+view v "/x" {
+    postgres {
+        functions query
+        select query
+        insert query
+        update query
+        delete query
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (string)
+    (block
+      (grant
+        (block
+          (mode
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl))))))

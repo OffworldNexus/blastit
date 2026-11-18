@@ -1,0 +1,58 @@
+==================
+a hash operator does not start a Blastfile comment inside the literal
+==================
+view tags GET "/tags" {
+    postgres {
+        query 'SELECT tags #> $? '
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter)
+              (sql_other))))))))
+
+==================
+a hash with no operator around it still ends at the closing quote
+==================
+view tags GET "/tags" {
+    postgres {
+        query 'SELECT 1 # x'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_number)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_word))))))))

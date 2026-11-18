@@ -15,6 +15,8 @@
 (mode (keyword) @constant)
 (grant (keyword) @constant)
 (table_grant (keyword) @function)	; select, insert, update, delete
+; --- MB.34.2: `query` is a rule of its own now (§9.2a), so it needs its own capture
+(query_decl "query" @keyword)
 
 ; --- literals
 (codec) @constant
@@ -25,6 +27,16 @@
 (raw_string) @string.special
 (regex_raw_string) @string.regex
 (env_var) @variable.special @variable
+; --- MB.34.2: the SQL inside a `query '…'`: the wrapper first, then the tokens
+;     the reference page explains. `sql_word`/`sql_number`/`sql_operator` and
+;     `sql_other` are deliberately uncaptured (§10.1): `number` and `operator`
+;     are not among the fifteen names the bundled themes style, and an
+;     unmeasured capture is what §10.1's guard exists to reject. They inherit
+;     `@string.special` from the wrapper, which is the right colour for a word.
+(sql_string) @string.special
+(sql_keyword) @keyword
+(sql_parameter) @variable.special @variable
+(sql_ellipsis) @variable.special @variable
 
 ; --- names
 (view_decl (name) @function)

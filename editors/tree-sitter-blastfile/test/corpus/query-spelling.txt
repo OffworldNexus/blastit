@@ -1,0 +1,72 @@
+==================
+the double-quoted spelling stays a string, and a regex keeps its own nodes
+==================
+view catalog GET "/products" {
+    postgres {
+        query "SET TIME ZONE 'UTC'"
+        immutable regex '^/x[0-9]+$'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (string))
+          (directive
+            (keyword)
+            (regex_raw_string
+              (regex_body))))))))
+
+==================
+sql_string appears only under query_decl, never under a directive or a regex
+==================
+trait session {
+    postgres {
+        query 'select 1'
+        query "SET TIME ZONE 'UTC'"
+        immutable "/assets/*"
+        immutable regex '^/fonts/[a-z]+$'
+        functions pg_catalog.unaccent
+        body raw unvalidated
+    }
+}
+
+---
+
+(source_file
+  (trait_decl
+    (name)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_number)))
+          (query_decl
+            (string))
+          (directive
+            (keyword)
+            (string))
+          (directive
+            (keyword)
+            (regex_raw_string
+              (regex_body)))
+          (directive
+            (keyword)
+            (dotted_name
+              (name)
+              (name)))
+          (directive
+            (keyword)
+            (codec)
+            (codec)))))))

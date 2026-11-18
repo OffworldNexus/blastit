@@ -70,8 +70,7 @@ view cart {
         (block
           (mode
             (keyword))
-          (directive
-            (keyword)
+          (query_decl
             (string))))))
   (static_decl
     (string)

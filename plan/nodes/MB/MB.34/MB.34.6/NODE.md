@@ -8,19 +8,20 @@ priority: 1
 depends_on: [MB.34.2, MB.34.4]
 paths:
   - "editors/tree-sitter-blastfile/grammar.js"
+  - "editors/tree-sitter-blastfile/highlights.scm"
   - "editors/tree-sitter-blastfile/src/parser.c"
   - "editors/tree-sitter-blastfile/src/grammar.json"
   - "editors/tree-sitter-blastfile/src/node-types.json"
-  - "editors/tree-sitter-blastfile/test/corpus/query-sql.txt"
+  - "editors/tree-sitter-blastfile/test/corpus/**"
   - editors/zed/languages/blastfile/highlights.scm
   - editors/zed/extension.toml
   - scripts/check_zed_extension.py
   - scripts/test_check_zed_extension.py
-attempts: 0
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-17T13:17"
+updated: "2026-11-18T04:39"
 ---
 
 # Goal

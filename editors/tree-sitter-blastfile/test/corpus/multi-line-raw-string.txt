@@ -19,6 +19,23 @@ WHERE price > $?'
     (block
       (grant
         (block
-          (directive
-            (keyword)
-            (raw_string)))))))
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter))))))))

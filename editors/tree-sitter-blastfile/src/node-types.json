@@ -39,6 +39,10 @@
           "named": true
         },
         {
+          "type": "query_decl",
+          "named": true
+        },
+        {
           "type": "table_grant",
           "named": true
         },
@@ -211,6 +215,25 @@
     }
   },
   {
+    "type": "query_decl",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "sql_string",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "regex_raw_string",
     "named": true,
     "fields": {},
@@ -256,6 +279,45 @@
         },
         {
           "type": "view_decl",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "sql_string",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "sql_ellipsis",
+          "named": true
+        },
+        {
+          "type": "sql_keyword",
+          "named": true
+        },
+        {
+          "type": "sql_number",
+          "named": true
+        },
+        {
+          "type": "sql_operator",
+          "named": true
+        },
+        {
+          "type": "sql_other",
+          "named": true
+        },
+        {
+          "type": "sql_parameter",
+          "named": true
+        },
+        {
+          "type": "sql_word",
           "named": true
         }
       ]
@@ -432,6 +494,10 @@
     "named": false
   },
   {
+    "type": "'",
+    "named": false
+  },
+  {
     "type": "(",
     "named": false
   },
@@ -599,6 +665,34 @@
   {
     "type": "select",
     "named": false
+  },
+  {
+    "type": "sql_ellipsis",
+    "named": true
+  },
+  {
+    "type": "sql_keyword",
+    "named": true
+  },
+  {
+    "type": "sql_number",
+    "named": true
+  },
+  {
+    "type": "sql_operator",
+    "named": true
+  },
+  {
+    "type": "sql_other",
+    "named": true
+  },
+  {
+    "type": "sql_parameter",
+    "named": true
+  },
+  {
+    "type": "sql_word",
+    "named": true
   },
   {
     "type": "sslmode",

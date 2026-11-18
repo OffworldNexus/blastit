@@ -1,0 +1,457 @@
+==================
+a bind placeholder after an operator in a SELECT
+==================
+view products GET "/products" {
+    postgres {
+        query 'SELECT id FROM products WHERE price > $?'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter))))))))
+
+==================
+an ellipsis keeps the statement open in an IN list
+==================
+view products GET "/products" {
+    postgres {
+        query 'SELECT id FROM products WHERE id IN ($?, ...)'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_other)
+              (sql_parameter)
+              (sql_other)
+              (sql_other)
+              (sql_ellipsis)
+              (sql_other))))))))
+
+==================
+a numbered bind parameter, `$1` and `$12`
+==================
+view orders POST "/orders" {
+    postgres {
+        query 'UPDATE t SET a = $1 WHERE b = $12'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter))))))))
+
+==================
+a multi-row INSERT is a trailing ellipsis after a value tuple
+==================
+view orders POST "/orders" {
+    postgres {
+        query 'INSERT INTO t (a, b) VALUES ($?, $?), ...'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_other)
+              (sql_parameter)
+              (sql_other)
+              (sql_other)
+              (sql_parameter)
+              (sql_other)
+              (sql_other)
+              (sql_other)
+              (sql_ellipsis))))))))
+
+==================
+a lowercase statement proves keyword matching is case-insensitive
+==================
+view products GET "/products" {
+    postgres {
+        query 'select id, name from products where price > $? order by id desc'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword))))))))
+
+==================
+a mixed-case statement colours every spelling of the same keyword
+==================
+view products GET "/products" {
+    postgres {
+        query 'select Count(*) From products Where Price Is Not Null'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword))))))))
+
+==================
+an operator soup statement with a SQL comment and a quoted JSON operator
+==================
+view events GET "/events" {
+    postgres {
+        query 'SELECT count(*), payload->>name FROM t -- note'
+        query "SELECT count(*), x->>'k' FROM t"
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_other)
+              (sql_other)
+              (sql_word)
+              (sql_operator)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_word)))
+          (query_decl
+            (string)))))))
+
+==================
+a quoted identifier, a double-quoted table and a decimal number
+==================
+view orders GET "/orders" {
+    postgres {
+        query 'select "Order" from "orders" where total >= 10.5'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_number))))))))
+
+==================
+a statement holding sort, cast and concatenation operators across a tab and a newline
+==================
+view report GET "/report" {
+    postgres {
+        query 'select * from t where a IS NOT NULL
+	and b::text <> $1
+	and c LIKE $? || %'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_operator)
+              (sql_word)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_parameter)
+              (sql_other)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_word)
+              (sql_other)
+              (sql_keyword)
+              (sql_other)
+              (sql_parameter)
+              (sql_other)
+              (sql_operator)
+              (sql_other)
+              (sql_operator))))))))
+
+==================
+an empty query string has no interior tokens
+==================
+view empty GET "/empty" {
+    postgres {
+        query ''
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string)))))))
+
+==================
+a regex next to a query keeps its regex_body, and other raw strings stay raw_string
+==================
+view assets GET "/assets" {
+    postgres {
+        query 'select 1'
+        immutable regex '^/assets/(img|css)/[a-z0-9._-]+$'
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (query_decl
+            (sql_string
+              (sql_keyword)
+              (sql_other)
+              (sql_number)))
+          (directive
+            (keyword)
+            (regex_raw_string
+              (regex_body))))))))
