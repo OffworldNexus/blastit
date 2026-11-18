@@ -1405,6 +1405,603 @@ fn definition_is_declined_and_unadvertised() {
 }
 
 // ---------------------------------------------------------------------------
+// 4a. The Quick Fix and the two SQL tokens (R60–R62, `MB.34.5`)
+// ---------------------------------------------------------------------------
+
+/// The page's blockquote paragraph that starts with `first`, with its wrapped
+/// `> ` lines joined by one space.
+///
+/// The two SQL hovers must be the reference page's own words (§7.6, R68), so
+/// the critical suite compares the reply against the page rather than against a
+/// third copy of the sentence: a page edit the editor did not follow is red
+/// here, which is the drift signal the design asks for.
+fn page_paragraph(first: &str) -> String {
+    let page = include_str!("../../../docs/reference/blastfile.md");
+    let mut paragraphs: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in page.lines() {
+        match line.strip_prefix("> ") {
+            Some(text) => {
+                let joined = current.get_or_insert_with(String::new);
+                if !joined.is_empty() {
+                    joined.push(' ');
+                }
+                joined.push_str(text);
+            }
+            None => {
+                if let Some(joined) = current.take() {
+                    paragraphs.push(joined);
+                }
+            }
+        }
+    }
+    if let Some(joined) = current {
+        paragraphs.push(joined);
+    }
+    paragraphs
+        .into_iter()
+        .find(|paragraph| paragraph.starts_with(first))
+        .unwrap_or_else(|| panic!("the page has no blockquote starting {first:?}"))
+}
+
+/// The byte range of the string interior that begins after `open`: from the
+/// first character inside the opening quote to the closing quote (§7A.3).
+fn interior(text: &str, open: &str) -> (usize, usize) {
+    let start = text.find(open).expect("the opening quote") + open.len();
+    let quote = open.chars().last().expect("a quote");
+    let end = start + text[start..].find(quote).expect("the closing quote");
+    (start, end)
+}
+
+/// The LSP point of a byte offset, computed here rather than by the server, so
+/// a byte/`char`/UTF-16 mix-up is red.
+fn point_at(text: &str, byte: usize) -> Value {
+    let line_start = text[..byte].rfind('\n').map_or(0, |at| at + 1);
+    let line = text[..line_start].matches('\n').count();
+    let character: usize = text[line_start..byte].chars().map(char::len_utf16).sum();
+    json!({"line": line, "character": character})
+}
+
+/// Applies one `TextEdit` to `text` by its two byte offsets.
+fn apply(text: &str, start: usize, end: usize, new_text: &str) -> String {
+    format!("{}{}{}", &text[..start], new_text, &text[end..])
+}
+
+/// The request body for one `codeAction` caret.
+fn caret(uri: &str, line: u64, character: u64) -> Value {
+    json!({
+        "textDocument": {"uri": uri},
+        "range": {
+            "start": {"line": line, "character": character},
+            "end": {"line": line, "character": character},
+        },
+    })
+}
+
+/// C1, R62: `codeActionProvider` is advertised, it is the boolean `true` (an
+/// object would advertise kinds), and it is the only key this amendment adds —
+/// no `codeActionKinds`, no `codeAction/resolve`.
+#[test]
+fn code_action_provider_is_advertised_and_alone() {
+    let mut session = Session::spawn(true);
+    session.request(json!(1), "initialize", json!({}));
+    let result = session.recv_result();
+    let capabilities = result["capabilities"].as_object().expect("capabilities");
+    assert_eq!(capabilities.get("codeActionProvider"), Some(&json!(true)));
+    let mut keys: Vec<&str> = capabilities.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "codeActionProvider",
+            "documentFormattingProvider",
+            "hoverProvider",
+            "positionEncoding",
+            "textDocumentSync",
+        ],
+        "codeActionProvider is the only key the Quick Fix adds"
+    );
+    let document = result.to_string();
+    assert!(
+        !document.contains("codeActionKinds") && !document.contains("resolveProvider"),
+        "{document}"
+    );
+    let (status, stderr) = session.finish();
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.is_empty(), "{stderr:?}");
+}
+
+/// C2, R62: a psql paste (`$1`) gets exactly one action — the exact title and
+/// kind, one uri, one `TextEdit` over the **whole interior** — and applying it
+/// re-parses clean, so the squiggle goes.
+#[test]
+fn a_literal_query_gets_one_quick_fix() {
+    let text = "postgres $DATABASE_URL\n\nview v \"/x\" {\n    postgres {\n        \
+                query \"SELECT id FROM products WHERE email = $1\"\n    }\n}\n";
+    let (start, end) = interior(text, "query \"");
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let _ = session.open("file:///quickfix", text, 0);
+    session.request(
+        json!(2),
+        "textDocument/codeAction",
+        caret("file:///quickfix", 4, 20),
+    );
+    let result = session.recv_result();
+    let actions = result.as_array().expect("an array").clone();
+    assert_eq!(actions.len(), 1, "exactly one action: {result}");
+    let action = &actions[0];
+    assert_eq!(action["title"], "Parameterize SQL for Blastfile ($?)");
+    assert_eq!(action["kind"], "quickfix");
+    // No second opinion: no `diagnostics`, no `isPreferred`, no `command`.
+    for absent in ["diagnostics", "isPreferred", "disabled", "command", "data"] {
+        assert!(action.get(absent).is_none(), "{absent} must not be emitted");
+    }
+    let changes = action["edit"]["changes"].as_object().expect("changes");
+    assert_eq!(changes.len(), 1, "one document, never a second authority");
+    let edits = changes["file:///quickfix"].as_array().expect("edits");
+    assert_eq!(edits.len(), 1, "one undo step, one edit: {result}");
+    let edit = &edits[0];
+    assert_eq!(edit["range"]["start"], point_at(text, start));
+    assert_eq!(edit["range"]["end"], point_at(text, end));
+    let new_text = edit["newText"].as_str().expect("newText");
+    assert!(new_text.contains("$?"), "{new_text}");
+    assert!(!new_text.contains("$1"), "{new_text}");
+    assert_ne!(
+        new_text,
+        &text[start..end],
+        "a real change, not an identity edit"
+    );
+
+    let applied = apply(text, start, end, new_text);
+    assert!(
+        blastit_manifest::blastfile::check(&applied, blastit_manifest::UidLayout::DEFAULT_BASE)
+            .is_ok(),
+        "the applied edit must re-check clean: {applied}"
+    );
+    let _ = session.open("file:///applied", &applied, 1);
+    session.request(
+        json!(3),
+        "textDocument/codeAction",
+        caret("file:///applied", 4, 20),
+    );
+    assert_eq!(session.recv_result(), json!([]), "nothing left to fix");
+    let (status, stderr) = session.finish();
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.is_empty(), "{stderr:?}");
+}
+
+/// One `query`'s document, so a `check` of an applied edit answers for that
+/// statement alone (`MB.34.5`'s C3/C4 fixtures).
+fn with_query(statement: &str) -> String {
+    format!(
+        "postgres $DATABASE_URL\n\nview v \"/x\" {{\n    postgres {{\n        {statement}\n    }}\n}}\n"
+    )
+}
+
+/// C3, R62: both spellings are edited. A `"…"` interior must come back escaped
+/// and still legal, and a `'…'` interior takes the rewrite verbatim; each range
+/// is the whole interior, so the second `$?` of the `'…'` statement is inside
+/// the edit rather than a literal-only patch.
+#[test]
+fn both_spellings_are_parameterized() {
+    let mut session = Session::spawn(true);
+    session.initialize();
+
+    let cases = [
+        (
+            "file:///double",
+            "query \"SELECT id FROM t WHERE email = 'a@b.com'\"",
+            "SELECT id FROM t WHERE email = $?",
+            false,
+        ),
+        (
+            "file:///single",
+            "query 'UPDATE t SET a = $1 WHERE b = $2'",
+            "UPDATE t SET a = $? WHERE b = $?",
+            true,
+        ),
+    ];
+    for (uri, statement, expected, single) in cases {
+        let text = with_query(statement);
+        let open = if single { "query '" } else { "query \"" };
+        let (start, end) = interior(&text, open);
+        let _ = session.open(uri, &text, 0);
+        session.request(json!(7), "textDocument/codeAction", caret(uri, 4, 20));
+        let result = session.recv_result();
+        let actions = result.as_array().expect("an array");
+        assert_eq!(actions.len(), 1, "{statement}: {result}");
+        let edit = &actions[0]["edit"]["changes"][uri]
+            .as_array()
+            .expect("edits")[0];
+        assert_eq!(edit["range"]["start"], point_at(&text, start), "{uri}");
+        assert_eq!(edit["range"]["end"], point_at(&text, end), "{uri}");
+        assert_eq!(edit["newText"], expected, "{uri}");
+        // The property is asserted on the server's own bytes, not on the local
+        // `expected`: a rewrite that kept the value or the numbering reds here.
+        let new_text = edit["newText"].as_str().expect("newText");
+        if single {
+            assert!(
+                !new_text.contains("$1") && !new_text.contains("$2"),
+                "{new_text}"
+            );
+        } else {
+            assert!(!new_text.contains('@'), "the value is gone: {new_text}");
+        }
+        let applied = apply(&text, start, end, new_text);
+        assert!(
+            blastit_manifest::blastfile::check(&applied, blastit_manifest::UidLayout::DEFAULT_BASE)
+                .is_ok(),
+            "{uri} must re-check clean: {applied}"
+        );
+    }
+    let (status, _) = session.finish();
+    assert_eq!(status.code(), Some(1));
+}
+
+/// C4, R62: nothing is offered where nothing can change — a clean `query`, the
+/// protocol's own `SET TIME ZONE 'UTC'` (which keeps its literal, ADR-0003),
+/// and a redacted `…`.
+#[test]
+fn nothing_is_offered_where_nothing_can_change() {
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let cases = [
+        ("file:///clean", "query 'SELECT id FROM t'"),
+        ("file:///setup", "query \"SET TIME ZONE 'UTC'\""),
+        ("file:///redacted", "query 'SELECT … FROM'"),
+    ];
+    for (uri, statement) in cases {
+        let _ = session.open(uri, &with_query(statement), 0);
+        session.request(json!(uri), "textDocument/codeAction", caret(uri, 4, 20));
+        assert_eq!(session.recv_result(), json!([]), "{statement}");
+    }
+    let (status, _) = session.finish();
+    assert_eq!(status.code(), Some(1));
+}
+
+/// C5, R62: `context.diagnostics` is never the source of truth. An empty set
+/// and a fabricated one get the same one action, because the server re-derives
+/// the finding from its own tracked text.
+#[test]
+fn context_diagnostics_is_never_trusted() {
+    let text = "postgres $DATABASE_URL\n\nview v \"/x\" {\n    postgres {\n        \
+                query \"SELECT id FROM t WHERE email = $1\"\n    }\n}\n";
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let _ = session.open("file:///ctx", text, 0);
+    let mut answers = Vec::new();
+    for context in [
+        json!({"diagnostics": []}),
+        json!({"diagnostics": [{
+            "range": {"start": {"line": 9, "character": 9}, "end": {"line": 9, "character": 9}},
+            "severity": 1,
+            "message": "a fabricated finding the client made up",
+        }],
+        "only": ["quickfix"]}),
+        json!({}),
+    ] {
+        let mut params = caret("file:///ctx", 4, 20);
+        params["context"] = context;
+        session.request(json!(5), "textDocument/codeAction", params);
+        answers.push(session.recv_result());
+    }
+    assert_eq!(answers[0].as_array().map(Vec::len), Some(1), "{answers:?}");
+    assert_eq!(
+        answers[0], answers[1],
+        "the fabricated set changed the answer"
+    );
+    assert_eq!(answers[0], answers[2], "the missing set changed the answer");
+    let (status, _) = session.finish();
+    assert_eq!(status.code(), Some(1));
+}
+
+/// C6, R62: the range test is per interior, not per line or per document. On
+/// one file holding a comment, a `body none`, a `regex '…'` **and** a query,
+/// only the query's range offers anything.
+#[test]
+fn a_range_off_every_query_offers_nothing() {
+    let text = "# a comment with $1 in it\npostgres $DATABASE_URL\n\nview v \"/x\" {\n    \
+                body none\n    postgres {\n        \
+                query \"SELECT id FROM products WHERE email = $1\"\n    }\n}\n\n\
+                view r regex '/v[0-9]+/items' {\n    body none\n}\n";
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let _ = session.open("file:///ranges", text, 0);
+    for (label, line, character) in [
+        ("a comment holding $1", 0, 17),
+        ("`body none`", 4, 5),
+        ("`regex '…'`", 10, 16),
+        ("the closing quote of the query", 6, 55),
+    ] {
+        session.request(
+            json!(label),
+            "textDocument/codeAction",
+            caret("file:///ranges", line, character),
+        );
+        assert_eq!(session.recv_result(), json!([]), "{label}");
+    }
+    session.request(
+        json!(9),
+        "textDocument/codeAction",
+        caret("file:///ranges", 6, 20),
+    );
+    assert_eq!(
+        session.recv_result().as_array().map(Vec::len),
+        Some(1),
+        "the query's own range still offers the fix"
+    );
+    // A document this session does not track has nothing to offer — and it is
+    // `[]`, not an error, so the client is never left hanging (§7A.1).
+    session.request(
+        json!(10),
+        "textDocument/codeAction",
+        caret("file:///not-open", 6, 20),
+    );
+    assert_eq!(session.recv_result(), json!([]));
+    let (status, _) = session.finish();
+    assert_eq!(status.code(), Some(1));
+}
+
+/// P7, C7, R60: the edit's two ends are UTF-16 points, not `char` or byte
+/// counts. The interior holds `'😀'` (one `char`, two UTF-16 units, four bytes)
+/// and a tab, so the closing quote is character **70** — a `char` count gives
+/// 69 and a byte count 72 — and the file above it starts with a surrogate pair,
+/// so a document-wide byte count cannot answer either.
+#[test]
+fn the_edit_range_is_utf16_across_a_surrogate_pair() {
+    let text = "# 😀 a surrogate pair above the query\npostgres $DATABASE_URL\n\n\
+                view v \"/x\" {\n    postgres {\n        \
+                query \"SELECT id FROM products WHERE tag = '😀'\tAND email = $1\"\n    }\n}\n";
+    let (start, end) = interior(text, "query \"");
+    assert_eq!(point_at(text, end), json!({"line": 5, "character": 70}));
+    assert_eq!(point_at(text, start), json!({"line": 5, "character": 15}));
+
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let _ = session.open("file:///pair", text, 0);
+    session.request(
+        json!(2),
+        "textDocument/codeAction",
+        caret("file:///pair", 5, 20),
+    );
+    let result = session.recv_result();
+    let edit = &result.as_array().expect("an array")[0]["edit"]["changes"]["file:///pair"]
+        .as_array()
+        .expect("edits")[0];
+    assert_eq!(edit["range"]["start"], point_at(text, start));
+    assert_eq!(edit["range"]["end"], point_at(text, end));
+    // The rewrite as the server returns it: both values became `$?`, and the
+    // tab `normalize` folds is a single space by the time the edit exists.
+    assert_eq!(
+        edit["newText"],
+        "SELECT id FROM products WHERE tag = $? AND email = $?"
+    );
+    let new_text = edit["newText"].as_str().expect("newText");
+    let applied = apply(text, start, end, new_text);
+    assert!(
+        blastit_manifest::blastfile::check(&applied, blastit_manifest::UidLayout::DEFAULT_BASE)
+            .is_ok(),
+        "the applied edit must re-check clean: {applied}"
+    );
+    assert!(!new_text.contains("$1"), "{new_text}");
+    let (status, _) = session.finish();
+    assert_eq!(status.code(), Some(1));
+}
+
+/// C8, R62: unusable params are `-32602` — never a panic and never a silent
+/// `[]` — and the malformed request does not end the session.
+#[test]
+fn code_action_params_are_validated() {
+    let text = "postgres $DATABASE_URL\n\nview v \"/x\" {\n    postgres {\n        \
+                query \"SELECT id FROM t WHERE email = $1\"\n    }\n}\n";
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let _ = session.open("file:///params", text, 0);
+
+    session.request(
+        json!(2),
+        "textDocument/codeAction",
+        json!({"textDocument": {"uri": "file:///params"}}),
+    );
+    assert_eq!(session.recv_error(-32602), json!(2));
+
+    session.request(
+        json!(3),
+        "textDocument/codeAction",
+        json!({
+            "textDocument": {"uri": "file:///params"},
+            "range": {
+                "start": {"line": 4, "character": "twenty"},
+                "end": {"line": 4, "character": 20},
+            },
+        }),
+    );
+    assert_eq!(session.recv_error(-32602), json!(3));
+
+    // No `textDocument` at all is unusable params too.
+    session.request(
+        json!(4),
+        "textDocument/codeAction",
+        json!({"range": {"start": {"line": 4, "character": 20}, "end": {"line": 4, "character": 20}}}),
+    );
+    assert_eq!(session.recv_error(-32602), json!(4));
+
+    // The session still answers, and the well-formed request still works.
+    session.request(
+        json!(5),
+        "textDocument/codeAction",
+        caret("file:///params", 4, 20),
+    );
+    assert_eq!(
+        session.recv_result().as_array().map(Vec::len),
+        Some(1),
+        "a malformed request must not poison the session"
+    );
+    let (status, stderr) = session.finish();
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.is_empty(), "{stderr:?}");
+}
+
+/// H7, R61: inside a `query`, `$?` answers on its `$`, on its `?` and on the
+/// character just after it, byte-identically, with a range over exactly the two
+/// source characters — and the sentence is the reference page's own blockquote.
+#[test]
+fn hover_explains_the_placeholder() {
+    let text = "postgres $DATABASE_URL\n\nview v \"/x\" {\n    postgres {\n        \
+                query 'SELECT id FROM t WHERE price > $? AND id IN ($?, ...)'\n    }\n}\n";
+    let line = text.lines().nth(4).expect("the query line");
+    let first = line.find("$?").expect("the token");
+    let expected = page_paragraph("`$?` is one bind placeholder");
+    assert!(expected.contains("IN ($?, ...)"), "{expected}");
+
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let _ = session.open("file:///token", text, 0);
+    let mut answers = Vec::new();
+    for offset in 0..=2u64 {
+        session.request(
+            json!(offset),
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///token"},
+                "position": {"line": 4, "character": first as u64 + offset},
+            }),
+        );
+        answers.push(session.recv_result());
+    }
+    for answer in &answers {
+        assert_eq!(answer["contents"]["kind"], "markdown");
+        assert_eq!(answer["contents"]["value"], expected.as_str());
+        assert_eq!(
+            answer["range"]["start"],
+            json!({"line": 4, "character": 46})
+        );
+        assert_eq!(answer["range"]["end"], json!({"line": 4, "character": 48}));
+    }
+    assert_eq!(answers[0], answers[1], "the `?` is part of the token");
+    assert_eq!(
+        answers[0], answers[2],
+        "so is the character just after it, which here is a space inside the string"
+    );
+
+    // §7.6's predicate is `start <= byte < end`, so the closing quote itself is
+    // not inside the string: on a statement that *ends* with `$?`, hovering the
+    // quote (and the character after it) answers `null`, never the token.
+    let trailing = with_query("query 'SELECT id FROM t WHERE price > $?'");
+    let (_, quote) = interior(&trailing, "query '");
+    let quote_line = trailing[..quote].matches('\n').count();
+    let line_start = trailing[..quote].rfind('\n').map_or(0, |at| at + 1);
+    let quote_character = quote - line_start;
+    let _ = session.open("file:///trailing", &trailing, 2);
+    for (label, character) in [
+        ("the closing quote", quote_character),
+        ("just after the closing quote", quote_character + 1),
+    ] {
+        session.request(
+            json!(label),
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///trailing"},
+                "position": {"line": quote_line, "character": character},
+            }),
+        );
+        assert_eq!(session.recv_result(), Value::Null, "{label}");
+    }
+    let (status, _) = session.finish();
+    assert_eq!(status.code(), Some(1));
+}
+
+/// H8, R61: `...` answers on all three dots with a range over the three, and
+/// neither token answers outside a `query` — a `$?` in a comment or a `regex`
+/// gets `null`, because a hover is not a second grammar.
+#[test]
+fn hover_explains_the_variadic_marker() {
+    let text = "postgres $DATABASE_URL\n\nview v \"/x\" {\n    postgres {\n        \
+                query 'SELECT id FROM t WHERE id IN ($?, ...)'\n    }\n}\n";
+    let line = text.lines().nth(4).expect("the query line");
+    let dots = line.find("...").expect("the token");
+    let expected = page_paragraph("`...` is Blastit's variadic marker");
+    assert!(expected.contains("blastit check"), "{expected}");
+
+    let mut session = Session::spawn(true);
+    session.initialize();
+    let _ = session.open("file:///variadic", text, 0);
+    for offset in 0..3u64 {
+        session.request(
+            json!(offset),
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///variadic"},
+                "position": {"line": 4, "character": dots as u64 + offset},
+            }),
+        );
+        let answer = session.recv_result();
+        assert_eq!(answer["contents"]["value"], expected.as_str(), "{offset}");
+        assert_eq!(
+            answer["range"]["start"],
+            json!({"line": 4, "character": dots as u64})
+        );
+        assert_eq!(
+            answer["range"]["end"],
+            json!({"line": 4, "character": dots as u64 + 3})
+        );
+    }
+    // Just after the last dot is not the token.
+    session.request(
+        json!(9),
+        "textDocument/hover",
+        json!({
+            "textDocument": {"uri": "file:///variadic"},
+            "position": {"line": 4, "character": dots as u64 + 3},
+        }),
+    );
+    assert_eq!(session.recv_result(), Value::Null);
+
+    let outside = "postgres $DATABASE_URL\n\nview v \"/x\" {\n    \
+                   body raw # $? and ... live in a comment\n    postgres {\n        \
+                   query \"SELECT id FROM t WHERE email = $1\"\n    }\n}\n\n\
+                   view r regex '$?' {\n    body none\n}\n";
+    let _ = session.open("file:///outside", outside, 1);
+    for (label, line, character) in [
+        ("`$?` in a comment", 3, 15),
+        ("`...` in a comment", 3, 21),
+        ("the `...`'s trailing position", 3, 22),
+        ("`regex '$?'`", 9, 14),
+    ] {
+        session.request(
+            json!(label),
+            "textDocument/hover",
+            json!({
+                "textDocument": {"uri": "file:///outside"},
+                "position": {"line": line, "character": character},
+            }),
+        );
+        assert_eq!(session.recv_result(), Value::Null, "{label}");
+    }
+    // The `$DATABASE_URL` paragraph still answers: the word table is untouched.
+    session.request(
+        json!(20),
+        "textDocument/hover",
+        json!({
+            "textDocument": {"uri": "file:///outside"},
+            "position": {"line": 0, "character": 12},
+        }),
+    );
+    let env = session.recv_result();
+    assert_eq!(env["contents"]["kind"], "markdown");
+    assert!(
+        env["contents"]["value"]
+            .as_str()
+            .expect("markdown")
+            .contains("$DATABASE_URL"),
+        "{env}"
+    );
+    let (status, _) = session.finish();
+    assert_eq!(status.code(), Some(1));
+}
+
+// ---------------------------------------------------------------------------
 // 5. Hygiene, security and the CLI surface (R1, R3, R3a, S1–S11)
 // ---------------------------------------------------------------------------
 

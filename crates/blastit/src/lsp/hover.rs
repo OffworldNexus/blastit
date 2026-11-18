@@ -28,6 +28,39 @@ pub(super) fn hover_text(word: &str) -> Option<&'static str> {
         .map(|(_, value)| *value)
 }
 
+/// The two SQL token paragraphs, in the reference page's own words (§7.6).
+///
+/// A `query` interior gets exactly these two tokens and no SQL lesson: `$?` and
+/// `...` are the tokens the tool defines, so they are the only two the hover
+/// explains (`docs/reference/blastfile.md`, the two blockquotes the page prints
+/// under "In the editor, hovering either token inside a `query` says exactly
+/// this"). The rows are one paragraph each, ≤ 600 bytes, and the unit test
+/// below joins the page's wrapped blockquotes and compares byte for byte, so a
+/// one-word fix to the page cannot drift from the editor silently.
+const SQL_HOVER_TABLE: &[(&str, &str)] = &[
+    (
+        "$?",
+        "`$?` is one bind placeholder: the app sends one value for it, and the wire sees \
+         `$1, $2, …` in the order the placeholders appear. `IN ($?, ...)` binds any number \
+         of values with one grant — the list length is not part of the grant.",
+    ),
+    (
+        "...",
+        "`...` is Blastit's variadic marker, not SQL: it is legal only as `IN ($?, ...)` \
+         (any number of values) or after a `VALUES` row, `($?, $?), ...` (any number of \
+         rows). `blastit check` refuses it anywhere else.",
+    ),
+];
+
+/// The markdown paragraph for one SQL token, or `None` for any other text
+/// (§7.6): the two tokens are the whole vocabulary inside a `query`.
+pub(super) fn sql_hover(token: &str) -> Option<&'static str> {
+    SQL_HOVER_TABLE
+        .iter()
+        .find(|(key, _)| *key == token)
+        .map(|(_, value)| *value)
+}
+
 /// The `$IDENT` shape: `[A-Z_][A-Z0-9_]*` (§7.2).
 pub(super) fn is_env_name(name: &str) -> bool {
     let mut bytes = name.bytes();
@@ -223,7 +256,57 @@ const HOVER_TABLE: &[(&str, &str)] = &[
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{HOVER_TABLE, hover_text};
+    use super::{HOVER_TABLE, SQL_HOVER_TABLE, hover_text, sql_hover};
+
+    /// The page's blockquote paragraphs, unwrapped: every run of `> ` lines,
+    /// joined with the single spaces the wrapping replaced (`MB.34.5`, §7.6).
+    fn quoted_paragraphs(page: &str) -> Vec<String> {
+        let mut paragraphs: Vec<String> = Vec::new();
+        let mut current: Option<String> = None;
+        for line in page.lines() {
+            match line.strip_prefix("> ") {
+                Some(text) => {
+                    let joined = current.get_or_insert_with(String::new);
+                    if !joined.is_empty() {
+                        joined.push(' ');
+                    }
+                    joined.push_str(text);
+                }
+                None => {
+                    if let Some(joined) = current.take() {
+                        paragraphs.push(joined);
+                    }
+                }
+            }
+        }
+        if let Some(joined) = current {
+            paragraphs.push(joined);
+        }
+        paragraphs
+    }
+
+    /// H7/H8's wording half: the two SQL paragraphs are the reference page's
+    /// two blockquotes, byte for byte, and nothing else is a SQL token — so
+    /// `$1`, `SELECT` and an empty token get no paragraph (§7.6 item 3).
+    #[test]
+    fn the_sql_paragraphs_are_the_pages_blockquotes() {
+        assert_eq!(SQL_HOVER_TABLE.len(), 2);
+        let page = include_str!("../../../../docs/reference/blastfile.md");
+        let paragraphs = quoted_paragraphs(page);
+        for (token, value) in SQL_HOVER_TABLE {
+            assert!(value.len() <= 600, "{token} is {} bytes", value.len());
+            assert!(
+                paragraphs
+                    .iter()
+                    .any(|paragraph| paragraph.as_str() == *value),
+                "{token}'s paragraph is not the page's blockquote: {value:?}"
+            );
+            assert_eq!(sql_hover(token), Some(*value));
+        }
+        assert_eq!(sql_hover("$1"), None);
+        assert_eq!(sql_hover("SELECT"), None);
+        assert_eq!(sql_hover(""), None);
+    }
 
     /// H6: the table is bounded, sorted, duplicate-free, and every key is a word
     /// of the reference page — the page is the source, this is a transcription.

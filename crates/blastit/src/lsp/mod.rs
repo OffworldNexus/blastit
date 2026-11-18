@@ -19,7 +19,14 @@
 //!   positions, pushed on every `didOpen`/`didChange` and cleared on `didClose`;
 //! * §6 — one whole-document formatting edit from `blastfile::fmt`, or `[]`, or
 //!   `null`;
-//! * §7 — hover from a bounded static table, never a second grammar.
+//! * §7 — hover from a bounded static table, never a second grammar;
+//! * §7.6 and §7A — the two SQL tokens `$?`/`...` inside a `query` interior,
+//!   and one `quickfix` whose single `TextEdit` is the statement
+//!   `blastit_sqlpolicy::parameterize` returns for the string under the range.
+//!
+//! The Quick Fix is not a second implementation: the rewrite is
+//! `blastit_sqlpolicy::parameterize`, the same function `blastit check` and
+//! `--learn` use (`R66`), so the editor and the CLI cannot drift.
 //!
 //! stdout carries framed messages and nothing else; stderr carries at most four
 //! fixed sentences (§11.3) and never a byte of document text — a `Blastfile`
@@ -38,12 +45,14 @@
     clippy::indexing_slicing
 )]
 
+use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::panic::AssertUnwindSafe;
 
 use blastit_manifest::blastfile;
-use blastit_manifest::{ManifestError, ManifestWarning, Position, UidLayout};
+use blastit_manifest::{Manifest, ManifestError, ManifestWarning, Position, QuerySite, UidLayout};
+use blastit_sqlpolicy::parameterize;
 use serde_json::{Map, Value, json};
 
 // §7's hover **data** lives in its own file: the table is a transcription of
@@ -53,7 +62,7 @@ use serde_json::{Map, Value, json};
 // `crate::lsp::run`.
 mod hover;
 
-use hover::{env_var_paragraph, hover_text, is_env_name};
+use hover::{env_var_paragraph, hover_text, is_env_name, sql_hover};
 
 /// Most bytes one header block may hold, its `\r\n\r\n` terminator included
 /// (§3.1). Zed writes one 19-byte header, so this is 400× headroom and `O(1)`
@@ -121,6 +130,11 @@ const NO_DOCUMENT: &str = "blastit lsp has no open document for this file; reope
 const INCREMENTAL: &str = "incremental sync is not supported; reopen the file";
 const TOO_MANY_DOCUMENTS: &str = "blastit lsp tracks at most 32 open Blastfiles; close one";
 
+/// The one action §7A offers: the page's own words (`docs/local.md`
+/// step 2), and the only kind `codeActionProvider: true` can produce.
+const QUICK_FIX_TITLE: &str = "Parameterize SQL for Blastfile ($?)";
+const QUICK_FIX_KIND: &str = "quickfix";
+
 /// One document a session holds (§2.5), keyed by its `uri` — which is opaque:
 /// compared and echoed, never parsed into a path, never opened.
 ///
@@ -129,6 +143,26 @@ const TOO_MANY_DOCUMENTS: &str = "blastit lsp tracks at most 32 open Blastfiles;
 struct Document {
     /// The whole document, as the client last sent it.
     text: String,
+    /// The `query` interiors `Manifest::from_blastfile_str` found in [`text`],
+    /// filled by the first hover or `codeAction` and dropped with the text it
+    /// was parsed from (§13.3: one cache entry, invalidated by `didChange`).
+    ///
+    /// `None` is "this document does not parse", which is a real answer — a
+    /// `LiteralQuery` never reaches a `Checked`, so §7.6's sites come from the
+    /// parse-and-lower entry point and not from `check`.
+    ///
+    /// [`text`]: Document::text
+    sites: OnceCell<Option<Vec<QuerySite>>>,
+}
+
+impl Document {
+    /// A tracked document with its sites not yet computed.
+    fn new(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            sites: OnceCell::new(),
+        }
+    }
 }
 
 /// One session's state (§2.5).
@@ -500,6 +534,13 @@ impl Server {
                 Some(result) => write_result(out, id, result)?,
                 None => write_error(out, id, INVALID_PARAMS)?,
             },
+            // §7A: at most one `quickfix`, or `[]`. `context.diagnostics` is
+            // read by nobody (§7A.1), so a stale client copy cannot decide what
+            // the edit says.
+            "textDocument/codeAction" => match self.code_action(&params) {
+                Some(result) => write_result(out, id, result)?,
+                None => write_error(out, id, INVALID_PARAMS)?,
+            },
             // A notification's method sent as a request is accepted, so a
             // client that attached an id is not left hanging on a reply — and
             // its params are read, so §2.4's `-32602` row is answered for a
@@ -556,12 +597,7 @@ impl Server {
             let notice = notice(TOO_MANY_DOCUMENTS);
             return publish(out, uri, None, &[notice]);
         }
-        self.documents.insert(
-            uri.to_owned(),
-            Document {
-                text: text.to_owned(),
-            },
-        );
+        self.documents.insert(uri.to_owned(), Document::new(text));
         let diagnostics = diagnostics(text);
         publish(out, uri, Some(version), &diagnostics)
     }
@@ -605,12 +641,7 @@ impl Server {
             let diagnostics = diagnostics(text);
             return publish(out, uri, None, &diagnostics);
         }
-        self.documents.insert(
-            uri.to_owned(),
-            Document {
-                text: text.to_owned(),
-            },
-        );
+        self.documents.insert(uri.to_owned(), Document::new(text));
         let diagnostics = diagnostics(text);
         publish(out, uri, Some(version), &diagnostics)
     }
@@ -676,6 +707,32 @@ impl Server {
         let Some(line_text) = lines.line(line) else {
             return Some(Value::Null);
         };
+        // §7.6: inside a `query` interior the reply is one of the two SQL
+        // tokens or `null` — no word table, no SQL lesson. A position outside
+        // every interior takes `word_at` exactly as it always has, so
+        // `$DATABASE_URL` still answers and a `$?` in a comment does not.
+        let byte = lines.offset(line, character);
+        if let Some(site) = self
+            .query_sites(document)
+            .iter()
+            .find(|site| inside(site, byte))
+        {
+            let Some((start, end)) = sql_token(&document.text, byte) else {
+                return Some(Value::Null);
+            };
+            // The token must be this string's own characters: a `$?` that ends
+            // where the opening quote begins is outside the interior.
+            if start < site.interior.start || end > site.interior.end {
+                return Some(Value::Null);
+            }
+            let Some(token) = document.text.get(start as usize..end as usize) else {
+                return Some(Value::Null);
+            };
+            let Some(value) = sql_hover(token) else {
+                return Some(Value::Null);
+            };
+            return Some(token_hover(&lines, start, end, value));
+        }
         let start = char_index(line_text, character);
         let Some(word) = word_at(line_text, start) else {
             return Some(Value::Null);
@@ -713,6 +770,78 @@ impl Server {
             },
         }))
     }
+
+    /// The `query` interiors of one tracked document, parsed once per text
+    /// (§13.3). A document that does not parse has none, so a hover falls back
+    /// to the word table and a `codeAction` answers `[]`.
+    fn query_sites<'a>(&self, document: &'a Document) -> &'a [QuerySite] {
+        document
+            .sites
+            .get_or_init(|| sites_of(&document.text))
+            .as_deref()
+            .unwrap_or_default()
+    }
+
+    /// `textDocument/codeAction`: at most one `quickfix` whose single
+    /// `TextEdit` replaces the whole `query` string's interior with the
+    /// statement `parameterize` wrote (§7A). `None` is unusable params
+    /// (`-32602`); `[]` is "nothing to offer", which is never an error.
+    fn code_action(&self, params: &Value) -> Option<Value> {
+        let uri = document_uri(params)?;
+        let range = params.get("range")?;
+        let (start_line, start_character) = point_of(range.get("start")?)?;
+        let (end_line, end_character) = point_of(range.get("end")?)?;
+        let Some(document) = self.documents.get(uri) else {
+            return Some(json!([]));
+        };
+        let lines = Lines::new(&document.text);
+        let start = lines.offset(start_line, start_character);
+        let end = lines.offset(end_line, end_character);
+        // An inverted range is a client quirk, not an error (§7A.2).
+        if start > end {
+            return Some(json!([]));
+        }
+        let Some(site) = self
+            .query_sites(document)
+            .iter()
+            .find(|site| intersects(site, start, end))
+        else {
+            return Some(json!([]));
+        };
+        // The one implementation (`R66`): `check`/`--learn`'s own rewrite. It
+        // already refuses the two protocol statements, a redacted `…`, the
+        // file/network capabilities `--learn` refuses, and everything that
+        // would not re-parse clean.
+        let Some(rewritten) = parameterize(&site.raw) else {
+            return Some(json!([]));
+        };
+        let Some(interior) = document
+            .text
+            .get(site.interior.start as usize..site.interior.end as usize)
+        else {
+            return Some(json!([]));
+        };
+        let new_text = encode_interior(&document.text, site, &rewritten);
+        // §7A.3(a) and (b): a real change, not an identity edit that re-checks
+        // clean. The encoded text is what the file would hold, so it is what
+        // has to differ.
+        if new_text == interior {
+            return Some(json!([]));
+        }
+        let start_point = lines.point_at(site.interior.start);
+        let end_point = lines.point_at(site.interior.end);
+        Some(json!([{
+            "title": QUICK_FIX_TITLE,
+            "kind": QUICK_FIX_KIND,
+            "edit": {"changes": {uri: [{
+                "range": {
+                    "start": {"line": start_point.0, "character": start_point.1},
+                    "end": {"line": end_point.0, "character": end_point.1},
+                },
+                "newText": new_text,
+            }]}},
+        }]))
+    }
 }
 
 /// The `textDocument.uri` a sync message names (§2.5).
@@ -740,6 +869,143 @@ fn document_version(params: &Value) -> i64 {
         .unwrap_or(0)
 }
 
+/// One `{line, character}` object as an LSP point (§4.6). A missing or
+/// non-numeric member is unusable params, which is `-32602` (§2.4, C8).
+fn point_of(value: &Value) -> Option<(u32, u32)> {
+    let line = u32::try_from(value.get("line")?.as_u64()?).ok()?;
+    let character = u32::try_from(value.get("character")?.as_u64()?).ok()?;
+    Some((line, character))
+}
+
+/// §7.6's predicate: whether `byte` lies inside a `query` interior.
+///
+/// `start <= byte < end`, exactly as the design writes it: the closing quote is
+/// **not** inside the string, so hovering it — or the character after it —
+/// answers `null` and falls through to nothing. A position outside every
+/// interior takes the word table.
+fn inside(site: &QuerySite, byte: u32) -> bool {
+    site.interior.start <= byte && byte < site.interior.end
+}
+
+/// §7A.2's range test: a real range overlaps the interior, and a zero-width
+/// caret (Zed's) sits inside it.
+fn intersects(site: &QuerySite, start: u32, end: u32) -> bool {
+    if start == end {
+        site.interior.start <= start && start < site.interior.end
+    } else {
+        start < site.interior.end && site.interior.start < end
+    }
+}
+
+/// §7.6's token at `byte`: the source byte span of `$?` or `...`.
+///
+/// The test is on **source** characters, so the range it returns is one the
+/// editor can select: the `$`, its `?`, or the character just after it for
+/// `$?`; the dot run the cursor is in, cut to its first three, for `...`.
+fn sql_token(text: &str, byte: u32) -> Option<(u32, u32)> {
+    let at = byte as usize;
+    let bytes = text.as_bytes();
+    let dollar = |start: usize| bytes.get(start..start.saturating_add(2)) == Some(&b"$?"[..]);
+    if dollar(at) {
+        return Some((byte, byte.saturating_add(2)));
+    }
+    if at >= 1 && dollar(at - 1) {
+        return Some((byte - 1, byte.saturating_add(1)));
+    }
+    if at >= 2 && dollar(at - 2) {
+        return Some((byte - 2, byte));
+    }
+    if bytes.get(at) == Some(&b'.') {
+        let mut start = at;
+        while start > 0 && bytes.get(start - 1) == Some(&b'.') {
+            start = start.saturating_sub(1);
+        }
+        let mut end = at;
+        while bytes.get(end) == Some(&b'.') {
+            end = end.saturating_add(1);
+        }
+        if end.saturating_sub(start) >= 3 {
+            let start = u32::try_from(start).ok()?;
+            return Some((start, start.saturating_add(3)));
+        }
+    }
+    None
+}
+
+/// One `Hover` whose `range` is the token's own source span (§7.6), converted
+/// with [`Lines::point_at`] and never through the decoded statement.
+fn token_hover(lines: &Lines<'_>, start: u32, end: u32, value: &str) -> Value {
+    let start_point = lines.point_at(start);
+    let end_point = lines.point_at(end);
+    json!({
+        "contents": {"kind": "markdown", "value": value},
+        "range": {
+            "start": {"line": start_point.0, "character": start_point.1},
+            "end": {"line": end_point.0, "character": end_point.1},
+        },
+    })
+}
+
+/// The `query` sites of a document, from `Manifest::from_blastfile_str` —
+/// parse and lower, **no** validate (§7.6), so a `LiteralQuery` still has its
+/// site. `None` is a document that does not parse: there are no sites.
+///
+/// The walk is `validate`'s own order (groups, then routes), and a trait a view
+/// `use`s contributes its site twice; the interiors are disjoint by
+/// construction, so the first match is the only match.
+fn sites_of(text: &str) -> Option<Vec<QuerySite>> {
+    // §3.3: the parse is wrapped like every other call into `blastit-manifest`,
+    // so a panic is "no sites" rather than a dead session — and the hook already
+    // stopped the payload reaching stderr.
+    let parsed = std::panic::catch_unwind(AssertUnwindSafe(|| Manifest::from_blastfile_str(text)));
+    let manifest = parsed.ok()?.ok()?;
+    let mut sites: Vec<QuerySite> = Vec::new();
+    let grants = manifest
+        .groups()
+        .values()
+        .flat_map(|group| group.grants().values());
+    let route_grants = manifest
+        .routes()
+        .iter()
+        .flat_map(|route| route.grants().values());
+    for grant in grants.chain(route_grants) {
+        if let Some(postgres) = grant.as_postgresql() {
+            sites.extend(postgres.query_sites().iter().cloned());
+        }
+    }
+    Some(sites)
+}
+
+/// §7A.4: `parameterize` returns **decoded** text, and the edit must be text
+/// the file can hold.
+///
+/// A `'…'` interior takes it verbatim, because a parameterised statement holds
+/// no `'`. A `"…"` interior escapes with the token's own four escapes, in this
+/// order (`\` first, or `\"` would become `\\"`): `\` → `\\`, `"` → `\"`, a
+/// newline → `\n`, a tab → `\t`.
+fn encode_interior(source: &str, site: &QuerySite, decoded: &str) -> String {
+    let quote = site
+        .interior
+        .start
+        .checked_sub(1)
+        .and_then(|at| source.as_bytes().get(at as usize))
+        .copied();
+    if quote != Some(b'"') {
+        return decoded.to_owned();
+    }
+    let mut out = String::with_capacity(decoded.len());
+    for character in decoded.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// §2.3's capability document, byte for byte where it matters.
 fn capabilities() -> Value {
     json!({
@@ -748,6 +1014,7 @@ fn capabilities() -> Value {
             "textDocumentSync": {"openClose": true, "change": 1, "save": false},
             "documentFormattingProvider": true,
             "hoverProvider": true,
+            "codeActionProvider": true,
         },
         "serverInfo": {"name": "blastit", "version": env!("CARGO_PKG_VERSION")},
     })
@@ -925,6 +1192,38 @@ impl<'a> Lines<'a> {
         (line_index, character as u32)
     }
 
+    /// The byte offset of one LSP position (§4.6): §4.2's units read
+    /// backwards, clamped exactly like [`Lines::point`] — a line past the end is
+    /// the document's length, and a character past the line's end is its last
+    /// byte.
+    fn offset(&self, line: u32, character: u32) -> u32 {
+        let Some(line_text) = self.line(line) else {
+            return u32::try_from(self.text.len()).unwrap_or(u32::MAX);
+        };
+        let start = self.starts.get(line as usize).copied().unwrap_or(0);
+        let chars = char_index(line_text, character);
+        let bytes: usize = line_text.chars().take(chars).map(char::len_utf8).sum();
+        start.saturating_add(u32::try_from(bytes).unwrap_or(u32::MAX))
+    }
+
+    /// The LSP point of a byte offset (§4.6): the line whose start is the last
+    /// one `<= at`, and the UTF-16 length of that line's prefix before `at`.
+    ///
+    /// The exact inverse of [`Lines::offset`] on a character boundary
+    /// (`point_at(offset(line, character)) == (line, character)` for every
+    /// legal position), and `O(log lines + character)`.
+    fn point_at(&self, at: u32) -> (u32, u32) {
+        let at = at.min(u32::try_from(self.text.len()).unwrap_or(u32::MAX));
+        let line = self
+            .starts
+            .partition_point(|start| *start <= at)
+            .saturating_sub(1);
+        let start = self.starts.get(line).copied().unwrap_or(0) as usize;
+        let prefix = self.text.get(start..at as usize).unwrap_or_default();
+        let character: usize = prefix.chars().map(char::len_utf16).sum();
+        (line as u32, character as u32)
+    }
+
     /// The range a diagnostic squiggles (§4.3): the maximal run of
     /// `[A-Za-z0-9_-]` at the position, one unit for punctuation, and a
     /// zero-width range for [`Position::NONE`].
@@ -1032,11 +1331,11 @@ fn max_point_utf16(text: &str) -> (u32, u32) {
     clippy::indexing_slicing
 )]
 mod tests {
-    use blastit_manifest::Position;
+    use blastit_manifest::{Position, QuerySite};
 
     use super::{
         Lines, MAX_FRAME_BODY_BYTES, MAX_FRAME_HEADER_BYTES, char_index, declared_length,
-        max_point_utf16, word_at,
+        encode_interior, intersects, max_point_utf16, parameterize, sql_token, word_at,
     };
 
     /// §3.1's bound, asserted as a literal: a change to the parser's cap must be
@@ -1169,6 +1468,124 @@ mod tests {
         assert_eq!(
             declared_length(b"Content-Type: application/json\r\n\r\n"),
             None
+        );
+    }
+
+    /// P7 (§4.6): the `=` in `view v "/😀é" { body = }` is char index 20,
+    /// UTF-16 index 21 and byte index **24** (18 ASCII bytes, a four-byte emoji
+    /// and a two-byte `é`). The two wrong answers are distinguishable in
+    /// opposite directions: `character as usize` gives 21 (the `o`) and a
+    /// `chars().count()`-based answer gives 20 (the space).
+    #[test]
+    fn p7_the_offset_is_bytes_and_the_point_is_utf16() {
+        let text = "view v \"/😀é\" { body = }";
+        let lines = Lines::new(text);
+        assert_eq!(lines.offset(0, 21), 24);
+        assert_eq!(lines.point_at(24), (0, 21));
+        // A line and a character past the end clamp like `point`: the
+        // document's length, and the document's last point.
+        assert_eq!(lines.offset(9, 0), text.len() as u32);
+        assert_eq!(lines.offset(0, 99), text.len() as u32);
+        assert_eq!(lines.point_at(u32::MAX), lines.point_at(text.len() as u32));
+        // The inverse on every character boundary, including the emoji's.
+        for (index, _) in text.char_indices() {
+            let (line, character) = lines.point_at(index as u32);
+            assert_eq!(lines.offset(line, character), index as u32, "{index}");
+        }
+    }
+
+    /// §7.6's token test, on source characters: `$?` answers on its `$`, on its
+    /// `?`, and on the character just after it (H7's three positions); `...`
+    /// answers on every dot and is cut to its first three; anything else is
+    /// `None`, so a `$1` is never a token this hover explains.
+    #[test]
+    fn the_two_sql_tokens_are_source_spans() {
+        let text = "SELECT $? FROM t WHERE id IN ($?, ...) AND x = $1";
+        let dollar = text.find("$?").unwrap();
+        for at in [dollar, dollar + 1, dollar + 2] {
+            assert_eq!(
+                sql_token(text, at as u32),
+                Some((dollar as u32, dollar as u32 + 2))
+            );
+        }
+        let dots = text.find("...").unwrap();
+        for at in [dots, dots + 1, dots + 2] {
+            assert_eq!(
+                sql_token(text, at as u32),
+                Some((dots as u32, dots as u32 + 3))
+            );
+        }
+        // A position just after the run is not "in" it.
+        assert_eq!(sql_token(text, (dots + 3) as u32), None);
+        // `$1` is PostgreSQL's own numbering, not one of the two tokens.
+        let one = text.find("$1").unwrap();
+        for at in [one, one + 1, one + 2] {
+            assert_eq!(sql_token(text, at as u32), None);
+        }
+        // A four-dot run is cut to its first three, from any dot in it.
+        let four = "a .... b";
+        for at in [2, 3, 4, 5] {
+            assert_eq!(sql_token(four, at), Some((2, 5)));
+        }
+    }
+
+    /// §7A.2's predicate: a caret sits inside an interior, a real range
+    /// overlaps it, and both ends are exclusive the way the design writes them.
+    #[test]
+    fn a_range_meets_an_interior_by_overlap_or_caret() {
+        let site = QuerySite {
+            at: Position::at(1, 1),
+            interior: 10..20,
+            escapes: Vec::new(),
+            raw: String::new(),
+        };
+        assert!(intersects(&site, 10, 10), "a caret at the first character");
+        assert!(intersects(&site, 19, 19), "a caret at the last character");
+        assert!(!intersects(&site, 20, 20), "the closing quote is outside");
+        assert!(!intersects(&site, 9, 9), "the opening quote is outside");
+        assert!(intersects(&site, 0, 11), "a range that ends inside");
+        assert!(intersects(&site, 19, 40), "a range that starts inside");
+        assert!(intersects(&site, 0, 40), "a range that covers it");
+        assert!(
+            !intersects(&site, 0, 10),
+            "an end at the start does not touch"
+        );
+        assert!(
+            !intersects(&site, 20, 40),
+            "a start at the end does not touch"
+        );
+    }
+
+    /// §7A.4: `parameterize` returns decoded text, and the `"…"` spelling needs
+    /// its four escapes back — `\` first, or `\"` would become `\\"`.
+    #[test]
+    fn the_interior_is_re_encoded_for_its_spelling() {
+        let decoded = parameterize("SELECT \"o\".id FROM t WHERE email = 'a@b.com'")
+            .expect("a literal is rewritten");
+        assert_eq!(decoded, "SELECT \"o\".id FROM t WHERE email = $?");
+        let double = "query \"SELECT \\\"o\\\".id FROM t WHERE email = 'a@b.com'\"";
+        let site = QuerySite {
+            at: Position::at(1, 7),
+            interior: 7..double.len() as u32 - 1,
+            escapes: Vec::new(),
+            raw: String::new(),
+        };
+        assert_eq!(
+            encode_interior(double, &site, &decoded),
+            "SELECT \\\"o\\\".id FROM t WHERE email = $?"
+        );
+        // A `'…'` interior takes the decoded text verbatim: every literal is
+        // gone, so no `'` is left to escape.
+        let single = "query 'SELECT id FROM t WHERE email = $?'";
+        let site = QuerySite {
+            at: Position::at(1, 7),
+            interior: 7..single.len() as u32 - 1,
+            escapes: Vec::new(),
+            raw: String::new(),
+        };
+        assert_eq!(
+            encode_interior(single, &site, "SELECT \"x\" FROM t"),
+            "SELECT \"x\" FROM t"
         );
     }
 }
