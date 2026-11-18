@@ -4,7 +4,8 @@
 |---|---|
 | `blastit dev` | your machine, no root |
 | `blastit check` | CI (`blastit test` is an alias) |
-| `blastit lsp` | your editor |
+| `blastit lsp` | your editor, Linux |
+| `blastit-lsp` | your editor, Linux/macOS/Windows |
 | `blastit` | production |
 | `blastit-manifest fold` | grants from a log |
 
@@ -67,19 +68,88 @@ stops at `0` or `2`, with nothing run. [What it checks](../ci.md#what-it-fails-o
 and [the `--json` contract](../ci.md#for-agents-json) are on the CI page.
 `blastit test` is the same command under its other name.
 
-## `blastit lsp`
+## `blastit lsp` (Linux)
 
-An editor spawns it; you never run it by hand. Start it with no arguments —
-`blastit lsp`, or `uv run blastit lsp` when the CLI is not installed (`uv add
-blastit`) — and register the extensionless name `Blastfile` for the buffers it
+An editor spawns it; the one thing you run by hand is `blastit lsp --help`, which
+prints the usage and exits `0`. The editor starts the session with no arguments —
+`blastit lsp` — and registers the extensionless name `Blastfile` for the buffers it
 serves. It speaks the Language Server Protocol on stdin/stdout: the editor sends
 each document, so it reads no `./Blastfile`, no config and no network, and needs no
 privileges; logs go to stderr, so stdout stays the protocol. An error carries the
 sentence `blastit check` prints after its `Blastfile:` prefix, and a refusal with
 no position is already one sentence — grants, queries and coverage stay with
 [`blastit check`](#blastit-check). Formatting rewrites the file to the [canonical
-layout](blastfile.md#formatting). It exits `0` after the client's `shutdown`, and
-`1` only if the client disappears without one — never because a document is broken.
+layout](blastfile.md#formatting). It exits `0` after the client's `shutdown`; `1`
+when the session ends without one — the client disappears, sends `exit` first, or
+its stream cannot be framed; `2` for an argument it does not take. Never because a
+document is broken. This command delegates to the same implementation as the
+portable [`blastit-lsp`](#blastit-lsp).
+
+## `blastit-lsp`
+
+The same server as [`blastit lsp`](#blastit-lsp-linux), packaged as its own binary
+for Linux, macOS and Windows. An editor starts it with no arguments —
+`<path>/blastit-lsp` — on stdin/stdout, and registers the extensionless name
+`Blastfile`; there is no `--help` and no `--version`, and an argument is ignored
+while it waits on stdin, so started by hand it exits `1` when the input ends. It
+reads no `./Blastfile`, no `BLASTIT_*` variable and no configuration, opens no
+socket, serves no application and holds no privilege. `blastit` itself stays the
+Linux-only server: macOS and Windows get the **editor** only, because serving an app
+needs Linux, as root or with the capability set ([deployments](../deploy/index.md)).
+It exits `0` after the client's `shutdown`; `1` when the session ends without one —
+the client disappears, sends `exit` first, or its stream cannot be framed. Never
+because a document is broken.
+
+The parser is the visible check: a `query` that does not parse gets one diagnostic
+at its first token — the sentence `blastit check` prints on Linux.
+
+Zed's extension downloads this binary itself, once per Blastit release, and
+reuses the cached copy. On Linux, [`blastit lsp`](#blastit-lsp-linux) is the same
+server: the extension runs it when `blastit` is on the `PATH` it sees, and downloads
+otherwise. To pin a version, work offline, or use another editor, take the asset for
+your target from [a release](https://github.com/OffworldNexus/blastit/releases) and
+unpack it — one directory holding `blastit-lsp` (`blastit-lsp.exe` on Windows):
+
+```text
+# macOS, Apple silicon; Intel uses x86_64-apple-darwin, Linux the same command
+tar -xzf blastit-lsp-aarch64-apple-darwin.tar.gz
+# Windows (PowerShell)
+Expand-Archive blastit-lsp-x86_64-pc-windows-msvc.zip -DestinationPath "$env:LOCALAPPDATA\blastit-lsp"
+```
+
+| Target | Asset |
+|---|---|
+| Linux x86_64 | `blastit-lsp-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux aarch64 | `blastit-lsp-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `blastit-lsp-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `blastit-lsp-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `blastit-lsp-x86_64-pc-windows-msvc.zip` |
+
+Nothing else is built for the editor: no 32-bit target, no musl, no Windows on ARM.
+Each asset is
+`https://github.com/OffworldNexus/blastit/releases/latest/download/<asset>`, or the
+same name under a tag. Shipped from the release that carries the portable server;
+earlier tags have no `blastit-lsp-*` asset.
+
+Keep that file anywhere permanent and name its absolute path — not its folder — in
+your settings: `zed: open settings` for every project, or a project's
+`.zed/settings.json`, merging:
+
+```json
+{ "lsp": { "blastit-lsp": { "binary": { "path": "/Users/you/bin/blastit-lsp" } } } }
+```
+
+On Windows that value is `C:/Users/you/bin/blastit-lsp.exe` — forward slashes are
+valid JSON and paste anywhere. That object is Zed's; another LSP client
+needs only the file. On Linux a `blastit` binary works instead:
+
+```json
+{ "lsp": { "blastit-lsp": { "binary": { "path": "/usr/local/bin/blastit", "arguments": ["lsp"] } } } }
+```
+
+Without `arguments` it starts the serving server and fails closed — and `"arguments"`
+belongs only beside a `blastit` path, never beside `blastit-lsp`. A macOS browser
+download is quarantined: `xattr -d com.apple.quarantine blastit-lsp` clears it.
 
 ## `blastit`
 

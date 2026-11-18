@@ -1320,10 +1320,10 @@ SQL_KEYWORDS = (
 )
 
 #: `page -> its `text` fences in reading order`, each `(first significant line,
-#: is a Blastfile)`. The 33 blocks measured with
+#: is a Blastfile)`. The 34 blocks measured with
 #: `python/tests/runnable_docs/fences.py`: 29 carry a Blastfile (12
 #: `text title="Blastfile"` documents and 17 keyword-led statement lists) and
-#: the four named below stay plain.
+#: the five named below stay plain.
 #:
 #: The key is the fence's first non-blank, non-comment line, **never its line
 #: number**: another node edits the prose above these fences (MB.34.8 already
@@ -1381,6 +1381,9 @@ EXPECTED_FENCES: dict[str, tuple[tuple[str, bool], ...]] = {
             ),
             False,
         ),
+    ),
+    "docs/reference/cli.md": (
+        ("tar -xzf blastit-lsp-aarch64-apple-darwin.tar.gz", False),
     ),
 }
 
@@ -1724,7 +1727,7 @@ def test_the_highlighter_is_wired_and_published():
 
 
 def test_every_text_block_classifies_as_measured(tmp_path):
-    """The 29 + 4 split, matched by first line so a prose edit cannot break it."""
+    """The 29 + 5 split, matched by first line so a prose edit cannot break it."""
     rows = fence_rows()
     verdicts = run_lexer(tmp_path, {"classify": [body for *_, body in rows]})[
         "classify"
@@ -1768,9 +1771,9 @@ def test_every_text_block_classifies_as_measured(tmp_path):
     highlighted = sum(
         1 for entries in measured.values() for _, verdict in entries if verdict
     )
-    assert (highlighted, len(rows) - highlighted) == (29, 4), (
+    assert (highlighted, len(rows) - highlighted) == (29, 5), (
         f"{highlighted} fences highlighted and {len(rows) - highlighted} plain, "
-        "not 29 + 4"
+        "not 29 + 5"
     )
 
 
@@ -2084,7 +2087,7 @@ def test_nothing_outside_a_query_string_is_sql(tmp_path):
 def test_the_plain_fences_stay_plain_with_a_query_line_appended(tmp_path):
     """The refusal is the block's, not the line's: a `query` line cannot rescue it."""
     bodies = blocks_for(highlight=False)
-    assert len(bodies) == 4, f"{len(bodies)} plain fences, not 4"
+    assert len(bodies) == 5, f"{len(bodies)} plain fences, not 5"
     appended = [body + "\nquery 'SELECT 1'\n" for _, _, body in bodies]
     verdicts = run_lexer(tmp_path, {"classify": appended})["classify"]
     wrong = [

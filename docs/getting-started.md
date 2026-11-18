@@ -9,10 +9,14 @@ $ uv init --app
 $ uv add blastit
 ```
 
-Wheels cover Linux x86_64 on CPython 3.13 and 3.14; elsewhere the sdist builds
-from source and needs a Rust toolchain and libclang.
+Wheels cover Linux x86_64 on CPython 3.13 and 3.14; on other Linux targets the
+sdist builds from source and needs a Rust toolchain, libclang and a C compiler.
+`uv add blastit` has no macOS or Windows build: on those, the editor comes from the
+Zed extension, which installs from a checkout until it is listed
+([editors](local.md#editors)). Serving an app is Linux, which is what these steps
+assume.
 
-Without Python at all, build the standalone binary from this repository:
+On Linux, without Python at all, build the standalone binary from this repository:
 `cargo build -p blastit --locked` writes `target/debug/blastit`, a plain Rust
 binary with no `libpython` to install and no `PATH` to configure.
 

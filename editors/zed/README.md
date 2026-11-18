@@ -2,23 +2,34 @@
 
 Zed language extension for `Blastfile`, Blastit's routing table and permission
 model: syntax highlighting, brackets, an outline of the file's sections, and the
-`blastit lsp` language server.
+`blastit-lsp` language server.
 
 ## Install
 
-Open the command palette, run `zed: install dev extension`, and pick this
-directory (`editors/zed`, the one holding `extension.toml`).
+**Blastfile** is not in Zed's registry yet: install Rust, `git clone
+https://github.com/OffworldNexus/blastit`, then `zed: install dev extension` and pick
+`editors/zed` (Zed builds it — and its `wasm32-wasip2` target — with `cargo`). Once
+listed, `zed: extensions` → **Blastfile** is the whole step.
 
-The extension finds the server itself, so there is nothing to configure:
+The extension finds the server itself, first match wins:
 
-| On your `PATH` | What runs |
+| It uses | What runs |
 |---|---|
-| `blastit` | `blastit lsp` |
-| `uv`, in a project that has `blastit` | `uv run --frozen --no-sync --quiet blastit lsp` |
+| `lsp.blastit-lsp.binary.path` | that `blastit-lsp` file — an unpacked archive, or a build of it |
+| `blastit-lsp` on your `PATH` | `blastit-lsp` |
+| `blastit` on your `PATH` | `blastit lsp` |
+| none of these | its GitHub Release build for your platform, downloaded once |
 
-With neither, Zed shows one line: *blastit is not installed: run `uv add blastit`
-(or `uv sync` once in this project), or `uv tool install blastit`*. `--no-sync` is
-deliberate: opening a repository must not run that repository's build backend.
+Until the release that ships `blastit-lsp`, this extension runs a `blastit`/`uv`
+already on `PATH`.
+
+Every row runs the same server: rows 1–3 use a file already on disk, and the last
+fetches that same file once and reuses it. Never point `path` at a `blastit` binary
+without `"arguments": ["lsp"]`: the bare binary is the production server and fails
+closed. If none can run — no build for your OS and architecture, no network — Zed
+says so in one line, and `binary.path` is the way past it. Unpacking an archive,
+the Windows path and the `"arguments": ["lsp"]` shape are on the
+[CLI page](../../docs/reference/cli.md#blastit-lsp).
 
 `format_on_save` defaults to `off` for languages Zed does not special-case, so
 add one line to your project's `.zed/settings.json` (this repository ships it):
@@ -41,8 +52,8 @@ fetches the pinned commit and compiles the committed `src/parser.c` into
 
 ## Regenerating (maintainers only)
 
-Users need no `npm`, no Tree-sitter CLI, no `cargo` and no `wasi-sdk`; this
-section is for whoever edits `grammar.js`.
+Users need no `npm`, no Tree-sitter CLI and no `wasi-sdk`; this section is for
+whoever edits `grammar.js`.
 
 The generator is **Tree-sitter CLI 0.25.10**, pinned in
 `editors/tree-sitter-blastfile/package.json` (`devDependencies`) and recorded

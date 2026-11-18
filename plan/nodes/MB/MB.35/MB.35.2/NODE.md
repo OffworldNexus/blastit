@@ -2,7 +2,7 @@
 id: MB.35.2
 title: "Document blastit-lsp for Linux, macOS and Windows: install, run, what the editor gets, and what stays Linux-only"
 kind: task
-status: active
+status: review
 owner: "doc-writer"
 priority: 1
 depends_on: [MB.35.1, MB.32.1]
@@ -13,11 +13,11 @@ paths:
   - editors/zed/README.md
   - docs/troubleshooting.md
   - python/tests/test_docs_assets.py
-attempts: 1
+attempts: 2
 max_attempts: 3
 escalation: none
 created: "2026-11-17T13:17"
-updated: "2026-11-18T05:11"
+updated: "2026-11-18T06:15"
 ---
 
 # Goal

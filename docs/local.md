@@ -1,11 +1,13 @@
 # Local development
 
-`blastit dev` runs your app the way production does, without root: everything runs
-as you, so nothing needs `sudo`, and a misconfiguration fails on your machine
-instead of in production. One uid means it is **not a sandbox**: the credential
-barrier still keeps the database URL out of the app's `environ` and `argv`, but any
-process running as you can read `.env` and your `/proc` entries. Use a throwaway
-local database; never point `blastit dev` at production data.
+`blastit dev` is Linux only; the editor is not — it works on Linux, macOS and
+Windows ([Editors](#editors)). `blastit dev` runs your app the way production does,
+without root: everything runs as you, so nothing needs `sudo`, and a
+misconfiguration fails on your machine instead of in production. One uid means it
+is **not a sandbox**: the credential barrier still keeps the database URL out of
+the app's `environ` and `argv`, but any process running as you can read `.env` and
+your `/proc` entries. Use a throwaway local database; never point `blastit dev` at
+production data.
 
 ## Start
 
@@ -146,16 +148,21 @@ store, including the ones reading password hashes.
 
 ## Editors
 
-1. Zed ≥ 0.205: `zed: extensions`, install **Blastfile**. Not listed yet: `zed:
-   install dev extension` on the repo's `editors/zed` — the only step needing `cargo`.
-2. Open `./Blastfile`: colours (SQL inside a `query '…'` only: a `query "…"` is
+1. Zed ≥ 0.205. **Blastfile** is not in Zed's registry yet: `git clone
+   https://github.com/OffworldNexus/blastit`, then `zed: install dev extension` on
+   `editors/zed` — the only step needing Rust (Zed's builder installs the
+   `wasm32-wasip2` target itself). Once listed, `zed: extensions` → **Blastfile** is
+   the whole step.
+2. Once the release ships `blastit-lsp`, the extension finds the server itself, in a
+   fixed order ([the order](reference/cli.md#blastit-lsp)); there is nothing to
+   configure.
+3. Open `./Blastfile`: colours (SQL inside a `query '…'` only: a `query "…"` is
    one string), bracket matching, an outline, and a squiggle, inside the string,
    at the `line:col` `blastit check` prints. Quick Fix **Parameterize SQL for
    Blastfile ($?)** turns a pasted literal or `$1…$n` into `$?`, and an
    `IN ($1, $2)` list into `IN ($?, ...)` ([grants](reference/blastfile.md#grants)
-   has the shapes). Hovering `$?` or `...` explains each. The extension starts
-   `blastit lsp` itself, from `PATH` or through `uv run`.
-3. Merge this into `.zed/settings.json` to turn format-on-save on: Zed's default is
+   has the shapes). Hovering `$?` or `...` explains each.
+4. Merge this into `.zed/settings.json` to turn format-on-save on: Zed's default is
    `off` and an extension cannot set it. Blastit's repo commits that file; save a
    mis-indented line and it snaps back.
 
@@ -163,10 +170,15 @@ store, including the ones reading password hashes.
 { "languages": { "Blastfile": { "format_on_save": "on" } } }
 ```
 
-Another editor registers the extensionless `Blastfile` and starts
-[`blastit lsp`](reference/cli.md#blastit-lsp) on stdin/stdout — using it needs
-no `npm`, Tree-sitter CLI, `cargo` or `wasi-sdk`. CI checks the file with
-`blastit check`, and production never runs `blastit lsp`.
+Another editor registers the extensionless `Blastfile` and spawns
+[`blastit-lsp`](reference/cli.md#blastit-lsp) with nothing on the command line, or
+[`blastit lsp`](reference/cli.md#blastit-lsp-linux) on Linux, speaking LSP on
+stdin/stdout. Running the server needs no `npm`, Tree-sitter CLI, `cargo` or
+`wasi-sdk`. CI checks the file with `blastit check`, and production never runs
+either. macOS and Windows get this editor only: serving an app needs Linux, as root
+or with the capability set ([deployments](deploy/index.md)), and those platforms
+have no `blastit` binary at all — `dev`, `check`, `fmt` and `lsp` are Linux only —
+so run the audit in CI or a Linux container.
 
 ## Before you deploy
 

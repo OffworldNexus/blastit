@@ -98,3 +98,10 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | the container is OOM-killed | the view-process cap is too high: set `BLASTIT_MAX_VIEW_PROCESSES` or raise `BLASTIT_VIEW_MEM_ESTIMATE` |
 | a `memory:` WARN, then it serves | the reading is above the `85%` default and you raised `BLASTIT_MEM_HIGH_WATERMARK` past it; the line names the knob, the measured value and the cache it left out. Free memory to quieten it |
 | a route's first request is slower | a lazy view process forking: mark hot routes `prefork = true` |
+
+## The editor
+
+| Symptom | Fix |
+|---|---|
+| the extension cannot find the server | set `lsp.blastit-lsp.binary.path` to the file, not its folder ([shapes](reference/cli.md#blastit-lsp)); `which blastit-lsp` (`where.exe blastit-lsp` on Windows) reads your shell's `PATH`, which may not be the one Zed captured at launch, so restart Zed after changing it; a Linux `blastit` at that path needs `"arguments": ["lsp"]` |
+| it says there is no `blastit-lsp` for your OS and architecture, or the download fails | no asset for that pair ([the five](reference/cli.md#blastit-lsp)): use a supported machine, or run `cargo build -p blastit-lsp --release --locked` after the release that ships `blastit-lsp`, then point `binary.path` at `target/release/blastit-lsp` (needs `cargo`, `clang`, `libclang`; `LIBCLANG_PATH` on Windows); offline, unpack an asset by hand and point at it |
