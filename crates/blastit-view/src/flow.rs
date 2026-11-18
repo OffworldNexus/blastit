@@ -37,11 +37,11 @@ use crate::sync::lock;
 /// Granting one `WINDOW` per byte would be a frame per byte; waiting for more
 /// than this delays the next read of a streaming upload. 64 KiB is a few
 /// frames' worth at the default frame size and small next to the window.
-pub(crate) const WINDOW_BATCH: usize = 64 * 1024;
+pub const WINDOW_BATCH: usize = 64 * 1024;
 
 /// The flow-control state of one request.
 #[derive(Debug)]
-pub(crate) struct Flow {
+pub struct Flow {
     /// Request-body bytes the scheduler may still send us.
     ///
     /// It starts at [`INITIAL_WINDOW`] and grows as the application consumes
@@ -53,7 +53,7 @@ pub(crate) struct Flow {
 
 impl Flow {
     /// A fresh window in both directions.
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             body_left: Mutex::new(i64::from(INITIAL_WINDOW)),
             response: Credit::new(INITIAL_WINDOW),
@@ -64,7 +64,7 @@ impl Flow {
     ///
     /// Returns `false` when the scheduler sent more than its credit, which
     /// §3.1 calls a broken protocol: the caller decides what to do with it.
-    pub(crate) fn body_received(&self, bytes: usize) -> bool {
+    pub fn body_received(&self, bytes: usize) -> bool {
         let mut left = lock(&self.body_left);
         if i64::try_from(bytes).unwrap_or(i64::MAX) > *left {
             return false;
@@ -78,26 +78,29 @@ impl Flow {
     /// The caller must send the matching `WINDOW` frame: the local count is
     /// raised first so that frames already in flight from the scheduler are
     /// never refused, and a lost `WINDOW` frame only ever stalls the sender.
-    pub(crate) fn body_granted(&self, bytes: usize) {
+    pub fn body_granted(&self, bytes: usize) {
         let mut left = lock(&self.body_left);
         *left = left.saturating_add(i64::try_from(bytes).unwrap_or(i64::MAX));
     }
 
     /// Request-body bytes the scheduler may still send us.
-    #[cfg(test)]
-    pub(crate) fn body_left(&self) -> i64 {
+    ///
+    /// `pub` rather than test-only: the WSGI worker's unit tests assert it from
+    /// `blastit-view-python`, where this crate is a dependency and `#[cfg(test)]`
+    /// does not reach.
+    pub fn body_left(&self) -> i64 {
         *lock(&self.body_left)
     }
 
     /// The response-body credit of this request.
-    pub(crate) fn response(&self) -> &Credit {
+    pub fn response(&self) -> &Credit {
         &self.response
     }
 }
 
 /// A one-directional credit window: how much body the peer still accepts.
 #[derive(Debug)]
-pub(crate) struct Credit {
+pub struct Credit {
     available: Mutex<u64>,
     wake: Condvar,
     closed: AtomicBool,
@@ -122,7 +125,7 @@ impl Credit {
     /// Blocks on a condvar, so the caller must have released the GIL: nothing
     /// here touches the interpreter, but a request thread that waited while
     /// holding it would stop every other request in the process.
-    pub(crate) fn take(&self, want: usize) -> usize {
+    pub fn take(&self, want: usize) -> usize {
         let mut available = lock(&self.available);
         loop {
             if *available > 0 {
@@ -147,7 +150,7 @@ impl Credit {
     /// only make progress by reading more frames (a single-threaded worker
     /// transport) can go and read them instead of parking here.
     #[cfg(any(feature = "php", test))]
-    pub(crate) fn try_take(&self, want: usize) -> Option<usize> {
+    pub fn try_take(&self, want: usize) -> Option<usize> {
         let mut available = lock(&self.available);
         if *available > 0 {
             let taken = (want as u64).min(*available);
@@ -158,7 +161,7 @@ impl Credit {
     }
 
     /// Grant `bytes` more credit.
-    pub(crate) fn grant(&self, bytes: u32) {
+    pub fn grant(&self, bytes: u32) {
         {
             let mut available = lock(&self.available);
             *available = available.saturating_add(u64::from(bytes));
@@ -171,14 +174,14 @@ impl Credit {
     /// A taker with credit left still spends it — the frames may yet be
     /// deliverable on a drained channel — but one that would have to wait
     /// stops instead.
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.wake.notify_all();
     }
 
     /// Credit left, for tests.
     #[cfg(test)]
-    pub(crate) fn available(&self) -> u64 {
+    pub fn available(&self) -> u64 {
         *lock(&self.available)
     }
 }

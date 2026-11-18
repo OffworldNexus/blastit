@@ -11,15 +11,17 @@ publish.workspace = true
 workspace = true
 
 [features]
-default = ["python"]
-# The PEP 3333 bridge and the `serve` loop that runs a WSGI callable. A build
-# that serves no WSGI route leaves it off and links no `libpython` at all; the
-# channel framing (`wire`, `flow`) stays compiled either way because it is the
-# worker transport, not the interpreter binding (ADR-0010 §4, `MB.3.11`).
-python = ["dep:pyo3"]
+# No WSGI feature and no default feature: the framing, the credit windows and
+# the loaded-file codec are plain `std` and always compiled, while the
+# embedded CPython worker is `blastit-view-python` — a crate of its own — so a
+# `--workspace` build or another crate's defaults can no longer drag
+# `libpython` into an artifact that serves no WSGI route
+# (`docs/knowledge/LESSONS.md` `MB.17`, `ADR-0016`).
+default = []
 # Embedded PHP: `PhpEmbedRuntime` over the same `view.chan` framing. It needs
 # `libphp` only through `dlopen` inside the worker (`MB.3.13`), so this feature
 # adds no link-time dependency and the standalone binary stays portable.
+# `MB.36.5` moves `php.rs` into `blastit-view-php` and deletes this line.
 php = ["dep:blastit-php-sapi"]
 
 [dependencies]
@@ -27,13 +29,4 @@ blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
 # The frozen `blastit_php_abi_v1` surface and the one `dlopen` module. Optional:
 # a build with no PHP route pays for neither.
 blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }
-# No `auto-initialize`: a view process is forked from an interpreter that
-# `init` has already initialised (§4, §9.3), and library code must never
-# start or stop one.
-pyo3 = { version = "0.30.1", optional = true }
 thiserror = "2.0.21"
-
-[dev-dependencies]
-# The tests own the interpreter: they attach to it themselves, and
-# `auto-initialize` is what lets them (see `tests/gil.rs`).
-pyo3 = { version = "0.30.1", features = ["auto-initialize"] }

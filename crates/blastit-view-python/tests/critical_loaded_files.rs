@@ -27,7 +27,6 @@
 //! observe the first one's consumed flushes. The other test reads
 //! `stage1.rs`'s source and never attaches to Python.
 
-#![cfg(feature = "python")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
@@ -36,9 +35,8 @@ use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use blastit_view::{
-    LoadedReport, LoadedTracker, MAX_BATCH_BYTES, ViewConfig, decode, serve_reporting,
-};
+use blastit_view::loaded::{LoadedReport, MAX_BATCH_BYTES, decode};
+use blastit_view_python::{LoadedTracker, WsgiConfig, serve_reporting};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -118,7 +116,7 @@ fn the_loaded_file_report_is_exact() {
                 py,
                 worker_chan,
                 py.None(),
-                ViewConfig::for_route("web"),
+                WsgiConfig::for_route("web"),
                 Some(LoadedReport {
                     socket: worker_socket,
                     source: 3,
@@ -358,7 +356,7 @@ fn the_loaded_file_report_is_exact() {
 /// `the_loaded_file_report_is_exact`.
 #[test]
 fn the_dev_boot_installs_the_tracker_before_the_first_import_and_harvests_after_warmup() {
-    let src = include_str!("../src/stage1.rs");
+    let src = include_str!("../../blastit/src/stage1.rs");
     let at = |needle: &str| {
         src.find(needle)
             .unwrap_or_else(|| panic!("stage1.rs no longer contains {needle:?}"))

@@ -51,7 +51,8 @@ use blastit_php_sapi::{FileSink, LoadError, Loaded, ServerVars, SharedObject, Si
 use crate::error::ViewError;
 use crate::flow::Flow;
 use crate::loaded::Reporter;
-use crate::runtime::{OUTPUT_LINE_CAP, OutputStream, RequestEnd, RequestIo, WorkerRuntime};
+use crate::runtime::{RequestEnd, RequestIo, WorkerRuntime};
+use crate::stream::{OUTPUT_LINE_CAP, OutputStream};
 use crate::sync::lock;
 use crate::wire::Writer;
 

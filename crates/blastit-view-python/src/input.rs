@@ -16,10 +16,10 @@ use pyo3::exceptions::PyOSError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList};
 
-use crate::flow::WINDOW_BATCH;
 use crate::request::RequestState;
-use crate::sync::lock;
-use crate::wire::Writer;
+use blastit_view::flow::WINDOW_BATCH;
+use blastit_view::sync::lock;
+use blastit_view::wire::Writer;
 
 /// The largest size a single read will be asked for.
 ///

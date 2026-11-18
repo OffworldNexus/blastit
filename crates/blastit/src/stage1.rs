@@ -1664,7 +1664,7 @@ fn load(
             .as_deref()
             .map(|cwd| PathBuf::from(std::ffi::OsString::from_vec(cwd.to_vec())))
             .filter(|_| report.is_some());
-        root.and_then(|root| blastit_view::LoadedTracker::install(py, &root))
+        root.and_then(|root| blastit_view_python::LoadedTracker::install(py, &root))
     } else {
         None
     };

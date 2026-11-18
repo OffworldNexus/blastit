@@ -10,7 +10,7 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyString, PyTuple};
 
 use crate::input::Input;
-use crate::sync::lock;
+use blastit_view::sync::lock;
 
 /// The interpreter's `sys.stderr`, resolved once per process.
 ///

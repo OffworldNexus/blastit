@@ -16,7 +16,7 @@ use crate::sync::lock;
 /// best-effort basis. The I/O thread notices a dead channel on its own next
 /// read.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WriteError {
+pub enum WriteError {
     /// The frame does not fit the channel's frame limit, or a field could not
     /// be encoded. A `*_BODY` frame never fails this way, because bodies are
     /// split first; a `RESP_HEAD` with a very large header block can.
@@ -45,7 +45,7 @@ pub(crate) enum WriteError {
 ///
 /// Callers release the GIL around these calls, so a slow reader on the
 /// scheduler side blocks neither the interpreter nor the channel's I/O thread.
-pub(crate) struct Writer {
+pub struct Writer {
     inner: Mutex<Inner>,
 }
 
@@ -61,7 +61,7 @@ struct Inner {
 
 impl Writer {
     /// A writer that owns its end of `view.chan`.
-    pub(crate) fn new(stream: UnixStream, limits: Limits) -> Self {
+    pub fn new(stream: UnixStream, limits: Limits) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 stream,
@@ -72,7 +72,7 @@ impl Writer {
     }
 
     /// Send exactly one frame, under `id`.
-    pub(crate) fn write_frame(&self, frame: &Frame, id: u32) -> Result<(), WriteError> {
+    pub fn write_frame(&self, frame: &Frame, id: u32) -> Result<(), WriteError> {
         let mut inner = lock(&self.inner);
         let Inner {
             stream,
@@ -99,7 +99,7 @@ impl Writer {
     /// request was cancelled, or the channel's far end is gone): the caller
     /// gives up on the response instead of blocking for a grant that cannot
     /// come.
-    pub(crate) fn write_body(&self, id: u32, body: &[u8], flow: &Flow) -> Result<(), WriteError> {
+    pub fn write_body(&self, id: u32, body: &[u8], flow: &Flow) -> Result<(), WriteError> {
         let credit = flow.response();
         let mut sent = 0;
         while sent < body.len() {
@@ -117,7 +117,7 @@ impl Writer {
 
     /// The payload size a body frame may carry, so callers can size their
     /// reads.
-    pub(crate) fn max_payload(&self) -> usize {
+    pub fn max_payload(&self) -> usize {
         lock(&self.inner).limits.max_payload()
     }
 }

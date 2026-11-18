@@ -26,8 +26,9 @@ default = ["php", "static"]
 # Every embedded-CPython role: the `BLASTIT_APP` import, the WSGI views, the
 # immortalisation pass and `blastit dev --learn`. Off in the standalone archive,
 # which carries no `libpython` and refuses a manifest that needs an interpreter
-# (ADR-0010 §4, `MB.3.11`).
-python = ["dep:pyo3", "blastit-view/python"]
+# (ADR-0010 §4, `MB.3.11`). The WSGI worker itself is `blastit-view-python`, a
+# crate of its own: the feature pulls it (and `pyo3`) in, and nothing else can.
+python = ["dep:pyo3", "dep:blastit-view-python"]
 # Embedded PHP routes (`[route.php]`, ADR-0010). `libphp` is never linked: a
 # view `dlopen`s the host's NTS library and the per-minor shim, and the loader
 # that does it lives in `blastit-php-sapi`. The standalone binary therefore
@@ -55,6 +56,10 @@ blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler", default-
 blastit-sqlpolicy = { version = "0.2.0", path = "../blastit-sqlpolicy" }
 blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
 blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+# The embedded-CPython worker (`MB.36.3`): PEP 3333, `wsgi.input`, the response
+# frames and the worker pool, behind the `python` feature. A build without that
+# feature does not link this crate, and therefore not `libpython` either.
+blastit-view-python = { version = "0.2.0", path = "../blastit-view-python", optional = true }
 libc = "0.2.191"
 pyo3 = { version = "0.30.1", optional = true }
 rustix = { version = "1.1.5", features = ["event", "fs", "process", "net", "pipe", "stdio"] }

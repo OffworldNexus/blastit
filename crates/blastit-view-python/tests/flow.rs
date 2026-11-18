@@ -11,7 +11,7 @@ mod support;
 use std::time::Duration;
 
 use blastit_frame::{DoneOutcome, Frame};
-use blastit_view::ViewError;
+use blastit_view_python::ViewError;
 use support::{End, Harness, INITIAL_CREDIT, load_app};
 
 /// Three mebibytes, with a byte pattern that makes a lost or reordered chunk

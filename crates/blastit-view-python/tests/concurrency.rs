@@ -9,7 +9,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use blastit_frame::{DoneOutcome, Frame, Limits};
-use blastit_view::ViewConfig;
+use blastit_view_python::WsgiConfig;
 use support::{Harness, load_app, load_module};
 
 /// Extract the body of one request's response from the frames collected for it.
@@ -80,9 +80,9 @@ fn a_parked_worker_is_reused_for_the_next_request() {
     // runs on the same worker, with the same Python thread state. The cap is
     // one, so this also checks that a parked worker does not count as a live
     // request and does not turn a sequential request into a `503`.
-    let cfg = ViewConfig {
+    let cfg = WsgiConfig {
         max_threads: Some(1),
-        ..ViewConfig::for_route("web")
+        ..WsgiConfig::for_route("web")
     };
     let mut harness = Harness::start(
         load_app(
@@ -168,9 +168,9 @@ fn concurrent_responses_do_not_interleave_their_frames() {
     // frames are far smaller than the bodies. If the writer were not
     // serialising whole frames, the decoder would see nonsense.
     let limits = Limits::new(1024).unwrap();
-    let cfg = ViewConfig {
+    let cfg = WsgiConfig {
         frame_limits: limits,
-        ..ViewConfig::for_route("web")
+        ..WsgiConfig::for_route("web")
     };
     let mut harness = Harness::start(
         load_app(

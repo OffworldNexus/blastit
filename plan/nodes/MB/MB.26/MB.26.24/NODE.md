@@ -51,6 +51,15 @@ globs, `$r` macro passes, raw identifiers, split paths). The three defects above
 other side of that boundary — the **manifest** and the **crate-root set** — which the guard reads
 but does not fully derive. Keep the token analysis; extend what it is anchored to.
 
+**A fourth item, added by the lead after `MB.36.3`.** The `closure` promise's `SERVING` tuple
+still names only the pre-`MB.36` crates, so `blastit-view-static`, `blastit-view-python` and
+`blastit-view-php` — the three crates `MB.36` creates, each of which links a runtime or a
+privilege the portable server must never see — are absent from the denylist that is supposed to
+name them. Add all three (and check the tuple against `crates/` so the next crate cannot be
+forgotten), or close the property the way the docstring already proposes by freezing the
+reviewed closure in a checked-in file.
+
+
 `docs/testing/E2E-MB.35.md` §6/§7 quote the guard's sentences, so the wording change ("target
 paths under `src/`" only when it is true for every target class) must be reflected there, and the
 one stale number it still carries (2000639 archive bytes vs the surviving artefact's 2000670) is
@@ -67,8 +76,9 @@ $ make check
 
 plus one **compiling** negative twin per class, proved red for the right property:
 `[[test]]` with a path outside `src/`; `src/bin/x.rs` with an `unsafe` block and no
-`#![forbid(unsafe_code)]`; a `package =` rename. Each twin's fixture must be shown to build with
-`cargo check --all-targets` first, or it proves nothing.
+`#![forbid(unsafe_code)]`; a `package =` rename; and a `closure` twin whose fixture reaches a new
+view crate by name, so the `SERVING` tuple cannot silently omit one again. Each twin's fixture
+must be shown to build with `cargo check --all-targets` first, or it proves nothing.
 
 # Notes
 

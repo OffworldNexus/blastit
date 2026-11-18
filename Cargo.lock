@@ -130,6 +130,7 @@ dependencies = [
  "blastit-sqlpolicy",
  "blastit-sys",
  "blastit-view",
+ "blastit-view-python",
  "libc",
  "pyo3",
  "rustix 1.1.5",
@@ -281,8 +282,16 @@ version = "0.2.0"
 dependencies = [
  "blastit-frame",
  "blastit-php-sapi",
- "pyo3",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "blastit-view-python"
+version = "0.2.0"
+dependencies = [
+ "blastit-frame",
+ "blastit-view",
+ "pyo3",
 ]
 
 [[package]]

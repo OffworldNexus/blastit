@@ -21,7 +21,7 @@ use blastit_frame::RequestCost;
 use blastit_frame::{
     Decoder, DoneOutcome, Frame, INITIAL_WINDOW, Limits, ReqHead, RespHead, Scheme, encode,
 };
-use blastit_view::{ViewConfig, ViewError, serve};
+use blastit_view_python::{ViewError, WsgiConfig, serve};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
@@ -43,7 +43,7 @@ pub struct Harness {
 
 impl Harness {
     /// Start a view on a socketpair and hand back its other end.
-    pub fn start(app: Py<PyAny>, cfg: ViewConfig) -> Self {
+    pub fn start(app: Py<PyAny>, cfg: WsgiConfig) -> Self {
         Self::start_with(app, cfg, None)
     }
 
@@ -51,11 +51,11 @@ impl Harness {
     ///
     /// This is how a caller that sets one (a supervisor, a signal-driven loop)
     /// would hand the channel over; a timed-out read must not end the process.
-    pub fn start_reading_with_timeout(app: Py<PyAny>, cfg: ViewConfig, timeout: Duration) -> Self {
+    pub fn start_reading_with_timeout(app: Py<PyAny>, cfg: WsgiConfig, timeout: Duration) -> Self {
         Self::start_with(app, cfg, Some(timeout))
     }
 
-    fn start_with(app: Py<PyAny>, cfg: ViewConfig, view_timeout: Option<Duration>) -> Self {
+    fn start_with(app: Py<PyAny>, cfg: WsgiConfig, view_timeout: Option<Duration>) -> Self {
         let limits = cfg.frame_limits;
         let (ours, peer) = UnixStream::pair().expect("socketpair");
         peer.set_read_timeout(Some(TIMEOUT)).expect("read timeout");
@@ -76,7 +76,7 @@ impl Harness {
 
     /// Start a view whose only configuration is a route name.
     pub fn for_route(route: &str, app: Py<PyAny>) -> Self {
-        Self::start(app, ViewConfig::for_route(route))
+        Self::start(app, WsgiConfig::for_route(route))
     }
 
     /// Send one frame.

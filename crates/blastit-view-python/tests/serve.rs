@@ -7,7 +7,7 @@ mod support;
 use std::time::{Duration, Instant};
 
 use blastit_frame::{DoneOutcome, Frame, Limits, RespHead};
-use blastit_view::{ViewConfig, ViewError};
+use blastit_view_python::{ViewError, WsgiConfig};
 use support::{End, Harness, global_int, hello_app};
 
 #[test]
@@ -282,9 +282,9 @@ fn cancel_discards_the_rest_of_a_response_but_still_sends_done() {
 
 #[test]
 fn max_threads_refuses_a_request_with_503() {
-    let cfg = ViewConfig {
+    let cfg = WsgiConfig {
         max_threads: Some(1),
-        ..ViewConfig::for_route("web")
+        ..WsgiConfig::for_route("web")
     };
     let mut harness = Harness::start(support::load_app("busy", &support::sleeping_app(0.4)), cfg);
     assert_eq!(harness.expect_frame(), (0, Frame::Ready));
@@ -312,9 +312,9 @@ fn max_threads_refuses_a_request_with_503() {
 #[test]
 fn a_large_response_is_split_into_frames_that_fit() {
     let limits = Limits::new(256).unwrap();
-    let cfg = ViewConfig {
+    let cfg = WsgiConfig {
         frame_limits: limits,
-        ..ViewConfig::for_route("web")
+        ..WsgiConfig::for_route("web")
     };
     let module = support::load_module(
         "large_body",
@@ -391,7 +391,7 @@ fn a_body_that_is_never_read_stalls_instead_of_aborting() {
 fn a_second_req_head_for_a_live_request_is_a_protocol_error() {
     let mut harness = Harness::start(
         support::load_app("slow_head", &support::sleeping_app(0.3)),
-        ViewConfig::for_route("web"),
+        WsgiConfig::for_route("web"),
     );
     assert_eq!(harness.expect_frame(), (0, Frame::Ready));
 
@@ -670,9 +670,9 @@ fn a_raising_close_marks_the_request_errored_but_finishes_it() {
 
 #[test]
 fn an_unservable_script_name_is_refused_before_ready() {
-    let cfg = ViewConfig {
+    let cfg = WsgiConfig {
         script_name: "/app/".to_string(),
-        ..ViewConfig::for_route("web")
+        ..WsgiConfig::for_route("web")
     };
     let harness = Harness::start(support::load_app("bad_script_name", &hello_app("hi")), cfg);
     let err = harness.finish().expect_err("the mount point is not usable");
@@ -682,9 +682,9 @@ fn an_unservable_script_name_is_refused_before_ready() {
     );
 
     // Nothing was served, so READY never went out either.
-    let cfg = ViewConfig {
+    let cfg = WsgiConfig {
         script_name: "app".to_string(),
-        ..ViewConfig::for_route("web")
+        ..WsgiConfig::for_route("web")
     };
     let mut harness = Harness::start(
         support::load_app("bad_script_name_2", &hello_app("hi")),
@@ -704,7 +704,7 @@ fn a_read_timeout_on_the_channel_is_retried() {
     // must keep reading rather than give up.
     let mut harness = Harness::start_reading_with_timeout(
         support::load_app("slow_start", &hello_app("after a pause")),
-        ViewConfig::for_route("web"),
+        WsgiConfig::for_route("web"),
         Duration::from_millis(50),
     );
     assert_eq!(harness.expect_frame(), (0, Frame::Ready));

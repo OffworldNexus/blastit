@@ -632,6 +632,25 @@ impl Reporter {
     }
 }
 
+/// What a view is handed so it can report: its own datagram socket and the
+/// source id its batches name.
+///
+/// The socket is the write end of the per-view socketpair; the supervisor keeps
+/// the read end and attributes a datagram by the descriptor it arrived on. The
+/// source is a diagnostic (`seq` space), never a route to restart (§4.4).
+///
+/// The reporter that consumes it is the view kind's — a WSGI view's is
+/// `blastit-view-python`'s `LoadedReporter`, because it also owns the inherited
+/// interpreter state — while this pair is plain transport and lives here.
+#[derive(Debug)]
+pub struct LoadedReport {
+    /// The write end of the view's `SOCK_DGRAM` socketpair.
+    pub socket: UnixDatagram,
+    /// The id this view's batches name: its route index, or
+    /// [`PRELOAD_SOURCE`] for the preload phase.
+    pub source: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,8 +9,8 @@ use pyo3::types::{PyString, PyTuple};
 
 use crate::environ::latin1_bytes;
 use crate::request::RequestState;
-use crate::sync::lock;
-use crate::wire::{WriteError, Writer};
+use blastit_view::sync::lock;
+use blastit_view::wire::{WriteError, Writer};
 
 /// The status line and headers `start_response` stored but did not send.
 #[derive(Clone)]

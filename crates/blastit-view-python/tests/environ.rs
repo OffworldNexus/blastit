@@ -5,7 +5,7 @@
 mod support;
 
 use blastit_frame::{Frame, Scheme};
-use blastit_view::ViewConfig;
+use blastit_view_python::WsgiConfig;
 use support::{Harness, echo_app, load_app, load_module};
 
 /// Start an echo app for the given keys and serve one request with `head`.
@@ -191,9 +191,9 @@ fn content_headers_are_not_http_keys() {
 fn the_script_name_is_stripped_from_the_path_only_on_a_boundary() {
     let source = echo_app(&["SCRIPT_NAME", "PATH_INFO"]);
     let app = load_app("script_name", &source);
-    let cfg = ViewConfig {
+    let cfg = WsgiConfig {
         script_name: "/app".to_string(),
-        ..ViewConfig::for_route("web")
+        ..WsgiConfig::for_route("web")
     };
     let mut harness = Harness::start(app, cfg);
     assert_eq!(harness.expect_frame(), (0, Frame::Ready));

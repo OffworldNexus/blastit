@@ -23,7 +23,7 @@
 //!   could want it), so "release around the fork" would mean detaching and
 //!   re-attaching around every view, for no benefit;
 //! * the child therefore **inherits the GIL**, and the only thing it may do
-//!   with it is hand it to [`blastit_view::serve`], which detaches for the
+//!   with it is hand it to [`blastit_view_python::serve`], which detaches for the
 //!   whole of its work and lets the request threads attach. Everything between
 //!   `PyOS_AfterFork_Child()` and that call runs on the interpreter's main
 //!   thread with no other Python thread in existence — the fork contract §9.3
@@ -40,7 +40,7 @@ use blastit_sys::{
     Fork, Pid, Rlimits, SeccompRole, Signal, harden_child, pipe, restore_signal_mask_in_child,
     set_dumpable, socketpair_stream,
 };
-use blastit_view::ViewConfig;
+use blastit_view_python::WsgiConfig;
 use pyo3::prelude::*;
 use pyo3::types::PyTracebackMethods;
 
@@ -220,7 +220,7 @@ fn child_main(py: Python<'_>, mut spawn: ViewSpawn<'_>, child: ChildIo, view_end
 ///
 /// This is the part `child_main` guards with `catch_unwind`; it is with the GIL
 /// held throughout, and the only call that touches the interpreter is
-/// [`blastit_view::serve_reporting`], which detaches. `loaded` is this view's
+/// [`blastit_view_python::serve_reporting`], which detaches. `loaded` is this view's
 /// report socket: one `boot` batch before `READY`, then one delta per request.
 fn serve_forever(
     py: Python<'_>,
@@ -240,13 +240,14 @@ fn serve_forever(
     // is done. `view_end` must not close it a second time — a descriptor that
     // has already gone back to the kernel can have been handed out again.
     std::mem::forget(view_end);
-    let view_cfg = ViewConfig {
+    let view_cfg = WsgiConfig {
         route_name: spawn.info.name.clone(),
         script_name: crate::config::mount_point(spawn.cfg.script_name.as_deref()),
         frame_limits: spawn.limits,
         max_threads: Some(spawn.cfg.view_worker_cap()),
     };
-    match blastit_view::serve_reporting(py, chan, spawn.app.clone_ref(py), view_cfg, loaded) {
+    match blastit_view_python::serve_reporting(py, chan, spawn.app.clone_ref(py), view_cfg, loaded)
+    {
         Ok(()) => child_exit("", 0),
         Err(err) => child_exit(&format!("view {}: {err}", spawn.info.name), 1),
     }

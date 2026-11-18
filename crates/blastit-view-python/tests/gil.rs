@@ -18,7 +18,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use blastit_frame::{Decoder, DoneOutcome, Frame, Limits, encode};
-use blastit_view::{ViewConfig, serve};
+use blastit_view_python::{WsgiConfig, serve};
 use pyo3::prelude::*;
 use support::{load_app, request};
 
@@ -85,7 +85,7 @@ fn serve_runs_with_the_gil_held_by_its_caller() {
 
     // The GIL is held here, exactly as init holds it, and the request threads
     // `serve` starts still get to run Python.
-    let result = Python::attach(|py| serve(py, ours, app, ViewConfig::for_route("web")));
+    let result = Python::attach(|py| serve(py, ours, app, WsgiConfig::for_route("web")));
     let seen = scheduler.join().expect("the scheduler thread panicked");
 
     assert!(result.is_ok(), "serve returned {result:?}");

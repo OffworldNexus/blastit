@@ -2,7 +2,7 @@
 id: MB.36.3
 title: "Extract crates/blastit-view-python: environ, input, request, response and the serve worker pool out of blastit-view, wired through blastit's python feature"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.36.2]
@@ -19,11 +19,11 @@ paths:
   - crates/blastit/tests/critical_loaded_files.rs
   - crates/blastit/Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T15:57"
+updated: "2026-11-18T13:55"
 ---
 
 # Goal
