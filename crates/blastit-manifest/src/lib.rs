@@ -106,6 +106,10 @@ pub mod blastfile;
 pub mod edit;
 
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
+// The Quick Fix's rewrite, re-exported beside `TableGrant`/`Columns` on the
+// same argument: a caller that asks the manifest for a `query`'s canonical `$?`
+// text should not have to name a second crate (`ADR-0013`, `MB.35.4`).
+pub use blastit_sqlpolicy::parameterize;
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning, Position};
 // §18's one line is the crate's: a caller that prints a path or a message of
 // its own renders it with these rather than keeping a second copy.

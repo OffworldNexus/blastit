@@ -41,7 +41,11 @@ pub mod config;
 pub mod dev_reload;
 pub mod host;
 pub mod infer_routes;
-pub mod lsp;
+// `blastit lsp` is one delegation: the server is `crates/blastit-lsp`, which
+// builds on macOS and Windows where this crate cannot serve (`MB.35.4`,
+// `ADR-0013`). The re-export keeps `crate::lsp::run()` — and the capability
+// drop `cli.rs` performs before it — compiling untouched.
+pub use blastit_lsp as lsp;
 pub mod mem_usage;
 
 mod child;

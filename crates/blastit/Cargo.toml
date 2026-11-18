@@ -41,6 +41,7 @@ blastit-events = { version = "0.2.0", path = "../blastit-events" }
 blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
 blastit-http = { version = "0.2.0", path = "../blastit-http" }
 blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
+blastit-lsp = { version = "0.2.0", path = "../blastit-lsp" }
 blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
 blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi", optional = true }
 blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler" }

@@ -1,4 +1,5 @@
-//! `blastit lsp`: the LSP 3.17 subset Zed needs, on stdin/stdout (`MB.22.3`).
+//! The `blastit-lsp` server — and `blastit lsp`, which delegates to it — is the
+//! LSP 3.17 subset Zed needs, on stdin/stdout (`MB.22.3`, `MB.35.4`).
 //!
 //! This is a **text tool** the developer's editor spawns: it reads framed
 //! JSON-RPC from stdin, answers on stdout, and never opens a file, reads an
@@ -22,11 +23,12 @@
 //! * §7 — hover from a bounded static table, never a second grammar;
 //! * §7.6 and §7A — the two SQL tokens `$?`/`...` inside a `query` interior,
 //!   and one `quickfix` whose single `TextEdit` is the statement
-//!   `blastit_sqlpolicy::parameterize` returns for the string under the range.
+//!   `blastit_manifest::parameterize` returns for the string under the range.
 //!
 //! The Quick Fix is not a second implementation: the rewrite is
-//! `blastit_sqlpolicy::parameterize`, the same function `blastit check` and
-//! `--learn` use (`R66`), so the editor and the CLI cannot drift.
+//! `blastit_manifest::parameterize`, the manifest's re-export of the same
+//! function `blastit check` and `--learn` use (`R66`), so the editor and the
+//! CLI cannot drift.
 //!
 //! stdout carries framed messages and nothing else; stderr carries at most four
 //! fixed sentences (§11.3) and never a byte of document text — a `Blastfile`
@@ -35,7 +37,11 @@
 //! The deny list below is enforced by `cargo clippy -- -D warnings`: a stray
 //! `println!`, an `unwrap()` on a JSON shape, or a `v[i]` cannot compile, which
 //! matters because an editor does not restart a server that dies on its own.
+//! `#![forbid(unsafe_code)]` is the other half of the portability claim: a
+//! foreign declaration needs `unsafe`, so no privilege call can be reached
+//! without a crate, and this crate names none (§1.3, `ADR-0013`).
 
+#![forbid(unsafe_code)]
 #![deny(clippy::print_stdout)]
 #![deny(
     clippy::unwrap_used,
@@ -51,15 +57,15 @@ use std::io::{self, Read, Write};
 use std::panic::AssertUnwindSafe;
 
 use blastit_manifest::blastfile;
+use blastit_manifest::parameterize;
 use blastit_manifest::{Manifest, ManifestError, ManifestWarning, Position, QuerySite, UidLayout};
-use blastit_sqlpolicy::parameterize;
 use serde_json::{Map, Value, json};
 
 // §7's hover **data** lives in its own file: the table is a transcription of
 // `docs/reference/blastfile.md`, and keeping it out of this module is what lets
 // the reader of the protocol see the protocol. The module §1's boundary table
 // names is still this one, and the entry an editor spawns is still
-// `crate::lsp::run`.
+// `crate::run`.
 mod hover;
 
 use hover::{env_var_paragraph, hover_text, is_env_name, sql_hover};

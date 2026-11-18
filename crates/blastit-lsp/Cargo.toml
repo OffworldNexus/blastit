@@ -1,0 +1,23 @@
+[package]
+name = "blastit-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "blastit_lsp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "blastit-lsp"
+path = "src/main.rs"
+
+[dependencies]
+blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+serde_json = "1.0.154"

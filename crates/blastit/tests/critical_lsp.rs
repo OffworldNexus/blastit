@@ -2046,11 +2046,11 @@ fn the_lsp_arm_drops_capabilities() {
 /// or config module, and names the manifest's one reader and writer.
 #[test]
 fn the_lsp_module_is_a_text_tool() {
-    // §1's entry is `lsp/mod.rs` and its hover data lives beside it as
-    // `lsp/hover.rs`: both are this module, so both carry the same list.
+    // §1's entry is `blastit-lsp/src/lib.rs` and its hover data lives beside it
+    // as `blastit-lsp/src/hover.rs`: both are this module, so both carry the list.
     let sources = [
-        include_str!("../src/lsp/mod.rs"),
-        include_str!("../src/lsp/hover.rs"),
+        include_str!("../../blastit-lsp/src/lib.rs"),
+        include_str!("../../blastit-lsp/src/hover.rs"),
     ];
     for source in sources {
         for forbidden in [

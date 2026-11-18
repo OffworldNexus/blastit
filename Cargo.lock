@@ -123,6 +123,7 @@ dependencies = [
  "blastit-frame",
  "blastit-http",
  "blastit-ingress",
+ "blastit-lsp",
  "blastit-manifest",
  "blastit-php-sapi",
  "blastit-scheduler",
@@ -203,6 +204,14 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "url",
+]
+
+[[package]]
+name = "blastit-lsp"
+version = "0.2.0"
+dependencies = [
+ "blastit-manifest",
+ "serde_json",
 ]
 
 [[package]]

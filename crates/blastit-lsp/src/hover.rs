@@ -3,9 +3,9 @@
 //!
 //! This module is **data and its one lookup**, nothing else: the table is a
 //! transcription of `docs/reference/blastfile.md`, so a one-word fix to the page
-//! is a one-word fix here, and the page stays the source. `mod.rs` is still the
+//! is a one-word fix here, and the page stays the source. `lib.rs` is still the
 //! module §1's boundary table names — this split is data only, and the public
-//! entry an editor spawns (`blastit lsp`) is untouched.
+//! entry an editor spawns (`blastit-lsp`, or `blastit lsp`) is untouched.
 //!
 //! Hover text is not a second grammar: nothing here lexes, parses or decides
 //! what a word means, and `hover_text` answers `None` for every word the table
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn the_sql_paragraphs_are_the_pages_blockquotes() {
         assert_eq!(SQL_HOVER_TABLE.len(), 2);
-        let page = include_str!("../../../../docs/reference/blastfile.md");
+        let page = include_str!("../../../docs/reference/blastfile.md");
         let paragraphs = quoted_paragraphs(page);
         for (token, value) in SQL_HOVER_TABLE {
             assert!(value.len() <= 600, "{token} is {} bytes", value.len());
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn hover_table_is_bounded_and_transcribed() {
         assert!(HOVER_TABLE.len() <= 48, "{} rows", HOVER_TABLE.len());
-        let page = include_str!("../../../../docs/reference/blastfile.md");
+        let page = include_str!("../../../docs/reference/blastfile.md");
         let mut previous = "";
         for (key, value) in HOVER_TABLE {
             assert!(!key.is_empty(), "an empty key");
