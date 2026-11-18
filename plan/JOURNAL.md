@@ -3437,3 +3437,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-18T19:20 [MB.36.11] (lead) status review -> active
 - 2026-11-18T19:20 [MB.36.11] (lead) attempt 2/3 started
 - 2026-11-18T19:54 [MB.36.11] (lead) status active -> done
+- 2026-11-18T19:57 [MB.36] (lead) Gate: seven leaves done (8/9/10 re-filed to MB.26.25/26/27 as deferred coverage, 11 landed). Acceptance at this tree: make check EXIT=0 (204 ok, 0 FAILED; docs-
+- 2026-11-18T19:57 [MB.36] (lead) status ready -> done

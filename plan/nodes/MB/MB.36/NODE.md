@@ -2,7 +2,7 @@
 id: MB.36
 title: "View crates architecture: blastit-view-{python,php,static} composed by Cargo features over view.chan, replacing the Upstream/WorkerRuntime trait soup (mandatory for 0.2.0)"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths:
@@ -22,7 +22,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-17T14:07"
-updated: "2026-11-17T14:07"
+updated: "2026-11-18T19:57"
 ---
 
 # Goal
