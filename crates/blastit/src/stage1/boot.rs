@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use crate::child::ChildIo;
 use crate::config::{Config, LogFormat};
-use crate::logs::{Emitter, output_event};
+use crate::logs::{Colour, Emitter, output_event};
 use crate::mem_usage;
 use crate::py::Python;
 use crate::roles::{HttpFds, SchedulerFds};
@@ -42,12 +42,13 @@ use super::{Adoption, Interpreter, Options, fail};
 /// `interpreter` says whether CPython has to be started here (the standalone
 /// binary) or is the interpreter this process already runs on (a wheel install,
 /// §4, §9.3).
-pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
+pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! {
     // Whether a live interpreter is in this image, which decides how the forks
     // below behave (§9.3) and how stage 1 finds the application's modules.
     let hosted = interpreter.is_hosted();
-    // The configuration itself is not known yet, so a failure here is JSON.
-    let boot = Emitter::stdout(LogFormat::Json, Level::Info);
+    // The configuration itself is not known yet, so a failure here is JSON —
+    // which carries no colour.
+    let boot = Emitter::stdout(LogFormat::Json, Level::Info, Colour::PLAIN);
     // `blastit dev`: the runtime root stage 0 created, and the address http
     // binds. Adopted first so every fatal path in stage 1 — `read_config`,
     // `bind_tcp`, `fork`, `BLASTIT_APP` import — removes the verified `0700`
@@ -85,7 +86,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>) -> ! {
         },
         None => None,
     };
-    let emitter = Emitter::stdout(config.log_format, config.log_level);
+    let emitter = Emitter::stdout(config.log_format, config.log_level, colour);
     // §8.1: a setting that is deprecated is the operator's to hear about, once,
     // and the log is the only place blastit can say it. The decision comes from
     // stage 0's parsing and the sentences name variables, never values.

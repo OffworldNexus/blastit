@@ -30,7 +30,7 @@ use crate::config::{Config, LogFormat, Mode, Privilege};
 // The two provenance types are the deployment gate's (`php` only): the rest of
 // stage 0 names neither.
 use crate::host::{EXEC, Host, Install};
-use crate::logs::{Emitter, fail, output_event};
+use crate::logs::{Colour, Emitter, fail, output_event};
 // The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
@@ -111,7 +111,8 @@ impl Early {
 /// settings, and the one an operator reading a failed boot can always parse —
 /// and the error follows them.
 fn fail_early(early: &mut Early, message: &str) -> ! {
-    let json = Emitter::stdout(LogFormat::Json, Level::Info);
+    // JSON needs no settings and takes no colour.
+    let json = Emitter::stdout(LogFormat::Json, Level::Info, Colour::PLAIN);
     early.flush(&json);
     fail(&json, message)
 }
@@ -329,7 +330,10 @@ pub const MAX_CONFIG_DOCUMENT: usize = 60 * 1024;
 ///
 /// `preset` is `--preset` when the command line carried one, and it wins over
 /// `BLASTIT_PRESET` (E1, [`Config::from_env`]).
-pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
+///
+/// `colour` is the terminal decision the command line's composition root made
+/// once (`A-4`): this image never asks its descriptors again.
+pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour) -> ! {
     // §8.1: the log format is one of the *settings*, and stage 0's first lines
     // are made before there is a configuration to read it from — so they are
     // kept here, in the order they were made, and written out once the settings
@@ -405,7 +409,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>) -> ! {
     // anything can fail with it, so the `boot` line below can say it — and so
     // E1's preset assumption can be checked against it.
     config.privilege = Some(privilege.clone());
-    let emitter = Emitter::stdout(config.log_format, config.log_level);
+    let emitter = Emitter::stdout(config.log_format, config.log_level, colour);
     // The lines that waited for the settings, in the format they name.
     early.flush(&emitter);
     emitter.emit(&Event::now(

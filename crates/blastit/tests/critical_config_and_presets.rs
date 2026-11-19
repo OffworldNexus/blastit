@@ -564,13 +564,63 @@ fn top_level_help_lists_the_three_commands_and_the_presets() {
     for preset in ["digitalocean-paas", "compose-traefik"] {
         assert!(stdout.contains(preset), "{stdout}");
     }
-    assert!(!stdout.contains("--version"), "{stdout}");
+    // `MB.40.5` (`A-8`): the re-exec grammar stage 0 uses between its own two
+    // images is plumbing, not a feature, and `--version` is the line a bug
+    // report asks for.
+    for internal in ["--stage=1", "--role=dbproxy", "--config-fd"] {
+        assert!(!stdout.contains(internal), "{internal} is hidden: {stdout}");
+    }
+    assert!(stdout.contains("--version"), "{stdout}");
     assert!(output.stderr.is_empty(), "{output:?}");
 
-    let version = sandbox.run_cli(&["--version"]);
-    assert_eq!(version.status.code(), Some(1));
-    assert!(version.stdout.is_empty());
-    assert!(!version.stderr.is_empty());
+    // `A-14` / `A-8`: `--version` and `-V` answer with the version on stdout.
+    for flag in ["--version", "-V"] {
+        let version = sandbox.run_cli(&[flag]);
+        assert_eq!(version.status.code(), Some(0), "{flag}: {version:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&version.stdout),
+            "blastit 0.2.0\n",
+            "{flag}"
+        );
+        assert!(version.stderr.is_empty(), "{flag}: {version:?}");
+    }
+
+    // `A-8` / `A-14`: the version answers only a command line that carries
+    // nothing else, so a typo is named instead of being swallowed by `-V`.
+    let mixed = sandbox.run_cli(&["--preset", "nope", "-V"]);
+    assert_eq!(mixed.status.code(), Some(2), "{mixed:?}");
+    assert!(mixed.stdout.is_empty(), "{mixed:?}");
+    let stderr = String::from_utf8_lossy(&mixed.stderr);
+    assert!(stderr.contains("unknown preset `nope`"), "{stderr}");
+    assert!(stderr.contains("compose-traefik"), "{stderr}");
+
+    // `A-14`: `blastit help [COMMAND]` is the word people type, and an unknown
+    // command is a usage error (`2`), not a grammar lecture.
+    let help = sandbox.run_cli(&["help", "dev"]);
+    assert_eq!(help.status.code(), Some(0), "{help:?}");
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--port"));
+    let unknown = sandbox.run_cli(&["help", "wat"]);
+    assert_eq!(unknown.status.code(), Some(2), "{unknown:?}");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("unknown subcommand 'wat'"),
+        "{unknown:?}"
+    );
+
+    // `A-11`: a misspelled preset is named before anything about capabilities,
+    // whichever spelling asked for it, and the error lists the real ones.
+    for (vars, argv) in [
+        (&[][..], &["--preset", "nope"][..]),
+        (&[("BLASTIT_PRESET", "nope")][..], &[][..]),
+    ] {
+        let output = sandbox.run_cli_env(vars, argv);
+        assert_eq!(output.status.code(), Some(2), "{argv:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{argv:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("nope"), "{argv:?}: {stderr}");
+        for preset in ["digitalocean-paas", "compose-traefik"] {
+            assert!(stderr.contains(preset), "{argv:?}: {stderr}");
+        }
+    }
 
     for (argv, expected) in [
         (&["dev", "--help"][..], "--port"),

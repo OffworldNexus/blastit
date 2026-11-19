@@ -47,7 +47,9 @@ pub(crate) use manifest_io::{
     MANIFEST_ENV, ManifestReadError, display_path, manifest_path, missing_manifest, read_manifest,
 };
 pub use manifest_io::{mount_point, seccomp_requested, view_dir};
-pub use preset::{PRESETS, Preset, PresetChoice, PresetPolicy, preset_help, preset_list};
+pub use preset::{
+    PRESETS, Preset, PresetChoice, PresetPolicy, preset_help, preset_list, preset_unknown,
+};
 pub use settings::{Config, MIN_DEBT_TTL, TRUSTED_PROXIES_DEFAULT};
 pub use types::{ConfigError, Immortalize, LogFormat, Mode, Privilege, SpawnMode, Warning};
 

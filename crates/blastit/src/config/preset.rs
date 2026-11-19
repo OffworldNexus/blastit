@@ -126,6 +126,23 @@ pub fn preset_list() -> String {
         .join("; ")
 }
 
+/// The one sentence an unknown preset name gets (E1).
+///
+/// `source` is the spelling the operator actually wrote — `--preset` or
+/// `BLASTIT_PRESET` — and the list is every preset this build knows, because the
+/// alternatives are what they need next. This function is the *single* owner of
+/// that sentence: the boot's own lookup and the command line's early check both
+/// call it, so the flag, the variable and the refusal cannot drift apart.
+pub fn preset_unknown(name: &str, source: &str) -> ConfigError {
+    invalid(
+        source,
+        format!(
+            "unknown preset `{name}`: the known presets are {}",
+            preset_list()
+        ),
+    )
+}
+
 /// The known presets, one per line and indented, for the usage text (E1).
 pub fn preset_help() -> String {
     PRESETS
@@ -319,13 +336,7 @@ pub(super) fn preset_choice(
 /// every known preset, because the name that was asked for is the mistake worth
 /// correcting and the alternatives are what the operator needs next.
 fn look_up_preset(name: &str, source: &str) -> Result<Option<&'static Preset>, ConfigError> {
-    Preset::find(name).map(Some).ok_or_else(|| {
-        invalid(
-            source,
-            format!(
-                "unknown preset `{name}`: the known presets are {}",
-                preset_list()
-            ),
-        )
-    })
+    Preset::find(name)
+        .map(Some)
+        .ok_or_else(|| preset_unknown(name, source))
 }

@@ -115,11 +115,10 @@ impl Emitter {
         }
     }
 
-    /// An emitter writing to stdout, coloured only when stdout is a terminal.
-    pub fn stdout(format: LogFormat, level: Level) -> Self {
-        // SAFETY: `isatty` takes a descriptor number and cannot fail.
-        let color = unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;
-        Self::new(libc::STDOUT_FILENO, format, level, color)
+    /// An emitter writing to stdout, coloured only when the process decided
+    /// stdout should be.
+    pub fn stdout(format: LogFormat, level: Level, colour: Colour) -> Self {
+        Self::new(libc::STDOUT_FILENO, format, level, colour.stdout)
     }
 
     /// Prints one of init's own events, if it passes the level filter.
@@ -243,6 +242,49 @@ impl Emitter {
     /// Writes one line, with its newline, in a single `write`.
     fn write_line(&self, line: &str) {
         write_line(self.fd, line);
+    }
+}
+
+/// Whether each of blastit's two streams should carry ANSI colour (`A-4`).
+///
+/// One value, decided once by the composition root ([`crate::term::colour`]) and
+/// handed down: the event emitter takes [`Colour::stdout`], a refusal takes
+/// [`Colour::stderr`]. Nothing asks a descriptor twice, and nothing below the
+/// root reads `NO_COLOR` or `TERM`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Colour {
+    /// The event stream, `--help`, `--version`.
+    pub stdout: bool,
+    /// Command-line refusals and every other word written to stderr.
+    pub stderr: bool,
+}
+
+impl Colour {
+    /// No colour anywhere: a capture that is not a terminal, and the value a
+    /// JSON boot under no settings uses.
+    pub const PLAIN: Self = Self {
+        stdout: false,
+        stderr: false,
+    };
+
+    /// The decision for a pair of descriptors, with the two variables an
+    /// operator sets applied.
+    ///
+    /// This is pure on purpose: `NO_COLOR` (set to a non-empty value) and
+    /// `TERM=dumb` win over the descriptor, and the *reading* of those two
+    /// variables is the boot's job, once, in [`crate::term`]. stdout and stderr
+    /// are separate answers because a redirect changes one and not the other.
+    pub fn new(
+        stdout_terminal: bool,
+        stderr_terminal: bool,
+        no_color: Option<&str>,
+        term: Option<&str>,
+    ) -> Self {
+        let plain = no_color.is_some_and(|value| !value.is_empty()) || term == Some("dumb");
+        Self {
+            stdout: stdout_terminal && !plain,
+            stderr: stderr_terminal && !plain,
+        }
     }
 }
 
@@ -548,6 +590,55 @@ mod tests {
             EventKind::ManifestWarning(ManifestWarning::new(name.to_string())),
         )
         .with_level(Level::Info)
+    }
+
+    #[test]
+    fn colour_is_asked_per_stream_and_plain_when_the_operator_says_so() {
+        // `A-4`: the predicate is the pair of descriptors, not a single global
+        // answer, and the two variables an operator sets win over it. The value
+        // is computed from what the boot read, so this test drives the decision
+        // itself and never touches the process environment.
+        assert_eq!(Colour::new(false, false, None, None), Colour::PLAIN);
+        assert_eq!(
+            Colour::new(true, false, None, None),
+            Colour {
+                stdout: true,
+                stderr: false
+            },
+            "a redirect changes one stream, not the other"
+        );
+        assert_eq!(
+            Colour::new(false, true, None, None),
+            Colour {
+                stdout: false,
+                stderr: true
+            }
+        );
+        assert_eq!(
+            Colour::new(true, true, Some("1"), None),
+            Colour::PLAIN,
+            "NO_COLOR wins"
+        );
+        assert_eq!(
+            Colour::new(true, true, Some(""), None),
+            Colour {
+                stdout: true,
+                stderr: true
+            },
+            "an empty NO_COLOR is how a shell clears it"
+        );
+        assert_eq!(
+            Colour::new(true, true, None, Some("dumb")),
+            Colour::PLAIN,
+            "TERM=dumb wins"
+        );
+        assert_eq!(
+            Colour::new(true, true, None, Some("xterm-256color")),
+            Colour {
+                stdout: true,
+                stderr: true
+            }
+        );
     }
 
     #[test]

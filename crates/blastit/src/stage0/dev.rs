@@ -17,7 +17,7 @@ use crate::dev_learn::{DevRoot, PRIVILEGE};
 // The two provenance types are the deployment gate's (`php` only): the rest of
 // stage 0 names neither.
 use crate::host::{Host, Reexec};
-use crate::logs::{Emitter, fail, output_event};
+use crate::logs::{Colour, Emitter, fail, output_event};
 use crate::mem_usage;
 // The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
@@ -130,7 +130,9 @@ pub(super) fn reexec_argv_dev(root: &DevRoot, reexec: &Reexec) -> Vec<CString> {
 /// `--learn` additionally hands dbproxy an observation pipe and an attribution
 /// socket, and hands both to stage 1, which drains them and writes the manifest
 /// on a clean `SIGTERM` (`R29`).
-pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
+///
+/// `colour` is the decision the command line made once (`A-4`).
+pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Colour) -> ! {
     // `S3`: a non-loopback bind has no authentication at all, so it needs the
     // second acknowledgement and says so before anything is written to stdout.
     if !crate::dev_learn::is_loopback(&options.host) && !crate::dev_learn::expose_requested() {
@@ -156,10 +158,10 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
     // The privilege field is `root`/`capabilities` in the document; a dev boot
     // is neither, and stage 0 says `unprivileged-dev` in its own event below.
     config.privilege = None;
-    let emitter = Emitter::stdout(config.log_format, config.log_level);
+    let emitter = Emitter::stdout(config.log_format, config.log_level, colour);
     // Every fatal path before the banner writes here, on descriptor 2: a
     // startup error has to leave stdout empty (§1.1).
-    let startup = Emitter::new(2, config.log_format, config.log_level, false);
+    let startup = Emitter::new(2, config.log_format, config.log_level, colour.stderr);
 
     // §8 Sizing: above `BLASTIT_MEM_HIGH_WATERMARK` the scheduler will not start
     // a view process, so a boot that ignores the reading serves nothing and says

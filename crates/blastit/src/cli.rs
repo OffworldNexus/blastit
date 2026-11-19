@@ -14,7 +14,17 @@
 //! tree instead, and so have no flag at all.
 //!
 //! Nothing here reads the environment or a file on the command line's behalf:
-//! stage 0 does that (§4).
+//! stage 0 does that (§4). The two exceptions are documented where they are:
+//! `PORT` (the documented `blastit dev` fallback) and `BLASTIT_PRESET` (which the
+//! same boot reads, checked here so a typo is named before the capability gate).
+//!
+//! # The four modules
+//!
+//! * [`help`] — every word a person reads, and the one shape a refusal takes.
+//! * [`parse`] — the grammar of the four subcommands and the re-exec lines.
+//! * [`preset`] — the one resolver for `--preset` and `BLASTIT_PRESET`.
+//! * [`run`] — where a validated command line is handed to the stage that runs
+//!   it.
 //!
 //! # Library and binary
 //!
@@ -28,9 +38,20 @@ use std::net::IpAddr;
 use std::os::fd::RawFd;
 
 use crate::host::Host;
+use crate::logs::Colour;
 use crate::py::Python;
 use crate::stage0;
 use crate::stage1;
+
+mod help;
+mod parse;
+mod preset;
+mod run;
+
+use help::{help_for, refuse, usage};
+use parse::{Subcommand, parse, parse_check, parse_dev, parse_fmt, parse_lsp};
+use preset::env_is_known;
+use run::{role_is_allowed, run_check, run_dev, run_fmt};
 
 /// The four command shapes `0.2.0` exposes (§1.1).
 ///
@@ -103,14 +124,7 @@ pub struct FmtOptions {
     pub path: Option<std::path::PathBuf>,
 }
 
-/// What a subcommand's parser decided: print its help, or run it.
-#[derive(Debug)]
-enum Subcommand<T> {
-    Help,
-    Run(T),
-}
-
-/// What the command line says about which role to play.
+/// The internal grammar the process tree uses to start its own images.
 #[derive(Debug, Default)]
 struct Args {
     stage: Option<u32>,
@@ -154,102 +168,6 @@ struct Args {
     dev_reload_since: Option<u128>,
 }
 
-/// How to use the program, printed with a command-line error.
-///
-/// The presets are listed with their one-line descriptions: `--preset` is the
-/// one argument whose valid values an operator cannot guess (E1).
-fn usage() -> String {
-    format!(
-        "{USAGE}\n\n\
-         presets (`--preset NAME`, or `BLASTIT_PRESET=NAME`; every BLASTIT_* variable that \
-         is set wins over one):\n{}",
-        crate::config::preset_help()
-    )
-}
-
-/// The roles and their arguments; [`usage`] adds the presets.
-const USAGE: &str = "\
-usage:
-  blastit [--preset NAME]                   stage 0 (production)
-  blastit dev [--port N] [--host ADDR] [--learn] [--no-reload]
-                                            unprivileged single-UID simulation
-  blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
-                                            audit a pytest suite (alias: test)
-  blastit fmt [--check] [PATH]              rewrite a Blastfile in canonical layout
-  blastit lsp                               speak LSP on stdin/stdout (editors)
-  blastit --stage=1 --config-fd=N \\
-          [--dbproxy-pid=P --dbproxy-events-fd=N \\
-           --dbproxy-stdout-fd=N --dbproxy-stderr-fd=N]   stage 1
-  blastit --role=dbproxy --secrets-fd=N --events-fd=N --ready-fd=N [--seccomp=0|1]";
-
-/// `blastit dev --help` (§1.1).
-const DEV_USAGE: &str = "\
-usage: blastit dev [--port N] [--host ADDR] [--learn] [--no-reload]
-
-  --port N      port to bind, 1..=65535 (default 8080, or PORT when set)
-  --host ADDR   IP address to bind (default 127.0.0.1); a non-loopback
-                address needs BLASTIT_DEV_EXPOSE=1
-  --learn       observe requests and SQL and propose manifest additions
-  --no-reload   turn live reload off: nothing is watched, and no
-                `dev.reload.unavailable` warning is printed
-  -h, --help    print this help
-
-`blastit dev` runs the real five-role tree as the current uid: no sudo, no
-capabilities, not a sandbox. Use `blastit` for production.";
-
-/// `blastit check --help` (§1.1).
-const CHECK_USAGE: &str = "\
-usage: blastit check [--json] [--learn [--dry-run]] [-- ARGS...]
-       blastit test  ...                    exact alias of `check`
-
-  --json        write at most one JSON document to stdout; everything else,
-                including pytest output, goes to stderr
-  --learn       observe requests and SQL and propose manifest additions
-  --dry-run     with --learn, report the proposal without writing it
-  -- ARGS...    passed to `pytest -q` verbatim
-  -h, --help    print this help
-
-Exit codes: 0 clean, 1 completeness findings, 2 CLI/config error, 3 pytest
-failed (including exit 5, no tests collected).";
-
-/// `blastit fmt --help` (§14.4).
-///
-/// `{env}` is [`crate::config::MANIFEST_ENV`], filled in by [`fmt_usage`] so the help
-/// text and the variable a boot reads can never spell it differently.
-const FMT_USAGE: &str = "\
-usage: blastit fmt [--check] [PATH]
-
-  --check       change nothing; name every file that is not in canonical
-                layout and exit 1
-  PATH          the file to format (default ./Blastfile, or {env})
-  -h, --help    print this help
-
-`blastit fmt` rewrites the file in the canonical layout: one directive per line,
-four spaces per level, one blank line between sections. Comments are kept, and
-without --check the rewrite is atomic and keeps the file's mode.
-
-Exit codes: 0 clean or rewritten, 1 --check found a file that is not canonical,
-2 the file could not be read, parsed or written.";
-
-/// [`FMT_USAGE`] with the manifest variable named from its one spelling.
-fn fmt_usage() -> String {
-    FMT_USAGE.replace("{env}", crate::config::MANIFEST_ENV)
-}
-
-/// `blastit lsp --help` (`MB.22.3`; `docs/reference/cli.md` `## blastit lsp`).
-const LSP_USAGE: &str = "\
-usage: blastit lsp
-
-Reads LSP messages on stdin and answers on stdout, for an editor to spawn:
-`blastit lsp` takes no argument and no file, reads no `BLASTIT_*` variable,
-opens no path and holds no privilege. Diagnostics, formatting and hover go to
-the editor, not to a terminal, so there is nothing else to print.
-
-  -h, --help    print this help
-
-Exit codes: 0 after the client said `shutdown`, 1 if it disappeared without
-one, 2 a command-line error.";
-
 /// Runs the role the command line names, in the installation `host` describes.
 ///
 /// `py` is the interpreter the caller is running in, when there is one:
@@ -261,6 +179,10 @@ one, 2 a command-line error.";
 /// raises out of `main()` — the caller turns it into `ExitCode::from` or
 /// `SystemExit`. Stage 0 and stage 1 never return at all.
 pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
+    // `A-4`: the terminal is asked once, here — the composition root every
+    // image of this program starts at — and the answer travels as a value.
+    // Nothing below this line reads `NO_COLOR`, `TERM` or `isatty` again.
+    let colour = crate::term::colour();
     // Normative dispatch order (§4.2 E.1): a subcommand is the first argument,
     // so `dev` is checked before `check` before the stage-0/stage-1/`--role`
     // grammar. A stage-0 argument named `dev` is not a thing: the command is the
@@ -268,64 +190,98 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
     match Command::from_argv(&argv) {
         Command::Dev => match parse_dev(&argv[1..]) {
             Ok(Subcommand::Help) => {
-                println!("{DEV_USAGE}");
+                println!("{}", help::DEV_USAGE);
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_dev(&host, &options, py.is_some()),
+            Ok(Subcommand::Run(options)) => run_dev(&host, &options, py.is_some(), colour),
             Err(message) => {
-                eprintln!("blastit dev: {message}");
+                refuse("blastit dev", &message, false, colour);
+                // `1` for `dev`'s own grammar: the protected CLI matrix pins
+                // `critical_config_and_presets.rs:426-445` at `1`.
                 FAILURE
             }
         },
         Command::Check => match parse_check(&argv[1..]) {
             Ok(Subcommand::Help) => {
-                println!("{CHECK_USAGE}");
+                println!("{}", help::CHECK_USAGE);
                 SUCCESS
             }
             Ok(Subcommand::Run(options)) => run_check(&host, &options),
             Err(message) => {
-                eprintln!("blastit check: {message}");
+                refuse("blastit check", &message, false, colour);
                 CHECK_FAILURE
             }
         },
         Command::Fmt => match parse_fmt(&argv[1..]) {
             Ok(Subcommand::Help) => {
-                println!("{}", fmt_usage());
+                println!("{}", help::fmt_usage());
                 SUCCESS
             }
             Ok(Subcommand::Run(options)) => run_fmt(&options),
             Err(message) => {
-                eprintln!("blastit fmt: {message}");
+                refuse("blastit fmt", &message, false, colour);
                 FMT_FAILURE
             }
         },
         Command::Lsp => match parse_lsp(&argv[1..]) {
             Ok(Subcommand::Help) => {
-                println!("{LSP_USAGE}");
+                println!("{}", help::LSP_USAGE);
                 SUCCESS
             }
             Ok(Subcommand::Run(())) => run_lsp(),
             Err(message) => {
-                eprintln!("blastit lsp: {message}");
+                refuse("blastit lsp", &message, false, colour);
                 LSP_FAILURE
             }
         },
         Command::Serve => {
             // E1: the usage text lists the presets with their one-line
             // descriptions, which is the only way to find out what `--preset`
-            // accepts, and the three commands the binary has.
+            // accepts, and the commands the binary has. It goes to stdout, so
+            // its headers take stdout's answer.
             if argv
                 .iter()
                 .any(|argument| argument == "--help" || argument == "-h")
             {
-                println!("{}", usage());
+                println!("{}", usage(colour.stdout));
                 return SUCCESS;
             }
+            // `A-8` / `A-14`: the version answers only a command line that
+            // carries nothing else, so `blastit --preset nope -V` still names
+            // the typo (`2`) instead of printing a version and exiting `0`.
+            if argv.len() == 1 && matches!(argv[0].as_str(), "--version" | "-V") {
+                println!("blastit {}", env!("CARGO_PKG_VERSION"));
+                return SUCCESS;
+            }
+            // `blastit help [COMMAND]`: the word people type, answered with the
+            // same text `--help` prints (`A-14`).
+            if argv.first().map(String::as_str) == Some("help") {
+                return match help_for(argv.get(1).map(String::as_str), colour.stdout) {
+                    Ok(text) => {
+                        println!("{text}");
+                        SUCCESS
+                    }
+                    Err(message) => {
+                        refuse("blastit", &message, false, colour);
+                        USAGE_FAILURE
+                    }
+                };
+            }
             match parse(&argv) {
-                Ok(args) => dispatch(args, &host, py),
-                Err(message) => {
-                    eprintln!("blastit: {message}\n{}", usage());
-                    FAILURE
+                Ok(args) => {
+                    // E1 (`A-11`): `BLASTIT_PRESET` is checked here, before
+                    // stage 0 reads capabilities, so a misspelled name is named
+                    // for what it is instead of being drowned by a refusal to
+                    // start. The flag's own name was validated by `parse`.
+                    if let Err(message) = env_is_known(&args) {
+                        refuse("blastit", &message, true, colour);
+                        return USAGE_FAILURE;
+                    }
+                    dispatch(args, &host, py, colour)
+                }
+                Err(refusal) => {
+                    refuse("blastit", &refusal.message, true, colour);
+                    refusal.exit
                 }
             }
         }
@@ -337,6 +293,13 @@ const FAILURE: u8 = 1;
 
 /// The exit status of `--help`, which is not a failure.
 const SUCCESS: u8 = 0;
+
+/// The exit status of a command line this build cannot act on (`A-12`).
+///
+/// `2` is what every subcommand uses for a bad flag, an unknown preset or an
+/// unknown subcommand, and the stage-0 command line now answers the same way:
+/// one mistake in argv is one exit status, whichever command caught it.
+const USAGE_FAILURE: u8 = 2;
 
 /// `blastit check`'s CLI failure, distinct from a finding (`1`) and pytest
 /// (`3`) (`R4`).
@@ -352,224 +315,16 @@ const FMT_NOT_CANONICAL: u8 = 1;
 /// error, not a session (`docs/design/blastfile-lsp-zed.md` §2.4).
 const LSP_FAILURE: u8 = 2;
 
-/// Parses and validates `blastit dev`'s arguments (`R2`).
-///
-/// # Errors
-///
-/// A one-line message naming the argument and the fix. Every rejection is a
-/// CLI failure (`exit 1`) with nothing on stdout.
-fn parse_dev(arguments: &[String]) -> Result<Subcommand<DevOptions>, String> {
-    let mut port = None;
-    let mut host = None;
-    let mut learn = false;
-    let mut no_reload = false;
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        index += 1;
-        match argument.as_str() {
-            "-h" | "--help" => return Ok(Subcommand::Help),
-            "--learn" => learn = true,
-            "--no-reload" => no_reload = true,
-            "--manifest" => {
-                return Err(format!(
-                    "`--manifest` is not accepted: put `Blastfile` in the working \
-                     directory, or set {}",
-                    crate::config::MANIFEST_ENV
-                ));
-            }
-            "--preset" => {
-                return Err(
-                    "`--preset` is only for `blastit` (production); `blastit dev` \
-                     ignores BLASTIT_PRESET"
-                        .to_string(),
-                );
-            }
-            "--port" => {
-                let value = arguments
-                    .get(index)
-                    .ok_or_else(|| "`--port` wants a value from 1 to 65535".to_string())?;
-                index += 1;
-                port = Some(parse_port(value)?);
-            }
-            "--host" => {
-                let value = arguments
-                    .get(index)
-                    .ok_or_else(|| "`--host` wants an IP address".to_string())?;
-                index += 1;
-                host = Some(parse_host(value)?);
-            }
-            other => {
-                if let Some(value) = other.strip_prefix("--port=") {
-                    port = Some(parse_port(value)?);
-                } else if let Some(value) = other.strip_prefix("--host=") {
-                    host = Some(parse_host(value)?);
-                } else if other.starts_with('-') {
-                    return Err(format!("unknown argument `{other}`"));
-                } else {
-                    return Err(format!("`{other}` is not an argument of `blastit dev`"));
-                }
-            }
-        }
-    }
-    Ok(Subcommand::Run(DevOptions {
-        port: match port {
-            Some(port) => port,
-            None => port_from_env()?,
-        },
-        host: host.unwrap_or(IpAddr::from([127, 0, 0, 1])),
-        learn,
-        no_reload,
-    }))
-}
-
-/// Parses and validates `blastit check` / `blastit test` (`R3`).
-///
-/// The split on `--` happens first: everything after it belongs to `pytest`,
-/// and the two flags that would hijack the harness are refused by name.
-///
-/// # Errors
-///
-/// A one-line message naming the argument and the fix. Every rejection is
-/// `exit 2` with nothing on stdout.
-fn parse_check(arguments: &[String]) -> Result<Subcommand<CheckOptions>, String> {
-    let (flags, forwarded) = match arguments.iter().position(|argument| argument == "--") {
-        Some(index) => (&arguments[..index], &arguments[index + 1..]),
-        None => (arguments, &[][..]),
-    };
-    for argument in forwarded {
-        if argument == "--blastit-manifest" || argument.starts_with("--blastit-manifest=") {
-            return Err(format!(
-                "pytest arguments must not include `--blastit-manifest`: set \
-                 {} or put `Blastfile` in the working directory",
-                crate::config::MANIFEST_ENV
-            ));
-        }
-        if argument == "--blastit-live-server" || argument.starts_with("--blastit-live-server=") {
-            return Err(
-                "pytest arguments must not include `--blastit-live-server`: `blastit check` \
-                 provides the server"
-                    .to_string(),
-            );
-        }
-    }
-    let mut options = CheckOptions {
-        json: false,
-        learn: false,
-        dry_run: false,
-        pytest_args: forwarded.to_vec(),
-    };
-    for argument in flags {
-        match argument.as_str() {
-            "-h" | "--help" => return Ok(Subcommand::Help),
-            "--json" => options.json = true,
-            "--learn" => options.learn = true,
-            "--dry-run" => options.dry_run = true,
-            "--manifest" => {
-                return Err(format!(
-                    "`--manifest` is not accepted: put `Blastfile` in the working \
-                     directory, or set {}",
-                    crate::config::MANIFEST_ENV
-                ));
-            }
-            "--preset" => {
-                return Err(
-                    "`--preset` is only for `blastit` (production); `blastit check` \
-                     ignores BLASTIT_PRESET"
-                        .to_string(),
-                );
-            }
-            other => return Err(format!("unknown argument `{other}`")),
-        }
-    }
-    if options.dry_run && !options.learn {
-        return Err("`--dry-run` is only valid with `--learn`".to_string());
-    }
-    Ok(Subcommand::Run(options))
-}
-
-/// Parses and validates `blastit fmt` (`R19`).
-///
-/// One file per invocation, so a second positional argument is a mistake named
-/// as one. `--help` wins wherever it appears, which is what makes
-/// `blastit fmt --check --help` print the help rather than format anything.
-///
-/// # Errors
-///
-/// A one-line message naming the argument and the fix. Every rejection is
-/// `exit 2` with nothing on stdout.
-fn parse_fmt(arguments: &[String]) -> Result<Subcommand<FmtOptions>, String> {
-    let mut check = false;
-    let mut path = None;
-    for argument in arguments {
-        match argument.as_str() {
-            "-h" | "--help" => return Ok(Subcommand::Help),
-            "--check" => check = true,
-            "--manifest" => {
-                return Err(format!(
-                    "`--manifest` is not accepted: put `Blastfile` in the working \
-                     directory, or set {}",
-                    crate::config::MANIFEST_ENV
-                ));
-            }
-            "--preset" => {
-                return Err(
-                    "`--preset` is only for `blastit` (production); `blastit fmt` \
-                     ignores BLASTIT_PRESET"
-                        .to_string(),
-                );
-            }
-            other if other.starts_with('-') => {
-                return Err(format!("unknown argument `{other}`"));
-            }
-            other => {
-                if path.is_some() {
-                    return Err(format!(
-                        "`{other}` is a second path: `blastit fmt` formats one file"
-                    ));
-                }
-                path = Some(std::path::PathBuf::from(other));
-            }
-        }
-    }
-    Ok(Subcommand::Run(FmtOptions { check, path }))
-}
-
-/// Parses and validates `blastit lsp` (`MB.22.3`).
-///
-/// The session has no argument: the editor writes the protocol on stdin and
-/// reads it on stdout, so anything else on the command line is a CLI error
-/// (`exit 2`) rather than a flag this server half-understands. `--help` wins
-/// wherever it appears, as it does for `fmt`.
-///
-/// # Errors
-///
-/// A one-line message naming the argument. Every rejection is `exit 2` with
-/// nothing on stdout.
-fn parse_lsp(arguments: &[String]) -> Result<Subcommand<()>, String> {
-    // `--help` wins wherever it appears, which is what makes
-    // `blastit lsp --bogus --help` print the help rather than refuse.
-    if arguments
-        .iter()
-        .any(|argument| argument == "-h" || argument == "--help")
-    {
-        return Ok(Subcommand::Help);
-    }
-    match arguments.first() {
-        None => Ok(Subcommand::Run(())),
-        Some(argument) => Err(format!(
-            "`{argument}` is not an argument: `blastit lsp` speaks LSP on \
-             stdin/stdout and reads no file"
-        )),
-    }
-}
-
 /// The `blastit lsp` session (`MB.22.3`).
 ///
 /// The capability check comes **first**, before a byte of the editor's input is
 /// read: a binary carrying `CAP_*` would grant them to this process image, and a
 /// `Blastfile` is policy, not input, so an editor's text tool holds nothing.
 /// `hold_none` is the check, not the drop — a plain install has nothing to drop.
+///
+/// It stays in this file on purpose: `critical_lsp.rs` reads `src/cli.rs` and
+/// asserts that the check precedes the session, which is the invariant that
+/// makes an editor's tool harmless even if a future refactor adds a capability.
 ///
 /// # Returns
 ///
@@ -586,141 +341,8 @@ fn run_lsp() -> u8 {
     crate::lsp::run()
 }
 
-/// The `blastit fmt` command (§14.4).
-///
-/// Discovery is [`crate::config::manifest_path`]'s when no `PATH` names a file:
-/// the same function the boot, `dev` and `check` call, so `fmt` can never format
-/// a different file than the one those three read (design §15.1). A `PATH`
-/// argument wins over both, because it is the caller naming the file to format.
-///
-/// `--check` reads, formats in memory and writes nothing at all — not even a
-/// temporary file — and prints `<path>: not in canonical layout` on stdout when
-/// the file would change. Without `--check` the rewrite goes through
-/// [`blastit_manifest::edit::write_atomic`], so the file keeps its mode and a
-/// failed write leaves the original in place.
-fn run_fmt(options: &FmtOptions) -> u8 {
-    let path = match options.path.clone().map_or_else(
-        || crate::config::manifest_path().map_err(|error| error.to_string()),
-        Ok,
-    ) {
-        Ok(path) => path,
-        Err(message) => {
-            eprintln!("{message}");
-            return FMT_FAILURE;
-        }
-    };
-    let text = match blastit_manifest::blastfile::read(&path) {
-        Ok(text) => text,
-        Err(errors) => {
-            // §15.1: a file that is not there is the one missing-file sentence,
-            // produced exactly once in `config::missing_manifest` — the same
-            // words `blastit`, `dev` and `check` use. `read`'s own wording for
-            // an unreadable file stays for every other refusal.
-            if std::fs::metadata(&path)
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-            {
-                eprintln!("{}", crate::config::missing_manifest(&path));
-                return FMT_FAILURE;
-            }
-            return report_manifest_errors(&path, &errors);
-        }
-    };
-    let formatted = match blastit_manifest::blastfile::fmt(&text) {
-        Ok(formatted) => formatted,
-        Err(errors) => return report_manifest_errors(&path, &errors),
-    };
-    if formatted == text {
-        return SUCCESS;
-    }
-    if options.check {
-        println!(
-            "{}: not in canonical layout",
-            crate::config::display_path(&path)
-        );
-        return FMT_NOT_CANONICAL;
-    }
-    match blastit_manifest::edit::write_atomic(&path, &formatted) {
-        Ok(()) => SUCCESS,
-        Err(error) => {
-            eprintln!(
-                "{}: the file could not be written: {}",
-                crate::config::display_path(&path),
-                blastit_manifest::clipped(&error.to_string())
-            );
-            FMT_FAILURE
-        }
-    }
-}
-
-/// Prints one line per refusal, each prefixed with the manifest path exactly
-/// once (§18), and returns `fmt`'s failure status.
-///
-/// The position comes from [`blastit_manifest::ManifestError::position`], not
-/// from the rendered line: a positioned refusal renders `<line>:<col>: <message>`,
-/// so the path goes straight before it — `./Blastfile:2:10: …`; a position-less
-/// one takes the `<path>: <message>` spelling.
-fn report_manifest_errors(path: &std::path::Path, errors: &blastit_manifest::ManifestErrors) -> u8 {
-    let path = crate::config::display_path(path);
-    for error in errors.errors() {
-        let rendered = error.to_string();
-        if error.position().is_none() {
-            eprintln!("{path}: {rendered}");
-        } else {
-            eprintln!("{path}:{rendered}");
-        }
-    }
-    FMT_FAILURE
-}
-
-/// A `--port` / `PORT` value: `1..=65535` (`R2`).
-fn parse_port(value: &str) -> Result<u16, String> {
-    let port: u16 = value
-        .trim()
-        .parse()
-        .map_err(|_| format!("`--port` wants a whole number from 1 to 65535, not `{value}`"))?;
-    if port == 0 {
-        return Err("`--port` wants a whole number from 1 to 65535, not `0`".to_string());
-    }
-    Ok(port)
-}
-
-/// `PORT` when neither `--port` nor its environment spelling is absent (`R2`).
-fn port_from_env() -> Result<u16, String> {
-    match std::env::var("PORT") {
-        Ok(value) => parse_port(&value).map_err(|reason| format!("PORT: {reason}")),
-        Err(std::env::VarError::NotPresent) => Ok(8080),
-        Err(std::env::VarError::NotUnicode(_)) => Err("PORT: the value is not valid UTF-8".into()),
-    }
-}
-
-/// A `--host` value: an IP address, not a host name (`R2`).
-fn parse_host(value: &str) -> Result<IpAddr, String> {
-    value
-        .trim()
-        .parse()
-        .map_err(|_| format!("`--host` wants an IP address such as 127.0.0.1, not `{value}`"))
-}
-
-/// The `blastit dev` supervisor's entry (`MA.2.3.3`).
-///
-/// The grammar above decided *what* to run; this hands the options to stage 0's
-/// unprivileged mode, which never returns: it either `execve`s stage 1 or exits
-/// non-zero. `host` is the installation, exactly as it is for production.
-fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> u8 {
-    crate::stage0::run_dev(host, options, interpreter)
-}
-
-/// The `blastit check` engine (`MA.2.3.5`).
-///
-/// The grammar above decided *what* to audit; this hands the options to
-/// [`crate::check::run`], which owns the transaction: validate, start dbproxy,
-/// run pytest, audit, and — under `--learn` only — write (`R3..R5`, `R30`).
-fn run_check(host: &Host, options: &CheckOptions) -> u8 {
-    crate::check::run(host, options)
-}
-
 /// Runs the role the arguments name.
-fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
+fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>, colour: Colour) -> u8 {
     if let Some(role) = args.role.as_deref() {
         if let Err(message) = role_is_allowed(role, py.is_some()) {
             eprintln!("blastit: {message}");
@@ -762,7 +384,7 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
     }
 
     match args.stage {
-        None | Some(0) => stage0::run(host, py.is_some(), args.preset.as_deref()),
+        None | Some(0) => stage0::run(host, py.is_some(), args.preset.as_deref(), colour),
         Some(1) => {
             let Some(config_fd) = args.config_fd else {
                 eprintln!("blastit: --stage=1 needs --config-fd");
@@ -789,6 +411,7 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
                     dev_reload_since: args.dev_reload_since,
                 },
                 interpreter,
+                colour,
             )
         }
         Some(other) => {
@@ -798,195 +421,12 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>) -> u8 {
     }
 }
 
-/// Whether an install that runs inside an interpreter may play the role (§2.2).
-///
-/// dbproxy holds the real credentials and must run no interpreter at all (§4),
-/// so a wheel install — where blastit *is* a Python process — hands the role to
-/// the Python-free `blastit-dbproxy` binary the wheel ships instead of playing
-/// it in the process that imported the extension.
-///
-/// # Errors
-///
-/// A one-line message when the caller is in an interpreter and asked for
-/// dbproxy.
-fn role_is_allowed(role: &str, hosted: bool) -> Result<(), String> {
-    if hosted && role == "dbproxy" {
-        return Err(
-            "--role=dbproxy runs no interpreter; use the `blastit-dbproxy` binary this \
-             installation ships"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-/// The one flag an operator carries over from `blastit dev` (`MB.17`).
-///
-/// `blastit --port 4242` is the command an owner actually typed, and the
-/// generic "`…` is not `--key=value`" names neither the command that has the
-/// flag nor the setting production reads instead. `--port`/`-p` never belongs
-/// to this grammar at all — stage 0 carries the port to stage 1 inside the
-/// config descriptor — so this sentence is the whole answer, and the generic
-/// message stays for genuine key/value mistakes.
-const PORT_IS_DEV_ONLY: &str =
-    "`--port` is a `blastit dev` flag; production takes `PORT=<n>` or `--preset`";
-
-/// Whether `argument` is the dev-only port flag, with or without a value.
-fn is_dev_only_flag(argument: &str) -> bool {
-    let key = argument.split_once('=').map_or(argument, |(key, _)| key);
-    matches!(key, "--port" | "-p")
-}
-
-/// Parses `--key=value` arguments — and `--preset NAME`, which people type —
-/// refusing anything else.
-///
-/// # Errors
-///
-/// A one-line message naming the argument; the caller prints it with the usage.
-fn parse(arguments: &[String]) -> Result<Args, String> {
-    let mut args = Args::default();
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = &arguments[index];
-        index += 1;
-        // E1: `--preset NAME` is how the flag is written in the documentation
-        // and how an operator types it; `--preset=NAME` is the spelling every
-        // other argument of this program uses. Both are accepted, and this is
-        // the only argument that takes a value of its own: the rest name
-        // descriptors and roles, where a stray word means a mistake.
-        if argument == "--preset" {
-            let value = arguments
-                .get(index)
-                .filter(|next| !next.starts_with('-'))
-                .ok_or_else(|| "`--preset` wants a preset name".to_string())?;
-            index += 1;
-            args.preset = Some(preset_name(value)?);
-            continue;
-        }
-        if is_dev_only_flag(argument) {
-            return Err(PORT_IS_DEV_ONLY.to_string());
-        }
-        let Some((key, value)) = argument.split_once('=') else {
-            return Err(format!("`{argument}` is not `--key=value`"));
-        };
-        match key {
-            "--stage" => args.stage = Some(number(value, key)?),
-            "--role" => args.role = Some(value.to_string()),
-            "--config-fd" => args.config_fd = Some(descriptor(value, key)?),
-            "--dbproxy-pid" => args.dbproxy_pid = Some(number(value, key)?),
-            "--dbproxy-events-fd" => args.dbproxy_events_fd = Some(descriptor(value, key)?),
-            "--dbproxy-stdout-fd" => args.dbproxy_stdout_fd = Some(descriptor(value, key)?),
-            "--dbproxy-stderr-fd" => args.dbproxy_stderr_fd = Some(descriptor(value, key)?),
-            "--secrets-fd" => args.secrets_fd = Some(descriptor(value, key)?),
-            "--events-fd" => args.events_fd = Some(descriptor(value, key)?),
-            "--ready-fd" => args.ready_fd = Some(descriptor(value, key)?),
-            "--seccomp" => args.seccomp = Some(flag(value, key)?),
-            "--preset" => args.preset = Some(preset_name(value)?),
-            // The `dev`-only arguments travel from stage 0 to stage 1 and name
-            // state an operator never types: the ephemeral root, the bind
-            // address, the internal `--learn` descriptors and the reload on/off
-            // token (`R20`, `R22`, `R29`, §4.1).
-            "--dev-root" => args.dev_root = Some(std::path::PathBuf::from(value)),
-            "--dev-host" => args.dev_host = Some(parse_host(value)?),
-            "--dev-obs-fd" => args.dev_obs_fd = Some(descriptor(value, key)?),
-            "--dev-ctl-fd" => args.dev_ctl_fd = Some(descriptor(value, key)?),
-            // `--no-reload` is the user's; this is how stage 0 carries it across
-            // the `execve`, beside the other internal `--dev-*` tokens.
-            "--dev-reload" => args.dev_reload = Some(on_off(value, key)?),
-            "--dev-adopt-fd" => args.dev_adopt_fd = Some(descriptor(value, key)?),
-            "--dev-policy-fd" => args.dev_policy_fd = Some(descriptor(value, key)?),
-            "--dev-reload-since" => {
-                args.dev_reload_since = Some(value.parse().map_err(|_| {
-                    format!("`--dev-reload-since` is not a unix-nanosecond number: {value}")
-                })?);
-            }
-            other => return Err(format!("unknown argument `{other}`")),
-        }
-    }
-    // `--seccomp` is how §7.3's `BLASTIT_SECCOMP` reaches the one role that is
-    // `execve`'d with an empty environment; every other role is a `fork` of a
-    // process that still has the variable.
-    if args.seccomp.is_some() && args.role.as_deref() != Some("dbproxy") {
-        return Err("`--seccomp` is only for `--role=dbproxy`".to_string());
-    }
-    // E1: the preset belongs to stage 0, which is the stage that reads the
-    // environment. Stage 1 gets the values the preset supplied through the
-    // configuration document, the same way it gets every other setting, and the
-    // roles below stage 1 have no configuration of their own.
-    if args.preset.is_some() && (args.stage == Some(1) || args.role.is_some()) {
-        return Err("`--preset` is only for stage 0".to_string());
-    }
-    let any_dev = args.dev_root.is_some()
-        || args.dev_host.is_some()
-        || args.dev_obs_fd.is_some()
-        || args.dev_ctl_fd.is_some()
-        || args.dev_reload.is_some()
-        || args.dev_adopt_fd.is_some()
-        || args.dev_policy_fd.is_some()
-        || args.dev_reload_since.is_some();
-    if any_dev && (args.stage != Some(1) || args.role.is_some()) {
-        return Err("`--dev-*` arguments are only for `--stage=1`".to_string());
-    }
-    if any_dev && args.dev_root.is_none() {
-        return Err("`--dev-*` arguments need `--dev-root`".to_string());
-    }
-    Ok(args)
-}
-
-/// A whole number argument.
-fn number<T: std::str::FromStr>(value: &str, key: &str) -> Result<T, String> {
-    value
-        .parse::<T>()
-        .map_err(|_| format!("`{key}` wants a whole number, not `{value}`"))
-}
-
-/// A descriptor number argument.
-fn descriptor(value: &str, key: &str) -> Result<RawFd, String> {
-    let fd: i32 = number(value, key)?;
-    if fd < 0 {
-        return Err(format!("`{key}` wants a descriptor number, not `{value}`"));
-    }
-    Ok(fd)
-}
-
-/// A `0`/`1` argument, the spelling every boolean the command line carries
-/// uses.
-fn flag(value: &str, key: &str) -> Result<bool, String> {
-    match value {
-        "1" => Ok(true),
-        "0" => Ok(false),
-        other => Err(format!("`{key}` wants 0 or 1, not `{other}`")),
-    }
-}
-
-/// A `on`/`off` argument: the spelling the internal reload token uses, so the
-/// `--dev-reload=on|off` the design names is what travels (§4.1, §4.6).
-fn on_off(value: &str, key: &str) -> Result<bool, String> {
-    match value {
-        "on" => Ok(true),
-        "off" => Ok(false),
-        other => Err(format!("`{key}` wants on or off, not `{other}`")),
-    }
-}
-
-/// A `--preset` argument: a name, without the whitespace an operator may have
-/// typed around it (E1).
-///
-/// The name itself is checked where the presets are known (E1,
-/// [`crate::stage0`] hands it to `Config::from_env`), which is also where
-/// `BLASTIT_PRESET` is checked; this only refuses the empty value, which is a
-/// flag that was meant to carry something.
-fn preset_name(value: &str) -> Result<String, String> {
-    let name = value.trim();
-    if name.is_empty() {
-        return Err("`--preset` wants a preset name".to_string());
-    }
-    Ok(name.to_string())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use super::help::{help_for, usage};
+    use super::parse::{Subcommand, parse, parse_check, parse_dev};
+    use super::run::role_is_allowed;
     use super::*;
 
     #[test]
@@ -1123,22 +563,97 @@ mod tests {
     }
 
     #[test]
+    fn a_value_this_build_cannot_read_is_a_usage_error() {
+        // `A-12`: `--stage=x`, `--seccomp=maybe` and a `--dev-*` token outside
+        // its stage are mistakes in what somebody typed, so they exit `2` like
+        // every other unknown argument — not `1`, which is reserved for the
+        // re-exec lines the protected CLI matrix pins.
+        for argv in [
+            &["--stage=x"][..],
+            &["--seccomp=maybe"][..],
+            &["--stage=1", "--seccomp=maybe"][..],
+            &["--dev-root=/tmp/x"][..],
+        ] {
+            let argv: Vec<String> = argv.iter().map(|argument| argument.to_string()).collect();
+            let refusal = parse(&argv).expect_err("refused");
+            assert_eq!(refusal.exit, USAGE_FAILURE, "{argv:?}: {refusal:?}");
+        }
+        // The genuine re-exec lines keep `1`.
+        for argv in [
+            &["--stage=1", "--seccomp=0"][..],
+            &["--stage=1", "--config-fd=7", "--dev-obs-fd=11"][..],
+        ] {
+            let argv: Vec<String> = argv.iter().map(|argument| argument.to_string()).collect();
+            let refusal = parse(&argv).expect_err("refused");
+            assert_eq!(refusal.exit, FAILURE, "{argv:?}: {refusal:?}");
+        }
+    }
+
+    #[test]
     fn the_dev_only_port_flag_is_answered_with_the_two_places_it_belongs() {
         // The command an owner typed (`MB.17`) must name both the command that
         // has the flag and the setting production reads, never "not
         // `--key=value`", which answers a question nobody asked.
         for argument in ["--port", "--port=4242", "-p", "-p=4242"] {
-            let message = parse(&[argument.to_string()]).expect_err(argument);
-            assert_eq!(message, PORT_IS_DEV_ONLY, "{argument}");
+            let refusal = parse(&[argument.to_string()]).expect_err(argument);
+            assert_eq!(refusal.exit, USAGE_FAILURE, "{argument}");
+            let message = refusal.message;
+            assert_eq!(message, parse::PORT_IS_DEV_ONLY, "{argument}");
             assert!(message.contains("blastit dev"), "{message}");
             assert!(message.contains("PORT="), "{message}");
         }
-        // A genuine key/value mistake keeps the generic sentence: it is a
-        // different bug and the fix is different too.
+        // A genuine key/value mistake keeps its own sentence — it is a
+        // different bug — but names the help that lists the flag (`A-14`).
+        let bare = parse(&["--stage".to_string()]).expect_err("a bare --stage");
         assert_eq!(
-            parse(&["--stage".to_string()]).expect_err("a bare --stage"),
-            "`--stage` is not `--key=value`"
+            bare.message,
+            "unknown argument `--stage` — run 'blastit --help'"
         );
+        // A word where a flag belongs is a command this build does not have,
+        // and says so instead of asking for `--key=value` (`A-14`).
+        let word = parse(&["serve".to_string()]).expect_err("a positional");
+        assert_eq!(
+            word.message,
+            "unknown subcommand 'serve' — run 'blastit --help'"
+        );
+        assert_eq!(word.exit, USAGE_FAILURE);
+    }
+
+    #[test]
+    fn a_stage_zero_preset_typo_is_a_usage_error_naming_the_presets() {
+        // `A-11`: the flagship case — a typo used to be drowned by ten JSON
+        // lines about `cap_chown`. `parse` runs before stage 0, so the sentence
+        // comes first, and one resolver owns it.
+        for argv in [
+            &["--preset", "nope"][..],
+            &["--preset=nope"][..],
+            &["--preset", " wrong "][..],
+        ] {
+            let argv: Vec<String> = argv.iter().map(|argument| argument.to_string()).collect();
+            let refusal = parse(&argv).expect_err("a preset typo");
+            assert_eq!(refusal.exit, USAGE_FAILURE, "{argv:?}");
+            assert!(refusal.message.contains("unknown preset"), "{refusal:?}");
+            assert!(refusal.message.contains("digitalocean-paas"), "{refusal:?}");
+        }
+        // The documented spellings are accepted, and whitespace is the
+        // operator's.
+        for argv in [
+            &["--preset", "compose-traefik"][..],
+            &["--preset=digitalocean-paas"][..],
+            &["--preset", " digitalocean-paas "][..],
+        ] {
+            let argv: Vec<String> = argv.iter().map(|argument| argument.to_string()).collect();
+            assert!(parse(&argv).is_ok(), "{argv:?}");
+        }
+        // A re-exec of this program by itself keeps `1` (the protected matrix
+        // pins `--stage=1 --preset x`), and still names the flag.
+        let restage: Vec<String> = ["--stage=1", "--preset", "x"]
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect();
+        let refusal = parse(&restage).expect_err("stage 1 has no preset");
+        assert_eq!(refusal.exit, FAILURE);
+        assert!(refusal.message.contains("--preset"), "{refusal:?}");
     }
 
     #[test]
@@ -1208,15 +723,14 @@ mod tests {
         assert!(parse(&["--preset".to_string()]).is_err());
         assert!(parse(&["--preset".to_string(), "--help".to_string()]).is_err());
         assert!(parse(&["--preset".to_string(), "--preset=x".to_string()]).is_err());
-        // A name that is not a preset is refused where the presets are known
-        // (`Config::from_env`), not here.
-        assert_eq!(
-            parse(&["--preset".to_string(), "nope".to_string()])
-                .unwrap()
-                .preset
-                .as_deref(),
-            Some("nope")
-        );
+        // A name that is not a preset is refused here, at the command line,
+        // and the error lists the ones there are (`A-11`).
+        let error = parse(&["--preset".to_string(), "nope".to_string()])
+            .expect_err("`nope` is not a preset");
+        assert!(error.message.contains("unknown preset `nope`"), "{error:?}");
+        for preset in crate::config::PRESETS {
+            assert!(error.message.contains(preset.name()), "{error:?}");
+        }
 
         // The last one wins, whichever spelling each uses: this is an argument,
         // not a set.
@@ -1244,7 +758,7 @@ mod tests {
         // E1: `--preset` is the one argument whose values an operator cannot
         // guess, so `--help` (and every argument error) names them, one line
         // each, and shows the spelling the documentation uses.
-        let usage = usage();
+        let usage = usage(false);
         assert!(usage.contains("--preset NAME"), "{usage}");
         assert!(usage.contains("BLASTIT_PRESET=NAME"), "{usage}");
         for preset in crate::config::PRESETS {
@@ -1256,6 +770,75 @@ mod tests {
             usage.lines().filter(|line| line.contains(": ")).count() >= 2,
             "{usage}"
         );
+    }
+
+    #[test]
+    fn the_usage_hides_the_reexec_grammar_and_offers_version_and_help() {
+        // `A-8`: `--stage=1` and `--role=dbproxy` are plumbing between two
+        // images of this same program. They are still parsed (the tests above
+        // prove it), and they are not something a person is taught to type.
+        let plain = usage(false);
+        for internal in ["--stage=1", "--role=dbproxy", "--config-fd", "--secrets-fd"] {
+            assert!(!plain.contains(internal), "{internal} is hidden:\n{plain}");
+        }
+        assert!(plain.contains("-V, --version"), "{plain}");
+        assert!(
+            plain.contains("blastit help [dev|check|fmt|lsp]"),
+            "{plain}"
+        );
+        assert!(plain.contains("-h, --help"), "{plain}");
+        assert!(!plain.contains('\u{1b}'), "{plain}");
+        // The same text on a terminal colours only its two headers, so every
+        // line of the body is byte-for-byte the plain one.
+        let coloured = usage(true);
+        assert!(coloured.starts_with("\u{1b}[1m\u{1b}[36musage:\u{1b}[0m\n"));
+        let stripped = coloured
+            .replace("\u{1b}[1m\u{1b}[36m", "")
+            .replace("\u{1b}[0m", "");
+        assert_eq!(stripped, plain);
+    }
+
+    #[test]
+    fn help_names_every_command_and_refuses_an_unknown_one() {
+        assert!(help_for(None, false).expect("help").starts_with("usage:"));
+        assert!(
+            help_for(Some("blastit"), false)
+                .expect("blastit")
+                .starts_with("usage:")
+        );
+        assert!(
+            help_for(Some("dev"), false)
+                .expect("dev")
+                .contains("--port")
+        );
+        assert!(
+            help_for(Some("check"), false)
+                .expect("check")
+                .contains("--dry-run")
+        );
+        assert!(
+            help_for(Some("test"), false)
+                .expect("test")
+                .contains("--json")
+        );
+        assert!(
+            help_for(Some("fmt"), false)
+                .expect("fmt")
+                .contains("--check")
+        );
+        assert!(
+            help_for(Some("lsp"), false)
+                .expect("lsp")
+                .contains("blastit lsp")
+        );
+        // `serve` is not a command this build has: `blastit help serve` is
+        // refused exactly as `blastit serve` is (`A-14`).
+        for unknown in ["wat", "serve"] {
+            assert_eq!(
+                help_for(Some(unknown), false).expect_err("unknown"),
+                format!("unknown subcommand '{unknown}' — run 'blastit --help'")
+            );
+        }
     }
 
     /// The `Run` half of a parsed subcommand, for the grammar twins below.

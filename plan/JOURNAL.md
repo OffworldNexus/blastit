@@ -3681,3 +3681,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T03:58 [MB.40.4.3] (lead) status active -> review
 - 2026-11-19T04:04 [MB.40.4.3] (lead) status review -> done
 - 2026-11-19T04:04 [MB.40.4] (lead) status ready -> done
+- 2026-11-19T04:04 [MB.40.5] (lead) status ready -> active
+- 2026-11-19T04:04 [MB.40.5] (lead) attempt 1/3 started
+- 2026-11-19T04:04 [MB.40.5] (lead) base 1fde3df
+- 2026-11-19T04:15 [MB.40.5] (lead) status active -> review
+- 2026-11-19T04:27 [MB.40.5] (lead) committed groups 1-2; needs_split: groups 3 (banner/phases/alignment, blocked by 3 protected tests) and 4 (check/fmt actionable output)

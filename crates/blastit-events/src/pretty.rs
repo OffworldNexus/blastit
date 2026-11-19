@@ -40,11 +40,14 @@ pub fn encode_pretty(event: &Event, color: bool) -> String {
 }
 
 /// The level word, padded to five columns and coloured when asked.
+///
+/// DEBUG is `dim` (`ESC[2m`), the same code the logger's field-dump fallback
+/// uses: one palette for a build's output, not two (`A-4`).
 fn level_word(level: Level, color: bool) -> String {
     let mut word = format!("{:<5}", level.as_str().to_uppercase());
     if color {
         let code = match level {
-            Level::Debug => "36",
+            Level::Debug => "2",
             Level::Info => "32",
             Level::Warn => "33",
             Level::Error => "31",
@@ -514,7 +517,7 @@ mod tests {
         assert!(
             encode_pretty(&event.clone().with_level(Level::Error), true).contains("\u{1b}[31m")
         );
-        assert!(encode_pretty(&event.with_level(Level::Debug), true).contains("\u{1b}[36m"));
+        assert!(encode_pretty(&event.with_level(Level::Debug), true).contains("\u{1b}[2m"));
     }
 
     #[test]

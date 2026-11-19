@@ -2,16 +2,16 @@
 id: MB.40.5
 title: "CLI visual & UX craft overhaul: --version, clean --help, NO_COLOR/IsTerminal, http:// banner, actionable check & fmt diffs"
 kind: task
-status: ready
+status: review
 owner: implementer
 priority: 1
 depends_on: [MB.40.4]
 paths: ["crates/blastit/**", "crates/blastit-events/**", "python/**", Cargo.toml, Cargo.lock]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T00:16"
+updated: "2026-11-19T04:15"
 ---
 
 # Goal

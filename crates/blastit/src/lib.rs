@@ -81,6 +81,7 @@ mod roles;
 mod stage0;
 mod stage1;
 mod supervise;
+mod term;
 mod visibility;
 
 // The worker transport (`view.chan` framing and flow control) is part of this
