@@ -3903,3 +3903,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T22:58 [MB.42.7] (lead) base 4dc0c2f569d60195bf6b682b0175294ab4d156f7
 - 2026-11-19T23:08 [MB.42.7] (lead) authorized protected-test hardening: crates/blastit-sys/tests/critical_embedded_seccomp.rs forks (libc::fork at :244 via try_fork at :163,340,368) and its child
 - 2026-11-19T23:19 [MB.42.7] (lead) status active -> done
+- 2026-11-19T23:19 [MB.42.8] (unknown) created (task) Finish async-signal-safe fork cleanup: critical_child_sequence.rs forks then child::enter (allocates)
+- 2026-11-19T23:26 [MB.42.9] (unknown) created (task) Handoff: an unsafe $VIRTUAL_ENV must be skipped, not exit 1 (blasts every dev|check|fmt|lsp in a 0775 checkout)
+- 2026-11-19T23:26 [MB.42] (lead) MB.42.9 created: handoff treats ambient $VIRTUAL_ENV as 'explicit' so an unsafe active venv exits 1 - reproduced on this repo (parent dir 0775) where every blas
+- 2026-11-19T23:26 [MB.42.2.4] (lead) status review -> done

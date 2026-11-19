@@ -2,7 +2,7 @@
 id: MB.42.2.4
 title: "Integration glue: make install staging, test-critical staging, and one-binary four-runtime E2E"
 kind: task
-status: review
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2.3]
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T17:18"
-updated: "2026-11-19T22:54"
+updated: "2026-11-19T23:26"
 ---
 
 # Goal

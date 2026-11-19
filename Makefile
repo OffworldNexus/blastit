@@ -11,6 +11,7 @@
 #   make test-critical    # run critical skip check + staged Python critical tests (offline)
 #   make rs-test-critical # run every crates/*/tests/critical_*.rs suite standalone
 #   make e2e              # build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
+#   make e2e-universal    # one staged bundle, four runtimes: CPython 3.13/3.14, PHP 8.4, static, handoff (slow)
 #   make install          # stage a self-contained release bundle under PREFIX (default ~/.local)
 #   make uninstall        # remove the bundle `make install` staged under PREFIX
 #   make php-sapi         # build the per-minor C SAPI shims this host has headers for
@@ -30,8 +31,9 @@ DOCS_PYTEST ?= 9.2.0
 # so `--version`, `dev` and `check` work with no `uv`, no wheel and no `PATH`.
 PREFIX ?= $(HOME)/.local
 INSTALL_BINDIR := $(PREFIX)/bin
-INSTALL_LIBDIR := $(PREFIX)/share/blastit/lib
-INSTALL_PYDIR  := $(PREFIX)/share/blastit/python
+INSTALL_SHARE  := $(PREFIX)/share/blastit
+INSTALL_LIBDIR := $(INSTALL_SHARE)/lib
+INSTALL_PYDIR  := $(INSTALL_SHARE)/python
 # `make PREFIX= install` would stage into `/bin` and `/share`; refuse at parse
 # time instead of writing outside the prefix the caller meant.
 ifneq ($(filter install uninstall,$(MAKECMDGOALS)),)
@@ -81,7 +83,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help fast-check check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check \
-        py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
+        universal-smoke py-format py-lint test-critical docs-check docs-unit docs-test e2e e2e-universal mutants-rust \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image python-runtime platform-matrix-check standalone standalone-glibc workflow-check \
         packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp
@@ -143,6 +145,18 @@ rs-no-python: ## Build + inspect the universal binary: zero libpython, zero libp
 	@echo "cargo build -p blastit --locked            # default universal artifact"
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
 	scripts/check-portable-elf.sh "$(CURDIR)/target/debug/blastit"
+	@echo "cargo build --release -p blastit --locked        # the binaries make install ships"
+	$(STANDALONE_ENV) $(CARGO) build --release -p blastit --locked
+	$(STANDALONE_ENV) $(CARGO) build --release -p blastit-lsp --locked
+	@set -e; portable=scripts/check-portable-elf.sh; advertised=0; parsed=0; \
+	if grep -q -- '--max-glibc' "$$portable"; then advertised=1; fi; \
+	if grep -q -e '--max-glibc)' "$$portable"; then parsed=1; fi; \
+	if [ "$$advertised" -eq 1 ] && [ "$$parsed" -eq 0 ]; then \
+		echo "error: $$portable advertises --max-glibc without parsing it: a floor that is never applied reads as enforced; add the '--max-glibc)' arm (or drop the prose)" >&2; \
+		exit 1; \
+	fi; \
+	flags=""; if [ "$$parsed" -eq 1 ]; then flags="--max-glibc 2_28"; fi; \
+	"$$portable" $$flags "$(CURDIR)/target/release/blastit" "$(CURDIR)/target/release/blastit-lsp"
 	@set -e; count=$$(grep -c -e pyo3 -e blastit-php-sapi crates/blastit-view/Cargo.toml || true); \
 	if [ "$$count" -ne 0 ]; then \
 		echo "error: crates/blastit-view names an interpreter ($$count line(s)): the transport crate must stay plain std" >&2; \
@@ -184,6 +198,17 @@ rs-no-default: ## Build feature-less binary and prove static mount refusal when 
 		echo "no-default build: 0 $$crate dependencies"; \
 	done
 	$(CARGO) test -p blastit-scheduler --locked --no-default-features --test static_feature_off
+
+# The facts `MB.42.2.4` adds to the per-slice gate that `rs-test` and
+# `rs-no-python` do **not** already carry: the debug `blastit` is still the
+# portable universal artifact (the portable-ELF gate on a release binary runs in
+# `check`), and the §4 handoff suite runs on its own so a regression names
+# handoff instead of hiding inside `rs-test`'s 74 s output. `blastit-audit`'s
+# suites are left to `rs-test`, which already runs them.
+universal-smoke: ## Debug binary + portable-ELF and the handoff suite (in fast-check)
+	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
+	scripts/check-portable-elf.sh "$(CURDIR)/target/debug/blastit"
+	$(RUST_ENV) $(CARGO) test -p blastit --locked --features python --test critical_handoff
 
 # Verify debug-only boot swap seam is present in debug builds and compiled out of release builds.
 seam-check: ## Verify debug-only test seam presence in debug and absence in release
@@ -264,7 +289,7 @@ test-critical: critical-skip-check ## Run critical skip check + staged Python cr
 	cp target/debug/blastit "$$stage/blastit/_bin/blastit"; \
 	ln -sfn blastit "$$stage/blastit/_bin/blastit-dbproxy"; \
 	echo "python -m unittest discover -s python/tests/critical"; \
-	CARGO_NET_OFFLINE=true UV_OFFLINE=1 PYTHONPATH="$${stage}:$(CURDIR)/python" \
+	CARGO_NET_OFFLINE=true UV_OFFLINE=1 BLASTIT_NO_LOCAL_HANDOFF=1 PYTHONPATH="$${stage}:$(CURDIR)/python" \
 		$(RUST_ENV) $(UV) run --no-project python -m unittest discover \
 		-s python/tests/critical -p 'test_*.py'
 
@@ -448,6 +473,27 @@ e2e: ## Build manylinux_2_28 wheel and run Docker + rootless capability e2e test
 	scripts/build-wheel.sh --manylinux 2_28
 	E2E_DOCKERFILE=Dockerfile.prebuilt $(UV) run --no-project e2e/run.py
 	$(UV) run --no-project e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
+
+# One artifact, four runtimes (`MB.42.2.4`). Slow: it stages a release bundle,
+# builds a venv per interpreter and boots a real `blastit dev` per leg, so it is
+# not in `fast-check`; `make check` (the epic/release gate) and this target run it.
+# Every leg and its PASS/FAIL summary live in `e2e/universal_binary.py`, and that
+# harness refuses a SKIP unless `--allow-skip` is passed — which this target, and
+# `make check`, never do.
+#
+# The bundle is staged **outside the checkout**: `stage0::project_python`'s
+# `cargo_target()` adds `<target>/py-sapi` as a `dev` shim candidate when the
+# binary sits under a directory named `target`, so a leg could pass on the build
+# tree's shim and never touch the bundle's. `BUNDLE_REQUIRE_PHP_SHIMS=1` makes
+# `install` refuse a bundle with no PHP shim, so the gate cannot exit 0 on a host
+# that never had `libphp-embed`.
+E2E_UNIVERSAL_PREFIX ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/opencode/blastit-e2e/prefix
+E2E_UNIVERSAL_LEGS ?= --python 3.13 --python 3.14 --php 8.4 --static --handoff --check
+
+e2e-universal: ## One staged bundle proves CPython 3.13/3.14, PHP 8.4, static and handoff (slow)
+	BUNDLE_REQUIRE_PHP_SHIMS=1 $(MAKE) install PREFIX="$(E2E_UNIVERSAL_PREFIX)"
+	$(UV) run --no-project e2e/universal_binary.py \
+		--binary "$(E2E_UNIVERSAL_PREFIX)/bin/blastit" $(E2E_UNIVERSAL_LEGS)
 
 # Build per-minor C SAPI shims (`libblastit_php<mm>-<arch>-<libc>.so`) using `-isystem` for PHP headers.
 PHP_MINORS ?= 8.5 8.4 8.3
@@ -741,10 +787,16 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-fast-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test py-lint plan-validate ## Fast per-slice Rust + Python + plan check
+fast-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test py-lint plan-validate universal-smoke ## Fast per-slice Rust + Python + plan check
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python rs-no-default seam-check platform-matrix-check workflow-check packaging-gates-test zed-check plan-validate ## Full unprivileged epic/release gate
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python rs-no-default seam-check e2e-universal platform-matrix-check workflow-check packaging-gates-test zed-check plan-validate ## Full unprivileged epic/release gate
 
+# `make install` stages the §6.1 bundle: one universal `blastit` (the default
+# `python,php,static` features), its `blastit-lsp`, every shim this host built,
+# the licence and the pure-Python package, with two symlinks as the entry points.
+# `scripts/check-bundle-layout.sh` then asserts the tree, so a host that skipped a
+# shim cannot quietly ship a bundle that half works. Never run this against
+# `~/.local` in a test: pass `PREFIX=<scratch dir>`.
 install: ## Install a self-contained release bundle under PREFIX (default ~/.local)
 	@set -eu; \
 	if [ "$(PREFIX)" = "$(HOME)/.local" ] && [ -L "$(INSTALL_BINDIR)/blastit" ]; then \
@@ -755,37 +807,40 @@ install: ## Install a self-contained release bundle under PREFIX (default ~/.loc
 				$(UV) tool uninstall blastit >/dev/null 2>&1 || true ;; \
 		esac; \
 	fi
-	@echo "cargo build --release --locked -> blastit (python,php,static)"
-	$(RUST_ENV) $(CARGO) build --release --locked -p blastit --features python,php,static
-	@echo "cargo build --release --locked -> blastit-lsp"
-	$(RUST_ENV) $(CARGO) build --release --locked -p blastit-lsp
+	@echo "cargo build --release --locked -p blastit            # python, php, static"
+	$(STANDALONE_ENV) $(CARGO) build --release --locked -p blastit
+	@echo "cargo build --release --locked -p blastit-lsp"
+	$(STANDALONE_ENV) $(CARGO) build --release --locked -p blastit-lsp
+	$(MAKE) py-sapi
 	$(MAKE) php-sapi
 	@set -eu; \
-	rm -rf "$(PREFIX)/share/blastit"; \
-	mkdir -p "$(INSTALL_LIBDIR)" "$(INSTALL_PYDIR)/blastit/_bin" "$(INSTALL_BINDIR)"; \
+	rm -rf "$(INSTALL_SHARE)"; \
+	mkdir -p "$(INSTALL_LIBDIR)" "$(INSTALL_PYDIR)/blastit" "$(INSTALL_BINDIR)"; \
 	install -m 0755 target/release/blastit "$(INSTALL_LIBDIR)/blastit"; \
 	install -m 0755 target/release/blastit-lsp "$(INSTALL_LIBDIR)/blastit-lsp"; \
-	for shim in target/php-sapi/libblastit_php*.so; do \
+	for shim in target/py-sapi/libblastit_py*.so target/php-sapi/libblastit_php*.so; do \
 		[ -e "$$shim" ] || continue; \
 		install -m 0755 "$$shim" "$(INSTALL_LIBDIR)/"; \
 	done; \
+	install -m 0644 LICENSE "$(INSTALL_SHARE)/LICENSE"; \
 	install -m 0644 python/blastit/*.py "$(INSTALL_PYDIR)/blastit/"; \
-	ln -sfn "$(INSTALL_LIBDIR)/blastit" "$(INSTALL_PYDIR)/blastit/_bin/blastit"; \
-	ln -sfn "$(INSTALL_LIBDIR)/blastit" "$(INSTALL_PYDIR)/blastit/_bin/blastit-dbproxy"; \
-	ln -sfn "$(INSTALL_LIBDIR)/blastit" "$(INSTALL_BINDIR)/blastit"; \
-	ln -sfn "$(INSTALL_LIBDIR)/blastit-lsp" "$(INSTALL_BINDIR)/blastit-lsp"; \
-	shims=""; \
-	for shim in "$(INSTALL_LIBDIR)"/libblastit_php*.so; do \
+	ln -sfn "../share/blastit/lib/blastit" "$(INSTALL_BINDIR)/blastit"; \
+	ln -sfn "../share/blastit/lib/blastit-lsp" "$(INSTALL_BINDIR)/blastit-lsp"; \
+	scripts/check-bundle-layout.sh "$(PREFIX)"; \
+	py=0; php=0; \
+	for shim in "$(INSTALL_LIBDIR)"/libblastit_*.so; do \
 		[ -e "$$shim" ] || continue; \
-		shims="$$shims $$(basename "$$shim")"; \
+		case "$$shim" in \
+			*libblastit_py*) py=$$((py + 1)) ;; \
+			*libblastit_php*) php=$$((php + 1)) ;; \
+		esac; \
 	done; \
-	echo "install: $(INSTALL_BINDIR)/blastit -> $(INSTALL_LIBDIR)/blastit"; \
-	echo "install: $(INSTALL_BINDIR)/blastit-lsp -> $(INSTALL_LIBDIR)/blastit-lsp"; \
-	echo "install: capabilities: python, php, static"; \
-	[ -n "$$shims" ] || shims=" none on this host (make php-sapi prints why)"; \
-	echo "install: php sapi shims:$$shims"; \
-	echo "install: python gate under $(INSTALL_PYDIR)"; \
-	echo "install: $$("$(INSTALL_BINDIR)/blastit" --version)"; \
+	echo "install: capabilities: static always; python $$py shim(s); php $$php shim(s)"; \
+	[ "$$py" -gt 0 ] || echo "install: note: no CPython shim was built, so WSGI views cannot boot here (make py-sapi prints why)"; \
+	[ "$$php" -gt 0 ] || echo "install: note: no PHP shim was built, so [route.php] cannot boot here (make php-sapi prints why)"; \
+	echo "install: python package: $(INSTALL_PYDIR)/blastit (it belongs to this binary, not to your interpreter)"; \
+	echo "install: no pip needed:  PYTHONPATH=$(INSTALL_PYDIR) python -m blastit check"; \
+	echo "install: next: in a project with a Blastfile, run  $(INSTALL_BINDIR)/blastit dev"; \
 	case ":$$PATH:" in \
 		*":$(INSTALL_BINDIR):"*) echo "install: $(INSTALL_BINDIR) is already on PATH" ;; \
 		*) echo "install: add it to PATH:  export PATH=\"$(INSTALL_BINDIR):\$$PATH\"" ;; \
