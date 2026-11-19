@@ -1,7 +1,7 @@
 # blastit — Architecture
 
 blastit is a zero-trust application harness for 12-factor web apps (Python WSGI,
-embedded PHP 8.3–8.5, and static sites) that **sandboxes views**. Each view runs
+embedded PHP 8.3–8.6, and static sites) that **sandboxes views**. Each view runs
 under its own uid, and a view only gets the capabilities the `Blastfile` lists
 for it. For now that means PostgreSQL: route X may run parameterised queries A
 and B, route Y may run query C, and nothing else. If an attacker takes over a
@@ -59,8 +59,10 @@ Section 9 summarises the parts of both that matter here.
 A single serving Rust binary, `blastit`, plays every role. Most roles are chosen by
 their position in the process tree. The exception is dbproxy, which is
 re-exec'd with `--role=dbproxy` (§4); that flag grants nothing by itself,
-because the secrets only arrive over an inherited pipe. CPython is embedded
-through `pyo3` for a Python route, the host's NTS `libphp` is `dlopen`ed in a
+because the secrets only arrive over an inherited pipe. CPython (`3.13`, `3.14`)
+is `dlopen`ed in stage 1 via an fd-pinned per-minor `libblastit_py3{13,14}` shim
+only when a Python route is active ([ADR-0017](docs/decisions/ADR-0017-universal-distribution.md)),
+the host's NTS `libphp` is `dlopen`ed in a
 PHP route (§2.6), a `static` mount is answered by the scheduler through the
 `blastit-view-static` library (§2.4), so an all-static site needs no interpreter
 at all. The database proxy is
@@ -175,10 +177,15 @@ names the capability-free copy of a standalone install's own binary (which
 writable by neither group nor others, in a directory that is not either: a uid
 that could replace it would decide what the credentials-holding process runs next.
 
-**Distribution.** A tagged release publishes the wheels to PyPI through trusted
-publishing (`.github/workflows/publish-pypi.yml`); from an sdist, the build
-backend builds `blastit-dbproxy` from the workspace inside it, so a source
-install carries the same binary as a wheel.
+**Distribution.** A tagged release publishes `py3-none-*` wheels to PyPI through
+trusted publishing (`.github/workflows/publish-pypi.yml`), native `.deb`/`.rpm`
+packages to signed APT/RPM repositories (`.github/workflows/packages.yml`), and
+standalone archives; from an sdist, `blastit_build.py` builds the same universal
+`blastit` binary from the workspace inside it. [ADR-0017](docs/decisions/ADR-0017-universal-distribution.md)
+(`docs/design/universal-distribution.md`) unifies every Linux package (`.deb`,
+`.rpm`, `.tar.gz`, `py3-none-*` wheels, and the Composer wrapper) around one
+`libpython`-free `blastit` binary that loads CPython (`3.13`, `3.14`) and NTS
+`libphp` (`8.3`–`8.6`) via fd-pinned per-minor `dlopen` shims.
 
 ### 2.2 dbproxy
 
@@ -554,16 +561,18 @@ artifact needs neither.
 
 | Crate | Owns | Direct dependencies | Builds on |
 |---|---|---|---|
-| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code** | `blastit-dbproxy`, `blastit-env`, `blastit-events`, `blastit-frame`, `blastit-http`, `blastit-ingress`, `blastit-lsp`, `blastit-manifest`, `blastit-scheduler`, `blastit-sqlpolicy`, `blastit-sys`, `blastit-view`, optional `blastit-view-php` (`php`) and `blastit-view-python` (`python`), plus `libc`, `pyo3` (optional), `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
-| `blastit-sys` | the OS surface: fork/exec, uids, capabilities, seccomp, signals, `fanotify`, `/proc` | `libc`, `rustix`, `thiserror` | Linux |
-| `blastit-dbproxy` | the PostgreSQL broker: per-route listener, the query allowlist | `async-trait`, `blastit-events`, `blastit-sqlpolicy`, `blastit-sys`, `pregresql`, `rustix`, `serde`, `serde_json`, `thiserror`, `tokio`, `zeroize`, `tokio-postgres` (dev) | Linux |
+| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code, zero `pyo3`** | `blastit-audit`, `blastit-dbproxy`, `blastit-env`, `blastit-events`, `blastit-frame`, `blastit-http`, `blastit-ingress`, `blastit-lsp`, `blastit-manifest`, `blastit-scheduler`, `blastit-sqlpolicy`, `blastit-sys`, `blastit-view`, optional `blastit-py-sapi` (`python`) and `blastit-view-php` (`php`), plus `libc`, `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
+| `blastit-sys` | the OS surface: fork/exec, uids, capabilities, seccomp, signals, `fanotify`, `/proc`, `elf`, `pin` (verified fd-pinning) | `libc`, `rustix`, `thiserror` | Linux |
+| `blastit-dbproxy` | the PostgreSQL broker library: per-route listener, the query allowlist (`blastit --role=dbproxy`) | `async-trait`, `blastit-events`, `blastit-sqlpolicy`, `blastit-sys`, `pregresql`, `rustix`, `serde`, `serde_json`, `thiserror`, `tokio`, `zeroize`, `tokio-postgres` (dev) | Linux |
 | `blastit-scheduler` | the routing table, the worker budget, fair queuing, the static mount's admission and dispatch (`static` feature) | `blastit-events`, `blastit-frame`, `blastit-ingress`, `blastit-manifest`, `blastit-view`, optional `blastit-view-static` (`static`, default here), `rustix`, `serde_json`, `thiserror`, `tokio` | Linux |
 | `blastit-http` | HTTP/1.1 head parsing, the listener, the client-address resolver | `blastit-events`, `blastit-frame`, `httparse`, `thiserror`, `tokio` | Linux (`#[cfg(unix)]`) |
 | `blastit-view` | **transport only**: `wire`, `flow`, `stream`, `loaded`, `error`, `config`, `sync`, `path` (the one request-target decoder) and `spawn` (the fork seam); no worker, no `pyo3`, no SAPI | `blastit-frame`, `blastit-sys`, `thiserror` | Linux |
-| `blastit-view-python` | the WSGI worker: `environ`, `input`, `request`, `response`, `serve` (the pool), `loaded` (the Python tracker), `immortal`, `zygote` (the fork and child half) | `blastit-frame`, `blastit-sys`, `blastit-view`, `pyo3` | Linux; `blastit` feature `python` |
+| `blastit-view-python` | the WSGI worker: `environ`, `input`, `request`, `response`, `serve` (the pool), `loaded` (the Python tracker), `immortal`, `zygote` (the fork and child half) | `blastit-frame`, `blastit-sys`, `blastit-view`, `pyo3` | Linux; linked by `blastit-py-shim` only |
+| `blastit-py-sapi` | stage-0 Python discovery (`pyvenv.cfg`/ELF gate), `blastit_py_abi_v1` types, and the stage-1 `dlopen` loader (zero `pyo3`) | `blastit-manifest`, `blastit-sys`, `rustix`, `serde`, `serde_json`, `thiserror` | Linux; `blastit` feature `python` |
+| `blastit-py-shim` | per-minor `libblastit_py3{13,14}-<arch>-<libc>.so` `cdylib` shim (`dlopen`ed in stage 1, never linked into `blastit`) | `blastit-py-sapi`, `blastit-sys`, `blastit-view`, `blastit-view-python`, `pyo3`, `serde`, `serde_json` | Linux (`make py-sapi`) |
 | `blastit-view-php` | the embedded worker: `worker` (`PhpEmbedRuntime`, `view.chan` loop), `discovery` (stage-0 ELF gate), `pinning` (library/shim + entry pins), `probe` (the boot probe child), `spawn` (the PHP fork and child half) | `blastit-frame`, `blastit-manifest`, `blastit-php-sapi`, `blastit-sys`, `blastit-view`, `rustix`, `serde_json` | Linux; `blastit` feature `php` |
 | `blastit-view-static` | `static_asset` (`openat2` resolution), `static_response` (MIME/`ETag`/`immutable`), `rewrite` (SPA answer) — a library the scheduler calls, no process | `blastit-manifest`, `blastit-view`, `rustix`, `thiserror` | Linux; `blastit-scheduler` feature `static` |
-| `blastit-py` | the `pyo3` module the wheel imports | `blastit`, `blastit-ingress`, `blastit-manifest`, `blastit-sqlpolicy`, `pyo3`, `serde_json` | Linux |
+| `blastit-audit` | unified route-trace, grant-diff, `--learn` planner, and SQL/table-grant analysis engine backing `blastit check` and `blastit --internal-json` | `blastit-dbproxy`, `blastit-ingress`, `blastit-manifest`, `blastit-sqlpolicy`, `serde`, `serde_json`, `thiserror` | any |
 | `blastit-php-sapi` | the C SAPI shim's Rust half (the shim is `dlopen`ed, never linked) | none at runtime — a build script compiles the per-minor C ABI | Linux |
 | `blastit-env` | the `BLASTIT_*` / `ALWAYS_STRIP` barrier and the swapped `envp` | `blastit-manifest`, `percent-encoding`, `thiserror`, `url`, `zeroize` | any |
 | `blastit-manifest` | the `Blastfile`: lexer, parser, model, `validate`, `fmt`, warning sites, and the query vocabulary it re-exports from `blastit-sqlpolicy` | `blastit-ingress`, `blastit-sqlpolicy`, `regex`, `serde`, `thiserror` | any |
@@ -1880,12 +1889,12 @@ is written up in
    — which is what every child of a capability-carrying file sees, its bounding
    set being empty — and a rootless init keeps its capabilities across
    `setresuid`, because the kernel only clears the sets when a uid crosses 0.
-   Together they mean the capability belongs on a **dedicated copy** of the file
-   init starts from (mode `0500`, owned by init's uid, whose uid is then a
-   dedicated one), that a wheel install `execve`s its separate `blastit-dbproxy`
-   for the credentials-holding role, and that a standalone install names its
-   capability-free copy in `BLASTIT_EXEC`. The check is by **device and inode**
-   over every name the shared interpreter has, because the kernel grants the
+   Together they mean the capability belongs on a **dedicated copy** of the
+   `blastit` binary init starts from (mode `0500`, owned by init's uid, whose uid
+   is then a dedicated one), and that both wheel and package installs serve
+   `--role=dbproxy` from the capability-free `blastit` binary named in
+   `BLASTIT_EXEC`. The check is by **device and inode** so a symlink chain cannot
+   hide a shared binary carrying file capabilities, because the kernel grants the
    attribute of the file an `execve` resolves to, not of the name it was given.
 
 ### 9.2 Memory

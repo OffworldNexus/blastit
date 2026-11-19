@@ -3786,3 +3786,21 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T13:54 [MB.41.3] (lead) commit 953cefec8e3372b8b7d977904484279ade7bc8d2; fast-check green, docs_fences 13 passed, docs-unit/docs-test 60 fences (36 executed), critical_guard clean
 - 2026-11-19T14:11 [MB.41] (lead) status ready -> done
 - 2026-11-19T14:11 [MB.41] (lead) gate passed: make check green; php-sapi-e2e 8.4 + rs-test-php-image 29 passed; visual-checker PASS on built site
+- 2026-11-19T14:12 AUTOPILOT off by conductor awaiting owner decision on Option 3 distribution (universal binary + 3.3a vs 3.3b)
+- 2026-11-19T14:30 [MB.42] (conductor) created (epic) Universal libpython-free blastit binary, .deb/.rpm + install.sh, py3-none wheels, Composer wrapper, local CLI handoff & zero-decision hero DX
+- 2026-11-19T14:30 [MB.42.1] (conductor) created (task) Write ADR-0017 & technical design for universal libpython-free binary, local CLI handoff, .deb/.rpm + install.sh, py3-none wheels & Composer wrap
+- 2026-11-19T14:30 [MB.42.2] (conductor) created (task) Implement universal libpython-free blastit binary (per-minor dlopen Python shims) & safe local CLI handoff
+- 2026-11-19T14:30 [MB.42.3] (conductor) created (task) Build & container-verify .deb, .rpm, docs/install.sh, universal py3-none wheels, Composer wrapper & CI/release workflows
+- 2026-11-19T14:30 [MB.42.4] (conductor) created (task) Rewrite hero & docs around zero-decision install.sh + bare blastit CLI + lockfile wrappers, and pass full make check + make e2e
+- 2026-11-19T14:30 ESCALATION #16 -> architect for MB.42.1 by conductor: Core distribution & runtime-loading architecture shift (ADR-0017: universal libpython-free binary, local CLI handoff, .d
+- 2026-11-19T14:30 AUTOPILOT on by conductor executing MB.42 universal distribution & zero-decision hero DX
+- 2026-11-19T14:31 [MB.42.1] (lead) status ready -> active
+- 2026-11-19T14:31 [MB.42.1] (lead) attempt 1/3 started
+- 2026-11-19T14:31 [MB.42.1] (lead) base 8be9d3ead248b3b943856da533562814cfdc2ca6
+- 2026-11-19T14:37 [MB.42.1] (lead) OWNER CLARIFICATION 2026-11-19: distribution goes through signed APT/RPM repositories (Cloudsmith offworld-nexus/{apt,rpm}, components main|nightly, Forgejo mir
+- 2026-11-19T15:48 [MB.42.5] (unknown) created (task) Add PHP 8.6 support end-to-end (shim, discovery, 16-leg matrix, packaging, docs) for PHP 8.3-8.6
+- 2026-11-19T15:48 [MB.42.3] (unknown) edited fields
+- 2026-11-19T15:48 [MB.42.1] (lead) OWNER REQUIREMENT 2026-11-19: PHP 8.6 end-to-end (8.3-8.6). New task MB.42.5 created; MB.42.3 now depends on MB.42.2+MB.42.5; architect notified to fold Minor::
+- 2026-11-19T16:42 [MB.42.1] (lead) status active -> review
+- 2026-11-19T16:46 [MB.42.1] (lead) REVIEW FIX (filtered): B1 glibc floor false (shims need 2.36-2.41, .deb says 2.28, gate unenforceable); B2 py3-none wheel has no builder/consumer contract (matu
+- 2026-11-19T17:17 [MB.42.1] (lead) status review -> done

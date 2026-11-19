@@ -19,3 +19,4 @@ Numbered 1-page records (`ADR-NNNN-<slug>.md`) of lasting UX, protocol, and secu
 | [ADR-0013](ADR-0013-blastfile-lsp-and-zed.md) | `blastit lsp` and the Zed Blastfile extension | Accepted | MB.22 |
 | [ADR-0014](ADR-0014-dev-fanotify-live-reload.md) | Live reload in `blastit dev`: one unprivileged file-handle group, exact loaded-file tracking, one all-views reload | Accepted | MB.23 |
 | [ADR-0016](ADR-0016-view-crates-over-wire.md) | View Crates Over the Wire: `blastit-view` as Transport and One Crate per View Kind (`0.2.0`) | Proposed | MB.36.1 |
+| [ADR-0017](ADR-0017-universal-distribution.md) | Universal `libpython`-Free `blastit` Binary, Per-Minor Python & PHP 8.3–8.6 Shims, Signed APT/RPM Repositories & Safe Local CLI Handoff | Accepted | MB.42.1 |
