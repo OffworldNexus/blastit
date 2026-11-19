@@ -2,7 +2,7 @@
 id: MB.40.4.3
 title: Split blastit stage0.rs/stage1.rs into cohesive modules + fork/exec parameter structs
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.40.4.2]
@@ -11,11 +11,11 @@ paths:
   - crates/blastit/src/stage1.rs
   - "crates/blastit/src/stage0/**"
   - "crates/blastit/src/stage1/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T03:13"
-updated: "2026-11-19T03:13"
+updated: "2026-11-19T04:04"
 ---
 
 # Goal
