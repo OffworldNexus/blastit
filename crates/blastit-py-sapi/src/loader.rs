@@ -492,19 +492,6 @@ impl LoadedPy {
         Self::from_shim(shim, Some(library), py_minor)
     }
 
-    /// `Hosted`: the shim alone, when CPython is already live in this process.
-    ///
-    /// No `dlopen(libpython)`, no `gate_libpython`, no `init_paths` (design
-    /// §1.2.1 item 1): the interpreter is the one this image already runs.
-    ///
-    /// # Errors
-    ///
-    /// Everything [`Opened::open_pinned`] refuses, plus the ABI and minor
-    /// checks.
-    pub fn load_shim_only(shim: PinnedRef<'_>, py_minor: u32) -> Result<Self, LoadError> {
-        Self::from_shim(shim, None, py_minor)
-    }
-
     /// Resolves `blastit_py_abi_v1` out of a freshly opened shim and checks it.
     fn from_shim(
         shim: PinnedRef<'_>,
@@ -603,54 +590,6 @@ impl LoadedPy {
     pub fn shim_path(&self) -> &Path {
         self.shim.path()
     }
-}
-
-/// The three `PyOS_*Fork` entry points of an interpreter that is **already
-/// live** in this image (design §1.2.1 item 1, `Hosted`).
-///
-/// A wheel's stage 0 runs inside CPython, so the three hooks must run around
-/// its forks (`http`/scheduler are stage 1's, but dbproxy and the visibility
-/// probes are stage 0's). Stage 0 may not `dlopen` anything (design §7 `R3`),
-/// so the symbols are resolved from the objects the process already loaded:
-/// a CPython executable exports its C API (`-rdynamic`, the same contract
-/// `pyo3/extension-module` relies on), and `dlsym(RTLD_DEFAULT, …)` finds them
-/// without a second library handle.
-///
-/// # Errors
-///
-/// One sentence naming the entry point that could not be resolved. It is a
-/// refusal, never a silent bare `fork(2)`: forking a live CPython without
-/// `PyOS_BeforeFork` leaves its locks describing a process that no longer
-/// exists.
-pub fn hosted_hooks() -> Result<PyForkHooks<'static>, String> {
-    /// `RTLD_DEFAULT` (`dlfcn.h`): every object already in the global scope.
-    const RTLD_DEFAULT: *mut c_void = core::ptr::null_mut();
-
-    fn resolve(image: &str, name: &CStr) -> Result<extern "C" fn(), String> {
-        // SAFETY: `name` is a `c"…"` literal, NUL-terminated, and outlives the
-        // call; the returned pointer is this process's own entry point.
-        let pointer = unsafe { dlsym(RTLD_DEFAULT, name.as_ptr()) };
-        if pointer.is_null() {
-            return Err(format!(
-                "the interpreter this image ({image}) runs does not export `{}`; a wheel needs \
-                 an interpreter that exports its C API — run the standalone blastit instead",
-                name.to_string_lossy()
-            ));
-        }
-        // SAFETY: the named CPython entry points take no arguments and return
-        // nothing, which is the signature the fork protocol calls them with.
-        Ok(unsafe { core::mem::transmute::<*mut c_void, extern "C" fn()>(pointer) })
-    }
-
-    // The running image, so a wheel user can name the CPython to replace.
-    let image = std::env::current_exe()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| "this process".to_string());
-    Ok(PyForkHooks::hosted(
-        resolve(&image, c"PyOS_BeforeFork")?,
-        resolve(&image, c"PyOS_AfterFork_Parent")?,
-        resolve(&image, c"PyOS_AfterFork_Child")?,
-    ))
 }
 
 /// The last `dlerror()` message, or a placeholder when there is none.

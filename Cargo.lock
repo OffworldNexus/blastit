@@ -245,17 +245,6 @@ name = "blastit-php-sapi"
 version = "0.2.0"
 
 [[package]]
-name = "blastit-py"
-version = "0.2.0"
-dependencies = [
- "blastit",
- "blastit-audit",
- "blastit-manifest",
- "pyo3",
- "serde_json",
-]
-
-[[package]]
 name = "blastit-py-sapi"
 version = "0.2.0"
 dependencies = [

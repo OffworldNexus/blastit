@@ -53,5 +53,4 @@ pub use discovery::{
 };
 pub use loader::{
     LoadError, LoadedPy, Opened, PinnedRef, REQUIRED_SYMBOLS, gate_libpython, gate_pinned,
-    hosted_hooks,
 };

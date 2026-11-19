@@ -58,7 +58,6 @@ pub(super) fn dbproxy_limits(config: &Config) -> Rlimits {
 pub(super) fn fork_dbproxy_dev(
     emitter: &Emitter,
     boot: &DevBoot<'_>,
-    interpreter: bool,
     prepared: &blastit_env::Prepared,
     listeners: Vec<(UnixListener, ListenerSpec)>,
     obs_fd: Option<std::os::fd::RawFd>,
@@ -117,11 +116,7 @@ pub(super) fn fork_dbproxy_dev(
         working_dir: None,
     };
 
-    let hooks = match crate::py::runtime_hooks(interpreter) {
-        Ok(hooks) => hooks,
-        Err(message) => fail_with_root(emitter, boot.root, &message),
-    };
-    let forked = match crate::forking::fork(hooks) {
+    let forked = match crate::forking::fork(None) {
         Ok(fork) => fork,
         Err(err) => fail_with_root(emitter, boot.root, &format!("fork: {err}")),
     };
@@ -359,7 +354,6 @@ pub(super) fn fork_dbproxy(
     emitter: &Emitter,
     config: &Config,
     placement: &Placement,
-    interpreter: bool,
     prepared: &blastit_env::Prepared,
     listeners: Vec<(UnixListener, ListenerSpec)>,
 ) -> Option<DbproxyHandover> {
@@ -375,14 +369,10 @@ pub(super) fn fork_dbproxy(
     let layout = UidLayout::new(config.uid_base);
     // The route count is not needed here: the execute question never reads the
     // sticky exemption, which is the only thing the uid list is for.
-    let hooks = match crate::py::runtime_hooks(interpreter) {
-        Ok(hooks) => hooks,
-        Err(message) => fail(emitter, &message),
-    };
     match crate::visibility::unexecutable(
         std::slice::from_ref(&placement.dbproxy),
         layout.dbproxy(),
-        hooks,
+        None,
         &crate::visibility::DroppedTo::of(layout, 0),
     ) {
         Ok(Some(blocker)) => fail(emitter, &blocker.message()),
@@ -419,7 +409,7 @@ pub(super) fn fork_dbproxy(
     };
     let uid = UidLayout::new(config.uid_base).dbproxy();
 
-    match fork_ok(emitter, interpreter) {
+    match fork_ok(emitter) {
         Fork::Parent(pid) => {
             // The parent keeps only the read ends, and neither end of the pg
             // listeners: dbproxy owns those after the fork.
@@ -775,15 +765,11 @@ pub(super) fn pipe_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
 
 /// `fork()`, fatal on failure.
 ///
-/// With a live interpreter in this image the fork runs under CPython's protocol
-/// ([`crate::forking`]): a wheel's stage 0 forks dbproxy from inside the
-/// console script's interpreter, and §9.3 applies to it as much as to a view.
-pub(super) fn fork_ok(emitter: &Emitter, interpreter: bool) -> Fork {
-    let hooks = match crate::py::runtime_hooks(interpreter) {
-        Ok(hooks) => hooks,
-        Err(message) => fail(emitter, &message),
-    };
-    match crate::forking::fork(hooks) {
+/// Stage 0 runs no interpreter (`MB.42.2.2.2`), so the fork is a plain one: no
+/// CPython protocol has to be stopped and restarted around it, and stage 1's own
+/// forks take their hooks from the runtime it `dlopen`ed.
+pub(super) fn fork_ok(emitter: &Emitter) -> Fork {
+    match crate::forking::fork(None) {
         Ok(fork) => fork,
         Err(err) => fail(emitter, &format!("fork: {err}")),
     }

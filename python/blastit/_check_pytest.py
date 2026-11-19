@@ -22,9 +22,8 @@ Two things are recorded per request, and exactly once:
 * one ``HttpObsLine`` appended to ``http_obs.jsonl`` — the method, the
   ``PATH_INFO`` the scheduler would route on, the ``Content-Type``, the body's
   length, and a **bounded** probe of the body. The probe is
-  :func:`blastit._blastit.probe_ingress`'s, capped at
-  :data:`MAX_SAMPLE_BYTES` (64 KiB); the body itself is replayed to the
-  application unchanged, never logged;
+  :func:`_probe_stdlib`'s, capped at :data:`MAX_SAMPLE_BYTES` (64 KiB); the body
+  itself is replayed to the application unchanged, never logged;
 * one target pushed over the control channel and popped when the response body
   is exhausted, so the proxy attributes the statements of *that* request to it.
 
@@ -634,26 +633,16 @@ def _replay_body(environ: dict[str, Any]) -> tuple[bytes, int, Any]:
 def _probe(
     content_type: str | None, prefix: bytes, total: int
 ) -> dict[str, Any] | None:
-    """The bounded body sample: ``_blastit.probe_ingress`` or its stdlib twin.
+    """The bounded body sample, computed here, always (`MB.42.2.2.2`).
 
-    A bundle staged outside the application's venv can carry an extension built
-    for another CPython minor: ``from blastit import _blastit`` then raises
-    ``ImportError``, and a run that would otherwise audit fine would lose every
-    sample. The sample is a MIME essence and three booleans, so the fallback
-    reads the same bytes with :mod:`json` and :mod:`urllib.parse` and answers the
-    same keys, exactly as :func:`blastit.audit_v1.probe_ingress_json` does.
+    The gate runs inside the project's own interpreter while ``blastit check``
+    is a separate process, so the sample is computed in-process: the probe is a
+    MIME essence and three booleans over a 64 KiB prefix, and a gate that
+    needed another artifact to be importable would lose every sample the day the
+    two were installed apart. :func:`_probe_stdlib` is the same judgement the
+    Rust gate makes, and it never raises.
     """
-    try:
-        from blastit import _blastit
-    except ImportError:
-        return _probe_stdlib(content_type, prefix, total)
-    try:
-        sample = json.loads(_blastit.probe_ingress(content_type, prefix, total))
-    except Exception:  # noqa: BLE001 - a probe must never fail a request
-        return _probe_stdlib(content_type, prefix, total)
-    if not isinstance(sample, dict):
-        return _probe_stdlib(content_type, prefix, total)
-    return sample
+    return _probe_stdlib(content_type, prefix, total)
 
 
 #: The largest `Content-Type` essence a report carries (`MAX_MIME_REPORT_BYTES`).
@@ -696,7 +685,7 @@ def _cap_mime(value: str) -> str:
 def _probe_stdlib(
     content_type: str | None, prefix: bytes, total: int
 ) -> dict[str, Any]:
-    """The body sample, computed without the C extension (`MB.40.8`).
+    """The body sample, in the gate's own process (`MB.40.8`).
 
     Untrusted bytes must never raise: a body this gate cannot judge is a body
     with no proven codec, which is what the audit reads. Every failure —

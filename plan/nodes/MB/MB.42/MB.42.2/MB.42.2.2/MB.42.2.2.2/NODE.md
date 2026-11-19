@@ -2,16 +2,16 @@
 id: MB.42.2.2.2
 title: "blastit --internal-json (12-row contract) + pure-stdlib _blastit.py bridge; retire crates/blastit-py"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2.2.1]
-paths: [Cargo.toml, Cargo.lock, "crates/**", "python/**", Makefile]
-attempts: 0
+paths: [Cargo.toml, Cargo.lock, "crates/**", "python/**", Makefile, pyproject.toml]
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T20:07"
-updated: "2026-11-19T20:07"
+updated: "2026-11-19T21:10"
 ---
 
 # Goal

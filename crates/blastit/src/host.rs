@@ -6,20 +6,15 @@
 //! This module is the whole of that knowledge, and it is the only thing the
 //! packaging changes:
 //!
-//! * the **standalone binary** re-executes `/proc/self/exe`, exactly as §4
-//!   describes;
-//! * a **wheel install** is a Python program: `blastit` is the console script
-//!   of the interpreter the wheel was installed into, `blastit._blastit.main()`
-//!   runs inside it, and `/proc/self/exe` is that interpreter. Stage 1 is
-//!   therefore re-executed as `python -I -m blastit` — the *same* interpreter,
-//!   which is what makes the application's dependencies importable, because the
-//!   `site-packages` CPython finds next to its own executable are the venv's.
+//! * the **binary** re-executes `/proc/self/exe`, exactly as §4 describes;
+//! * a **wheel install** starts no interpreter at all: `blastit.__main__` hands
+//!   the command line to the universal binary the wheel ships at
+//!   `blastit/_bin/blastit` (`MB.42.2.2.2`). One `py3-none-*` artifact serves
+//!   every CPython `>=3.12`, and the Python side never hosts stage 1.
 //!
-//! dbproxy is the exception either way. It holds the real credentials (§2.2),
-//! so it must not run an interpreter at all: a wheel ships it as a separate
-//! Python-free binary (`blastit/_bin/blastit-dbproxy`, mode `0755`) and stage 0
-//! `execve`s that instead of itself. The standalone binary keeps playing the
-//! role itself, with the `--role=dbproxy` it has always used.
+//! dbproxy holds the real credentials (§2.2), so it never runs an interpreter:
+//! stage 0 `execve`s this same binary again with `--role=dbproxy` and an empty
+//! environment.
 //!
 //! # D6: the file with the capabilities is never the file a child runs
 //!
@@ -107,15 +102,11 @@ pub struct Host {
     stage1: Reexec,
     dbproxy: Reexec,
     /// The interpreter's `sys.path` as the console script found it, in bytes
-    /// (`os.fsencode`): empty for the standalone binary, whose stage 1 embeds
-    /// CPython.
+    /// (`os.fsencode`): empty for the binary, whose stage 1 `dlopen`s CPython.
     sys_path: Vec<Vec<u8>>,
-    /// D6: how this installation was made, which decides what a capability
-    /// mistake tells an operator to fix.
-    install: Install,
     /// D6: the capability-free counterpart of the file that may carry the
-    /// capabilities — the interpreter a wheel's `sys.prefix` names, or the
-    /// binary `BLASTIT_EXEC` names — **and every name it can be started by**.
+    /// capabilities — the binary `BLASTIT_EXEC` names — **and every name it can
+    /// be started by**.
     ///
     /// A list because a capability is a property of the *file*, not of the name:
     /// `python`, `python3`, `python3.13` and `sys._base_executable` can be one
@@ -128,37 +119,11 @@ pub struct Host {
     plain: Vec<PathBuf>,
 }
 
-/// Which install this is (D6).
+/// D6: the noun a capability refusal uses for the file to copy and `setcap`.
 ///
-/// It changes nothing about the roles, only about the sentence a capability
-/// mistake produces: the file to `setcap` is an interpreter under a wheel and a
-/// binary under a standalone install.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Install {
-    /// The standalone binary, started directly (§2.1).
-    Binary,
-    /// A wheel install: a console script on a project's interpreter (D2).
-    Wheel,
-}
-
-impl Install {
-    /// The noun an operator reads: what has to be copied and `setcap`ed.
-    pub const fn file(self) -> &'static str {
-        match self {
-            Self::Binary => "binary",
-            Self::Wheel => "interpreter",
-        }
-    }
-
-    /// The variable that names the capability-free file, for the standalone
-    /// install; a wheel finds its own.
-    pub const fn naming(self) -> &'static str {
-        match self {
-            Self::Binary => "BLASTIT_EXEC",
-            Self::Wheel => "sys.prefix/bin/python (the console script's own interpreter)",
-        }
-    }
-}
+/// The program is one binary now (`MB.42.2.2.2`): a wheel starts it through
+/// `blastit/_bin/blastit`, so no refusal anywhere names an interpreter.
+pub const FILE_NOUN: &str = "binary";
 
 /// What stage 0 execs, once the deployment has been checked (D6/B1, B2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,47 +154,6 @@ impl Host {
             stage1: program.clone(),
             dbproxy: program,
             sys_path: Vec::new(),
-            install: Install::Binary,
-            plain,
-        }
-    }
-
-    /// A wheel install: the extension is running inside `executable`, and
-    /// dbproxy is the Python-free binary the wheel ships next to it.
-    ///
-    /// `sys_path` is the interpreter's import path at the moment the console
-    /// script started — `PYTHONPATH`, the working directory, the venv's
-    /// `site-packages` — as bytes (`os.fsencode`, so a path that is not valid
-    /// UTF-8 survives). Stage 1 is re-executed with `-I`, which drops the first
-    /// two, so stage 0 records them here and stage 1 puts them back (§4).
-    ///
-    /// `plain` is the interpreter a *child* must use — `sys.prefix/bin/python`,
-    /// which is what a project's own `python` is (D6/B1). It is the same file as
-    /// `executable` under an ambient-capability deployment, and a *different*
-    /// one when the deployment gave the capabilities to a dedicated copy.
-    pub fn wheel(
-        executable: PathBuf,
-        dbproxy: PathBuf,
-        plain: Vec<PathBuf>,
-        sys_path: Vec<Vec<u8>>,
-    ) -> Self {
-        Self {
-            stage1: Reexec {
-                program: executable,
-                // `-I`: stage 1 is `execve`'d with the application's
-                // environment, and the isolation keeps that environment from
-                // changing how the interpreter starts (§4). The venv is still
-                // found, because it is found next to the executable, and
-                // `sys_path` is restored explicitly.
-                prefix: vec![
-                    OsString::from("-I"),
-                    OsString::from("-m"),
-                    OsString::from("blastit"),
-                ],
-            },
-            dbproxy: Reexec::program(&dbproxy),
-            sys_path,
-            install: Install::Wheel,
             plain,
         }
     }
@@ -254,11 +178,6 @@ impl Host {
         &self.sys_path
     }
 
-    /// Which install this is (D6).
-    pub fn install(&self) -> Install {
-        self.install
-    }
-
     /// The capability-free program this installation can name, and every name
     /// it can be started by (D6).
     pub fn plain(&self) -> &[PathBuf] {
@@ -277,11 +196,8 @@ impl Host {
     /// install, the interpreter for a wheel. See [`placement`].
     pub fn placement(&self, drops_bounding: bool) -> Result<Placement, String> {
         // `BLASTIT_EXEC` is an operator's variable, so it is the one worth
-        // validating by name: a wheel's capability-free interpreter comes from
-        // the installation's own detection, which checks it is there.
-        if self.install == Install::Binary
-            && let Some(binary) = self.plain.first()
-        {
+        // validating by name.
+        if let Some(binary) = self.plain.first() {
             if !binary.is_file() {
                 return Err(format!(
                     "{EXEC}={} is not a file: a rootless standalone install names the \
@@ -294,20 +210,14 @@ impl Host {
             // write it or the directory it sits in.
             plain_is_protected(binary, rustix::process::geteuid().as_raw())?;
         }
-        let child = match self.install {
-            // A standalone install plays every role itself, and `BLASTIT_EXEC`
-            // is the capability-free copy of it (D6/B2).
-            Install::Binary => self
-                .plain
-                .first()
-                .cloned()
-                .unwrap_or_else(|| self.dbproxy.program.clone()),
-            // A wheel's dbproxy runs no interpreter and needs no capability, so
-            // the shipped binary is always a child program (D6/B1).
-            Install::Wheel => self.dbproxy.program.clone(),
-        };
+        // A standalone install plays every role itself, and `BLASTIT_EXEC` is
+        // the capability-free copy of it (D6/B2).
+        let child = self
+            .plain
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.dbproxy.program.clone());
         placement(
-            self.install,
             &self.stage1.program,
             &child,
             &self.plain,
@@ -508,10 +418,11 @@ pub fn protected(facts: &Facts, init_uid: u32) -> Result<(), String> {
 /// test:
 ///
 /// * a file that carries the capabilities must be a **dedicated copy**: it may
-///   not be the file the children use ([`Install::Wheel`]'s interpreter,
-///   [`Install::Binary`]'s binary), compared by device and inode rather than by
-///   name, so `python`, `python3` and a symlink chain all count (B1);
-/// * **no** name of the shared interpreter may carry a file capability: the
+///   not be the file the children use ([`Placement::init`] against
+///   [`Placement::dbproxy`]), compared by device and inode rather than by name,
+///   so `blastit` and `blastit-init` are two files even when one is a symlink
+///   (B1);
+/// * **no** name of the shared binary may carry a file capability: the
 ///   capability is granted per *file*, and every one of those names is a way to
 ///   run it;
 /// * a child may not `execve` a file with file capabilities **at all** when its
@@ -522,7 +433,6 @@ pub fn protected(facts: &Facts, init_uid: u32) -> Result<(), String> {
 ///
 /// The sentence an operator reads, naming the file and the `setcap` line.
 pub fn placement(
-    install: Install,
     init: &Path,
     child: &Path,
     plain: &[PathBuf],
@@ -539,44 +449,42 @@ pub fn placement(
             )
         })
     };
-    // Every name of the shared interpreter must be capability-free: whichever
-    // one a deployment starts, the capability belongs to init's file alone (B1).
-    // A name that *is* init's file (the dedicated copy the deployment starts, and
-    // `sys.executable` with it) is not a shared name, and may carry them.
+    // Every name of the shared binary must be capability-free: whichever one a
+    // deployment starts, the capability belongs to init's file alone (B1). A
+    // name that *is* init's file (the dedicated copy the deployment starts) is
+    // not a shared name, and may carry them.
     for name in plain {
         if same_file(name, init) {
             continue;
         }
         if caps(name)? {
-            return Err(capable_copy_advice_for(install, name, init));
+            return Err(capable_copy_advice_for(name, init));
         }
     }
     if caps(init)? {
         // The capable file must be init's alone. What it must *not* be is the
-        // file the shared interpreter is: that is the case where the boot cannot
-        // name a capability-free file other than init's own image, either because
-        // it cannot name one at all or because every name it has *is* that image.
+        // file the shared binary is: that is the case where the boot cannot name
+        // a capability-free file other than init's own image, either because it
+        // cannot name one at all or because every name it has *is* that image.
         let shared: Vec<&PathBuf> = plain.iter().filter(|name| !same_file(name, init)).collect();
         if shared.is_empty() {
             return Err(match plain.first() {
                 None => format!(
                     "{} carries file capabilities and this installation cannot name the \
-                     capability-free {} the children must use instead: {}",
+                     capability-free {} the children must use instead: {EXEC}",
                     init.display(),
-                    install.file(),
-                    install.naming()
+                    FILE_NOUN,
                 ),
-                Some(named) => capable_copy_advice_for(install, named, init),
+                Some(named) => capable_copy_advice_for(named, init),
             });
         }
     }
     if drops_bounding && caps(child)? {
         return Err(format!(
             "{} carries file capabilities, and the children of this boot cannot \
-             `execve` such a file at all (their bounding set is empty): point {} at \
+             `execve` such a file at all (their bounding set is empty): point {EXEC} at \
              the capability-free copy",
             child.display(),
-            install.naming()
         ));
     }
     Ok(Placement {
@@ -587,23 +495,22 @@ pub fn placement(
 
 /// The sentence an operator gets when a file that is *not* init's copy carries
 /// the capabilities (D6/B1).
-fn capable_copy_advice_for(install: Install, capable: &Path, init: &Path) -> String {
+fn capable_copy_advice_for(capable: &Path, init: &Path) -> String {
     format!(
         "{} carries file capabilities, and init runs from {} instead: every process of that \
          uid that can run it becomes init.\n{}",
         capable.display(),
         init.display(),
-        capable_copy_advice(install, capable)
+        capable_copy_advice(capable)
     )
 }
 
 /// The recipe that turns the shared file into init's private copy (D6/B1, B2).
 ///
-/// `shared` is the file that has the capabilities and must not: a wheel's
-/// interpreter, a standalone install's binary, or any of the names either can be
-/// started by — the file itself is what the kernel looks at, so a symlink chain
-/// makes them all one mistake.
-fn capable_copy_advice(install: Install, shared: &Path) -> String {
+/// `shared` is the file that has the capabilities and must not: the binary, or
+/// any of the names it can be started by — the file itself is what the kernel
+/// looks at, so a symlink chain makes them all one mistake.
+fn capable_copy_advice(shared: &Path) -> String {
     let resolved = std::fs::read_link(shared).unwrap_or_else(|_| shared.to_path_buf());
     // A symlink target may be relative (`python` → `python3.13`): a recipe that
     // reads `<dir>/python3.13-init` has to be about the *same* directory as the
@@ -620,20 +527,11 @@ fn capable_copy_advice(install: Install, shared: &Path) -> String {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
     ));
-    let tail = match install {
-        Install::Wheel => format!(
-            "  then start that copy (`{} -m blastit`) and leave {} capability-free: a copied \
-             interpreter has to stay in the same directory, because CPython finds its stdlib \
-             and its venv from the executable's own path",
-            copy.display(),
-            shared.display()
-        ),
-        Install::Binary => format!(
-            "  then start the copy, and set {EXEC}={} so that the database proxy runs the \
-             capability-free binary",
-            resolved.display()
-        ),
-    };
+    let tail = format!(
+        "  then start the copy, and set {EXEC}={} so that the database proxy runs the \
+         capability-free binary",
+        resolved.display()
+    );
     format!(
         "{} carries file capabilities: give them to a *dedicated copy* instead, because \
          every process of the uid init runs as could run that file otherwise — and init must \
@@ -1090,7 +988,6 @@ mod tests {
         assert!(host.stage1().prefix.is_empty());
         assert!(host.dbproxy().prefix.is_empty());
         assert!(host.sys_path().is_empty());
-        assert_eq!(host.install(), Install::Binary);
         assert!(host.plain().is_empty());
         // Nothing carries file capabilities, so there is nothing to keep apart.
         assert_eq!(
@@ -1110,7 +1007,6 @@ mod tests {
         // SAFETY: `env()` is held, so no other test reads or writes the variable.
         unsafe { std::env::set_var(EXEC, &plain) };
         let host = Host::binary();
-        assert_eq!(host.install(), Install::Binary);
         assert_eq!(host.plain(), std::slice::from_ref(&plain));
         assert_eq!(host.placement(true).unwrap().dbproxy, plain);
         // SAFETY: `env()` is still held.
@@ -1146,53 +1042,10 @@ mod tests {
         unsafe { std::env::remove_var(EXEC) };
     }
 
+    /// The mistake B1 is about: `setcap` on the binary a project's shell runs,
+    /// named by `BLASTIT_EXEC`.
     #[test]
-    fn a_wheel_reexecutes_the_interpreter_and_the_dbproxy_binary() {
-        let site_packages = "/app/.venv/lib/python3.14/site-packages/blastit";
-        let interpreter = PathBuf::from("/app/.venv/bin/python");
-        let host = Host::wheel(
-            interpreter.clone(),
-            PathBuf::from(format!("{site_packages}/_bin/blastit-dbproxy")),
-            vec![interpreter.clone()],
-            vec![b"/app".to_vec(), vec![b'/', b'a', 0xff, b'p']],
-        );
-        assert_eq!(
-            host.stage1().program,
-            Path::new("/app/.venv/bin/python"),
-            "stage 1 is the interpreter the wheel was installed into"
-        );
-        assert_eq!(
-            host.stage1().prefix,
-            vec![
-                OsString::from("-I"),
-                OsString::from("-m"),
-                OsString::from("blastit")
-            ]
-        );
-        assert_eq!(
-            host.dbproxy().program,
-            Path::new(&format!("{site_packages}/_bin/blastit-dbproxy")),
-            "dbproxy runs no interpreter"
-        );
-        assert!(host.dbproxy().prefix.is_empty());
-        assert_eq!(
-            host.sys_path(),
-            [b"/app".to_vec(), vec![b'/', b'a', 0xff, b'p']],
-            "the import path travels as bytes, invalid UTF-8 included"
-        );
-        assert_eq!(host.install(), Install::Wheel);
-        // Nothing carries file capabilities here, so the wheel's dbproxy binary
-        // is the child program, and the check passes (B1).
-        // `placement` itself is exercised on real paths and with the pure
-        // fnctions below: these paths are imaginary, and the check refuses what
-        // it cannot read rather than assuming it is capability-free.
-        assert!(host.placement(true).is_err());
-    }
-
-    /// The mistake B1 is about: `setcap` on the interpreter a project's `python`
-    /// is, started under any of its names.
-    #[test]
-    fn every_name_of_a_capable_interpreter_is_refused() {
+    fn every_named_program_that_carries_capabilities_is_refused() {
         let names = [
             "/usr/local/bin/python",
             "/usr/local/bin/python3",
@@ -1202,9 +1055,8 @@ mod tests {
             // init runs from a *copy*, so the refusal can only come from the
             // capability on the shared file.
             let err = placement(
-                Install::Wheel,
-                Path::new("/usr/local/bin/python3.13-init"),
-                Path::new("/w/_bin/blastit-dbproxy"),
+                Path::new("/opt/blastit/blastit-init"),
+                Path::new("/opt/blastit/blastit"),
                 &names.iter().map(PathBuf::from).collect::<Vec<_>>(),
                 true,
                 distinct,
@@ -1222,15 +1074,15 @@ mod tests {
             );
             assert!(err.contains("chmod 0500"), "{err}");
             assert!(err.contains(blastit_sys::caps::Capability::SETCAP), "{err}");
-            assert!(err.contains("-m blastit"), "{err}");
+            assert!(err.contains(EXEC), "{err}");
         }
     }
 
     /// A real `security.capability` (root, as `setcap` would write it) on a real
-    /// file that `python`, `python3` and `python3.13` all resolve to: the check
-    /// runs with the real `same_file` and the real `has_file_caps`.
+    /// file another name resolves to: the check runs with the real `same_file`
+    /// and the real `has_file_caps`.
     #[test]
-    fn a_real_capability_on_the_shared_interpreter_is_refused_under_every_name() {
+    fn a_real_capability_on_a_shared_name_is_refused() {
         if !rustix::process::geteuid().is_root() {
             println!("skipped: setting security.capability needs CAP_SETFCAP");
             return;
@@ -1266,9 +1118,8 @@ mod tests {
             .collect();
         for capable in &names {
             let err = placement(
-                Install::Wheel,
                 &init,
-                Path::new("/w/_bin/blastit-dbproxy"),
+                Path::new("/w/_bin/blastit"),
                 &names,
                 true,
                 same_file,
@@ -1304,9 +1155,8 @@ mod tests {
         // init is that file, and `python` is one of its names.
         let capable_init = |path: &Path| Ok(path == real.as_path());
         let err = placement(
-            Install::Wheel,
             &real,
-            Path::new("/w/_bin/blastit-dbproxy"),
+            Path::new("/w/_bin/blastit"),
             std::slice::from_ref(&link),
             true,
             same_file,
@@ -1320,22 +1170,21 @@ mod tests {
     }
 
     #[test]
-    fn a_shared_interpreter_that_is_init_itself_is_refused() {
-        // The same file under two names: `BLASTIT_EXEC` (or `sys.executable`)
-        // resolving to init's own file, by device and inode rather than by name.
+    fn a_shared_name_that_is_init_itself_is_refused() {
+        // The same file under two names: `BLASTIT_EXEC` resolving to init's own
+        // file, by device and inode rather than by name.
         let err = placement(
-            Install::Wheel,
-            Path::new("/usr/local/bin/python3.13"),
-            Path::new("/w/_bin/blastit-dbproxy"),
-            &[PathBuf::from("/usr/local/bin/python")],
+            Path::new("/usr/local/bin/blastit-init"),
+            Path::new("/w/blastit"),
+            &[PathBuf::from("/usr/local/bin/blastit")],
             true,
-            same(&[("/usr/local/bin/python", "/usr/local/bin/python3.13")]),
-            caps_of(&["/usr/local/bin/python3.13"]),
+            same(&[("/usr/local/bin/blastit", "/usr/local/bin/blastit-init")]),
+            caps_of(&["/usr/local/bin/blastit-init"]),
         )
         .unwrap_err();
         assert!(err.contains("dedicated copy"), "{err}");
         assert!(
-            err.contains("/usr/local/bin/python") && err.contains("-init"),
+            err.contains("/usr/local/bin/blastit") && err.contains("-init"),
             "the recipe is about the file the names reach: {err}"
         );
         assert!(err.contains("capabilities"), "{err}");
@@ -1344,17 +1193,16 @@ mod tests {
     #[test]
     fn a_capability_that_cannot_be_named_is_refused_by_name() {
         let err = placement(
-            Install::Wheel,
-            Path::new("/opt/blastit/python-init"),
-            Path::new("/w/_bin/blastit-dbproxy"),
+            Path::new("/opt/blastit/blastit-init"),
+            Path::new("/w/blastit"),
             &[],
             true,
             distinct,
-            caps_of(&["/opt/blastit/python-init"]),
+            caps_of(&["/opt/blastit/blastit-init"]),
         )
         .unwrap_err();
         assert!(err.contains("cannot name"), "{err}");
-        assert!(err.contains("sys.prefix/bin/python"), "{err}");
+        assert!(err.contains(EXEC), "{err}");
     }
 
     #[test]
@@ -1362,7 +1210,6 @@ mod tests {
         // An xattr that cannot be read must not be read as "no capabilities": a
         // sandbox that cannot prove something must not assume it.
         let err = placement(
-            Install::Binary,
             Path::new("/proc/self/exe"),
             Path::new("/proc/self/exe"),
             &[PathBuf::from("/not/readable/blastit")],
@@ -1380,7 +1227,6 @@ mod tests {
         // B2's other half: with an empty bounding set the `execve` itself fails,
         // so the boot refuses and says which variable to point elsewhere.
         let err = placement(
-            Install::Binary,
             Path::new("/proc/self/exe"),
             Path::new("/usr/local/bin/blastit-init"),
             &[PathBuf::from("/usr/local/bin/blastit")],
@@ -1397,7 +1243,6 @@ mod tests {
         // deployment is allowed, and it was allowed before D6 too.
         assert!(
             placement(
-                Install::Binary,
                 Path::new("/proc/self/exe"),
                 Path::new("/usr/local/bin/blastit-init"),
                 &[PathBuf::from("/usr/local/bin/blastit")],
@@ -1410,22 +1255,20 @@ mod tests {
     }
 
     /// A deployment that starts the *copy* lists it among the names of its
-    /// interpreter (`sys.executable`): that name is init's own file, so the
-    /// capability on it is the point of the deployment, not a mistake.
+    /// binary (`BLASTIT_EXEC`): that name is init's own file, so the capability
+    /// on it is the point of the deployment, not a mistake.
     #[test]
     fn init_own_copy_among_the_names_is_not_a_refusal() {
-        let init = "/usr/local/bin/python3.13-init";
+        let init = "/usr/local/bin/blastit-init";
         let placement = placement(
-            Install::Wheel,
             Path::new(init),
-            Path::new("/w/_bin/blastit-dbproxy"),
+            Path::new("/usr/local/bin/blastit"),
             &[
-                // What `sys.executable` and its resolved target are, under this
+                // What `BLASTIT_EXEC` and its resolved target are, under this
                 // deployment: init's own file.
                 PathBuf::from(init),
-                // The shared interpreter, capability-free.
-                PathBuf::from("/usr/local/bin/python3.13"),
-                PathBuf::from("/usr/local/bin/python"),
+                // The shared binary, capability-free.
+                PathBuf::from("/usr/local/bin/blastit"),
             ],
             true,
             same(&[(init, init)]),
@@ -1436,28 +1279,21 @@ mod tests {
     }
 
     #[test]
-    fn a_rootless_layout_is_accepted_and_keeps_the_wheels_own_dbproxy() {
-        // init runs from the copy, which carries the capabilities; the shared
-        // interpreter and the shipped dbproxy binary have none: exactly the
-        // deployment this step ships (B1).
+    fn a_rootless_layout_is_accepted_and_keeps_the_capability_free_binary() {
+        // init runs from the copy, which carries the capabilities; the binary
+        // `BLASTIT_EXEC` names has none: exactly the deployment this step ships
+        // (B1), and the child runs it (`--role=dbproxy`).
         let placement = placement(
-            Install::Wheel,
-            Path::new("/usr/local/bin/python3.13-init"),
-            Path::new("/app/.venv/lib/python3.13/site-packages/blastit/_bin/blastit-dbproxy"),
-            &[
-                PathBuf::from("/usr/local/bin/python3.13"),
-                PathBuf::from("/usr/local/bin/python"),
-            ],
+            Path::new("/usr/local/bin/blastit-init"),
+            Path::new("/usr/local/bin/blastit"),
+            &[PathBuf::from("/usr/local/bin/blastit")],
             true,
             same(&[]),
-            caps_of(&["/usr/local/bin/python3.13-init"]),
+            caps_of(&["/usr/local/bin/blastit-init"]),
         )
         .unwrap();
-        assert_eq!(placement.init, Path::new("/usr/local/bin/python3.13-init"));
-        assert_eq!(
-            placement.dbproxy,
-            Path::new("/app/.venv/lib/python3.13/site-packages/blastit/_bin/blastit-dbproxy")
-        );
+        assert_eq!(placement.init, Path::new("/usr/local/bin/blastit-init"));
+        assert_eq!(placement.dbproxy, Path::new("/usr/local/bin/blastit"));
     }
 
     #[test]

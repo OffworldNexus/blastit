@@ -80,8 +80,9 @@ for artifact in "$@"; do
                 echo "  binds the host's libpython at dlopen, so its DT_NEEDED list must never name one:" >&2
                 echo "  its unresolved Py_* symbols are the contract, not a leak." >&2 ;;
             *)
-                echo "  fix: build the standalone artifact (cargo build -p blastit --locked). The wheel enables" >&2
-                echo "  the python capability explicitly through crates/blastit-py/Cargo.toml." >&2 ;;
+                echo "  fix: build the standalone artifact (cargo build -p blastit --locked). The wheel ships" >&2
+                echo "  that same binary (pyproject.toml: bindings = \"bin\"), so its capability set is the" >&2
+                echo "  binary's: python, php and static, with libpython/libphp only dlopen'ed." >&2 ;;
         esac
         artifact_status=1
     fi

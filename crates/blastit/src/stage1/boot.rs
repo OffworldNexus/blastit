@@ -44,10 +44,9 @@ use crate::dev_reload::Class;
 
 /// Runs stage 1. Never returns.
 ///
-/// `live` is the installation fact: `true` when this process already runs
-/// CPython (a wheel's stage 1), `false` for the standalone binary, which
-/// `dlopen`s a pinned interpreter below (design §1.2.1 item 1).
-pub fn run(options: Options, live: bool, colour: Colour) -> ! {
+/// The universal binary is the only installation, so this image starts with no
+/// interpreter and `dlopen`s the pinned one below (design §1.2.1 item 1).
+pub fn run(options: Options, colour: Colour) -> ! {
     // The configuration itself is not known yet, so a failure here is JSON —
     // which carries no colour.
     let boot = Emitter::stdout(LogFormat::Json, Level::Info, Colour::PLAIN);
@@ -223,42 +222,12 @@ pub fn run(options: Options, live: bool, colour: Colour) -> ! {
             None
         }
     };
-    // `Hosted` (a wheel whose CPython is already live): the shim is loaded
-    // **here**, before `http` and the scheduler — no `libpython`, no gate, no
-    // `init_paths` (design §1.2.1 item 1) — so its three `PyOS_*Fork` hooks
-    // wrap those forks. `Embed` forks with `None` and loads after them.
-    #[cfg(feature = "python")]
-    let shim_only = match (&py_fds, live) {
-        (Some(pair), true) => match load_shim_only(&emitter, dev.as_ref(), &config, &pair.1) {
-            Ok(loaded) => Some(loaded),
-            Err(message) => fail(&emitter, dev.as_ref(), &message),
-        },
-        _ => None,
-    };
-    #[cfg(feature = "python")]
-    let hooks = shim_only
-        .as_ref()
-        .map(blastit_py_sapi::LoadedPy::hooks)
-        // `Hosted` without a pinned runtime (a wheel on a PHP-only/static-only
-        // manifest, `crates/blastit-py` until `MB.42.2.2`) still has CPython live
-        // in this image: its three `PyOS_*Fork` entry points come from the loaded
-        // interpreter, never from a bare `fork(2)` under it.
-        .or_else(|| match crate::py::runtime_hooks(live) {
-            Ok(hooks) => hooks,
-            Err(message) => fail(&emitter, dev.as_ref(), &message),
-        });
-    #[cfg(not(feature = "python"))]
-    let hooks = {
-        if live {
-            fail(
-                &emitter,
-                dev.as_ref(),
-                "this blastit was built without the `python` capability, so it cannot serve \
-                 on a live interpreter; install the blastit that ships the CPython shim",
-            );
-        }
-        None
-    };
+    // The universal binary starts no interpreter, so the forks below (`http`,
+    // the scheduler) and the PHP probe carry no CPython protocol; the per-view
+    // forks after `load::embed` take their hooks from the runtime it loaded
+    // (`supervise`). There is no second installation whose stage 1 runs inside
+    // CPython already (`MB.42.2.2.2`).
+    let hooks = None;
     // `ADR-0010` §3: stage 1 re-opens the NTS `libphp` and the shim stage 0
     // inspected, asserts `(st_dev, st_ino)` against that record, renders the INI
     // lockdown once and holds the descriptors every PHP worker is forked with.
@@ -652,8 +621,6 @@ pub fn run(options: Options, live: bool, colour: Colour) -> ! {
         signals,
         mask,
         components,
-        #[cfg(feature = "python")]
-        live,
         py_fds,
         dev,
         learn,
@@ -690,7 +657,7 @@ pub fn run(options: Options, live: bool, colour: Colour) -> ! {
     // the roles it forked: the boot gate refused every route that would need a
     // view, so the scheduler asks for none (`MB.3.11`).
     #[cfg(feature = "python")]
-    serve(&emitter, serving, shim_only);
+    serve(&emitter, serving);
     #[cfg(not(feature = "python"))]
     serve_without_interpreter(&emitter, serving)
 }
@@ -725,6 +692,8 @@ pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> 
             php: serving.php,
             egress: serving.egress,
             plans: serving.plans,
+            #[cfg(not(feature = "python"))]
+            _runtime: std::marker::PhantomData,
             ctl: serving.ctl,
             signals: serving.signals,
             mask: serving.mask,
@@ -779,10 +748,6 @@ pub(super) struct Serving {
     pub(super) mask: SignalMask,
     /// The components to supervise, by pid.
     pub(super) components: BTreeMap<i32, (Component, ComponentPipes)>,
-    /// Whether the interpreter was started by the host rather than embedded
-    /// here. Only a build with one can ask the question.
-    #[cfg(feature = "python")]
-    pub(super) live: bool,
     /// The `(libpython, shim)` descriptors this image adopted and verified
     /// (design §1.2.1 item 6). Held until the supervisor either takes them for
     /// a reload or the boot ends.
@@ -829,37 +794,4 @@ pub(super) struct Serving {
     /// pairs dbproxy's listeners were bound for (§4.8).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub(super) boot_pairs: std::collections::BTreeSet<(String, String)>,
-}
-
-/// `Hosted`: `dlopen` the shim alone, with no `libpython` and no gate.
-///
-/// The interpreter is already live in this image, so there is nothing to load
-/// and nothing to verify: design §1.2.1 item 1's `Hosted` order is the shim,
-/// its hooks, and then the forks. `init_paths` is deliberately **not** called —
-/// starting an interpreter that is already running is what the vtable refuses.
-#[cfg(feature = "python")]
-fn load_shim_only(
-    emitter: &Emitter,
-    dev: Option<&crate::dev_learn::Dev>,
-    config: &Config,
-    shim: &std::os::fd::OwnedFd,
-) -> Result<blastit_py_sapi::LoadedPy, String> {
-    let handoff = config
-        .python
-        .as_ref()
-        .ok_or_else(|| "this boot has no pinned Python runtime to serve with".to_string())?;
-    let fd = std::os::fd::AsRawFd::as_raw_fd(shim);
-    // The path is for refusals only; the load reads `/proc/self/fd/<fd>`.
-    let source = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap_or_else(|_| {
-        std::path::PathBuf::from(format!("the pinned CPython shim (descriptor {fd})"))
-    });
-    let _ = (emitter, dev);
-    blastit_py_sapi::LoadedPy::load_shim_only(
-        blastit_py_sapi::PinnedRef {
-            fd,
-            source: source.as_path(),
-        },
-        handoff.py_minor,
-    )
-    .map_err(|err| err.to_string())
 }

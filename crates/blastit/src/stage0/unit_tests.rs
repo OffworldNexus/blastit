@@ -27,7 +27,7 @@ use crate::dev_learn::{DevRoot, PRIVILEGE};
 // stage 0 names neither.
 #[cfg(feature = "php")]
 use crate::host::{Claim, Provenance};
-use crate::host::{EXEC, Host, Install, Placement, Reexec};
+use crate::host::{EXEC, Host, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 use crate::mem_usage;
 // The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
@@ -407,23 +407,23 @@ view ungranted regex '/ungranted/.*' {}
 
     /// `MB.25.2`: the `runtime` line's decision table. A resolved library is the
     /// probe's to report (only it ran `php_module_startup`), no callable means
-    /// static mounts and no language runtime, and a callable is only nameable
-    /// where an interpreter is already live — a wrong "yes" answers no line, not
-    /// a panic, and never an invented version.
+    /// static mounts and no language runtime, and a callable's version is stage
+    /// 1's — a wrong "yes" answers no line, not a panic, and never an invented
+    /// version (`MB.42.2.2.2`).
     #[test]
     fn the_runtime_shape_is_decided_by_what_the_boot_loads() {
         assert_eq!(
-            runtime_shape(true, true, true),
+            runtime_shape(true, true),
             None,
             "PHP's line is the probe's, never stage 0's"
         );
         assert_eq!(
-            runtime_shape(false, false, false),
+            runtime_shape(false, false),
             Some(Runtime::Static),
             "no library and no callable is a static-only file"
         );
         assert_eq!(
-            runtime_shape(false, true, false),
+            runtime_shape(false, true),
             None,
             "no interpreter here: there is nothing honest to say"
         );

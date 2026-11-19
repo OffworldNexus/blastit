@@ -2306,7 +2306,7 @@ def _write_json(path: Path, document: dict[str, Any]) -> None:
 
 
 def _audit(session: _Session, document: dict[str, Any]) -> dict[str, Any]:
-    """Runs blastit's own audit, in the compiled extension.
+    """Runs blastit's own audit, in the binary the package ships.
 
     The observations carry the `PATH_INFO` the app saw, and blastit's view had
     already stripped `BLASTIT_SCRIPT_NAME` from it before WSGI (§2.5), so it is

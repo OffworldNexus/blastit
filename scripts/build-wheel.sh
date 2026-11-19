@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # Builds the wheel a project installs with `pip install blastit` / `uv add blastit`.
 #
-# Two artifacts, in this order:
+# Three artifacts, in this order:
 #
 #   1. `blastit-dbproxy`, the Python-free binary that holds the real credentials
 #      (§2.2, §4). It is built from this workspace and copied into the wheel's
 #      Python package at `blastit/_bin/blastit-dbproxy`, mode 0755, because that
 #      is where stage 0 `execve`s it from.
-#   2. the `blastit._blastit` extension, with `pyo3/extension-module` enabled, so
-#      it does not link `libpython` — the interpreter that loads it already has
-#      it, and an auditwheel-compliant wheel may not depend on it.
+#   2. the universal `blastit` binary (`bindings = "bin"`), which is the program
+#      the wheel's console script `exec`s. It links no `libpython` and no
+#      `libphp`: stage 1 `dlopen`s a per-minor shim and a host `libphp`.
+#   3. `python/blastit/*.py`, the pure-stdlib package that ships with them.
+#
+# `MB.42.3` repacks this into the published `py3-none-*` layout, moving the
+# binary and the shims under `blastit/_bin/`.
 #
 # Platform tag & glibc floor:
 #
@@ -232,7 +236,7 @@ DOCKER
             maturin build --release --out /wheel-out \
                 --interpreter "'"$container_py"'" \
                 --compatibility "manylinux_'"${manylinux_ver}"'" \
-                --features blastit-py/extension-module,blastit/python
+                --features blastit/python
         '
 else
     mkdir -p "$out_dir"
@@ -240,14 +244,12 @@ else
     cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
     install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
 
-    # `blastit-py/extension-module` is deliberately not a default feature of that
-    # crate: it must be on for this build alone (see `crates/blastit-py/Cargo.toml`).
-    # `blastit/python` is the wheel's half of `ADR-0010` §4 (wheels are `python,
-    # php`): `blastit`'s default features are `php` only, so the wheel — the one
-    # artifact that *has* an interpreter — names the capability here, and
-    # `cargo build -p blastit --locked` stays the portable standalone binary.
+    # `blastit`'s default features carry `python`, `php` and `static`; naming the
+    # capability here is what keeps the wheel and `cargo build -p blastit`
+    # identical artifacts (`MB.42.2.2.2` deleted the per-minor extension, so
+    # there is no crate feature left to add).
     "${maturin[@]}" build --release --out "$out_dir" \
-        --features blastit-py/extension-module,blastit/python ${extra_args[@]+"${extra_args[@]}"}
+        --features blastit/python ${extra_args[@]+"${extra_args[@]}"}
 fi
 
 # The wheel is useless without the dbproxy binary — a blastit started from it
@@ -259,14 +261,12 @@ if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
     echo "the wheel has no dbproxy binary in it: $wheel" >&2
     exit 1
 fi
-# `pyo3/extension-module` is what keeps the extension off `libpython`, but the
-# artifact is only portable if that is true of the *file in the wheel*, not of the
-# intent in `Cargo.toml` (`MB.17`). Extract every `blastit/_blastit*.so` and run
-# the same `readelf` assertions the standalone binary gets: no `libpython`, no
-# `RUNPATH`/`RPATH` into this machine's uv cache — and, `MB.3.67`, no
-# `BLASTIT_TEST_SWAP_POINT`, because this is the release build a `pip install
-# blastit` loads and it was the one artifact family nothing measured. (The call
-# lives inside this block rather than above it: the release-hygiene fixture in
+# Every object a wheel carries is checked for `libpython`/`libphp` and a
+# `RUNPATH` into this machine's uv cache (`MB.17`): the artifact is only portable
+# if that is true of the *file in the wheel*. A `bindings = "bin"` wheel ships a
+# binary rather than an extension, so the ELF of the wheel itself is measured by
+# `scripts/check-portable-elf.sh` (below) and this block measures the extension
+# when one is present. (The call lives inside this block rather than above it: the release-hygiene fixture in
 # `python/tests/test_release_scripts.py` copies this script alone into a tree of
 # stubs, where a sibling script is "No such file" — and its stub wheel is not a
 # zip, so there is no ELF to measure either way.)
@@ -292,7 +292,8 @@ with zipfile.ZipFile(wheel) as archive:
         if name.startswith("blastit/") and "_blastit" in name and name.endswith(".so")
     ]
     if not members:
-        sys.exit(f"{wheel} carries no blastit/_blastit*.so: there is no extension to check")
+        print(f"note: {wheel} carries no blastit/_blastit*.so (a bin-binding wheel)")
+        sys.exit(0)
     with (scratch / "members").open("w", encoding="utf-8") as members_file:
         for index, name in enumerate(members):
             target = scratch / f"_blastit{index}.so"

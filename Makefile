@@ -228,30 +228,41 @@ py-lint: ## Lint and format-check Python package and harness tools
 	$(UVX) ruff check python tools
 	$(UVX) ruff format --check python tools
 
+# A comment is prose, not a construct: the guard strips `//` lines from the Rust
+# files and `#` lines from the Python ones *before* matching, so it cannot be
+# satisfied only by avoiding a word in a doc comment. `#[ignore]` begins with
+# `#`, so a Rust attribute line is never stripped.
 critical-skip-check: ## Refuse skip constructs in protected critical tests (R42)
 	@set -e; \
-	files=$$(ls crates/*/tests/critical_*.rs python/tests/critical/test_*.py 2>/dev/null || true); \
-	[ -n "$$files" ] || { echo "no protected critical tests to check"; exit 0; }; \
-	if found=$$(grep -nEH "$(CRITICAL_SKIP_PATTERN)" $$files); then \
+	rust=$$(ls crates/*/tests/critical_*.rs 2>/dev/null || true); \
+	python=$$(ls python/tests/critical/test_*.py 2>/dev/null || true); \
+	[ -n "$$rust$$python" ] || { echo "no protected critical tests to check"; exit 0; }; \
+	found=""; \
+	if [ -n "$$rust" ]; then \
+		found=$$(grep -nEHv '^[[:space:]]*//' $$rust | grep -E "$(CRITICAL_SKIP_PATTERN)" || true); \
+	fi; \
+	if [ -n "$$python" ]; then \
+		found="$$found$$(grep -nEHv '^[[:space:]]*#' $$python | grep -E "$(CRITICAL_SKIP_PATTERN)" || true)"; \
+	fi; \
+	if [ -n "$$found" ]; then \
 		echo "error: a protected critical test may never skip (R42):"; \
 		echo "$$found"; \
 		exit 1; \
 	fi; \
 	echo "protected critical tests hold no skip construct"
 
-# Stage `_blastit` + `blastit-dbproxy` and run protected Python critical tests (`CARGO_NET_OFFLINE=true` for maturin compatibility).
+# Stage the universal binary + the pure-Python package and run the protected Python critical tests (`CARGO_NET_OFFLINE=true` for maturin compatibility).
 # Rust `critical_*.rs` binaries run once inside `rs-test`; invoke `make rs-test-critical` for standalone Rust critical runs.
 test-critical: critical-skip-check ## Run critical skip check + staged Python critical tests (offline)
 	@set -e; \
 	stage="$(CRITICAL_STAGE)"; \
-	ext="$$($(PYO3_BIN) -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"; \
 	rm -rf "$$stage"; \
 	mkdir -p "$$stage/blastit/_bin"; \
 	cp python/blastit/*.py "$$stage/blastit/"; \
-	echo "cargo build --locked -p blastit-py -p blastit-dbproxy --features blastit/python"; \
-	$(RUST_ENV) CARGO_NET_OFFLINE=true $(CARGO) build --locked -p blastit-py -p blastit-dbproxy --features blastit/python; \
-	cp target/debug/lib_blastit.so "$$stage/blastit/_blastit$${ext}"; \
-	cp target/debug/blastit-dbproxy "$$stage/blastit/_bin/blastit-dbproxy"; \
+	echo "cargo build --locked -p blastit"; \
+	$(RUST_ENV) CARGO_NET_OFFLINE=true $(CARGO) build --locked -p blastit; \
+	cp target/debug/blastit "$$stage/blastit/_bin/blastit"; \
+	ln -sfn blastit "$$stage/blastit/_bin/blastit-dbproxy"; \
 	echo "python -m unittest discover -s python/tests/critical"; \
 	CARGO_NET_OFFLINE=true UV_OFFLINE=1 PYTHONPATH="$${stage}:$(CURDIR)/python" \
 		$(RUST_ENV) $(UV) run --no-project python -m unittest discover \
@@ -748,8 +759,6 @@ install: ## Install a self-contained release bundle under PREFIX (default ~/.loc
 	$(RUST_ENV) $(CARGO) build --release --locked -p blastit --features python,php,static
 	@echo "cargo build --release --locked -> blastit-lsp"
 	$(RUST_ENV) $(CARGO) build --release --locked -p blastit-lsp
-	@echo "cargo build --release --locked -> blastit-py, blastit-dbproxy"
-	$(RUST_ENV) $(CARGO) build --release --locked -p blastit-py -p blastit-dbproxy --features blastit/python
 	$(MAKE) php-sapi
 	@set -eu; \
 	rm -rf "$(PREFIX)/share/blastit"; \
@@ -761,9 +770,8 @@ install: ## Install a self-contained release bundle under PREFIX (default ~/.loc
 		install -m 0755 "$$shim" "$(INSTALL_LIBDIR)/"; \
 	done; \
 	install -m 0644 python/blastit/*.py "$(INSTALL_PYDIR)/blastit/"; \
-	ext="$$($(PYO3_BIN) -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"; \
-	install -m 0755 target/release/lib_blastit.so "$(INSTALL_PYDIR)/blastit/_blastit$$ext"; \
-	install -m 0755 target/release/blastit-dbproxy "$(INSTALL_PYDIR)/blastit/_bin/blastit-dbproxy"; \
+	ln -sfn "$(INSTALL_LIBDIR)/blastit" "$(INSTALL_PYDIR)/blastit/_bin/blastit"; \
+	ln -sfn "$(INSTALL_LIBDIR)/blastit" "$(INSTALL_PYDIR)/blastit/_bin/blastit-dbproxy"; \
 	ln -sfn "$(INSTALL_LIBDIR)/blastit" "$(INSTALL_BINDIR)/blastit"; \
 	ln -sfn "$(INSTALL_LIBDIR)/blastit-lsp" "$(INSTALL_BINDIR)/blastit-lsp"; \
 	shims=""; \

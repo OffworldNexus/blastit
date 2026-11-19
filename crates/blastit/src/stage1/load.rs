@@ -1,18 +1,12 @@
 //! Loading the pinned shim, and everything only an interpreter can answer
 //! (design §1.2.1, §2.4).
 //!
-//! Two installations, one order each, and the order is the whole value of the
-//! slice:
-//!
-//! * **`Embed`** (the universal binary): `libpython` `RTLD_NOW | RTLD_GLOBAL`,
-//!   then the shim `RTLD_NOW | RTLD_LOCAL`, then `blastit_py_abi_v1`'s
-//!   `init_paths`, then the two §7.2 visibility gates, then `preload`. The
-//!   forks of `http`/`scheduler` happened **before** this, in `boot::run`, so
-//!   they inherited no half-initialised interpreter.
-//! * **`Hosted`** (a wheel whose CPython is already live): the shim alone
-//!   (loaded in `boot::run`, so its hooks wrapped those forks), no `libpython`,
-//!   no gate, **no `init_paths`** — the path half travels in the `preload`
-//!   request and is applied there, then `preload`.
+//! One installation, one order, and the order is the whole value of the slice:
+//! `libpython` `RTLD_NOW | RTLD_GLOBAL`, then the shim
+//! `RTLD_NOW | RTLD_LOCAL`, then `blastit_py_abi_v1`'s `init_paths`, then the
+//! two §7.2 visibility gates, then `preload`. The forks of `http`/`scheduler`
+//! happened **before** this, in `boot::run`, so they inherited no
+//! half-initialised interpreter.
 //!
 //! Nothing here names an interpreter: every call is a `blastit_py_abi_v1`
 //! entry point, and the refusal text is the shim's own sentence.
@@ -96,22 +90,15 @@ struct PreloadRequest<'a> {
     report_fd: i32,
     root: Option<&'a [u8]>,
     immortalize: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    paths: Option<InitPathsRequest<'a>>,
 }
 
-/// What `preload` answers: §9.2 #7's pass, plus the path sets a `Hosted` boot
-/// computed on the way.
+/// What `preload` answers: §9.2 #7's pass.
 #[derive(Debug, Deserialize)]
 struct PreloadAnswer {
     decision: String,
     objects: u64,
     reason: Option<String>,
     elapsed_ns: u64,
-    #[serde(default)]
-    view_paths: Vec<String>,
-    #[serde(default)]
-    sys_path: Vec<String>,
 }
 
 /// The two path sets a boot has to answer for (§5.3, §7.2).
@@ -120,8 +107,7 @@ struct Paths {
     sys_path: Vec<String>,
 }
 
-/// `Embed`: load `libpython` + the shim, prepare the interpreter, gate the
-/// paths and preload.
+/// `libpython` + the shim, prepare the interpreter, gate the paths and preload.
 ///
 /// `py_fds` are the descriptors stage 1 re-verified after `test_swap_pause`.
 ///
@@ -155,42 +141,10 @@ pub(super) fn embed(
     if !inputs.dev {
         check_visibility(&paths, inputs.config, inputs.routes, Some(loaded.hooks()))?;
     }
-    let preloaded = preload_with(&loaded, inputs, None)?;
+    let preloaded = preload_with(&loaded, inputs)?;
     announce(inputs, &preloaded.outcome);
     Ok(Loaded {
         python: loaded,
-        zygote: preloaded.zygote,
-    })
-}
-
-/// `Hosted`: preload on the interpreter this process already runs.
-///
-/// # Errors
-///
-/// The shim's own `preload` sentence, or a §7.2 visibility gate.
-#[cfg(feature = "python")]
-pub(super) fn hosted(inputs: &Inputs<'_>, shim: LoadedPy) -> Result<Loaded, String> {
-    let handoff = pinned(inputs.config)?;
-    let path_request = InitPathsRequest {
-        sys_path: &handoff.sys_path,
-        cwd: inputs.config.cwd.as_deref(),
-        expected_minor: handoff.py_minor,
-        app_module: app_module(inputs.config),
-        // The wheel's interpreter already has its own `site-packages`.
-        site_packages: false,
-        python_home: Some(handoff.python_home.as_os_str().as_bytes()),
-    };
-    let preloaded = preload_with(&shim, inputs, Some(path_request))?;
-    let paths = Paths {
-        view_paths: preloaded.view_paths.clone(),
-        sys_path: preloaded.sys_path.clone(),
-    };
-    if !inputs.dev {
-        check_visibility(&paths, inputs.config, inputs.routes, Some(shim.hooks()))?;
-    }
-    announce(inputs, &preloaded.outcome);
-    Ok(Loaded {
-        python: shim,
         zygote: preloaded.zygote,
     })
 }
@@ -250,19 +204,11 @@ struct Preloaded {
     zygote: PyZygote,
     /// §9.2 #7's pass, as the shim reported it.
     outcome: Immortalised,
-    /// The path sets a `Hosted` boot computed on the way (empty for `Embed`).
-    view_paths: Vec<String>,
-    /// The interpreter's own `sys.path` (empty for `Embed`).
-    sys_path: Vec<String>,
 }
 
 /// The one `preload` call and its answer.
 #[cfg(feature = "python")]
-fn preload_with<'a>(
-    loaded: &LoadedPy,
-    inputs: &Inputs<'_>,
-    paths: Option<InitPathsRequest<'a>>,
-) -> Result<Preloaded, String> {
+fn preload_with(loaded: &LoadedPy, inputs: &Inputs<'_>) -> Result<Preloaded, String> {
     let config = inputs.config;
     let request = PreloadRequest {
         app: config.app.as_deref(),
@@ -271,7 +217,6 @@ fn preload_with<'a>(
         report_fd: inputs.report_fd,
         root: config.cwd.as_deref(),
         immortalize: config.immortalize.as_token(),
-        paths,
     };
     let request =
         serde_json::to_vec(&request).map_err(|err| format!("the preload request: {err}"))?;
@@ -287,12 +232,7 @@ fn preload_with<'a>(
         elapsed_ns: answer.elapsed_ns,
     };
     warn_if_skipped(inputs.emitter, &outcome);
-    Ok(Preloaded {
-        zygote,
-        outcome,
-        view_paths: answer.view_paths,
-        sys_path: answer.sys_path,
-    })
+    Ok(Preloaded { zygote, outcome })
 }
 
 /// The one line a first image owes after `preload`: the `boot` event.

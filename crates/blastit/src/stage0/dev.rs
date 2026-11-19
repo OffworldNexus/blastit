@@ -145,7 +145,7 @@ pub(super) fn reexec_argv_dev(root: &DevRoot, reexec: &Reexec) -> Vec<CString> {
 /// on a clean `SIGTERM` (`R29`).
 ///
 /// `colour` is the decision the command line made once (`A-4`).
-pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Colour) -> ! {
+pub fn run_dev(host: &Host, options: &DevOptions, colour: Colour) -> ! {
     // `S3`: a non-loopback bind has no authentication at all, so it needs the
     // second acknowledgement and says so before anything is written to stdout.
     if !crate::dev_learn::is_loopback(&options.host) && !crate::dev_learn::expose_requested() {
@@ -248,12 +248,9 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
     if let Err(errors) = manifest.check_static_roots(&config.manifest_dir) {
         dev_fail(&format!("{}: {errors}", config.manifest.display()));
     }
-    if let Some(message) = static_root_permission(
-        &manifest,
-        &config.manifest_dir,
-        crate::dev_learn::euid(),
-        interpreter,
-    ) {
+    if let Some(message) =
+        static_root_permission(&manifest, &config.manifest_dir, crate::dev_learn::euid())
+    {
         dev_fail(&message);
     }
     let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
@@ -339,7 +336,6 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
     let dbproxy = fork_dbproxy_dev(
         &startup,
         &boot,
-        interpreter,
         &prepared,
         listeners,
         learn.as_ref().map(|(_, obs)| obs.as_raw_fd()),
@@ -402,7 +398,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
         .map(super::project_python::PythonBoot::runtime);
     #[cfg(not(feature = "python"))]
     let runtime_line = None;
-    emit_runtime(&emitter, &config, interpreter, runtime_line);
+    emit_runtime(&emitter, &config, runtime_line);
     // A boot above the documented default is the operator's call once they
     // raised the knob, and it is also the state in which a view's first spawn
     // may have to wait for memory: say so once, with the reading and the cache

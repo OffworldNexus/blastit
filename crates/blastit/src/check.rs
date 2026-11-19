@@ -63,7 +63,7 @@ use serde_json::json;
 use crate::audit_v1::{self, CheckObsV1, ObsError, Report};
 use crate::cli::CheckOptions;
 use crate::config::Config;
-use crate::host::{Host, Install};
+use crate::host::Host;
 use crate::logs::{Colour, Emitter, Pipe};
 #[cfg(feature = "php")]
 use crate::stage0::php_boot_gate;
@@ -185,7 +185,6 @@ fn execute(host: &Host, options: &CheckOptions, colour: Colour) -> Result<u8, St
         &manifest,
         &config.manifest_dir,
         rustix::process::geteuid().as_raw(),
-        host.install() == Install::Wheel,
     ) {
         return Err(message);
     }
@@ -229,7 +228,7 @@ fn execute(host: &Host, options: &CheckOptions, colour: Colour) -> Result<u8, St
     // Both preflights run before dbproxy or the suite start, so a suite that
     // cannot run at all is exit `2` — never a proxy left behind, and never a
     // Django run that could reach the developer's own database (`R4`, `R30`).
-    let python = python_program(host, &config.manifest_dir)?;
+    let python = python_program(&config.manifest_dir)?;
     require_pytest(&python, &prepared)?;
     let handshake = Handshake::new(django_setup(
         &DjangoPreflight {
@@ -281,7 +280,6 @@ fn execute(host: &Host, options: &CheckOptions, colour: Colour) -> Result<u8, St
 
     let http_path = runtime.path().join("http_obs.jsonl");
     let status = run_pytest(PytestSpawn {
-        host,
         options,
         prepared: &prepared,
         python: &python,
@@ -958,7 +956,6 @@ impl Drop for EventDrain {
 /// optional control descriptor and the optional paths read as one document, and
 /// a caller cannot swap two of them by accident.
 struct PytestSpawn<'a> {
-    host: &'a Host,
     options: &'a CheckOptions,
     prepared: &'a blastit_env::Prepared,
     python: &'a Path,
@@ -971,7 +968,6 @@ struct PytestSpawn<'a> {
 /// Runs the suite, mapping a spawn failure to exit `2` (`R4`).
 fn run_pytest(spawn: PytestSpawn<'_>) -> Result<i32, String> {
     let PytestSpawn {
-        host,
         options,
         prepared,
         python,
@@ -995,7 +991,7 @@ fn run_pytest(spawn: PytestSpawn<'_>) -> Result<i32, String> {
     // `<exe_dir>/../python`, so `-p blastit._check_pytest` imports even when
     // `blastit` was never installed into the application's own venv. An existing
     // `PYTHONPATH` keeps its entries, after the bundle's.
-    if let Some(directory) = bundled_python(host) {
+    if let Some(directory) = bundled_python() {
         let existing = prepared
             .app_env()
             .get("PYTHONPATH")
@@ -1045,20 +1041,18 @@ fn run_pytest(spawn: PytestSpawn<'_>) -> Result<i32, String> {
     Ok(status.code().unwrap_or(-1))
 }
 
-/// The interpreter `pytest` runs on (`MB.40.8`).
+/// The interpreter `pytest` runs on (`MB.40.8`, `MB.42.2.2.2`).
 ///
-/// A wheel's is the one it was installed into (`sys.executable`). A standalone
-/// binary has none of its own, so it asks, in the order a developer's shell
-/// answers it: `BLASTIT_PYTHON`, the activated `$VIRTUAL_ENV`, the project's
-/// `.venv`, `PATH`, and finally the interpreter prefix this build recorded — so
-/// an `env -i PATH=/usr/bin:/bin` run still finds a `python3` with the project's
-/// pytest, while an activated venv or `PATH` always wins.
-fn python_program(host: &Host, manifest_dir: &Path) -> Result<PathBuf, String> {
+/// A wheel's console script hands the command line to the universal binary, so
+/// there is no interpreter in this process to inherit: it records the one it ran
+/// on in `BLASTIT_WHEEL_PYTHON` (dropped from the application's environment by
+/// `blastit-env` like every other `BLASTIT_*` variable) and that is the project's
+/// own environment. Otherwise the search is what a developer's shell answers:
+/// `BLASTIT_PYTHON`, the activated `$VIRTUAL_ENV`, the project's `.venv`,
+/// `BLASTIT_WHEEL_PYTHON`, `PATH` — so an activated venv always wins.
+fn python_program(manifest_dir: &Path) -> Result<PathBuf, String> {
     if let Some(explicit) = std::env::var_os("BLASTIT_PYTHON") {
         return Ok(PathBuf::from(explicit));
-    }
-    if host.install() == Install::Wheel {
-        return Ok(host.stage1().program.clone());
     }
     if let Some(found) = std::env::var_os("VIRTUAL_ENV")
         .map(PathBuf::from)
@@ -1068,6 +1062,12 @@ fn python_program(host: &Host, manifest_dir: &Path) -> Result<PathBuf, String> {
         return Ok(found);
     }
     if let Some(found) = venv_python(&manifest_dir.join(".venv")) {
+        return Ok(found);
+    }
+    if let Some(found) = std::env::var_os("BLASTIT_WHEEL_PYTHON")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_file())
+    {
         return Ok(found);
     }
     if let Some(found) = path_python() {
@@ -1108,29 +1108,30 @@ fn path_python() -> Option<PathBuf> {
     None
 }
 
-/// `<exe_dir>/../python` when it holds the staged `blastit` gate (`MB.40.8`).
+/// `<exe_dir>/../python`, or the site-packages directory three levels up, when
+/// it holds the staged `blastit` gate (`MB.40.8`, `MB.42.2.2.2`).
 ///
-/// `make install` symlinks `$PREFIX/bin/blastit` to
-/// `$PREFIX/share/blastit/lib/blastit` and stages the Python package beside it,
-/// so `std::env::current_exe` — which resolves the symlink — names the bundle
-/// that `../python` belongs to. Both staged markers must be there:
-/// `_check_pytest.py` is what `-p` imports, and `_bin/blastit-dbproxy` is what
-/// only the bundle ships, so a `cargo` build tree whose `target/<profile>` sits
-/// beside the repository's own `python/` can never be mistaken for one
-/// (`MB.40.8`). Without them the suite's own venv is used unchanged.
-fn bundled_python(host: &Host) -> Option<String> {
-    if host.install() != Install::Binary {
-        return None;
-    }
+/// Two layouts, one marker pair. `make install` puts the binary at
+/// `<prefix>/share/blastit/lib/blastit` and the package at
+/// `<prefix>/share/blastit/python/blastit`, so `../python` is the
+/// site-packages root. A wheel or the critical tier stages
+/// `<dir>/blastit/_bin/blastit`, whose `../../..` is that root instead. Both
+/// markers have to be there — `_check_pytest.py` is what `-p` imports, and
+/// `_bin/blastit-dbproxy` is what only a bundle ships — so a `cargo` build tree
+/// whose `target/<profile>` sits beside the repository's own `python/` can never
+/// be mistaken for one.
+fn bundled_python() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
-    let directory = exe.parent()?.parent()?.join("python");
-    let package = directory.join("blastit");
-    if !package.join("_check_pytest.py").is_file()
-        || !package.join("_bin").join("blastit-dbproxy").is_file()
-    {
-        return None;
-    }
-    Some(directory.to_string_lossy().into_owned())
+    let exe_dir = exe.parent()?;
+    let mut roots = vec![exe_dir.join("../python"), exe_dir.join("../../..")];
+    roots.retain(|root| {
+        let package = root.join("blastit");
+        package.join("_check_pytest.py").is_file()
+            && package.join("_bin").join("blastit-dbproxy").is_file()
+    });
+    roots
+        .first()
+        .map(|root| root.to_string_lossy().into_owned())
 }
 
 /// The `blastit-dbproxy` program this installation runs.

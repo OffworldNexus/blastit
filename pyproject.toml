@@ -1,17 +1,17 @@
 # The wheel a project installs (`pip install blastit`, `uv add blastit`).
 #
-# Same shape as granian's: a pyo3 extension for the server itself
-# (`blastit._blastit`, built from `crates/blastit-py`), a Python package for the
-# console script (`python/blastit`), and maturin as the build backend. Nothing
-# here detects a virtualenv: the CLI *is* a Python program, so it runs on the
-# interpreter of the environment it is installed in, and so does stage 1 of the
-# server (§4).
+# One universal Rust binary (`crates/blastit`) plus a pure-stdlib Python package
+# (`python/blastit`) that `exec`s it: `blastit._blastit` speaks NDJSON to
+# `blastit --internal-json`, so the same wheel runs on every CPython `>=3.12`
+# with no per-minor artifact. `MB.42.3` repacks the built wheel into the
+# `py3-none-*` layout that relocates the binary and the PHP/Python shims under
+# `blastit/_bin/`; until then a `bindings = "bin"` wheel is what `maturin`/
+# `uv build` produces from this file.
 #
 # The backend is `blastit_build`, which is maturin's with one thing in front of
-# it: a PEP 517 build also builds `blastit-dbproxy` and puts it in the package,
-# so `pip install blastit` from the sdist yields the same working wheel the
-# manylinux builds do (see `blastit_build.py`). `maturin build` itself — what
-# `scripts/build-wheel.sh` and CI run — never loads this file.
+# it: a PEP 517 build also builds `blastit-dbproxy` and puts it in the package.
+# `maturin build` itself — what `scripts/build-wheel.sh` and CI run — never loads
+# this file.
 [build-system]
 # 1.9.3 is the first release that carries `license-files` into the sdist, which
 # is where a source install reads them from (§ E4).
@@ -55,14 +55,13 @@ classifiers = [
 # nothing but the standard library.
 dependencies = []
 
-[project.scripts]
-blastit = "blastit.__main__:main"
-# D3c: the manifest tooling, next to the server. `blastit-manifest fold` reads
-# blastit's own JSON logs and prints (or writes) the grants a manifest is
-# missing, over the same normalisation and table-grant analysis the pytest
-# plugin uses. `python -m blastit.fold` does the same for an environment where
-# only the package is importable.
-blastit-manifest = "blastit.fold:main"
+# `bindings = "bin"` puts the Rust `blastit` binary in the wheel's own `bin/`,
+# and maturin refuses to combine that with `[project.scripts]` ("Defining scripts
+# and working with a binary doesn't mix well"). So the interim wheel's `blastit`
+# is the binary itself, and `python -m blastit` / `python -m blastit.fold` remain
+# the ways to reach the Python entry points. `MB.42.3`'s `py3-none` repack
+# relocates the binary into `blastit/_bin/` and restores the three console
+# scripts (`blastit`, `blastit-lsp`, `blastit-manifest`, design §6.1).
 
 # D3b: pytest finds the plugin by itself once the wheel is installed, so a
 # project only has to ask for a manifest (`pytest --blastit-manifest
@@ -80,15 +79,17 @@ Issues = "https://github.com/OffworldNexus/blastit/issues"
 Changelog = "https://github.com/OffworldNexus/blastit/blob/develop/CHANGELOG.md"
 
 [tool.maturin]
-manifest-path = "crates/blastit-py/Cargo.toml"
-module-name = "blastit._blastit"
+# The universal binary is the wheel's program (`bindings = "bin"`): the Python
+# package is a bridge to it, not an extension. A `bin` binding needs no
+# interpreter at build time, which is what makes one artifact portable.
+manifest-path = "crates/blastit/Cargo.toml"
+bindings = "bin"
 python-source = "python"
-# The wheel carries `blastit/_bin/blastit-dbproxy`, the Python-free binary stage 0
-# `execve`s for the credentials-holding role (§4, D2). `scripts/build-wheel.sh`
-# builds it and puts it in the package before maturin runs, and it is gitignored
-# there — which maturin's walk of `python-source` *does* respect, so the path is
-# named explicitly. Without this line the wheel has no dbproxy binary in it and
-# blastit refuses to start.
+# The wheel carries `blastit/_bin/blastit-dbproxy`, the capability-free copy
+# stage 0 `execve`s for the credentials-holding role (`--role=dbproxy`).
+# `scripts/build-wheel.sh` builds it and puts it in the package before maturin
+# runs, and it is gitignored there — which maturin's walk of `python-source`
+# *does* respect, so the path is named explicitly.
 include = [
     { path = "python/blastit/_bin/blastit-dbproxy", format = "wheel" },
     # The build backend isn't part of the cargo workspace or of `python-source`,

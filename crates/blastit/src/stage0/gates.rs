@@ -529,12 +529,7 @@ pub(crate) fn no_php_support(manifest: &Manifest) -> Option<String> {
 /// A build that embeds CPython in stage 1 (`cargo` development builds, where
 /// `interpreter` is `false`) has no interpreter *here*: the facts exist one
 /// stage later, and inventing a version would be worse than saying nothing.
-pub(super) fn emit_runtime(
-    emitter: &Emitter,
-    config: &Config,
-    interpreter: bool,
-    python: Option<(&str, &str)>,
-) {
+pub(super) fn emit_runtime(emitter: &Emitter, config: &Config, python: Option<(&str, &str)>) {
     // A build without the `php` feature has no record to ask: no manifest that
     // reaches this point declares one (the gate refuses it first), so "no PHP
     // entrypoint" is the answer that cannot invent a line.
@@ -546,7 +541,7 @@ pub(super) fn emit_runtime(
     // process, so [`runtime_shape`] honestly says nothing — but stage 0
     // discovered the interpreter the project will run on, and that pair is
     // exactly what the line exists to name (design §2.4).
-    let runtime = runtime_shape(entrypoint_php, config.app.is_some(), interpreter).or_else(|| {
+    let runtime = runtime_shape(entrypoint_php, config.app.is_some()).or_else(|| {
         python.map(|(version, environment)| {
             Runtime::python(version.to_string(), environment.to_string())
         })
@@ -562,11 +557,7 @@ pub(super) fn emit_runtime(
 /// The three inputs are what actually decides it — a resolved library, a
 /// callable, and an interpreter live in *this* process — so the table is one
 /// testable function rather than three conditions spread over two boot paths.
-pub(super) fn runtime_shape(
-    entrypoint_php: bool,
-    has_app: bool,
-    _interpreter: bool,
-) -> Option<Runtime> {
+pub(super) fn runtime_shape(entrypoint_php: bool, has_app: bool) -> Option<Runtime> {
     if entrypoint_php {
         // The probe reports it, after `php_module_startup`
         // (`blastit_view_php::probe`).
@@ -596,7 +587,6 @@ pub(crate) fn static_root_permission(
     manifest: &Manifest,
     manifest_dir: &Path,
     probe: u32,
-    interpreter: bool,
 ) -> Option<String> {
     // `dev` and `check`: the prober *is* the responder, and an unprivileged
     // process may not call `setgroups(2)`, so the dropped-to probe cannot
@@ -617,14 +607,10 @@ pub(crate) fn static_root_permission(
         probe,
     };
     for (index, path) in manifest.static_roots(manifest_dir) {
-        let hooks = match crate::py::runtime_hooks(interpreter) {
-            Ok(hooks) => hooks,
-            // A live interpreter whose fork protocol cannot be resolved is a
-            // refusal: a bare `fork(2)` there is the case §9.3 forbids.
-            Err(message) => return Some(message),
-        };
+        // Stage 0 runs no interpreter (the universal binary starts none), so the
+        // probe's forks carry no CPython protocol (`MB.42.2.2.2`).
         let refused =
-            match crate::visibility::unreadable(std::slice::from_ref(&path), &dropped, hooks) {
+            match crate::visibility::unreadable(std::slice::from_ref(&path), &dropped, None) {
                 Ok(None) => false,
                 // A probe that could not answer is refused rather than assumed
                 // fine: a root nobody proved readable is one nobody serves.

@@ -29,7 +29,7 @@ use blastit_manifest::{Manifest, UidLayout};
 use crate::config::{Config, LogFormat, Mode, Privilege};
 // The two provenance types are the deployment gate's (`php` only): the rest of
 // stage 0 names neither.
-use crate::host::{EXEC, Host, Install};
+use crate::host::{EXEC, FILE_NOUN, Host};
 use crate::logs::{Colour, Emitter, fail, output_event};
 // The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
@@ -253,8 +253,7 @@ fn privilege_from(held: &blastit_sys::Held) -> Privilege {
 /// installation — and this is the only place that knows it. Root is never told
 /// to "start as root": it already is, and its capabilities come from the
 /// container.
-fn capability_advice(host: &Host, err: &std::io::Error) -> String {
-    let install = host.install();
+fn capability_advice(err: &std::io::Error) -> String {
     let Some(blastit_sys::Error::MissingCapabilities { uid, missing }) =
         blastit_sys::Error::from_io(err)
     else {
@@ -267,46 +266,34 @@ fn capability_advice(host: &Host, err: &std::io::Error) -> String {
              `chown`s the view directories, `open`s them and `kill`s a view). Docker's \
              default capabilities include them — check `--cap-drop`, `--cap-add` and any \
              bounding-set restriction on the container.\n  \
-             A rootless deployment gives them to a *dedicated copy* of the {} instead:\n  \
+             A rootless deployment gives them to a *dedicated copy* of the {FILE_NOUN} instead:\n  \
              {}\n  \
              To run the same tree locally without root, use `blastit dev`; it is a \
              single-uid simulation, not a sandbox",
-            install.file(),
-            copy_recipe(install)
+            copy_recipe()
         );
     }
     format!(
         "init runs as uid {uid} and is missing {missing}.\n  \
-         A rootless deployment gives the capabilities to a *dedicated copy* of the {}, \
+         A rootless deployment gives the capabilities to a *dedicated copy* of the {FILE_NOUN}, \
          never to the shared one:\n  {}\n  \
          To run the same tree locally without root, use `blastit dev`; it is a \
          single-uid simulation, not a sandbox",
-        install.file(),
-        copy_recipe(install)
+        copy_recipe()
     )
 }
 
 /// The four commands that make the capable copy, in this installation's words
 /// (D6/B1, B2).
-fn copy_recipe(install: Install) -> String {
-    match install {
-        Install::Wheel => format!(
-            "cp \"$(readlink -f <the interpreter>)\" <same directory>/<interpreter>-init\n  \
-             chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
-             setcap '{}+ep' <the copy>\n  \
-             then start `<the copy> -m blastit` (the copy stays next to the original: \
-             CPython finds its stdlib and its venv from the executable's own path)",
-            blastit_sys::caps::Capability::SETCAP
-        ),
-        Install::Binary => format!(
-            "cp <the blastit binary> <the binary>-init\n  \
-             chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
-             setcap '{}+ep' <the copy>\n  \
-             then start <the copy>, and set {EXEC}=<the blastit binary> so that \
-             the database proxy runs the capability-free copy",
-            blastit_sys::caps::Capability::SETCAP,
-        ),
-    }
+fn copy_recipe() -> String {
+    format!(
+        "cp <the blastit binary> <the binary>-init\n  \
+         chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
+         setcap '{}+ep' <the copy>\n  \
+         then start <the copy>, and set {EXEC}=<the blastit binary> so that \
+         the database proxy runs the capability-free copy",
+        blastit_sys::caps::Capability::SETCAP,
+    )
 }
 
 /// How long stage 0 keeps reading a failed dbproxy's output before giving up
@@ -325,20 +312,14 @@ pub const MAX_CONFIG_DOCUMENT: usize = 60 * 1024;
 /// Runs stage 0. Never returns: it `execve`s stage 1 or exits non-zero.
 ///
 /// `host` says how blastit was installed: which program the barrier and
-/// dbproxy's own `execve` start, and — for a wheel — the interpreter's import
-/// path, which travels with the configuration because stage 1 is re-executed
-/// with `-I` (§4).
-///
-/// `interpreter` is `true` when a live CPython is in this image (a wheel: the
-/// console script's), which is what its `fork` has to account for (§9.3, and
-/// [`crate::forking`]).
+/// dbproxy's own `execve` start (§4).
 ///
 /// `preset` is `--preset` when the command line carried one, and it wins over
 /// `BLASTIT_PRESET` (E1, [`Config::from_env`]).
 ///
 /// `colour` is the terminal decision the command line's composition root made
 /// once (`A-4`): this image never asks its descriptors again.
-pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour) -> ! {
+pub fn run(host: &Host, preset: Option<&str>, colour: Colour) -> ! {
     // §8.1: the log format is one of the *settings*, and stage 0's first lines
     // are made before there is a configuration to read it from — so they are
     // kept here, in the order they were made, and written out once the settings
@@ -366,7 +347,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
                 Component::Init,
                 EventKind::Boot(stage0_lifecycle(None)),
             ));
-            fail_early(&mut early, human_refusals, &capability_advice(host, &err));
+            fail_early(&mut early, human_refusals, &capability_advice(&err));
         }
     };
     let privilege = privilege_from(&held);
@@ -525,7 +506,6 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
         &manifest,
         &config.manifest_dir,
         UidLayout::new(config.uid_base).scheduler(),
-        interpreter,
     ) {
         fail(&emitter, &message);
     }
@@ -556,7 +536,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
     // §8.1: one `runtime` line saying what this boot will run. PHP's is the
     // probe's (below the fork, after `php_module_startup`); the other two are
     // decided here.
-    emit_runtime(&emitter, &config, interpreter, runtime_line);
+    emit_runtime(&emitter, &config, runtime_line);
 
     let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
         Ok(prepared) => prepared,
@@ -587,14 +567,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
     }
 
     let listeners = bind_view_sockets(&emitter, &manifest, &prepared, &layout, &serve_gates);
-    let dbproxy = fork_dbproxy(
-        &emitter,
-        &config,
-        &placement,
-        interpreter,
-        &prepared,
-        listeners,
-    );
+    let dbproxy = fork_dbproxy(&emitter, &config, &placement, &prepared, listeners);
 
     // The interpreter's import path travels in the configuration, not in the
     // environment: stage 1 is `execve`'d as an interpreter of its own (§4), and

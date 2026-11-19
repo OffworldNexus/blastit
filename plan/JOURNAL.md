@@ -3873,3 +3873,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T20:21 [MB.42.6] (unknown) created (task) Fix wrong remediation text for an unused proxy in blastit check human output (no 'proxy <name>' directive exists)
 - 2026-11-19T20:22 [MB.42.2.2.1] (lead) REVIEW FIX (filtered): MAJOR matched has two storage sites (evaluate keeps its own map while Ledger builds the same; Ledger::matched() zero callers; two false d
 - 2026-11-19T20:30 [MB.42.2.2.1] (lead) status review -> done
+- 2026-11-19T20:30 [MB.42.2.2.2] (lead) status ready -> active
+- 2026-11-19T20:30 [MB.42.2.2.2] (lead) attempt 1/3 started
+- 2026-11-19T20:30 [MB.42.2.2.2] (lead) base 1da3e3ddfa6782d08474220be2c6f0a6e4e49d08
+- 2026-11-19T20:42 [MB.42.2.2.2] (lead) lead decisions: (1) item 7 DECLINED - keep the audit_v1/infer_routes re-exports (one-line aliases, single implementation; retiring would edit 2 protected tests 
+- 2026-11-19T20:44 [MB.42.2.2.2] (lead) status active -> review
+- 2026-11-19T20:47 [MB.42.2.2.2] (unknown) edited fields
+- 2026-11-19T20:47 [MB.42.2.2.2] (lead) REVIEW FIX (filtered): MAJOR pyproject.toml:83 maturin manifest-path still names the deleted crates/blastit-py -> uv build/maturin fail at config load = no whee
+- 2026-11-19T21:10 [MB.42.2.2.2] (lead) protected-test deletion verified (crates/blastit-py/tests/critical_check_schema.rs): its subjects are the retired pyo3 bindings; coverage migrated - schema_vers
+- 2026-11-19T21:10 [MB.42.2.2.2] (lead) status review -> done

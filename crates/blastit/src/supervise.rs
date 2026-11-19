@@ -407,6 +407,11 @@ pub struct Parts<'a> {
     /// only a WSGI view is forked from it.
     #[cfg(feature = "python")]
     pub runtime: Option<PyRuntime<'a>>,
+    /// A build with no interpreter holds no runtime, and `PyRuntime` is the only
+    /// user of `'a` in that shape: the marker is what keeps `Parts<'a>` a legal
+    /// type there without inventing a second struct (and is never read).
+    #[cfg(not(feature = "python"))]
+    pub _runtime: std::marker::PhantomData<&'a ()>,
     /// The `(libpython, shim)` descriptors this image inherited from stage 0,
     /// when it may reload: `exec_cycle` hands them to the replacement instead of
     /// re-opening the objects by path (§1.2.1 item 6).
@@ -640,7 +645,11 @@ impl<'a> Supervisor<'a> {
             #[cfg(feature = "python")]
             runtime: parts.runtime,
             // One owner: the hooks are the runtime's own three pointers (§1.2.1).
+            // A build with no interpreter loaded none, so it has none.
+            #[cfg(feature = "python")]
             hooks: parts.runtime.map(|runtime| runtime.hooks),
+            #[cfg(not(feature = "python"))]
+            hooks: None,
             emitter,
             ctl: Some(parts.ctl),
             decoder: Decoder::new(parts.limits),
@@ -3167,6 +3176,8 @@ mod tests {
                 },
                 #[cfg(feature = "python")]
                 runtime: None,
+                #[cfg(not(feature = "python"))]
+                _runtime: std::marker::PhantomData,
                 ctl,
                 signals,
                 mask,
@@ -3521,6 +3532,8 @@ view plain regex '/plain/.*' {}
                     },
                     #[cfg(feature = "python")]
                     runtime: None,
+                    #[cfg(not(feature = "python"))]
+                    _runtime: std::marker::PhantomData,
                     ctl: OwnedFd::from(ctl),
                     signals,
                     mask,
@@ -3723,6 +3736,8 @@ view plain regex '/plain/.*' {}
                 },
                 #[cfg(feature = "python")]
                 runtime: None,
+                #[cfg(not(feature = "python"))]
+                _runtime: std::marker::PhantomData,
                 ctl: OwnedFd::from(ctl),
                 signals,
                 mask,

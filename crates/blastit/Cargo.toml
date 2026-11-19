@@ -14,6 +14,14 @@ workspace = true
 name = "blastit"
 path = "src/main.rs"
 
+# The universal-binary shim suite needs the CPython capability it proves: without
+# `python` there is no shim to load and no `dev` boot to observe, so the target is
+# only built where it can say something (`MB.42.2.2.2`). The file itself is
+# protected and unchanged.
+[[test]]
+name = "critical_python_shim"
+required-features = ["python"]
+
 [features]
 # A plain `cargo build -p blastit` is the **universal** artifact (design
 # `universal-distribution.md` §1.1): `python` `dlopen`s the host's `libpython`

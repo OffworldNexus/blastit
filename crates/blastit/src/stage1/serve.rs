@@ -135,15 +135,11 @@ fn settle_reload(reload: &mut Option<Reload>, serving: &Serving, emitter: &Emitt
 /// Loads the application through the frozen vtable, emits `ready`, and
 /// supervises. Never returns.
 ///
-/// `shim` is the `Hosted` pre-load: a wheel's shim, `dlopen`ed in `boot::run`
-/// before the forks so its hooks wrapped them. `None` in an `Embed` boot, which
-/// loads `libpython` and the shim here, **after** those forks.
+/// Every boot with a Python view pinned its runtime in stage 0; this function
+/// `dlopen`s it **after** the `http`/scheduler forks, so no half-initialised
+/// interpreter is inherited (`MB.42.2.2.2`).
 #[cfg(feature = "python")]
-pub(super) fn serve(
-    emitter: &Emitter,
-    mut serving: Serving,
-    shim: Option<blastit_py_sapi::LoadedPy>,
-) -> ! {
+pub(super) fn serve(emitter: &Emitter, mut serving: Serving) -> ! {
     // The watcher exists **before** the first import, so the `preload` phase's
     // modules and file opens are watched too (§4.1 boot order), and the marking
     // pass runs once the load has reported what it opened.
@@ -183,21 +179,14 @@ pub(super) fn serve(
             memory: serving.memory,
             announce: serving.announce,
         };
-        // `Hosted` is the boot that already runs CPython; `Embed` is every other
-        // one, and it is the only path that loads `libpython`.
-        let result = match (serving.live, shim) {
-            (true, Some(shim)) => load::hosted(&inputs, shim).map(Some),
-            (_, None) => match &serving.py_fds {
-                Some(pair) => load::embed(&inputs, pair).map(Some),
-                None => Err(
-                    "this boot has no pinned Python runtime to serve with (a blastit bug — \
-                     report the boot log above)"
-                        .to_string(),
-                ),
-            },
-            (false, Some(_)) => Err(
-                "this boot was handed the wheel's shim, but no interpreter is live \
-                 (a blastit bug — report the boot log above)"
+        // The universal binary is the only installation: when stage 0 pinned a
+        // runtime, this image `dlopen`s it (`Embed`); otherwise the manifest
+        // needs no interpreter at all.
+        let result = match &serving.py_fds {
+            Some(pair) => load::embed(&inputs, pair).map(Some),
+            None => Err(
+                "this boot has no pinned Python runtime to serve with (a blastit bug — \
+                 report the boot log above)"
                     .to_string(),
             ),
         };

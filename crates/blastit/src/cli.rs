@@ -29,10 +29,9 @@
 //! # Library and binary
 //!
 //! This module is the whole binary. `crates/blastit`'s `main` calls it with a
-//! [`Host`] that re-executes `/proc/self/exe` (§4), and `blastit._blastit` — the
-//! extension a wheel installs — calls it with a host that re-executes the
-//! interpreter it is running in (D2). Both play exactly the same roles; only
-//! the two `execve`s of §4 differ.
+//! [`Host`] that re-executes `/proc/self/exe` (§4), and a wheel's console script
+//! `exec`s that same binary (`blastit/_bin/blastit`), so there is one shape of
+//! every role and no interpreter hosts a stage (`MB.42.2.2.2`).
 
 use std::net::IpAddr;
 use std::os::fd::RawFd;
@@ -43,14 +42,15 @@ use crate::stage0;
 use crate::stage1;
 
 mod help;
+mod internal_json;
 mod parse;
 mod preset;
 mod run;
 
 use help::{help_for, refuse, usage};
-use parse::{Subcommand, parse, parse_check, parse_dev, parse_fmt, parse_lsp};
+use parse::{Subcommand, parse, parse_check, parse_dev, parse_fmt, parse_internal_json, parse_lsp};
 use preset::env_is_known;
-use run::{role_is_allowed, run_check, run_dev, run_fmt};
+use run::{run_check, run_dev, run_fmt};
 
 /// The four command shapes `0.2.0` exposes (§1.1).
 ///
@@ -68,6 +68,9 @@ pub enum Command {
     Fmt,
     /// `blastit lsp`: speak LSP on stdin/stdout for an editor (`MB.22.3`).
     Lsp,
+    /// `blastit --internal-json`: the NDJSON dispatcher the pure-Python package
+    /// drives (`MB.42.2.2.2`). Hidden, and never combined with a re-exec line.
+    InternalJson,
 }
 
 impl Command {
@@ -78,6 +81,7 @@ impl Command {
             Some("check" | "test") => Self::Check,
             Some("fmt") => Self::Fmt,
             Some("lsp") => Self::Lsp,
+            Some("--internal-json") => Self::InternalJson,
             _ => Self::Serve,
         }
     }
@@ -177,19 +181,8 @@ struct Args {
 
 /// Runs the role the command line names, in the installation `host` describes.
 ///
-/// `py` is the interpreter the caller is running in, when there is one:
-/// `blastit._blastit.main()` is called *from* Python, so a wheel install always
-/// has it and stage 1 uses that interpreter as it stands (§9.3). The standalone
-/// binary passes `None` and embeds CPython itself.
-///
-/// Returns the process exit status, which is also what a Python console script
-/// raises out of `main()` — the caller turns it into `ExitCode::from` or
-/// `SystemExit`. Stage 0 and stage 1 never return at all.
-pub fn main<H: crate::LiveInterpreter>(host: Host, argv: Vec<String>, py: H) -> u8 {
-    // The installation fact, as a value: a wheel's `_blastit.main()` passes the
-    // interpreter it was called from, the binary passes `NoInterpreter`
-    // (design §1.2.1). No `pyo3` type reaches this signature.
-    let live = py.is_live();
+/// Returns the process exit status. Stage 0 and stage 1 never return at all.
+pub fn main(host: Host, argv: Vec<String>) -> u8 {
     // `A-4`: the terminal is asked once, here — the composition root every
     // image of this program starts at — and the answer travels as a value.
     // Nothing below this line reads `NO_COLOR`, `TERM` or `isatty` again.
@@ -204,7 +197,7 @@ pub fn main<H: crate::LiveInterpreter>(host: Host, argv: Vec<String>, py: H) -> 
                 println!("{}", help::DEV_USAGE);
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_dev(&host, &options, live, colour),
+            Ok(Subcommand::Run(options)) => run_dev(&host, &options, colour),
             Err(message) => {
                 refuse("blastit dev", &message, false, colour);
                 // `1` for `dev`'s own grammar: the protected CLI matrix pins
@@ -243,6 +236,13 @@ pub fn main<H: crate::LiveInterpreter>(host: Host, argv: Vec<String>, py: H) -> 
             Err(message) => {
                 refuse("blastit lsp", &message, false, colour);
                 LSP_FAILURE
+            }
+        },
+        Command::InternalJson => match parse_internal_json(&argv[1..]) {
+            Ok(()) => internal_json::run(),
+            Err(message) => {
+                refuse("blastit", &message, true, colour);
+                USAGE_FAILURE
             }
         },
         Command::Serve => {
@@ -288,7 +288,7 @@ pub fn main<H: crate::LiveInterpreter>(host: Host, argv: Vec<String>, py: H) -> 
                         refuse("blastit", &message, true, colour);
                         return USAGE_FAILURE;
                     }
-                    dispatch(args, &host, live, colour)
+                    dispatch(args, &host, colour)
                 }
                 Err(refusal) => {
                     refuse("blastit", &refusal.message, true, colour);
@@ -353,12 +353,8 @@ fn run_lsp() -> u8 {
 }
 
 /// Runs the role the arguments name.
-fn dispatch(args: Args, host: &Host, live: bool, colour: Colour) -> u8 {
+fn dispatch(args: Args, host: &Host, colour: Colour) -> u8 {
     if let Some(role) = args.role.as_deref() {
-        if let Err(message) = role_is_allowed(role, live) {
-            eprintln!("blastit: {message}");
-            return FAILURE;
-        }
         return match role {
             "dbproxy" => {
                 let (Some(secrets_fd), Some(events_fd), Some(ready_fd)) =
@@ -395,7 +391,7 @@ fn dispatch(args: Args, host: &Host, live: bool, colour: Colour) -> u8 {
     }
 
     match args.stage {
-        None | Some(0) => stage0::run(host, live, args.preset.as_deref(), colour),
+        None | Some(0) => stage0::run(host, args.preset.as_deref(), colour),
         Some(1) => {
             let Some(config_fd) = args.config_fd else {
                 eprintln!("blastit: --stage=1 needs --config-fd");
@@ -421,7 +417,6 @@ fn dispatch(args: Args, host: &Host, live: bool, colour: Colour) -> u8 {
                     #[cfg(feature = "python")]
                     py_shim_fd: args.py_shim_fd,
                 },
-                live,
                 colour,
             )
         }
@@ -437,7 +432,6 @@ fn dispatch(args: Args, host: &Host, live: bool, colour: Colour) -> u8 {
 mod tests {
     use super::help::{help_for, usage};
     use super::parse::{Subcommand, parse, parse_check, parse_dev};
-    use super::run::role_is_allowed;
     use super::*;
 
     #[test]
@@ -665,18 +659,6 @@ mod tests {
         let refusal = parse(&restage).expect_err("stage 1 has no preset");
         assert_eq!(refusal.exit, FAILURE);
         assert!(refusal.message.contains("--preset"), "{refusal:?}");
-    }
-
-    #[test]
-    fn the_standalone_binary_plays_every_role() {
-        assert!(role_is_allowed("dbproxy", false).is_ok());
-        assert!(role_is_allowed("http", false).is_ok());
-    }
-
-    #[test]
-    fn an_interpreter_never_holds_the_credentials() {
-        let err = role_is_allowed("dbproxy", true).unwrap_err();
-        assert!(err.contains("blastit-dbproxy"), "{err}");
     }
 
     #[test]

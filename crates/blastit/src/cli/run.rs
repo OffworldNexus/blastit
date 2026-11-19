@@ -15,8 +15,8 @@ use super::{CheckOptions, DevOptions, FMT_FAILURE, FMT_NOT_CANONICAL, FmtOptions
 /// The grammar above decided *what* to run; this hands the options to stage 0's
 /// unprivileged mode, which never returns: it either `execve`s stage 1 or exits
 /// non-zero. `host` is the installation, exactly as it is for production.
-pub(super) fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Colour) -> u8 {
-    crate::stage0::run_dev(host, options, interpreter, colour)
+pub(super) fn run_dev(host: &Host, options: &DevOptions, colour: Colour) -> u8 {
+    crate::stage0::run_dev(host, options, colour)
 }
 
 /// The `blastit check` engine (`MA.2.3.5`).
@@ -119,26 +119,4 @@ fn report_manifest_errors(path: &std::path::Path, errors: &blastit_manifest::Man
         }
     }
     FMT_FAILURE
-}
-
-/// Whether an install that runs inside an interpreter may play the role (§2.2).
-///
-/// dbproxy holds the real credentials and must run no interpreter at all (§4),
-/// so a wheel install — where blastit *is* a Python process — hands the role to
-/// the Python-free `blastit-dbproxy` binary the wheel ships instead of playing
-/// it in the process that imported the extension.
-///
-/// # Errors
-///
-/// A one-line message when the caller is in an interpreter and asked for
-/// dbproxy.
-pub(super) fn role_is_allowed(role: &str, hosted: bool) -> Result<(), String> {
-    if hosted && role == "dbproxy" {
-        return Err(
-            "--role=dbproxy runs no interpreter; use the `blastit-dbproxy` binary this \
-             installation ships"
-                .to_string(),
-        );
-    }
-    Ok(())
 }

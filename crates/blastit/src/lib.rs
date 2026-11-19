@@ -2,13 +2,11 @@
 //!
 //! The crate is a library and a binary.
 //!
-//! * The **binary** is the standalone install: `blastit`, root, PID 1, playing
-//!   every role out of one image (§2).
-//! * The **library** is that same code, reached through the pyo3 extension a
-//!   wheel installs (`blastit._blastit`). There the console script runs the
-//!   roles on the interpreter the wheel was installed into — the venv's, whose
-//!   `site-packages` the application's dependencies live in — and stage 1 uses
-//!   that interpreter instead of embedding a second one (§9.3, D2).
+//! * The **binary** is the universal install: `blastit`, root, PID 1, playing
+//!   every role out of one image (§2), and the one program a wheel's console
+//!   script `exec`s (`blastit/_bin/blastit`). The wheel's Python package is a
+//!   pure-stdlib bridge to it (`blastit._blastit`), so no interpreter hosts a
+//!   stage (`MB.42.2.2.2`).
 //!
 //! [`cli::main`] is the whole entry point, and [`Host`] is the only thing that
 //! differs between the two installations: which program the two `execve`s of §4
@@ -107,7 +105,3 @@ mod visibility;
 use blastit_view as _;
 
 pub use crate::host::{Host, Reexec};
-/// Whether this process already runs CPython, as a value: the wheel's
-/// `_blastit.main()` passes the interpreter it was called from, the binary
-/// passes [`NoInterpreter`] (design §1.2.1 item 2).
-pub use crate::py::{LiveInterpreter, NoInterpreter};
