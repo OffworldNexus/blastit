@@ -229,36 +229,47 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
         runtime.path(),
     )?);
     let listeners = bind_listeners(&prepared, Path::new(&socket_dir))?;
+    // A store-less app (a hello-world with no `postgres` store) declares no
+    // `postgresql` proxy, so there is no socket to hand dbproxy and no statement
+    // to attribute: dbproxy is not started at all and the gate records the HTTP
+    // requests alone, which is exactly what the audit of such an app reads. The
+    // control channel is not opened either, so nothing can be pushed into a
+    // channel nobody reads.
+    let mut dbproxy = None;
+    let mut observed = None;
+    let mut ctl_python = None;
+    if !listeners.is_empty() {
+        let (obs_read, obs_child) = socketpair("the observation pipe")?;
+        let (ctl_dbproxy, python_end) = socketpair("the control channel")?;
+        let (ready_read, ready_child) = socketpair("the ready pipe")?;
+        dbproxy = Some(Dbproxy::start(
+            host,
+            &manifest,
+            &prepared,
+            listeners,
+            Inherited {
+                obs: obs_child,
+                ctl: ctl_dbproxy,
+                ready: ready_child,
+            },
+            ready_read,
+        )?);
+        // Only *after* dbproxy's `execve`: the suite's end of the control
+        // channel has to cross pytest's `execve` (`Stdio` does not carry it), but
+        // dbproxy must never inherit it, so it keeps `FD_CLOEXEC` until it is
+        // spawned.
+        clear_cloexec(python_end.as_raw_fd())?;
+        observed = Some(ObsReader::start(obs_read));
+        ctl_python = Some(python_end);
+    }
 
-    let (obs_read, obs_child) = socketpair("the observation pipe")?;
-    let (ctl_dbproxy, ctl_python) = socketpair("the control channel")?;
-    let (ready_read, ready_child) = socketpair("the ready pipe")?;
-
-    let mut dbproxy = Dbproxy::start(
-        host,
-        &manifest,
-        &prepared,
-        listeners,
-        Inherited {
-            obs: obs_child,
-            ctl: ctl_dbproxy,
-            ready: ready_child,
-        },
-        ready_read,
-    )?;
-    // Only *after* dbproxy's `execve`: the suite's end of the control channel
-    // has to cross pytest's `execve` (`Stdio` does not carry it), but dbproxy
-    // must never inherit it, so it keeps `FD_CLOEXEC` until it is spawned.
-    clear_cloexec(ctl_python.as_raw_fd())?;
-
-    let observed = ObsReader::start(obs_read);
     let http_path = runtime.path().join("http_obs.jsonl");
     let status = run_pytest(
         options,
         &prepared,
         &python,
         &http_path,
-        ctl_python.as_raw_fd(),
+        ctl_python.as_ref().map(AsRawFd::as_raw_fd),
         options.json,
         handshake.path(),
     );
@@ -267,13 +278,19 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     let code = match status {
         Ok(code) => code,
         Err(message) => {
-            dbproxy.stop();
-            observed.stop();
+            if let Some(proxy) = dbproxy.as_mut() {
+                proxy.stop();
+            }
+            if let Some(reader) = observed.take() {
+                let _ = reader.stop();
+            }
             return Err(message);
         }
     };
-    dbproxy.stop();
-    let sql_text = observed.stop();
+    if let Some(proxy) = dbproxy.as_mut() {
+        proxy.stop();
+    }
+    let sql_text = observed.map(ObsReader::stop).unwrap_or_default();
 
     if code != 0 {
         // R4: pytest failed, exit 5 included. No audit report is emitted and
@@ -725,6 +742,9 @@ impl Dbproxy {
         command.stdin(Stdio::null());
         command.stdout(stdio_stderr()?);
         command.stderr(stdio_stderr()?);
+        // A coverage build boots dbproxy under the same profile file, so the
+        // role's coverage is written when it exits (`-C instrument-coverage`).
+        crate::coverage::inherit(&mut command);
         let child = command.spawn().map_err(|error| {
             format!(
                 "{}: {error} (the check needs the `blastit-dbproxy` binary this \
@@ -851,7 +871,7 @@ fn run_pytest(
     prepared: &blastit_env::Prepared,
     python: &Path,
     http_path: &Path,
-    ctl_fd: RawFd,
+    ctl_fd: Option<RawFd>,
     json: bool,
     django: Option<&Path>,
 ) -> Result<i32, String> {
@@ -867,13 +887,19 @@ fn run_pytest(
         command.env(name, value);
     }
     command.env(HTTP_OBS, http_path);
-    command.env(CTL_FD, ctl_fd.to_string());
+    // A store-less app runs no dbproxy, so there is no channel to push a target
+    // into and no `BLASTIT_CHECK_CTL_FD` to name: the gate records the request
+    // and pushes nothing (`_check_pytest._send`).
+    if let Some(fd) = ctl_fd {
+        command.env(CTL_FD, fd.to_string());
+    }
     if let Some(path) = django {
         // R30/ADR-0004: the only place the real proxy inputs exist in this
         // process tree after the rewrite, `0600`, and gone as soon as the gate
         // has read it.
         command.env(DJANGO_SETUP, path);
     }
+    crate::coverage::inherit(&mut command);
     command.stdin(Stdio::null());
     if json {
         // R5: the child's fd 1 *is* our stderr, so no `print()` can reach the
@@ -1530,6 +1556,47 @@ view fallback regex '.*' {}
         // stale file would hand the previous run's credentials to this one.
         let error = write_private(&path, b"{\"x\":2}").expect_err("refused");
         assert!(error.contains("File exists"), "{error}");
+    }
+
+    #[test]
+    fn a_store_less_app_binds_no_listener_and_a_proxied_one_binds_one() {
+        // Allowed: a hello-world with no store has nothing to proxy, so the
+        // check binds no socket and starts no dbproxy (`MB.40.2`).
+        let root = CheckRoot::create().expect("a runtime root");
+        let pg = root.postgres_dir().expect("the socket directory");
+        let store_less = audit_v1::parse_manifest("view hello \"/*\" {}\n").expect("manifest");
+        let platform = BTreeMap::new();
+        let prepared =
+            blastit_env::build_with_socket_dir(&store_less, &platform, None, "/run/blastit-check")
+                .expect("the environment");
+        let listeners = bind_listeners(&prepared, &pg).expect("no listener");
+        assert!(listeners.is_empty(), "{listeners:?}");
+        assert_eq!(
+            std::fs::read_dir(&pg)
+                .expect("the socket directory")
+                .count(),
+            0,
+            "a store-less run must not leave a socket it never serves"
+        );
+
+        // The other half: one store is one real wildcard socket, `0600` and
+        // owned by this uid.
+        let proxied = audit_v1::parse_manifest("postgres $DATABASE_URL\n\nview hello \"/*\" {}\n")
+            .expect("manifest");
+        let platform = BTreeMap::from([(
+            "DATABASE_URL".to_string(),
+            "postgresql://user:secret@127.0.0.1:5432/app".to_string(),
+        )]);
+        let prepared =
+            blastit_env::build_with_socket_dir(&proxied, &platform, None, "/run/blastit-check")
+                .expect("the environment");
+        let listeners = bind_listeners(&prepared, &pg).expect("one listener");
+        assert_eq!(listeners.len(), 1);
+        let port = blastit_env::postgresql::local_port(0).expect("a local port");
+        let socket = pg.join(format!(".s.PGSQL.{port}"));
+        let metadata = std::fs::symlink_metadata(&socket).expect("the socket exists");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
     }
 
     #[test]

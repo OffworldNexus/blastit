@@ -33,3 +33,7 @@ __pycache__/
 # Git worktrees live inside the checkout on disk (`git worktree add .worktrees/<slug>`),
 # never under /tmp (tmpfs = RAM) and never in $HOME: one release worktree held 12 G.
 /.worktrees/
+
+# Coverage runtime profiles (`BLASTIT_COVERAGE=1` / `-C instrument-coverage`)
+*.profraw
+*.profdata

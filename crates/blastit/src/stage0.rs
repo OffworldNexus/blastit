@@ -1287,6 +1287,7 @@ struct DevBoot<'a> {
 /// [`DevRoot::create`] goes through one of those helpers.
 fn dev_fail(message: &str) -> ! {
     eprintln!("blastit dev: {message}");
+    crate::coverage::flush();
     // SAFETY: the boot is aborting; `_exit` runs no handler.
     unsafe { libc::_exit(1) }
 }
@@ -1372,6 +1373,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool) -> ! {
             "blastit dev: {}",
             crate::dev_learn::exposure_error(&options.host)
         );
+        crate::coverage::flush();
         // SAFETY: nothing of blastit's is running yet; `_exit` runs no handler.
         unsafe { libc::_exit(1) }
     }

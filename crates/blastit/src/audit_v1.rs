@@ -64,7 +64,7 @@ use blastit_sqlpolicy::{Allowlist, KNOWN_STATIC_SETUP_SQL, is_introspection_setu
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::infer_routes::{RoutePlan, infer};
+use crate::infer_routes::{RoutePlan, infer, is_learnable_path};
 
 /// The only observations schema this build reads.
 pub const SCHEMA_VERSION: u64 = 1;
@@ -635,6 +635,9 @@ impl Policy {
     }
 
     fn allows(&self, sql: &str) -> bool {
+        // `Allowlist::check` restores the observation spelling (`$?`, `…`) for
+        // the table-grant analysis, so this is the one place `check` and
+        // `--learn` agree (`MB.40.2`).
         self.allow.check(sql).is_allowed()
     }
 }
@@ -1473,15 +1476,19 @@ fn is_uuid(segment: &str) -> bool {
         })
 }
 
-/// Plans the routes and exact queries an unrouted observation run adds (`R27`).
+/// Plans the routes and exact queries an observation run adds (`R27`).
 ///
-/// Only `ObsTarget::Unrouted` statements are mapped: they belong to a route
-/// that does not exist yet, so they cannot be granted anywhere today. The
-/// view's name comes from [`infer`]; its patterns come from the paths the run
-/// saw, with numeric and UUID-shaped segments becoming parameters; the
-/// statement is the learn policy's normalised text. Redacted literals are
-/// refused (they make the plan unwritable), transaction control is a hint, and
-/// a table grant is never invented.
+/// Every observed statement is mapped to the view it belongs to: the route a
+/// routed request resolved to, or the view this run proposes for an unrouted
+/// one. A statement on a **declared** view is proposed only when the same
+/// allowlist `check` audits with reports it missing, so `check --learn` answers
+/// `check`'s `missing_grant` instead of reporting `0 proposed`. The view's name
+/// comes from [`infer`]; its patterns come from the paths the run saw, with
+/// numeric and UUID-shaped segments becoming parameters; the statement is the
+/// learn policy's normalised text. Redacted literals are refused (they make the
+/// plan unwritable), transaction control is a hint, and a table grant is never
+/// invented. A path `--learn` refuses (a traversal, a dotfile, a `static`
+/// mount) proposes no view and no grant.
 ///
 /// # Errors
 ///
@@ -1498,13 +1505,20 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
         RoutingTable::new(manifest).map_err(|errors| ObsError::Manifest(errors.to_string()))?;
 
     let mut paths: BTreeSet<String> = BTreeSet::new();
+    // A `static` mount answers its files before any view sees them (`R14`), so a
+    // view for one of those paths would never run; and a scanner probe is never
+    // a view a developer forgot (`infer_routes::is_learnable_path`).
+    let mounts = MountTable::new(manifest);
+    let learnable = |path: &str| is_learnable_path(path) && mounts.lookup(path).is_none();
     for line in observations.http() {
-        if table.route(&line.method, &line.path).is_none() {
+        if table.route(&line.method, &line.path).is_none() && learnable(&line.path) {
             paths.insert(line.path.clone());
         }
     }
     for statement in observations.sql() {
-        if let ObsTarget::Unrouted { path, .. } = &statement.target {
+        if let ObsTarget::Unrouted { path, .. } = &statement.target
+            && learnable(path)
+        {
             paths.insert(path.clone());
         }
     }
@@ -1522,10 +1536,15 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
     let mut hints: BTreeSet<String> = BTreeSet::new();
     let mut grouped: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     for statement in observations.sql() {
-        let ObsTarget::Unrouted { path, .. } = &statement.target else {
-            continue;
+        // The view this statement belongs to: a declared view the request was
+        // routed to, or the view this run proposes for an unrouted request. The
+        // first is what makes `check --learn` answer `check`'s `missing_grant`
+        // for an existing view instead of proposing nothing at all.
+        let route = match &statement.target {
+            ObsTarget::Routed { route } => Some(route.clone()),
+            ObsTarget::Unrouted { path, .. } => plan.by_path.get(path).cloned(),
         };
-        let Some(route) = plan.by_path.get(path) else {
+        let Some(route) = route else {
             continue;
         };
         if statement.is_tx {
@@ -1540,12 +1559,24 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
                 // A redaction is never grantable, whatever a broken verdict
                 // says (`R24`, `R33`): the plan stays unwritable.
                 refused.insert(format!("{}: a redacted statement", normalized));
-            } else {
-                grouped
-                    .entry((route.clone(), statement.proxy.clone()))
-                    .or_default()
-                    .insert(normalized.clone());
+                continue;
             }
+            // A declared view is only proposed a statement `check` really
+            // reports as missing: the same allowlist, asked about the same
+            // observation, so the two commands cannot disagree.
+            if let Some(index) = manifest
+                .routes()
+                .iter()
+                .position(|candidate| candidate.name() == route)
+                && Policy::of(grant_of(manifest, index, &statement.proxy).as_ref())
+                    .allows(&statement.sql)
+            {
+                continue;
+            }
+            grouped
+                .entry((route.clone(), statement.proxy.clone()))
+                .or_default()
+                .insert(normalized.clone());
         }
     }
 
@@ -1759,6 +1790,141 @@ mod tests {
         let hint = &plan.transaction_control[0];
         assert!(!hint.contains("[route."), "no retired key: {hint}");
         assert!(!hint.contains("transaction_control"), "{hint}");
+    }
+
+    /// A `Blastfile` that grants a table instead of listing statements.
+    const TABLE_MANIFEST: &str = r#"
+postgres $DATABASE_URL
+
+view items regex '/items/.*' {
+    postgres {
+        select items(id)
+    }
+}
+"#;
+
+    /// One routed observation the gate saw with its normalised text — `$?`
+    /// placeholders and no wire parameters, which is what `sql_obs.jsonl` holds.
+    fn normalised(sql: &str) -> String {
+        json!({
+            "target": {"scope": "routed", "route": "items"},
+            "proxy": "db",
+            "kind": "query",
+            "sql": sql,
+            "is_tx": false,
+            "allowed": false,
+            "verdict": {"kind": "query", "normalized": sql},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_table_grant_allows_a_parameterised_statement_the_check_saw_normalised() {
+        // Allowed: `check` reads the normalised `$?` text, and the table grant
+        // analyses it — `select items(id)` covers `WHERE id = $1`, and the
+        // `IN ($?, ...)` shape a Django `__in`/`prefetch_related` sends
+        // (`MB.40.2`).
+        let manifest = parse_manifest(TABLE_MANIFEST).expect("the fixture manifest validates");
+        for allowed in [
+            r#"SELECT "items"."id" FROM "items" WHERE "items"."id" = $?"#,
+            r#"SELECT "items"."id" FROM "items" WHERE "items"."id" IN ($?, ...)"#,
+        ] {
+            let observations =
+                CheckObsV1::from_jsonl(&http("GET", "/items/1/"), &normalised(allowed))
+                    .expect("the observations parse");
+            let report = evaluate(&manifest, &observations).expect("the audit runs");
+            assert!(report.ok, "{allowed}: {:?}", report.findings);
+            assert!(
+                report.findings.is_empty(),
+                "{allowed}: {:?}",
+                report.findings
+            );
+            assert_eq!(report.proxies["db"].denied, 0, "{allowed}");
+        }
+    }
+
+    #[test]
+    fn a_table_grant_still_denies_an_ungranted_column_on_the_same_statement() {
+        // Denied twin: the same shapes, one column the grant does not name.
+        let manifest = parse_manifest(TABLE_MANIFEST).expect("the fixture manifest validates");
+        for denied in [
+            r#"SELECT "items"."secret" FROM "items" WHERE "items"."id" = $?"#,
+            r#"SELECT "items"."secret" FROM "items" WHERE "items"."secret" IN ($?, ...)"#,
+        ] {
+            let observations =
+                CheckObsV1::from_jsonl(&http("GET", "/items/1/"), &normalised(denied))
+                    .expect("the observations parse");
+            let report = evaluate(&manifest, &observations).expect("the audit runs");
+            assert!(!report.ok, "{denied}");
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|finding| matches!(finding, Finding::MissingGrant { .. })),
+                "{denied}: {:?}",
+                report.findings
+            );
+        }
+    }
+
+    #[test]
+    fn learn_proposes_a_missing_grant_on_a_declared_view() {
+        // `check` reports the missing statement, so `check --learn` must propose
+        // it: a routed statement on a declared view is not "nothing to learn".
+        let sql = routed(
+            Some(r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $?"#),
+            r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."owner_id" = $1"#,
+            false,
+        );
+        let manifest = parse_manifest(MANIFEST).expect("the fixture manifest validates");
+        let observations =
+            CheckObsV1::from_jsonl(&http("GET", "/notes/"), &sql).expect("the observations parse");
+        let plan = plan_learn(&manifest, &observations).expect("the plan is built");
+        assert_eq!(plan.routes(), 0, "the view is already declared");
+        assert_eq!(plan.queries(), 1);
+        assert_eq!(plan.edits.grants[0].view, "notes");
+        assert!(plan.would_write(false), "a learnable miss is writable");
+    }
+
+    #[test]
+    fn learn_does_not_repropose_a_statement_the_view_already_grants() {
+        // A statement `check` allows is not a proposal: the two must agree in
+        // both directions.
+        let granted = r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $1"#;
+        let sql = routed(
+            Some(r#"SELECT "notes"."id" FROM "notes" WHERE "notes"."id" = $?"#),
+            granted,
+            false,
+        );
+        let manifest = parse_manifest(MANIFEST).expect("the fixture manifest validates");
+        let observations =
+            CheckObsV1::from_jsonl(&http("GET", "/notes/"), &sql).expect("the observations parse");
+        let plan = plan_learn(&manifest, &observations).expect("the plan is built");
+        assert_eq!(plan.queries(), 0, "{:?}", plan.edits.grants);
+    }
+
+    #[test]
+    fn learn_refuses_scanner_probes() {
+        // Denied twin: a bot's traversal is not a view a developer forgot, and
+        // a static mount already answers its own paths (`R14`, `R28`).
+        for path in ["/.env", "/../etc/passwd", "/static/.env"] {
+            let sql = json!({
+                "target": {"scope": "unrouted", "method": "GET", "path": path},
+                "proxy": "db",
+                "kind": "query",
+                "sql": "SELECT 1",
+                "is_tx": false,
+                "allowed": true,
+                "verdict": {"kind": "query", "normalized": "SELECT 1"},
+            })
+            .to_string();
+            let manifest = parse_manifest(MANIFEST).expect("the fixture manifest validates");
+            let observations =
+                CheckObsV1::from_jsonl(&http("GET", path), &sql).expect("the observations parse");
+            let plan = plan_learn(&manifest, &observations).expect("the plan is built");
+            assert_eq!(plan.routes(), 0, "learned a view for {path}");
+            assert_eq!(plan.queries(), 0, "granted a query for {path}");
+        }
     }
 
     #[test]

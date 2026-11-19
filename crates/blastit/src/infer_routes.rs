@@ -104,6 +104,33 @@ pub fn infer<'a>(paths: impl IntoIterator<Item = &'a str>, manifest: &Manifest) 
     plan
 }
 
+/// Whether a request path may be turned into a view by `--learn` at all.
+///
+/// `--learn` exists to name the views a developer forgot to declare. A scanner
+/// probe is not one of them: a `/../etc/passwd` traversal, `/wp-login.php`, a
+/// `/.env` fetch or a `/.git/config` request is a bot trying its luck, and a
+/// `Blastfile` view for it would grant an attacker's path a home in production.
+/// So a path is learnable only when it is absolute, holds no control character,
+/// no backslash and no segment that starts with `.` — which covers `.`, `..`,
+/// `.env`, `.git` and any other hidden file — and no `..` inside a segment.
+///
+/// It is also not learnable when a `static` mount already answers it: the
+/// responder serves those files before any view sees them, so a view for the
+/// path would be dead weight (`R14`).
+pub fn is_learnable_path(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    if path
+        .chars()
+        .any(|character| character.is_control() || character == '\\')
+    {
+        return false;
+    }
+    path.split('/')
+        .all(|segment| !segment.starts_with('.') && !segment.contains(".."))
+}
+
 /// The name and path regex one request path infers, before grouping.
 fn describe(path: &str) -> (String, String) {
     let segments: Vec<&str> = path
@@ -246,5 +273,30 @@ mod tests {
     fn a_taken_name_is_suffixed() {
         let plan = infer(["/products/42/"], &manifest(&[("products", "\"/p/\"")]));
         assert_eq!(plan.routes[0].name, "products-2");
+    }
+
+    #[test]
+    fn scanner_probes_are_not_learnable() {
+        // Allowed: ordinary requests, numeric ids included.
+        for path in ["/", "/notes/", "/products/42/", "/café/", "/a-b_c/d.json"] {
+            assert!(is_learnable_path(path), "should learn {path:?}");
+        }
+        // Denied twin: traversals, dotfiles and anything that is not a path.
+        for path in [
+            "/../etc/passwd",
+            "/static/../app.py",
+            "/.env",
+            "/static/.env",
+            "/.git/config",
+            "/foo/..",
+            "/./notes/",
+            "notes/",
+            "",
+            "/a\\b",
+            "/a\u{0}b",
+            "/x..y/",
+        ] {
+            assert!(!is_learnable_path(path), "should refuse {path:?}");
+        }
     }
 }

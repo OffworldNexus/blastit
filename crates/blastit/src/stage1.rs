@@ -2156,6 +2156,7 @@ fn python_fail(
     if let Some(dev) = dev {
         dev.cleanup();
     }
+    crate::coverage::flush();
     // SAFETY: init is exiting; `_exit` runs no handler and cannot deadlock with
     // the GIL held.
     unsafe { libc::_exit(1) }

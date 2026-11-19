@@ -458,7 +458,10 @@ impl LearnRun {
                 return 1;
             }
         };
-        let edits = self.edits(&parsed);
+        let (edits, note) = self.edits(&parsed);
+        if let Some(note) = note {
+            eprintln!("learn: {note}");
+        }
         let routes_added = edits.views.len();
         let queries_added: usize = edits.grants.iter().map(|grant| grant.queries.len()).sum();
         let edited = match apply_edits(&source, &edits) {
@@ -481,7 +484,7 @@ impl LearnRun {
 
     /// The edits this run proposes, filtered against the grants already there
     /// (`R27`: `--learn` writes only views and exact `queries`).
-    fn edits(&self, manifest: &Manifest) -> BlastfileEdits {
+    fn edits(&self, manifest: &Manifest) -> (BlastfileEdits, Option<String>) {
         let mut edits = BlastfileEdits::default();
         let names: BTreeSet<String> = manifest
             .routes()
@@ -492,10 +495,17 @@ impl LearnRun {
         // Views: one per name, the methods and patterns collected from every
         // unrouted request. A path a literal pattern cannot carry (a brace the
         // grammar reads as a placeholder, a quote, a control byte) is not
-        // proposed: the writer would refuse the whole file for it.
+        // proposed: the writer would refuse the whole file for it. Neither is a
+        // scanner probe or a path a `static` mount already answers: `--learn`
+        // never invents a view for an attacker's path or for files the
+        // responder serves (`R14`, `R28`).
+        let mounts = blastit_manifest::MountTable::new(manifest);
         let mut proposed: BTreeMap<String, (BTreeSet<String>, Vec<String>)> = BTreeMap::new();
         let mut used = names.clone();
         for (method, path) in &self.unrouted {
+            if !crate::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some() {
+                continue;
+            }
             let (name, pattern) = name_and_pattern(path);
             if !crate::audit_v1::pattern_is_writable(path) {
                 continue;
@@ -528,10 +538,24 @@ impl LearnRun {
         // placed, and guessing would hand one new view another's grants. This is
         // what makes one `dev --learn` pass write the queries of the view it
         // discovered (R26, R27, `docs/local.md`).
+        //
+        // The same reasoning forbids attributing them when *any* unrouted request
+        // was one `--learn` refuses to turn into a view: a probe's `/.env` or
+        // `/../etc/passwd` request has no path on its statement, so its SQL would
+        // land in the one legitimate view's `queries` (`MB.40.2`).
+        let unattributable = self.unrouted.iter().any(|(_, path)| {
+            !crate::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some()
+        });
         let fallback_owner = match edits.views.as_slice() {
-            [only] => Some(only.name.clone()),
+            [only] if !unattributable => Some(only.name.clone()),
             _ => None,
         };
+        let note = unattributable.then(|| {
+            "an unrouted request was a path --learn never turns into a view (a traversal, a \
+             dotfile, or a `static` mount), so this run's split-socket statements are not \
+             attributed to any view; grant what your application really ran by hand"
+                .to_string()
+        });
 
         // Grants: only grantable statements, only routes the manifest declares
         // or this run proposes. An existing route's own grants are filtered out;
@@ -589,7 +613,7 @@ impl LearnRun {
                 functions: std::collections::BTreeSet::new(),
             });
         }
-        edits
+        (edits, note)
     }
 }
 
@@ -877,7 +901,8 @@ view items GET \"/items\" {}
         let lines = format!("{home_obs}\n{items_obs}\n{fallback_obs}\n");
         run.push_bytes(lines.as_bytes());
 
-        let edits = run.edits(&manifest);
+        let (edits, note) = run.edits(&manifest);
+        assert!(note.is_none(), "{note:?}");
         assert_eq!(edits.views.len(), 1);
         assert_eq!(edits.views[0].name, "extra");
         assert_eq!(
@@ -939,13 +964,72 @@ view home GET \"/\" {
         });
         run.push_bytes(format!("{fallback_obs}\n").as_bytes());
 
-        let edits = run.edits(&manifest);
+        let (edits, note) = run.edits(&manifest);
+        assert!(note.is_none(), "{note:?}");
         let names: Vec<&str> = edits.views.iter().map(|view| view.name.as_str()).collect();
         assert_eq!(names, vec!["extra", "orders"]);
         assert!(
             edits.grants.is_empty(),
             "an ambiguous fallback statement is not granted to a guess: {:?}",
             edits.grants
+        );
+    }
+
+    /// A scanner probe never donates its SQL to the one view a legitimate request
+    /// discovered (`MB.40.2`).
+    ///
+    /// dbproxy tags every split-socket statement with the fallback route and no
+    /// path, so `--learn` can only attribute them when *every* unrouted request
+    /// is one it would turn into a view. One probe among them makes the whole
+    /// batch unattributable, and the run says so.
+    #[test]
+    fn a_scanner_probe_never_donates_its_sql_to_the_one_proposed_view() {
+        let source = "\
+postgres $DATABASE_URL
+
+view home GET \"/\" {}
+";
+        let (manifest, _) = Manifest::parse_blastfile(source, 20_000).unwrap();
+        let mut run = LearnRun::new();
+        run.note_event(r#"{"event":"request","method":"GET","path":"/notes/"}"#);
+        run.note_event(r#"{"event":"request","method":"GET","path":"/.env"}"#);
+        let legit = serde_json::json!({
+            "target": {"scope": "routed", "route": LEARN_FALLBACK_ROUTE},
+            "proxy": "db",
+            "kind": "query",
+            "sql": "SELECT 1",
+            "is_tx": false,
+            "allowed": false,
+            "verdict": {"kind": "query", "normalized": "SELECT 1"}
+        });
+        let probe = serde_json::json!({
+            "target": {"scope": "routed", "route": LEARN_FALLBACK_ROUTE},
+            "proxy": "db",
+            "kind": "query",
+            "sql": "SELECT 2",
+            "is_tx": false,
+            "allowed": false,
+            "verdict": {"kind": "query", "normalized": "SELECT 2"}
+        });
+        run.push_bytes(format!("{legit}\n{probe}\n").as_bytes());
+
+        let (edits, note) = run.edits(&manifest);
+        let names: Vec<&str> = edits.views.iter().map(|view| view.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["notes"],
+            "the probe proposes no view of its own"
+        );
+        assert!(
+            edits.grants.is_empty(),
+            "no fallback statement is attributed while a probe was in the batch: {:?}",
+            edits.grants
+        );
+        let note = note.expect("the refusal is said out loud");
+        assert!(note.contains("--learn"), "{note}");
+        assert!(
+            !note.contains(".env"),
+            "the note never echoes a probe: {note}"
         );
     }
 

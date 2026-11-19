@@ -44,6 +44,14 @@ php = ["dep:blastit-view-php"]
 # is what decides whether the static responder is in the binary.
 static = ["blastit-scheduler/static"]
 
+# The LLVM profile flush in `src/coverage.rs` (`MB.40.2`). Only for a coverage
+# run, and only together with instrumentation:
+# `RUSTFLAGS="-C instrument-coverage" cargo test --features coverage`, or
+# `BLASTIT_COVERAGE=1` for a target that already passes `RUSTFLAGS` and cannot
+# add a feature to every workspace crate. `build.rs` turns either switch into
+# `cfg(coverage)`, because `-C instrument-coverage` emits no such cfg.
+coverage = []
+
 [dependencies]
 blastit-dbproxy = { version = "0.2.0", path = "../blastit-dbproxy" }
 blastit-env = { version = "0.2.0", path = "../blastit-env" }

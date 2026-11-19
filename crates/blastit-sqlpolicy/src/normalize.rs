@@ -174,6 +174,159 @@ pub fn normalize(sql: &str) -> String {
     reshape(&out.finish())
 }
 
+/// Rewrites the *observation* spelling of a statement back into one PostgreSQL
+/// parses, of the same shape.
+///
+/// [`normalize`] writes every bind placeholder as `$?` and
+/// [`crate::redact_literals`] replaces every quoted literal by `…`. Both keep a
+/// statement safe to log and to paste into a manifest, and neither is valid SQL:
+/// the table-grant analysis ([`crate::analyze`]) parses the text it is handed.
+/// This function gives back a statement of the same shape that a parser accepts,
+/// so an observed statement can be analysed against a grant:
+///
+/// * every `$?` in code becomes `$1` — a parameter's number says nothing about
+///   which tables, columns and functions a statement touches, so the analysis
+///   needs the placeholder token, not its ordinal;
+/// * every `…` in code becomes `''` — the empty literal that stands where the
+///   redacted one was, which keeps the access set identical without ever
+///   copying a value;
+/// * a shape tail — normalize's `, ...` after a placeholder list (`IN ($?, ...)`)
+///   or after a row of `VALUES` — becomes one more element or one more row, so
+///   the text still parses and the analysis sees the same tables and columns;
+/// * comments and quoted regions are copied verbatim, through the one
+///   [`crate::lexer`], so a `$?` inside a comment, a string, a quoted identifier
+///   or a dollar quote is data and is never rewritten.
+///
+/// The result is only for analysis: it is never compared with a grant (an exact
+/// match runs on [`normalize`]'s spelling), never logged and never written to a
+/// manifest.
+///
+/// ```
+/// # use blastit_sqlpolicy::restore_parameters;
+/// assert_eq!(
+///     restore_parameters(r#"SELECT "t"."id" FROM "t" WHERE "t"."id" = $?"#),
+///     r#"SELECT "t"."id" FROM "t" WHERE "t"."id" = $1"#
+/// );
+/// assert_eq!(restore_parameters("SELECT $?, … FROM t"), "SELECT $1, '' FROM t");
+/// assert_eq!(
+///     restore_parameters("WHERE id IN ($?, ...)"),
+///     "WHERE id IN ($1, $1)"
+/// );
+/// assert_eq!(
+///     restore_parameters("INSERT INTO t (a) VALUES ($?), ..."),
+///     "INSERT INTO t (a) VALUES ($1), ($1)"
+/// );
+/// assert_eq!(
+///     restore_parameters(r#"SELECT "a$?" FROM "t" -- $?"#),
+///     r#"SELECT "a$?" FROM "t" -- $?"#
+/// );
+/// ```
+pub fn restore_parameters(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    for region in lex(&chars) {
+        let text = &chars[region.start..region.end];
+        if region.kind != RegionKind::Code {
+            out.extend(text);
+            continue;
+        }
+        let mut code: Vec<char> = Vec::with_capacity(text.len());
+        let mut at = 0;
+        while let Some(&character) = text.get(at) {
+            if character == '$' && text.get(at + 1) == Some(&'?') {
+                code.push('$');
+                code.push('1');
+                at += 2;
+                continue;
+            }
+            if character == '\u{2026}' {
+                code.push('\'');
+                code.push('\'');
+                at += 1;
+                continue;
+            }
+            code.push(character);
+            at += 1;
+        }
+        out.extend(expand_tails(&code));
+    }
+    out
+}
+
+/// Expands normalize's shape tails into one more element or row.
+///
+/// `normalize` writes a varying `IN` list as `IN ($?, ...)` and a varying run of
+/// identical `VALUES` rows as `($?, $?), ...`. Neither parses, and both are what
+/// a Django `__in`, `prefetch_related` or `bulk_create` sends every request, so
+/// a table grant would otherwise deny them (`MB.40.2`). The tail is `, ...` in
+/// code: after a placeholder it gains one more placeholder, and after a `)` it
+/// repeats the group that closes there. Any other `...` is left as it was.
+fn expand_tails(code: &[char]) -> Vec<char> {
+    let mut out: Vec<char> = Vec::with_capacity(code.len() + 8);
+    let mut at = 0;
+    while at < code.len() {
+        if code[at] == '.'
+            && code.get(at + 1) == Some(&'.')
+            && code.get(at + 2) == Some(&'.')
+            && let Some(repetition) = tail_repetition(&mut out)
+        {
+            out.push(' ');
+            out.extend(repetition);
+            at += 3;
+            continue;
+        }
+        out.push(code[at]);
+        at += 1;
+    }
+    out
+}
+
+/// The element a `, ...` tail repeats, trimming the tail off `out` first.
+///
+/// `None` when what precedes the ellipsis is not a shape tail; `out` is then
+/// left exactly as it was, whitespace included.
+fn tail_repetition(out: &mut Vec<char>) -> Option<Vec<char>> {
+    let mut length = out.len();
+    while length > 0 && matches!(out[length - 1], ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c') {
+        length -= 1;
+    }
+    let comma = length.checked_sub(1)?;
+    if out.get(comma) != Some(&',') {
+        return None;
+    }
+    let last = comma.checked_sub(1)?;
+    let repetition = match out.get(last) {
+        // `VALUES ($?, $?), ...`: one more row, so the list still parses.
+        Some(&')') => {
+            let start = matching_open(&out[..=last])?;
+            out[start..=last].to_vec()
+        }
+        // `IN ($?, ...)`: one more placeholder; a parameter names no column.
+        Some(&'1') if out.get(last.checked_sub(1)?) == Some(&'$') => vec!['$', '1'],
+        _ => return None,
+    };
+    out.truncate(length);
+    Some(repetition)
+}
+
+/// The `(` matching the `)` that ends `text`.
+fn matching_open(text: &[char]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, character) in text.iter().enumerate().rev() {
+        match character {
+            ')' => depth += 1,
+            '(' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The shape rules, applied to the already-normalised text: `IN` lists of
 /// placeholders and `VALUES` row runs, as the module documentation describes.
 ///
@@ -1585,6 +1738,72 @@ mod tests {
         ] {
             let normalize_case = normalize(input);
             assert_eq!(normalize_case, input, "input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn restore_parameters_gives_the_parser_a_placeholder_and_a_literal_shape() {
+        // Allowed: the normalised spelling becomes valid SQL of the same shape.
+        assert_eq!(
+            restore_parameters(r#"SELECT "items"."id" FROM "items" WHERE "items"."id" = $?"#),
+            r#"SELECT "items"."id" FROM "items" WHERE "items"."id" = $1"#
+        );
+        assert_eq!(restore_parameters("SELECT $?, $?"), "SELECT $1, $1");
+        assert_eq!(
+            restore_parameters("SELECT …, … FROM t"),
+            "SELECT '', '' FROM t"
+        );
+        // The shape tails `normalize` writes: an `__in` list and a `bulk_create`
+        // row run expand into one more element or row (`MB.40.2`).
+        assert_eq!(
+            restore_parameters("WHERE id IN ($?, ...)"),
+            "WHERE id IN ($1, $1)"
+        );
+        assert_eq!(
+            restore_parameters("INSERT INTO t (a) VALUES ($?), ..."),
+            "INSERT INTO t (a) VALUES ($1), ($1)"
+        );
+        assert_eq!(
+            restore_parameters("INSERT INTO t (a) VALUES ($?, $?), ..."),
+            "INSERT INTO t (a) VALUES ($1, $1), ($1, $1)"
+        );
+        assert_eq!(
+            restore_parameters("SELECT f($?, ...) FROM t"),
+            "SELECT f($1, $1) FROM t"
+        );
+        // A `...` that is not a shape tail, or one inside a literal, is data.
+        assert_eq!(restore_parameters("SELECT a ... b"), "SELECT a ... b");
+        assert_eq!(
+            restore_parameters("SELECT 'a, ...' FROM t"),
+            "SELECT 'a, ...' FROM t"
+        );
+        // Already analysable text is left alone, so a wire statement can be
+        // handed to it too.
+        for sql in ["SELECT $1 FROM t", "SELECT '' FROM t", "SELECT 1"] {
+            assert_eq!(restore_parameters(sql), sql, "for {sql:?}");
+        }
+        // Denied twin: a marker inside a quoted region or a comment is data, not
+        // a placeholder, and rewriting it would move the columns a statement
+        // names — `"a$?"` is a column called `a$?`.
+        for sql in [
+            r#"SELECT "a$?" FROM "t""#,
+            "SELECT 'a$?' FROM t",
+            "SELECT E'a\\'$?' FROM t",
+            "SELECT $tag$a$?…$tag$ FROM t",
+            "SELECT 1 -- $? and …",
+            "SELECT 1 /* $? and … */",
+        ] {
+            assert_eq!(restore_parameters(sql), sql, "for {sql:?}");
+        }
+        assert_eq!(restore_parameters(""), "");
+        // Idempotent: the output holds no `$?` and no bare `…`.
+        for sql in ["SELECT $? FROM t WHERE a = … AND b = $?", "SELECT a$?b"] {
+            let once = restore_parameters(sql);
+            assert_eq!(
+                restore_parameters(&once),
+                once,
+                "not idempotent for {sql:?}"
+            );
         }
     }
 }

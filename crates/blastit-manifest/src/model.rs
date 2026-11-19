@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use blastit_ingress::IngressPolicy;
-use blastit_sqlpolicy::{Allowlist, TableGrants, redact_literals};
+use blastit_sqlpolicy::{Allowlist, TableGrants, redact_literals, restore_parameters};
 use regex::Regex;
 
 use crate::blastfile::{compile_pattern_text, compile_regex_text};
@@ -1484,7 +1484,7 @@ impl Manifest {
         }
         Allowlist::new(queries, transaction_control)
             .with_tables(tables)
-            .check(&parameterised(normalized_sql))
+            .check(&restore_parameters(normalized_sql))
             .is_allowed()
     }
 
@@ -1533,53 +1533,6 @@ impl Manifest {
     ) -> Self {
         Self::assemble(version, global_groups, proxies, groups, routes, Vec::new())
     }
-}
-
-/// Rewrites the manifest's `$?` placeholders into the numbered form
-/// PostgreSQL's parser accepts.
-///
-/// [`blastit_sqlpolicy::normalize`] writes every bind placeholder as `$?`, which
-/// no SQL parser accepts, and the table-grant analysis parses the text it is
-/// given. A statement taken from a manifest — or from an already normalised
-/// observation — therefore has to get its numbers back before it can be
-/// analysed. Every placeholder becomes `$1`: the analysis only asks which
-/// tables, columns and functions a statement touches, and a parameter's number
-/// says nothing about that.
-///
-/// Quoted regions are copied verbatim, so a column named `"a$?"` stays the
-/// column the grant names instead of becoming `"a$1"`. This is deliberately not
-/// a SQL lexer: it exists for one check-reported finding, and a statement it
-/// rewrites imperfectly can only make the analysis deny, never allow.
-fn parameterised(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut characters = sql.chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '\'' | '"' => {
-                out.push(character);
-                while let Some(inner) = characters.next() {
-                    out.push(inner);
-                    if inner != character {
-                        continue;
-                    }
-                    // A doubled quote is an escaped one, not the end.
-                    if characters.peek() == Some(&character) {
-                        if let Some(second) = characters.next() {
-                            out.push(second);
-                        }
-                        continue;
-                    }
-                    break;
-                }
-            }
-            '$' if characters.peek() == Some(&'?') => {
-                characters.next();
-                out.push_str("$1");
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// The fixed reason for a root that is a file: the design pins the phrases so a
@@ -2016,39 +1969,39 @@ view app "/*" {
     #[test]
     fn only_the_question_mark_placeholder_is_rewritten() {
         assert_eq!(
-            parameterised(r#"SELECT "t"."a" FROM "t" WHERE "t"."id" = $?"#),
+            restore_parameters(r#"SELECT "t"."a" FROM "t" WHERE "t"."id" = $?"#),
             r#"SELECT "t"."a" FROM "t" WHERE "t"."id" = $1"#
         );
-        assert_eq!(parameterised("SELECT $?, $?"), "SELECT $1, $1");
+        assert_eq!(restore_parameters("SELECT $?, $?"), "SELECT $1, $1");
 
         // A numbered placeholder is already analysable, and a `$` that opens
         // nothing (a dollar in an identifier, a trailing one) is not a
         // placeholder either: inventing a `$1` there would change the table
         // name the analysis resolves.
-        assert_eq!(parameterised("SELECT $2 FROM t"), "SELECT $2 FROM t");
-        assert_eq!(parameterised("SELECT a$ FROM t"), "SELECT a$ FROM t");
-        assert_eq!(parameterised("SELECT a$"), "SELECT a$");
+        assert_eq!(restore_parameters("SELECT $2 FROM t"), "SELECT $2 FROM t");
+        assert_eq!(restore_parameters("SELECT a$ FROM t"), "SELECT a$ FROM t");
+        assert_eq!(restore_parameters("SELECT a$"), "SELECT a$");
 
         // Quoted regions are copied verbatim, doubled quotes included, so a
         // column named `"a$?"` stays the column the grant names, and a value
         // spelled `'it''s $?'` stays one literal.
         assert_eq!(
-            parameterised(r#"SELECT "a$?"."b" FROM "a$?""#),
+            restore_parameters(r#"SELECT "a$?"."b" FROM "a$?""#),
             r#"SELECT "a$?"."b" FROM "a$?""#
         );
         assert_eq!(
-            parameterised("SELECT 1 WHERE x = 'it''s' AND y = $?"),
+            restore_parameters("SELECT 1 WHERE x = 'it''s' AND y = $?"),
             "SELECT 1 WHERE x = 'it''s' AND y = $1"
         );
         assert_eq!(
-            parameterised("SELECT 1 WHERE x = 'a$?'"),
+            restore_parameters("SELECT 1 WHERE x = 'a$?'"),
             "SELECT 1 WHERE x = 'a$?'"
         );
         assert_eq!(
-            parameterised("SELECT 1 WHERE x = 'a"),
+            restore_parameters("SELECT 1 WHERE x = 'a"),
             "SELECT 1 WHERE x = 'a"
         );
-        assert_eq!(parameterised(""), "");
+        assert_eq!(restore_parameters(""), "");
     }
 
     /// `--learn` inserts a new view above the catch-all. A `Blastfile`

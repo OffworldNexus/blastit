@@ -2,7 +2,7 @@
 id: MB.40.2
 title: "Fix the 4 live P0/High bugs: store-less check crash, table-grant $? check false-positive, --learn reload/probe bugs & coverage flush"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.40.1]
@@ -14,11 +14,11 @@ paths:
   - "python/**"
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T00:16"
+updated: "2026-11-19T01:25"
 ---
 
 # Goal

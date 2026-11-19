@@ -1238,6 +1238,7 @@ impl<'a> Supervisor<'a> {
         // A reload that never started must not keep serving.
         self.kill_all();
         crate::logs::write_line(libc::STDERR_FILENO, &format!("reload: exec stage 1: {err}"));
+        crate::coverage::flush();
         // SAFETY: init is exiting; `_exit` runs no handler and cannot deadlock.
         unsafe { libc::_exit(1) }
     }
@@ -1817,6 +1818,7 @@ impl<'a> Supervisor<'a> {
         if let Some(dev) = self.dev.take() {
             dev.cleanup();
         }
+        crate::coverage::flush();
         // SAFETY: init is exiting; `_exit` runs no handler and cannot deadlock
         // with the GIL held.
         unsafe { libc::_exit(1) }
@@ -1882,6 +1884,7 @@ impl<'a> Supervisor<'a> {
         if let Some(dev) = self.dev.take() {
             dev.cleanup();
         }
+        crate::coverage::flush();
         // SAFETY: init is exiting; `_exit` runs no handler.
         unsafe { libc::_exit(code) }
     }

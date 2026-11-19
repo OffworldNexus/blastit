@@ -93,13 +93,14 @@ pub use learn::{
     is_dangerous_learn_function, is_introspection_setup_sql,
 };
 pub use literals::{KNOWN_STATIC_SETUP_SQL, has_quoted_literal, literal_offset, redact_literals};
-pub use normalize::normalize;
+pub use normalize::{normalize, restore_parameters};
 pub use tables::{Columns, Denied, TableGrant, TableGrants};
 pub use template::{
     MAX_TEMPLATE_CHARS, MAX_TEMPLATE_PARAMS, MAX_TEMPLATE_PARSES, TemplateError, TemplateKind,
     check_template, parameterize,
 };
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use statements::is_transaction_control;
@@ -258,8 +259,19 @@ impl Allowlist {
             return deny(NOT_GRANTED);
         }
         // The analysis is cached by this normalised text, which is also the key
-        // an exact grant is compared against (§6).
-        match analysis::analyze_cached(sql, &normalized).as_ref() {
+        // an exact grant is compared against (§6). It *parses* the text, and an
+        // observation carries `blastit_dbproxy`'s spelling — `$?` placeholders
+        // and `…` where a literal was redacted — which no parser accepts. So a
+        // text in that spelling is restored to one of the same shape first: the
+        // access set a table grant decides on is identical, and the cache key
+        // stays the normalised text (`MB.40.2`).
+        let analysable: Cow<'_, str> =
+            if normalized.contains("$?") || normalized.contains('\u{2026}') {
+                Cow::Owned(restore_parameters(sql))
+            } else {
+                Cow::Borrowed(sql)
+            };
+        match analysis::analyze_cached(&analysable, &normalized).as_ref() {
             Ok(analysis) => match self.tables.check(analysis) {
                 Ok(()) => Decision::Allowed,
                 Err(denied) => Decision::Denied {
@@ -1094,6 +1106,59 @@ mod tests {
             "transaction control only"
         );
         assert!(Allowlist::unrestricted().check("SELECT 1").is_allowed());
+    }
+
+    #[test]
+    fn a_table_grant_checks_the_observation_spelling_of_a_statement() {
+        // `blastit_dbproxy`'s observation keeps the normalised text: `$?`
+        // placeholders and `…` where a literal was redacted. A table grant has
+        // to parse it, so `check` restores one of the same shape first — while
+        // the access set, and so the verdict, is the wire statement's
+        // (`MB.40.2`).
+        let grant = |columns: &[&str]| {
+            let columns = Columns::list(columns.iter().copied());
+            Allowlist::new(std::iter::empty::<&str>(), false).with_tables(TableGrants::new(
+                [(
+                    "items".to_string(),
+                    TableGrant {
+                        select: Some(columns.clone()),
+                        insert: Some(columns),
+                        ..TableGrant::default()
+                    },
+                )],
+                std::iter::empty::<String>(),
+            ))
+        };
+        let allow = grant(&["id"]);
+        for observed in [
+            r#"SELECT "items"."id" FROM "items" WHERE "items"."id" = $?"#,
+            r#"SELECT "items"."id" FROM "items" WHERE "items"."id" = …"#,
+            // `__in` / `prefetch_related`: normalize's `IN ($?, ...)` tail.
+            r#"SELECT "items"."id" FROM "items" WHERE "items"."id" IN ($?, ...)"#,
+            // `bulk_create`: normalize's `VALUES ($?), ...` row tail.
+            r#"INSERT INTO "items" ("id") VALUES ($?), ..."#,
+        ] {
+            assert_eq!(allow.check(observed), Decision::Allowed, "{observed}");
+        }
+        // Denied twins: the same shapes, one column the grant does not name —
+        // including inside the tails, so a tail can never widen a grant.
+        for denied in [
+            r#"SELECT "items"."secret" FROM "items" WHERE "items"."id" = $?"#,
+            r#"SELECT "items"."secret" FROM "items" WHERE "items"."secret" = …"#,
+            r#"SELECT "items"."secret" FROM "items" WHERE "items"."secret" IN ($?, ...)"#,
+            r#"INSERT INTO "items" ("secret") VALUES ($?), ..."#,
+        ] {
+            assert!(!allow.check(denied).is_allowed(), "{denied}");
+        }
+        // ... and a wire statement still works, unchanged.
+        assert_eq!(
+            allow.check(r#"SELECT "items"."id" FROM "items" WHERE "items"."id" = $1"#),
+            Decision::Allowed
+        );
+        assert_eq!(
+            allow.check(r#"SELECT "items"."id" FROM "items" WHERE "items"."id" IN ($1, $2, $3)"#),
+            Decision::Allowed
+        );
     }
 
     #[test]

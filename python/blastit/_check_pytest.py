@@ -6,10 +6,16 @@ records the statements; this module records the **requests**, and tells the prox
 which request the statements that follow belong to.
 
 The module is inert unless the orchestrator asked for it: with no
-``BLASTIT_CHECK_HTTP_OBS`` or ``BLASTIT_CHECK_CTL_FD`` in the environment
-(`crates/blastit/src/check.rs`) importing it starts nothing, patches nothing and
-writes nothing. That is what makes ``-p blastit._check_pytest`` safe to name on a
-machine where the command is not running.
+``BLASTIT_CHECK_HTTP_OBS`` in the environment
+(`crates/blastit/src/check.rs`) importing this module starts nothing, patches
+nothing and writes nothing. That is what makes ``-p blastit._check_pytest`` safe
+to name on a machine where the command is not running.
+
+A **store-less** application declares no `postgres` proxy, so `blastit check`
+starts no dbproxy and hands the suite no control descriptor. The gate still
+records every request (that is what the audit of such an app reads) and simply
+has nothing to push: :func:`_send` is a no-op when ``BLASTIT_CHECK_CTL_FD`` is
+absent, and the run completes exactly as a proxied one does.
 
 Two things are recorded per request, and exactly once:
 
@@ -138,8 +144,13 @@ class ControlError(RuntimeError):
 
 
 def _enabled() -> bool:
-    """Whether the orchestrator asked for observations."""
-    return bool(os.environ.get(HTTP_OBS)) and os.environ.get(CTL_FD) is not None
+    """Whether the orchestrator asked for observations.
+
+    The HTTP file is the only thing a run always has: a store-less app has no
+    proxy, so no control descriptor is handed over, and the gate still records
+    the requests.
+    """
+    return bool(os.environ.get(HTTP_OBS))
 
 
 def _control() -> socket.socket:
@@ -164,7 +175,13 @@ def _control() -> socket.socket:
 
 
 def _send(request: dict[str, Any]) -> None:
-    """Sends one control line and requires the proxy's ``{"ok": true}``."""
+    """Sends one control line and requires the proxy's ``{"ok": true}``.
+
+    A store-less app has no dbproxy and no control descriptor: the request is
+    still recorded, and there is no statement to attribute, so nothing is sent.
+    """
+    if os.environ.get(CTL_FD) is None:
+        return
     channel = _control()
     line = json.dumps(request).encode("utf-8") + b"\n"
     if len(line) > 4096:

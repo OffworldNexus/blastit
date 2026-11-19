@@ -517,6 +517,7 @@ pub fn fail(emitter: &Emitter, message: &str) -> ! {
             &output_event(Component::Init, None, Stream::Stderr, line).with_level(Level::Error),
         );
     }
+    crate::coverage::flush();
     // SAFETY: `_exit` never returns and runs no handler.
     unsafe { libc::_exit(1) }
 }

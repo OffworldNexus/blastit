@@ -3610,3 +3610,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T00:36 [MB.26.9] (expert) status proposed -> superseded: Consolidated into MB.40 holistic quality & coverage slices
 - 2026-11-19T00:36 [MB.26] (expert) status ready -> superseded: Consolidated into MB.40 holistic quality & coverage slices
 - 2026-11-19T00:50 [MB.40.1] (conductor) status active -> done
+- 2026-11-19T00:50 [MB.40.1] (conductor) committed 14b4047
+- 2026-11-19T00:51 [MB.40.2] (lead) status ready -> active
+- 2026-11-19T00:51 [MB.40.2] (lead) attempt 1/3 started
+- 2026-11-19T00:51 [MB.40.2] (lead) base 14b4047d71c784be607c556156aacbd2f858e98f
+- 2026-11-19T01:05 [MB.40.2] (lead) status active -> review
+- 2026-11-19T01:10 [MB.40.2] (lead) REVIEW FIX: (1) coverage.rs cfg(coverage) is never set by rustc -C instrument-coverage -> flush is dead code; gate on a real cargo feature/build.rs cfg and test
+- 2026-11-19T01:25 [MB.40.2] (lead) status review -> done

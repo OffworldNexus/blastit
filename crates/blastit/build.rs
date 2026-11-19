@@ -29,13 +29,54 @@
 //! `pyo3-build-config`'s `add_libpython_rpath_link_args()` does the same thing
 //! more thoroughly, but taking it as a build dependency would touch
 //! `Cargo.lock`, which every other crate in flight also edits.
+//!
+//! # The coverage gate
+//!
+//! `rustc -C instrument-coverage` emits **no** `cfg(coverage)` — that spelling is
+//! a nightly compiler-internal switch, and
+//! `rustc --print cfg -C instrument-coverage` lists no `coverage` at all. So the
+//! flush in `src/coverage.rs` cannot be gated on it: an instrumented build would
+//! compile the empty function and lose every profile to `_exit`. This script owns
+//! the gate instead: the `coverage` cargo feature, or `BLASTIT_COVERAGE=1` for a
+//! coverage target that passes `RUSTFLAGS` rather than a feature, emits
+//! `cargo:rustc-cfg=coverage`. The decision is also exported as
+//! `BLASTIT_COVERAGE_GATE` so a unit test can prove the cfg that selects the
+//! extern block is exactly this decision.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=PYO3_PYTHON");
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_PYTHON");
+    // The crate uses this cfg whether or not it is set, so declare it always.
+    println!("cargo:rustc-check-cfg=cfg(coverage)");
+    println!("cargo:rerun-if-env-changed=BLASTIT_COVERAGE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_COVERAGE");
+    let coverage = coverage_requested();
+    println!(
+        "cargo:rustc-env=BLASTIT_COVERAGE_GATE={}",
+        if coverage { "on" } else { "off" }
+    );
+    if coverage {
+        println!("cargo:rustc-cfg=coverage");
+    }
+    rpath();
+}
+
+/// Whether this build wants the coverage runtime's flush compiled in.
+///
+/// Two spellings, both deliberate: the `coverage` feature for
+/// `cargo … --features coverage`, and `BLASTIT_COVERAGE` for a target that
+/// already passes `RUSTFLAGS=-C instrument-coverage` and cannot add a feature to
+/// every crate in the workspace.
+fn coverage_requested() -> bool {
+    if env::var_os("CARGO_FEATURE_COVERAGE").is_some() {
+        return true;
+    }
+    env::var_os("BLASTIT_COVERAGE").is_some_and(|value| value == "1" || value == "true")
+}
+
+/// The `libpython` search path a Python-enabled build needs (§4, `MB.17`).
+fn rpath() {
     // No `python` capability, no `libpython`: the standalone artifact must stay
     // free of a search path into whoever built it. Cargo reruns this script when
     // the feature set changes, so turning `python` on still emits the rpath.
