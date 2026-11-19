@@ -8,28 +8,41 @@
   <a href="https://offworldnexus.github.io/blastit/">Documentation</a> · <a href="ARCHITECTURE.md">Architecture</a> · <a href="LICENSE">Apache 2.0</a>
 </p>
 
-**A zero-trust harness that keeps the blast radius of a security bug small.** It
-serves a Python WSGI app, a PHP front controller or a static site unchanged, and
-splits it into one `view` per route: each route runs in its own process under its
-own Unix user, talks to a local proxy instead of the real database, and may run
-only the SQL its `Blastfile` grants it. One exploitable bug in the least
-important page is worth that page, not the app. Linux; CPython 3.13+ or the
-host's NTS `libphp` (8.3, 8.4, 8.5); PostgreSQL.
+**Blastit is a Linux application server that sits behind your cloud ingress.**
+Traefik, DigitalOcean App Platform, Cloudflare or nginx terminate TLS and HTTP/2;
+blastit runs what they forward and splits it into one sandbox per route: each
+`view` gets its own process, its own Unix user and its own SQL allowlist, so a bug
+in the least important page is worth that page, not the app.
+
+Linux. Python (WSGI), PHP (front controllers on the host's NTS `libphp` 8.3, 8.4,
+8.5) or static files. `blastit-lsp` runs natively on Linux, macOS and Windows; on a
+macOS or Windows laptop, run `blastit` in Docker/Compose or a Linux VM.
+
+```console
+$ uv init --app && uv add blastit     # Python (WSGI)
+$ uv run blastit dev                  # your machine, no root
+$ uv run blastit check                # CI: proves nothing was forgotten
+
+$ curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz
+$ tar -xzf blastit-*.tar.gz && export PATH="$PWD/blastit-x86_64-unknown-linux-gnu:$PATH"
+$ blastit dev                         # PHP (host libphp) and static
+```
 
 ```mermaid
 flowchart LR
-    client(["client"]) --> ingress["ingress · validates"]
-    ingress --> sched["scheduler · fair queue"]
+    client(["client"]) --> edge["cloud ingress · TLS, HTTP/2"]
+    edge --> ingress["ingress · validates"] --> sched["scheduler · fair queue"]
     sched --> view["view · own uid"]
     view -- "socket" --> dbproxy["dbproxy · credentials"]
     dbproxy --> db[("PostgreSQL")]
 ```
 
-## Try it
+> [!NOTE]
+> `blastit dev` runs every process as you: the credential barrier and the grants
+> are real, the uid split is not. Production `blastit` refuses to boot without
+> root or the capabilities a preset names.
 
-```console
-$ uv init --app && uv add blastit
-```
+## Try it
 
 ```python title="hello.py"
 def application(environ, start_response):
@@ -42,7 +55,8 @@ app "hello"
 
 entrypoint python "hello:application"
 
-view hello GET "/*" {}
+view hello GET "/*" {
+}
 ```
 
 ```console
@@ -50,7 +64,7 @@ $ uv run blastit dev
   blastit dev · single-uid simulation · http://127.0.0.1:8080
   Not a sandbox. Production `blastit` refuses to run like this.
   http · scheduler · dbproxy · 1 route
-  view  hello  GET, HEAD  /.*
+  view  hello  GET, HEAD  /*
 ```
 
 ```console
@@ -59,8 +73,9 @@ hello from blastit
 ```
 
 The server keeps the terminal; `curl` goes in another one. One line swaps the
-runtime: `entrypoint php "public/index.php"` embeds the host's NTS `libphp`, and
-a `Blastfile` with no `entrypoint` plus a `static` mount serves built assets.
+interface: `entrypoint php "public/index.php"` runs a PSR-7/PSR-15 front controller
+on the host's embedded NTS `libphp`, and a file with no `entrypoint` plus a
+`static` mount serves a built front end with no interpreter at all.
 
 ## What `blastit check` prints
 
@@ -82,6 +97,14 @@ blastit check: 6 problems · `--json` for the machine-readable list
 A clean run is one line — `blastit check: 412 requests, 977 statements, 3/3
 views, clean` — and that is the deploy gate. `--json` is the same document for an
 agent.
+
+## Where it sits
+
+| Layer | What it does |
+|---|---|
+| your ingress | TLS, certificates, HTTP/2, edge cache, DDoS — Traefik, DigitalOcean, Cloudflare, nginx |
+| blastit | isolates every route, holds the database credentials, enforces each `view`'s SQL |
+| your app | its own framework routing, unchanged |
 
 ## Three places it has to work
 

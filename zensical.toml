@@ -7,7 +7,7 @@
 [project]
 site_name = "blastit"
 site_url = "https://offworldnexus.github.io/blastit/"
-site_description = "A zero-trust WSGI harness: one sandbox per route, no database credentials in the app, and only the SQL each route needs."
+site_description = "A Linux zero-trust application server for Python WSGI, embedded PHP and static sites: one sandbox per route, no database credentials in the app, and only the SQL each route needs."
 site_author = "Offworld Nexus"
 copyright = "&copy; 2026 Offworld Nexus &middot; Apache 2.0"
 

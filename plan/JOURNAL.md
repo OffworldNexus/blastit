@@ -3753,3 +3753,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T12:11 [MB.40.10] (conductor) base 1a251a02bcd7bf7f9f35786af38ce547b1e47114
 - 2026-11-19T12:19 [MB.40.10] (conductor) status active -> done
 - 2026-11-19T12:19 [MB.40] (conductor) status ready -> done
+- 2026-11-19T12:44 [MB.41] (conductor) created (epic) Global multi-language golden-path documentation overhaul (Linux + cloud app-server framing + linked Python/PHP/Static tabs) & Docker php-sapi fix
+- 2026-11-19T12:44 [MB.41.1] (conductor) created (task) Rewrite core onboarding spine (zensical.toml, README, Home, Getting started, Blastfile, Local, CI/CD) with Linux + cloud app-server framing & lin
+- 2026-11-19T12:44 [MB.41.2] (conductor) created (task) Align Deployments, Frameworks, Reference, How-it-works, Security & Troubleshooting with multi-language golden paths & cloud app-server framing
+- 2026-11-19T12:44 [MB.41.3] (conductor) created (task) Support indented content-tab fences in docs_fences & runnable_docs, fix rs-test-php-image Docker seccomp, and pass full make check + php-sapi Doc
+- 2026-11-19T12:44 AUTOPILOT on by conductor executing MB.41 global multi-language golden-path documentation overhaul
+- 2026-11-19T12:44 [MB.41.1] (lead) status ready -> active
+- 2026-11-19T12:44 [MB.41.1] (lead) attempt 1/3 started
+- 2026-11-19T12:53 [MB.41.1] (lead) base dc808a9d72b932cafa38c8e963e5eb345a4485fe
+- 2026-11-19T12:53 [MB.41.1] (lead) status active -> review
+- 2026-11-19T12:53 [MB.41.1] (lead) lead-verified green: make docs-check platform-matrix-check zed-check EXIT=0 on current bytes; pages 126/128/129/127/129/127 lines; 11 linked tab groups each of 
+- 2026-11-19T12:56 [MB.41.1] (lead) REVIEW FIX (filtered by lead): PHP install tab missing archive download; static tabs use uvx while page says no runtime (unify on standalone archive, uv only fo
+- 2026-11-19T13:00 [MB.41.1] (lead) status review -> done
