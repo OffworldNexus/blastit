@@ -31,6 +31,7 @@ $ blastit dev
   blastit dev · single-uid simulation · http://127.0.0.1:8080
   Not a sandbox. Production `blastit` refuses to run like this.
   http · scheduler · dbproxy · 0 routes
+  static  /  GET, HEAD  public
 ```
 
 ## The four directives

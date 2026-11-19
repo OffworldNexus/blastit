@@ -526,9 +526,12 @@ rs-test-php-image: ## Docker: run image-built PHP suites as root + unprivileged 
 		echo "  make php-sapi-e2e PHP_SAPI_KEEP=1" >&2; \
 		exit 1; \
 	}
+# Docker's default outer seccomp profile (`moby/profiles/seccomp/default.json`) answers `fanotify_init`
+# with EPERM, and `blastit dev`'s reload needs it; `seccomp=unconfined` on the outer container leaves
+# blastit's own inner `seccomp(SECCOMP_SET_MODE_FILTER)` enforcing every view/probe sandbox inside.
 	@set -eu; \
 	echo "docker run $(PHP_SAPI_IMAGE)  # the suites this image built (root)"; \
-	docker run --rm --cap-add SYS_PTRACE \
+	docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
 		-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
 		-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
 		"$(PHP_SAPI_IMAGE)" \
@@ -546,7 +549,7 @@ rs-test-php-image: ## Docker: run image-built PHP suites as root + unprivileged 
 			done'
 	@set -eu; \
 	echo "docker run --user $$(id -u):$$(id -g) $(PHP_SAPI_IMAGE)  # the PR_SET_DUMPABLE(0) witness"; \
-	out=$$(docker run --rm --user "$$(id -u):$$(id -g)" \
+	out=$$(docker run --rm --user "$$(id -u):$$(id -g)" --security-opt seccomp=unconfined \
 		-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
 		-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
 		"$(PHP_SAPI_IMAGE)" \

@@ -3775,3 +3775,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T13:07 [MB.41.2] (lead) lead gate: docs-check green (No issues found), platform-matrix ok, zed-check OK(59)+44 tests, e2e/static_assets.py --self-test 17/17 PASS, 14 synchronized tab g
 - 2026-11-19T13:11 [MB.41.2] (lead) REVIEW FIX (filtered): deploy Dockerfile tabs must be complete runnable images per runtime (anything-else stubs lack COPY/CMD/apt-get update; shared --health-cm
 - 2026-11-19T13:14 [MB.41.2] (lead) status review -> done
+- 2026-11-19T13:14 [MB.41.2] (lead) commit ba347dd1f5e495217a8af94f9b1609d3844ec510
+- 2026-11-19T13:14 [MB.41.3] (lead) status ready -> active
+- 2026-11-19T13:14 [MB.41.3] (lead) attempt 1/3 started
+- 2026-11-19T13:14 [MB.41.3] (lead) base ba347dd1f5e495217a8af94f9b1609d3844ec510
+- 2026-11-19T13:36 [MB.41.3] (lead) status active -> review
+- 2026-11-19T13:36 [MB.41.3] (lead) lead spot-check: real 'blastit dev' banner prints compiled regex '/.*' (verified live on a hello fixture) — implementer's correction to MB.41.1 is right
+- 2026-11-19T13:39 [MB.41.3] (lead) REVIEW FIX (filtered): six 'example' fences whose reason claims CLI flag checking must become mode=static; php/index.md '$ blastit fmt --check' can actually run
+- 2026-11-19T13:54 [MB.41.3] (lead) status review -> done

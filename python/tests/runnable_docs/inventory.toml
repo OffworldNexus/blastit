@@ -10,6 +10,10 @@
 # command, is shown in the report, and has to say what the gate checks instead
 # (at least 15 characters: "deploy" or "TODO" is not an answer).
 #
+# A fence indented inside a Zensical content tab (`=== "PHP"`) is a fence like
+# any other: `fences.scan_page` recognises it, de-indents its body, and this
+# inventory numbers it in reading order beside the top-level ones (`MB.41.3`).
+#
 # One more key exists, checked by `run.py`:
 #
 # * `port_fallback = "<reason>"` lets a fence whose port is taken run the same
@@ -27,32 +31,8 @@ path = "README.md"
 
 [[page.fence]]
 index = 1
-mode = "install"
-
-[[page.fence]]
-index = 2
-mode = "dev"
-fixture = "hello"
-
-[[page.fence]]
-index = 3
-mode = "dev-curl"
-fixture = "hello"
-
-[[page]]
-path = "docs/index.md"
-
-[[page.fence]]
-index = 1
-mode = "summary"
-fixture = "shop"
-
-[[page]]
-path = "docs/getting-started.md"
-
-[[page.fence]]
-index = 1
-mode = "install"
+mode = "example"
+reason = "This one tour mixes the wheel install (`uv init --app` + `uv add blastit`), a `blastit dev`/`check` pair and the standalone release archive download, which cannot share one project. Getting started fence 1 runs the wheel install, README fence 2 runs the dev banner and fence 3 its request, and `scripts/build-standalone.sh` builds the archive the last commands unpack."
 
 [[page.fence]]
 index = 2
@@ -67,83 +47,88 @@ fixture = "hello"
 [[page]]
 path = "docs/blastfile.md"
 
+# The Python tab's local-development trio: `dev`, `check` and `fmt --check` run
+# against the shop fixture, whose manifest is canonical and its grants complete.
 [[page.fence]]
 index = 1
-mode = "dev"
-fixture = "hello"
+mode = "summary"
+fixture = "shop"
 
 [[page.fence]]
 index = 2
+mode = "summary"
+fixture = "hello"
+
+[[page.fence]]
+index = 3
+mode = "static"
+reason = "The PHP tab's `blastit dev` is not executed: a PHP project fixture needs a `public/index.php` and the boot needs the host's NTS `libphp`, and this offline gate installs neither. `mode_static` checks the command's executable and every flag against the installed CLI, and the tab's Blastfile is parsed by docs_fences; e2e/php_sapi_probe.py boots the same launcher in its image."
+
+[[page.fence]]
+index = 4
+mode = "dev"
+fixture = "static-site"
+
+[[page.fence]]
+index = 5
 mode = "check"
 fixture = "shop"
 
 [[page.fence]]
-index = 3
-mode = "presets"
+index = 6
+mode = "fmt-check"
+reason = "`blastit fmt --check` runs here against the page's own PHP Blastfile and needs no PHP at all; the `blastit check` beside it reads `public/` beside the host `libphp` this gate does not have and exits 2 without a pytest suite, so that command is accounted."
+
+[[page.fence]]
+index = 7
+mode = "check-roots"
+fixture = "static-site"
 
 [[page]]
-path = "docs/local.md"
-
-[[page.fence]]
-index = 1
-mode = "dev"
-fixture = "hello"
-
-[[page.fence]]
-index = 2
-mode = "pgstub"
-reason = "Docker is not a dependency of an unprivileged gate: the harness runs the deterministic PostgreSQL wire stub on 127.0.0.1:5432 instead, and this fence proves it answers a startup and a SELECT."
-
-[[page.fence]]
-index = 3
-mode = "page-manifest"
-fixture = "shop"
-
-[[page.fence]]
-index = 4
-mode = "learn-git"
-fixture = "learn"
-
-[[page.fence]]
-index = 5
-mode = "dev-learn"
-fixture = "learn"
-
-[[page.fence]]
-index = 6
-mode = "denial"
-fixture = "denial"
+path = "docs/changelog.md"
 
 [[page]]
 path = "docs/ci.md"
 
 [[page.fence]]
 index = 1
-mode = "check"
+mode = "check-flags"
 fixture = "shop"
+
+[[page]]
+path = "docs/deploy/anything-else.md"
+
+[[page.fence]]
+index = 1
+mode = "static"
+reason = "Deployment recipe: setpriv with capability flags needs the production uid layout, which this unprivileged gate deliberately cannot create."
 
 [[page.fence]]
 index = 2
-mode = "findings"
-fixture = "findings"
+mode = "example"
+reason = "Measures X-Forwarded-For through a real edge the harness does not have; the trusted-proxy decision itself is a settings, unit and e2e concern."
 
 [[page.fence]]
 index = 3
-mode = "json"
-fixture = "findings"
+mode = "static"
+reason = "Deployment recipe: `psql` runs against a managed database's direct port, which this gate does not have, so the flags and the `SHOW TimeZone` read-back are checked against the installed binary."
 
 [[page.fence]]
 index = 4
-mode = "check"
-fixture = "shop"
-
-[[page.fence]]
-index = 5
-mode = "learn-sequence"
-fixture = "learn"
+mode = "static"
+reason = "Deployment recipe: Docker runs the published image with capabilities and a memory limit."
 
 [[page]]
-path = "docs/deploy/index.md"
+path = "docs/deploy/compose-traefik.md"
+
+[[page.fence]]
+index = 1
+mode = "presets"
+
+[[page.fence]]
+index = 2
+mode = "static"
+reason = "Deployment recipe: an image build, a push and a Compose stack on a host with a registry; the boot line it shows is checked as JSON."
 
 [[page]]
 path = "docs/deploy/digitalocean-paas.md"
@@ -178,48 +163,32 @@ mode = "static"
 reason = "Deployment recipe: `doctl apps create` needs a DigitalOcean account, the pool from the fence above, and the image fence 2 builds."
 
 [[page]]
-path = "docs/deploy/compose-traefik.md"
-
-[[page.fence]]
-index = 1
-mode = "presets"
-
-[[page.fence]]
-index = 2
-mode = "static"
-reason = "Deployment recipe: an image build, a push and a Compose stack on a host with a registry; the boot line it shows is checked as JSON."
-
-[[page]]
-path = "docs/deploy/anything-else.md"
-
-[[page.fence]]
-index = 1
-mode = "static"
-reason = "Deployment recipe: setpriv with capability flags needs the production uid layout, which this unprivileged gate deliberately cannot create."
-
-[[page.fence]]
-index = 2
-mode = "example"
-reason = "Measures X-Forwarded-For through a real edge the harness does not have; the trusted-proxy decision itself is a settings, unit and e2e concern."
-
-[[page.fence]]
-index = 3
-mode = "static"
-reason = "Deployment recipe: `psql` runs against a managed database's direct port, which this gate does not have, so the flags and the `SHOW TimeZone` read-back are checked against the installed binary."
-
-[[page.fence]]
-index = 4
-mode = "static"
-reason = "Deployment recipe: Docker runs the published image with capabilities and a memory limit."
-
-[[page]]
 path = "docs/deploy/fair-queuing.md"
+
+[[page]]
+path = "docs/deploy/index.md"
 
 [[page]]
 path = "docs/frameworks/index.md"
 
 [[page]]
-path = "docs/frameworks/python/index.md"
+path = "docs/frameworks/php/index.md"
+
+[[page.fence]]
+index = 1
+mode = "static"
+reason = "The gate builds no PHP project fixture: an `entrypoint php` file needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev --learn` command and its flags against the installed CLI, and parses the page's Blastfile block."
+
+[[page.fence]]
+index = 2
+mode = "static"
+reason = "The gate builds no PHP project fixture to format, so it checks `fmt --check`'s executable and flag against the installed CLI (docs/blastfile.md's Python tab runs the same `fmt --check` for real) and parses this page's Blastfile with docs_fences."
+
+[[page]]
+path = "docs/frameworks/php/laravel.md"
+
+[[page]]
+path = "docs/frameworks/php/symfony.md"
 
 [[page]]
 path = "docs/frameworks/python/django.md"
@@ -238,31 +207,15 @@ mode = "install-external"
 reason = "Installs flask, psycopg and pytest from the package index; only blastit comes from this workspace. blastit's own install runs in README.md and Getting started."
 
 [[page]]
-path = "docs/frameworks/php/index.md"
-
-[[page.fence]]
-index = 1
-mode = "static"
-reason = "The gate builds no PHP project fixture: an `entrypoint php` file needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev --learn` command and its flags against the installed CLI, and parses the page's Blastfile block."
-
-[[page.fence]]
-index = 2
-mode = "example"
-reason = "No PHP project fixture or host NTS `libphp` exists in this offline gate, so the `fmt --check` gate cannot run; the command is documented in docs/blastfile.md and the page's Blastfile block is parsed by the docs_fences gate."
-
-[[page]]
-path = "docs/frameworks/php/symfony.md"
-
-[[page]]
-path = "docs/frameworks/php/laravel.md"
+path = "docs/frameworks/python/index.md"
 
 [[page]]
 path = "docs/frameworks/static-and-spa.md"
 
 [[page.fence]]
 index = 1
-mode = "example"
-reason = "This offline gate has no release archive to unpack, so it does not serve a static site; e2e/static_assets.py compares this banner with a container's own `blastit dev`, line for line." 
+mode = "dev"
+fixture = "static-site"
 
 [[page.fence]]
 index = 2
@@ -281,12 +234,133 @@ fixture = "static-site"
 
 [[page.fence]]
 index = 5
-mode = "example"
-reason = "This gate serves no static fixture for this fence; e2e/static_assets.py runs the same `blastit check` and `--json` in its container and asserts the exit code and the document." 
+mode = "check-roots"
+fixture = "static-site"
 
 [[page.fence]]
 index = 6
 mode = "presets"
+
+[[page]]
+path = "docs/getting-started.md"
+
+[[page.fence]]
+index = 1
+mode = "install"
+
+[[page.fence]]
+index = 2
+mode = "example"
+reason = "The PHP tab installs the standalone release archive, which this offline gate does not fetch; `scripts/build-standalone.sh` builds that archive and `make install` stages the same layout, so the download and `PATH` commands are accounted rather than run."
+
+[[page.fence]]
+index = 3
+mode = "example"
+reason = "The static tab installs the standalone release archive, which this offline gate does not fetch; `scripts/build-standalone.sh` builds that archive and `make install` stages the same layout, so the download and `PATH` commands are accounted rather than run."
+
+[[page.fence]]
+index = 4
+mode = "dev"
+fixture = "hello"
+
+[[page.fence]]
+index = 5
+mode = "static"
+reason = "The PHP tab's `blastit dev` is not executed: it needs a PHP project fixture and a bootable host NTS `libphp`, and this offline gate has neither. `mode_static` checks the command's executable and every flag against the installed CLI, and the tab's Blastfile is parsed by docs_fences; e2e/php_sapi_probe.py boots the same launcher in its image."
+
+[[page.fence]]
+index = 6
+mode = "dev"
+fixture = "static-site"
+
+[[page]]
+path = "docs/how-it-works.md"
+
+[[page]]
+path = "docs/index.md"
+
+[[page.fence]]
+index = 1
+mode = "summary"
+fixture = "shop"
+
+[[page.fence]]
+index = 2
+mode = "summary"
+fixture = "shop"
+
+[[page.fence]]
+index = 3
+mode = "static"
+reason = "The PHP tab's `blastit dev` and `blastit --preset digitalocean-paas` are not executed: a PHP project fixture and the host's NTS `libphp` are both absent here. `mode_static` checks each executable, subcommand, flag and preset against the installed CLI, and the tab's Blastfile is parsed by docs_fences."
+
+[[page.fence]]
+index = 4
+mode = "dev-roots"
+fixture = "static-site"
+
+[[page]]
+path = "docs/local.md"
+
+[[page.fence]]
+index = 1
+mode = "dev-flags"
+fixture = "hello"
+port_fallback = "Port 8080 is routinely taken on a developer machine (Docker, Prometheus, another checkout). The contract both commands check is that `blastit dev` and `blastit dev --learn` boot the same file on the port the banner names, not the number 8080, so the run may use the next free port and says so on its verdict line."
+
+[[page.fence]]
+index = 2
+mode = "dev"
+fixture = "hello"
+
+[[page.fence]]
+index = 3
+mode = "static"
+reason = "The PHP tab's `blastit dev` is not executed: it needs a PHP project fixture and the host's NTS `libphp`, and this offline gate installs neither. `mode_static` checks the command's executable and every flag against the installed CLI, and e2e/php_sapi_probe.py boots the same launcher in its image."
+
+[[page.fence]]
+index = 4
+mode = "dev"
+fixture = "static-site"
+
+[[page.fence]]
+index = 5
+mode = "dev"
+fixture = "hello"
+
+[[page.fence]]
+index = 6
+mode = "example"
+reason = "The PHP tab exports the real URL and starts `blastit dev`, which needs the host NTS `libphp` this offline gate does not install; the Python tab beside it proves the same export reaches a served dev server."
+
+[[page.fence]]
+index = 7
+mode = "check-roots"
+fixture = "static-site"
+
+[[page.fence]]
+index = 8
+mode = "learn-then-check"
+fixture = "learn"
+
+[[page.fence]]
+index = 9
+mode = "fmt-check"
+fixture = "shop"
+reason = "`blastit fmt` runs here against the shop fixture's canonical Blastfile; the `blastit dev --learn` beside it needs a PHP project fixture and the host's NTS `libphp`, which this offline gate does not install, so that command is accounted."
+
+[[page.fence]]
+index = 10
+mode = "check-roots"
+fixture = "static-site"
+
+[[page.fence]]
+index = 11
+mode = "denial"
+fixture = "denial"
+
+[[page]]
+path = "docs/reference/blastfile.md"
 
 [[page]]
 path = "docs/reference/cli.md"
@@ -311,12 +385,6 @@ index = 4
 mode = "usage"
 
 [[page]]
-path = "docs/reference/blastfile.md"
-
-[[page]]
-path = "docs/reference/settings.md"
-
-[[page]]
 path = "docs/reference/log-events.md"
 
 [[page.fence]]
@@ -325,7 +393,7 @@ mode = "static"
 reason = "The pretty line is one request event rendered by `pretty.rs`, whose clock, status and duration a real run supplies; the gate checks the fence's shape and that the page's JSON example parses, never a live clock."
 
 [[page]]
-path = "docs/how-it-works.md"
+path = "docs/reference/settings.md"
 
 [[page]]
 path = "docs/security.md"
@@ -337,6 +405,3 @@ reason = "The page opens with the documented `blastit dev` banner and a one-requ
 
 [[page]]
 path = "docs/troubleshooting.md"
-
-[[page]]
-path = "docs/changelog.md"

@@ -109,6 +109,9 @@ EXECUTING = {
     "learn-then-check",
     "dev-flags",
     "check-flags",
+    "check-roots",
+    "dev-roots",
+    "fmt-check",
     "serve-flags",
     "usage",
     "presets",
@@ -539,6 +542,7 @@ class CliHelp:
     blastit: frozenset[str]
     dev: frozenset[str]
     check: frozenset[str]
+    fmt: frozenset[str]
     fold: frozenset[str]
     presets: frozenset[str]
 
@@ -712,8 +716,13 @@ class Harness:
             # The page's own block is the manifest under test; the fixture only
             # supplies the app code it names.
             (root / "Blastfile").write_text(manifest, encoding="utf-8")
-        shutil.copyfile(self.base / "pyproject.toml", root / "pyproject.toml")
-        shutil.copyfile(self.base / "uv.lock", root / "uv.lock")
+        # A fence that runs `uv init` creates its own project, so the harness's
+        # shared `pyproject.toml` would make `uv init` refuse the directory the
+        # page tells a reader to start in. Every other fence gets the pinned
+        # project that points `uv run` at the one venv.
+        if not any("uv init" in command.text for command in fence.commands()):
+            shutil.copyfile(self.base / "pyproject.toml", root / "pyproject.toml")
+            shutil.copyfile(self.base / "uv.lock", root / "uv.lock")
         if git:
             self._init_git(root, env)
         return root, env
@@ -1003,6 +1012,7 @@ class Harness:
         dev = self.start_dev(root, env, server.text, port)
         try:
             self.expect(server, None, dev.stdout, "exact")
+            self.assert_banner_rows(fence, dev.stdout)
         finally:
             code = dev.stop()
         if code != 0:
@@ -1058,7 +1068,7 @@ class Harness:
                             "refuses to run unprivileged:\n" + "\n".join(lines[-30:])
                         )
                     continue
-                if "check" in command.text:
+                if "blastit check" in command.text:
                     self.assert_clean(command, lines)
                 self.expect(command, code, lines, "exact")
         finally:
@@ -1537,6 +1547,120 @@ class Harness:
                 self.assert_clean(command, stdout + stderr)
         return "each check flag runs", True
 
+    def mode_check_roots(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
+        """A store-less audit: a static site is mounts, not routes.
+
+        `blastit check` over a `static` mount reads every `root` and exits `0`
+        without an audit line, and `--json` counts `0` routes; the page promises
+        exactly that, so the gate runs the command, asserts the document's route
+        count instead of a `N requests` line a mount never prints, and still
+        compares every line the fence documents.
+        """
+        root, env = self.prepare(fence, spec)
+        for command in fence.commands():
+            self.assert_root_audit(root, env, command)
+        return "every root audited: exit 0 and 0 routes", True
+
+    def mode_dev_roots(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
+        """Start a mount's `blastit dev`, then audit the roots the page names.
+
+        The landing page's static tab is a dev launch *and* a root audit in one
+        fence: the banner (including the mount row) is compared while the server
+        runs, and the same project's `blastit check` is asserted after it stops.
+        """
+        root, env = self.prepare(fence, spec)
+        commands = list(fence.commands())
+        exports = [
+            command for command in commands if command.text.startswith("export ")
+        ]
+        servers = [
+            command for command in commands if _dev_argv(command.text) is not None
+        ]
+        audits = [
+            command
+            for command in commands
+            if command not in servers and command not in exports
+        ]
+        if len(servers) != 1:
+            raise Failure(
+                f"{fence.page} fence {fence.index}: expected one `blastit dev` "
+                f"command, found {len(servers)}"
+            )
+        if not audits:
+            raise Failure(
+                f"{fence.page} fence {fence.index}: a `dev-roots` fence must also "
+                "document the `blastit check` root audit it runs"
+            )
+        for export in exports:
+            for name, value in _exports(self.translated(export.text)):
+                env[name] = value
+        server = servers[0]
+        port = _port_of(server.text)
+        dev = self.start_dev(root, env, server.text, port)
+        try:
+            self.expect(server, None, dev.stdout, "exact")
+            self.assert_banner_rows(fence, dev.stdout)
+        finally:
+            code = dev.stop()
+        if code != 0:
+            raise Failure(
+                f"`{server.text}` exited {code} after SIGTERM; stdout:\n"
+                + "\n".join(dev.stdout[-40:])
+                + "\nstderr:\n"
+                + "\n".join(dev.stderr[-40:])
+            )
+        for command in audits:
+            self.assert_root_audit(root, env, command)
+        return f"served on 127.0.0.1:{port}, then audited its roots", True
+
+    def mode_fmt_check(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
+        """Run the fence's `blastit fmt` against the page's own Blastfile.
+
+        `fmt --check` parses and formats a Blastfile with no language runtime, so
+        a page whose file is not canonical fails here. A page that shows no
+        document (its commands are per-language `console` tabs) falls back to the
+        fixture's manifest. A command that is not `fmt` is accounted through the
+        inventory's written `reason` — never silently skipped.
+        """
+        manifest = _page_blastfile(fence)
+        if manifest is not None:
+            # A `Blastfile` read from a page has no final newline; `fmt --check`
+            # judges the file on disk, and one that does not end in `\n` is not
+            # canonical for a reason that has nothing to do with the page.
+            manifest = manifest.rstrip("\n") + "\n"
+        root, env = self.prepare(fence, spec, manifest=manifest)
+        shell = self.shell(root, env)
+        formatted = 0
+        accounted = 0
+        try:
+            for command in fence.commands():
+                words = shlex.split(command.text.replace("\\\n", " "))
+                if "blastit" not in words or "fmt" not in words:
+                    _require_reason(spec, f"{fence.page} fence {fence.index}")
+                    accounted += 1
+                    continue
+                code, lines = shell.run(self.translated(command.text))
+                self.expect(command, code, lines, "exact")
+                formatted += 1
+        finally:
+            shell.close()
+        if not formatted:
+            raise Failure(
+                f"{fence.page} fence {fence.index}: a `fmt-check` fence must run a "
+                "`blastit fmt` command"
+            )
+        origin = (
+            "the page's own Blastfile"
+            if manifest is not None
+            else f"the {spec.fixture or 'empty'} fixture"
+        )
+        detail = f"`fmt` on {origin} exited 0"
+        if accounted:
+            detail += (
+                f"; {accounted} command(s) accounted: {(spec.reason or '').strip()}"
+            )
+        return detail, True
+
     def mode_serve_flags(self, fence: Fence, spec: FenceSpec) -> tuple[str, bool]:
         root, env = self.prepare(fence, spec)
         shell = self.shell(root, env)
@@ -1658,6 +1782,7 @@ class Harness:
                 "blastit": [blastit, "--help"],
                 "dev": [blastit, "dev", "--help"],
                 "check": [blastit, "check", "--help"],
+                "fmt": [blastit, "fmt", "--help"],
                 "fold": [manifest, "fold", "--help"],
             }.items():
                 texts[name] = self._tool(self.work, env, argv).stdout
@@ -1665,6 +1790,7 @@ class Harness:
                 blastit=_flags(texts["blastit"]),
                 dev=_flags(texts["dev"]),
                 check=_flags(texts["check"]),
+                fmt=_flags(texts["fmt"]),
                 fold=_flags(texts["fold"]),
                 presets=_presets(texts["blastit"]),
             )
@@ -1763,6 +1889,74 @@ class Harness:
         # documented `dev` command in the fence's own fresh project.
         return Command(fence.line, "uv run blastit dev", ()), commands[0]
 
+    def assert_banner_rows(self, fence: Fence, lines: Iterable[str]) -> None:
+        """The banner's `view`/`static` rows, exactly, when the page shows them.
+
+        `expect(policy="exact")` is containment: it finds each documented line
+        somewhere in the output, so a page that *drops* a row — the mount row a
+        static site always prints, `  static  /  GET, HEAD  public` — would still
+        pass. When the fence documents the `http · scheduler · dbproxy · N routes`
+        summary it is showing the whole banner, so the rows are compared as a
+        list: same rows, same text, same order (`MB.41.3`).
+        """
+        documented = [line.rstrip() for line in fence.body.splitlines()]
+        if not any("· dbproxy ·" in line and "routes" in line for line in documented):
+            return
+        shown = [line for line in documented if _is_banner_row(line)]
+        live = [line.rstrip() for line in lines if _is_banner_row(line)]
+        if shown != live:
+            raise Failure(
+                "the banner rows the page shows are not the rows the binary "
+                "printed:\ndocumented:\n"
+                + "\n".join(shown or ["(none)"])
+                + "\nlive:\n"
+                + "\n".join(live or ["(none)"])
+            )
+
+    def assert_root_audit(
+        self, root: Path, env: dict[str, str], command: Command
+    ) -> None:
+        """A store-less `blastit check`: exit `0`, documented output, 0 routes.
+
+        A mount is not a route, so the human form prints no audit line; the
+        `--json` document must still say `ok: true` with `routes.total == 0`.
+        Every line the fence documents is compared, exactly as the other
+        executing modes do — an uncompared fence is a silent acceptance.
+        """
+        words = shlex.split(command.text.replace("\\\n", " "))
+        if "check" not in words or "blastit" not in words:
+            raise Failure(
+                f"`{command.text}` is not a `blastit check` command; a store-less "
+                "audit runs that one"
+            )
+        code, stdout, stderr = self.run_split(root, env, command.text)
+        if code != 0:
+            raise Failure(
+                f"`{command.text}` exited {code}, expected 0 for a readable "
+                "root:\n" + "\n".join(stderr[-40:])
+            )
+        if stderr:
+            raise Failure(
+                f"`{command.text}` wrote to stderr on a clean audit:\n"
+                + "\n".join(stderr[-40:])
+            )
+        self.expect(command, code, stdout, "exact")
+        if "--json" not in words:
+            return
+        try:
+            document = json.loads("\n".join(stdout))
+        except json.JSONDecodeError as error:
+            raise Failure(
+                f"`{command.text}` did not print one JSON document:\n"
+                + "\n".join(stdout)
+            ) from error
+        routes = document.get("routes") or {}
+        if document.get("ok") is not True or routes.get("total") != 0:
+            raise Failure(
+                "a store-less static audit must be ok with 0 routes; the "
+                f"document says ok={document.get('ok')!r}, routes={routes!r}"
+            )
+
     def assert_clean(self, command: Command, lines: Iterable[str]) -> None:
         """A plain `check` fence promises a clean audit; `--json` and `--learn`
         have their own contracts (checked by their modes).
@@ -1839,6 +2033,12 @@ def _exports(command: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def _is_banner_row(line: str) -> bool:
+    """A `dev` banner row: one view or one `static` mount (`dev_learn.rs`)."""
+    stripped = line.strip()
+    return stripped.startswith(("view ", "static "))
+
+
 def _dev_argv(command: str) -> list[str] | None:
     text = command.replace("\\\n", " ")
     text = re.sub(r"(?<!\S)#.*$", "", text).strip()
@@ -1862,7 +2062,12 @@ def _serve_argv(command: str) -> list[str] | None:
         return None
     if words[:2] == ["uv", "run"]:
         words = words[2:]
-    if words[:1] == ["blastit"] and words[1:2] not in (["dev"], ["check"], ["test"]):
+    if words[:1] == ["blastit"] and words[1:2] not in (
+        ["dev"],
+        ["check"],
+        ["test"],
+        ["fmt"],
+    ):
         return words
     return None
 
@@ -3169,7 +3374,10 @@ def _static_blastit(words: list[str], cli: CliHelp, line: str) -> None:
             args = args[: args.index("--")]
         _check_flags(args, cli.check, line, f"blastit {command}")
         return
-    raise Failure(f"`{line}`: `blastit {command}` is not one of dev, check, test")
+    if command == "fmt":
+        _check_flags(rest[1:], cli.fmt, line, "blastit fmt")
+        return
+    raise Failure(f"`{line}`: `blastit {command}` is not one of dev, check, fmt, test")
 
 
 def _static_manifest(
@@ -3254,6 +3462,48 @@ def _logical_lines(command: str) -> list[str]:
     if pending.strip():
         logical.append(pending.strip())
     return [line for line in logical if line]
+
+
+def _page_blastfile(fence: Fence) -> str | None:
+    """The page's own `Blastfile`, in the fence's own language tab.
+
+    A spine page carries one `text title="Blastfile"` document per content tab,
+    and a fence inside `=== "PHP"` formats *that* tab's file, not the static
+    tab's document that happens to be nearer. The last `=== "…"` heading before
+    the fence names the tab, so the document inside that tab's range wins; a page
+    with no tabs uses the last document before the fence. `None` when the page
+    shows no document at all, and the caller falls back to its fixture.
+    """
+    text = (REPO / fence.page).read_text(encoding="utf-8")
+    blocks = [
+        block
+        for block in scan_page(fence.page, text)[0]
+        if block.language == "text" and 'title="Blastfile"' in block.info
+    ]
+    if not blocks:
+        return None
+    lines = text.splitlines()
+    headings = [
+        (index + 1, match.group(1))
+        for index, line in enumerate(lines)
+        if (match := re.match(r'^===\s+"(.+)"\s*$', line)) is not None
+    ]
+    before = [heading for heading in headings if heading[0] < fence.line]
+    if before:
+        name = before[-1][1]
+        # The tab may be a section with no document of its own (the PHP CI tab
+        # shows commands only); an earlier tab with the same name is the same
+        # language, so its document is the file these commands format.
+        for start, _same in reversed(
+            [heading for heading in before if heading[1] == name]
+        ):
+            following = [line for line, _ in headings if line > start]
+            end = following[0] if following else len(lines) + 1
+            inside = [block for block in blocks if start < block.line < end]
+            if inside:
+                return inside[-1].body
+    earlier = [block for block in blocks if block.line < fence.line]
+    return earlier[-1].body if earlier else None
 
 
 def _page_manifest(fence: Fence) -> str:

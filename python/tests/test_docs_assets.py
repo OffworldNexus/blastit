@@ -1320,10 +1320,10 @@ SQL_KEYWORDS = (
 )
 
 #: `page -> its `text` fences in reading order`, each `(first significant line,
-#: is a Blastfile)`. The 34 blocks measured with
-#: `python/tests/runnable_docs/fences.py`: 29 carry a Blastfile (12
-#: `text title="Blastfile"` documents and 17 keyword-led statement lists) and
-#: the five named below stay plain.
+#: is a Blastfile)`. The 40 blocks measured with
+#: `python/tests/runnable_docs/fences.py`: 32 carry a Blastfile (17
+#: `text title="Blastfile"` documents, 14 keyword-led statement lists and one
+#: titled fragment) and the eight named below stay plain.
 #:
 #: The key is the fence's first non-blank, non-comment line, **never its line
 #: number**: another node edits the prose above these fences (MB.34.8 already
@@ -1336,15 +1336,18 @@ EXPECTED_FENCES: dict[str, tuple[tuple[str, bool], ...]] = {
         ('app "hello"', True),
         ("blastit check: 4 requests, 2 statements, 3/4 views, 2 proxies", False),
     ),
-    "docs/blastfile.md": (('app "shop"', True),),
-    "docs/ci.md": (("trait connection {", True),),
+    "docs/blastfile.md": (
+        ('app "shop"', True),
+        ('app "shop"', True),
+        ('static "/" {', True),
+    ),
     "docs/deploy/digitalocean-paas.md": (("postgres {", True),),
     "docs/frameworks/php/index.md": (
-        ('app "shop"', True),
         (
             "sudo apt install libphp-embed php-pgsql # Debian 13, Ubuntu 24.04+",
             False,
         ),
+        ('app "shop"', True),
     ),
     "docs/frameworks/php/laravel.md": (('app "shop"', True),),
     "docs/frameworks/php/symfony.md": (('app "shop"', True),),
@@ -1352,16 +1355,22 @@ EXPECTED_FENCES: dict[str, tuple[tuple[str, bool], ...]] = {
     "docs/frameworks/python/flask.md": (('app "shop"', True),),
     "docs/frameworks/python/index.md": (('app "shop"', True),),
     "docs/frameworks/static-and-spa.md": (('static "/" {', True),),
-    "docs/getting-started.md": (('app "hello"', True),),
+    "docs/getting-started.md": (
+        ('app "hello"', True),
+        ("<?php", False),
+        ('app "hello"', True),
+        ("<!doctype html>", False),
+        ('static "/" {', True),
+    ),
     "docs/how-it-works.md": (
         ("/run/blastit/views/<uid>/ 0700, owned by the view uid", False),
     ),
-    "docs/index.md": (('app "myshop"', True),),
-    "docs/local.md": (
-        ("15:41:02.119 INFO reload 2 directories", False),
-        ('app "shop"', True),
-        ("view products regex '/products/.*' {", True),
+    "docs/index.md": (
+        ('app "myshop"', True),
+        ('app "myshop"', True),
+        ('static "/" {', True),
     ),
+    "docs/local.md": (),
     "docs/reference/blastfile.md": (
         ("file \u2192 app? entrypoint? section*", False),
         ('static "/" {', True),
@@ -1762,7 +1771,7 @@ def test_the_highlighter_is_wired_and_published():
 
 
 def test_every_text_block_classifies_as_measured(tmp_path):
-    """The 29 + 7 split, matched by first line so a prose edit cannot break it."""
+    """The 32 + 8 split, matched by first line so a prose edit cannot break it."""
     rows = fence_rows()
     verdicts = run_lexer(tmp_path, {"classify": [body for *_, body in rows]})[
         "classify"
@@ -1806,16 +1815,16 @@ def test_every_text_block_classifies_as_measured(tmp_path):
     highlighted = sum(
         1 for entries in measured.values() for _, verdict in entries if verdict
     )
-    assert (highlighted, len(rows) - highlighted) == (29, 7), (
+    assert (highlighted, len(rows) - highlighted) == (32, 8), (
         f"{highlighted} fences highlighted and {len(rows) - highlighted} plain, "
-        "not 29 + 7"
+        "not 32 + 8"
     )
 
 
 def test_every_highlighted_fence_really_colours_something(tmp_path):
     """Anti-vacuity: the classifier says yes, so the lexer must paint a token."""
     blocks = blocks_for(highlight=True)
-    assert len(blocks) == 29, f"{len(blocks)} highlighted fences, not 29"
+    assert len(blocks) == 32, f"{len(blocks)} highlighted fences, not 32"
     answers = run_lexer(tmp_path, {"roundtrip": [body for _, _, body in blocks]})[
         "roundtrip"
     ]
@@ -2122,7 +2131,7 @@ def test_nothing_outside_a_query_string_is_sql(tmp_path):
 def test_the_plain_fences_stay_plain_with_a_query_line_appended(tmp_path):
     """The refusal is the block's, not the line's: a `query` line cannot rescue it."""
     bodies = blocks_for(highlight=False)
-    assert len(bodies) == 7, f"{len(bodies)} plain fences, not 7"
+    assert len(bodies) == 8, f"{len(bodies)} plain fences, not 8"
     appended = [body + "\nquery 'SELECT 1'\n" for _, _, body in bodies]
     verdicts = run_lexer(tmp_path, {"classify": appended})["classify"]
     wrong = [

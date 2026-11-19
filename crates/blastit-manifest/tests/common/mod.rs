@@ -283,7 +283,10 @@ struct RawFence {
 /// The scanner is a copy of the one in `tests/docs_fences.rs` on purpose: a
 /// test binary cannot depend on another test binary, and the protected suite
 /// should not grow a Markdown reader of its own. An unclosed fence is refused
-/// by name, because nothing after it can be trusted.
+/// by name, because nothing after it can be trusted. A fence indented inside a
+/// Zensical content tab (`=== "PHP"`) is de-indented by its opening's own
+/// indentation, so a tabbed document enters the corpus as the text a reader
+/// copies (`MB.41.3`).
 fn fences_on(page: &str, document: &str) -> Vec<RawFence> {
     let lines: Vec<&str> = document.lines().collect();
     let mut fences = Vec::new();
@@ -295,6 +298,7 @@ fn fences_on(page: &str, document: &str) -> Vec<RawFence> {
         };
         let opening = lines[at].trim().to_string();
         let opening_line = at + 1;
+        let indent = leading_width(lines[at]);
         let mut body = String::new();
         let mut closed = false;
         at += 1;
@@ -303,7 +307,7 @@ fn fences_on(page: &str, document: &str) -> Vec<RawFence> {
                 closed = true;
                 break;
             }
-            body.push_str(lines[at]);
+            body.push_str(deindent(lines[at], indent));
             body.push('\n');
             at += 1;
         }
@@ -319,6 +323,22 @@ fn fences_on(page: &str, document: &str) -> Vec<RawFence> {
         at += 1;
     }
     fences
+}
+
+/// How many leading spaces or tabs `line` carries.
+fn leading_width(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+}
+
+/// `line` without up to `width` leading space/tab characters (ASCII, so the cut
+/// is a byte index).
+fn deindent(line: &str, width: usize) -> &str {
+    let bytes = line.as_bytes();
+    let mut cut = 0;
+    while cut < width && cut < bytes.len() && (bytes[cut] == b' ' || bytes[cut] == b'\t') {
+        cut += 1;
+    }
+    &line[cut..]
 }
 
 /// The first non-blank, non-comment line of a fence body, for §16.1's
@@ -402,15 +422,17 @@ pub fn documented_fences() -> Vec<PageFence> {
     fences
 }
 
-/// The pages that publish a complete document today (`MB.21.5.7`'s review).
+/// The pages that publish a complete document today (`MB.21.5.7`'s review,
+/// re-pinned by `MB.41.3` after the onboarding rewrite moved
+/// `docs/local.md`'s file into the page's language tabs as `console` commands).
 ///
-/// A total is not enough: with 27 documents against a floor of 20, a page that
-/// silently stopped yielding its document still passes. So the pages that carry
-/// one are pinned **as pages**, and [`documented_documents`] asserts every one of
-/// them still yields at least one document — naming the page that dropped out.
-/// The list is data, not a count: adding a page's document does not need an edit
-/// here (the corpus grows either way), dropping one fails by name.
-pub const DOCUMENTED_PAGES: [&str; 12] = [
+/// A total is not enough: a page that silently stopped yielding its document
+/// still passes a floor. So the pages that carry one are pinned **as pages**,
+/// and [`documented_documents`] asserts every one of them still yields at least
+/// one document — naming the page that dropped out. The list is data, not a
+/// count: adding a page's document does not need an edit here (the corpus grows
+/// either way), dropping one fails by name.
+pub const DOCUMENTED_PAGES: [&str; 11] = [
     "README.md",
     "docs/blastfile.md",
     "docs/frameworks/php/index.md",
@@ -422,7 +444,6 @@ pub const DOCUMENTED_PAGES: [&str; 12] = [
     "docs/frameworks/static-and-spa.md",
     "docs/getting-started.md",
     "docs/index.md",
-    "docs/local.md",
 ];
 
 /// Every complete documented document: the `text title="Blastfile"` fences.

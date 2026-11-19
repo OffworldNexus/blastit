@@ -30,6 +30,14 @@
 //! the exhaustive scan walks `README.md` and every `*.md` under `docs/**`
 //! (except the dated record) so a document fence on an unpinned page fails
 //! rather than silently joining the illustrations.
+//!
+//! A fence may sit inside a Zensical content tab (`=== "PHP"`), indented four or
+//! eight spaces. `collect_fences` recognises it and de-indents its body by the
+//! opening's own indentation, so a tabbed document is parsed and validated
+//! exactly like a top-level one. A page may carry one document per tab, and each
+//! has its own pinned `Shape` (`MB.41.3`): the Python tab is `Application`, the
+//! PHP tab `ViewsAndMount` where it mounts `public/`, the static tab
+//! `StaticSite`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fmt;
@@ -60,8 +68,9 @@ const STATEMENT_KEYWORDS: [&str; 6] = ["app", "entrypoint", "postgres", "trait",
 const THE_RETIRED_OPENING_IS_GONE: bool = true;
 
 /// The pages the site publishes whose fences are pinned, and how many documents
-/// and illustrations each carries (measured 2026-11-17 against the
-/// language-first `docs/frameworks/` tree, then pinned).
+/// and illustrations each carries (measured 2026-11-19 against the language-first
+/// `docs/frameworks/` tree with the three content tabs per spine page, then
+/// pinned).
 ///
 /// A page that gains a document is added here with its count, and one that drops
 /// a document lowers it — `docs/frameworks/index.md` is pinned at zero documents
@@ -71,9 +80,9 @@ const THE_RETIRED_OPENING_IS_GONE: bool = true;
 /// illustration".
 const PAGES: [(&str, Counts); 13] = [
     ("README.md", Counts::new(1, 6)),
-    ("docs/index.md", Counts::new(1, 2)),
-    ("docs/getting-started.md", Counts::new(1, 5)),
-    ("docs/local.md", Counts::new(1, 9)),
+    ("docs/index.md", Counts::new(3, 5)),
+    ("docs/getting-started.md", Counts::new(3, 10)),
+    ("docs/local.md", Counts::new(0, 13)),
     ("docs/frameworks/index.md", Counts::new(0, 1)),
     ("docs/frameworks/python/index.md", Counts::new(1, 1)),
     ("docs/frameworks/python/django.md", Counts::new(1, 3)),
@@ -82,23 +91,21 @@ const PAGES: [(&str, Counts); 13] = [
     ("docs/frameworks/php/symfony.md", Counts::new(1, 1)),
     ("docs/frameworks/php/laravel.md", Counts::new(1, 1)),
     ("docs/frameworks/static-and-spa.md", Counts::new(1, 7)),
-    ("docs/blastfile.md", Counts::new(1, 3)),
+    ("docs/blastfile.md", Counts::new(3, 8)),
 ];
 
-/// The whole pinned set: one `text title="Blastfile"` document on each of the
-/// twelve pages that carry one (the chooser carries none), and every
-/// illustration on those thirteen pages.
-const TOTAL: Counts = Counts::new(12, 46);
+/// The whole pinned set: seventeen `text title="Blastfile"` documents (three
+/// spine pages carry one per content tab) and every illustration on those
+/// thirteen pages (measured 2026-11-19, `MB.41.3`).
+const TOTAL: Counts = Counts::new(17, 63);
 
 /// Pages whose plain `text` fences are statement lists: syntax, not documents
 /// and not illustrations (§16.1). `docs/reference/blastfile.md` is deliberately
 /// absent from `PAGES` — it carries statement lists only — but its count is
-/// pinned here so a fence cannot vanish unnoticed.
-const STATEMENT_LISTS: [(&str, usize); 3] = [
-    ("docs/ci.md", 1),
-    ("docs/local.md", 1),
-    ("docs/reference/blastfile.md", 14),
-];
+/// pinned here so a fence cannot vanish unnoticed. The spine pages keep their
+/// per-language commands in `console` fences, so they no longer carry a
+/// statement list (`MB.41.3`).
+const STATEMENT_LISTS: [(&str, usize); 1] = [("docs/reference/blastfile.md", 14)];
 
 /// The directories that quote the erasure and are never part of §16.2's scan.
 const RECORD_DIRS: [&str; 5] = [
@@ -213,6 +220,11 @@ fn closes_fence(line: &str, marker: char, length: usize) -> bool {
 }
 
 /// Every fence in `document`, in page order, without the markers.
+///
+/// A content tab (`=== "PHP"`) indents its fences four or eight spaces; the
+/// opening is recognised from its trimmed line and each body line is de-indented
+/// by the opening's own indentation, so a tabbed `Blastfile` reaches
+/// `Manifest::parse_blastfile` with the text a reader copies.
 fn collect_fences(document: &str) -> Result<Vec<Fence>, FenceError> {
     let lines: Vec<&str> = document.lines().collect();
     let mut fences = Vec::new();
@@ -224,6 +236,7 @@ fn collect_fences(document: &str) -> Result<Vec<Fence>, FenceError> {
         };
         let opening = lines[at].trim().to_string();
         let opening_line = at + 1;
+        let indent = leading_width(lines[at]);
         let mut body = String::new();
         let mut closed = false;
         at += 1;
@@ -232,7 +245,7 @@ fn collect_fences(document: &str) -> Result<Vec<Fence>, FenceError> {
                 closed = true;
                 break;
             }
-            body.push_str(lines[at]);
+            body.push_str(deindent(lines[at], indent));
             body.push('\n');
             at += 1;
         }
@@ -250,6 +263,23 @@ fn collect_fences(document: &str) -> Result<Vec<Fence>, FenceError> {
         at += 1;
     }
     Ok(fences)
+}
+
+/// How many leading spaces or tabs `line` carries.
+fn leading_width(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ' || *c == '\t').count()
+}
+
+/// `line` without up to `width` leading space/tab characters.
+///
+/// Indentation is ASCII spaces and tabs, so the cut is a byte index.
+fn deindent(line: &str, width: usize) -> &str {
+    let bytes = line.as_bytes();
+    let mut cut = 0;
+    while cut < width && cut < bytes.len() && (bytes[cut] == b' ' || bytes[cut] == b'\t') {
+        cut += 1;
+    }
+    &line[cut..]
 }
 
 /// The retired complete-manifest opening and the transitional `blastfile` alias,
@@ -472,6 +502,49 @@ fn shape_of(manifest: &Manifest) -> Shape {
     }
 }
 
+/// Every pinned page's documents, in page order, each with its own `Shape`.
+///
+/// One document per content tab means one shape per tab: `docs/getting-started.md`
+/// carries `Application`, `ViewsAndMount`, `StaticSite`, and a tab that silently
+/// became a different shape fails here rather than passing as "some document".
+/// The framework pages keep the shape they were pinned with before the tabs.
+const SHAPES: [(&str, &[Shape]); 13] = [
+    ("README.md", &[Shape::Application]),
+    (
+        "docs/index.md",
+        &[Shape::Application, Shape::Application, Shape::StaticSite],
+    ),
+    (
+        "docs/getting-started.md",
+        &[Shape::Application, Shape::ViewsAndMount, Shape::StaticSite],
+    ),
+    ("docs/local.md", &[]),
+    ("docs/frameworks/index.md", &[]),
+    ("docs/frameworks/python/index.md", &[Shape::Application]),
+    ("docs/frameworks/python/django.md", &[Shape::ViewsAndMount]),
+    ("docs/frameworks/python/flask.md", &[Shape::Application]),
+    ("docs/frameworks/php/index.md", &[Shape::ViewsAndMount]),
+    ("docs/frameworks/php/symfony.md", &[Shape::ViewsAndMount]),
+    ("docs/frameworks/php/laravel.md", &[Shape::ViewsAndMount]),
+    ("docs/frameworks/static-and-spa.md", &[Shape::StaticSite]),
+    (
+        "docs/blastfile.md",
+        &[Shape::Application, Shape::Application, Shape::StaticSite],
+    ),
+];
+
+/// The shapes `file` promises, in page order; a page with a document but no row
+/// panics rather than passing (`MB.41.3`).
+fn pinned_shapes(file: &str) -> &'static [Shape] {
+    SHAPES
+        .iter()
+        .find(|(page, _)| *page == file)
+        .map(|(_, shapes)| *shapes)
+        .unwrap_or_else(|| {
+            panic!("{file}: a page with an executed document needs its shapes pinned in `SHAPES`")
+        })
+}
+
 /// Every Markdown page under `dir`, relative to `root`, POSIX form.
 fn markdown_under(dir: &Path, root: &Path, out: &mut Vec<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -516,34 +589,27 @@ fn every_documented_document_parses_and_validates() {
         let scan = scan_page(&document, THE_RETIRED_OPENING_IS_GONE)
             .unwrap_or_else(|error| panic!("{file}: {error}"));
         verify_statements(file, scan.statements).unwrap_or_else(|message| panic!("{message}"));
-        for fence in documents(&document).unwrap_or_else(|error| panic!("{file}: {error}")) {
+        let expected = pinned_shapes(file);
+        let mut found = documents(&document).unwrap_or_else(|error| panic!("{file}: {error}"));
+        assert_eq!(
+            found.len(),
+            expected.len(),
+            "{file}: `SHAPES` pins {} document shape(s); the page carries {}. \
+             A page that gained a tabbed document is pinned here, not absorbed \
+             by \"some document\" (MB.41.3).",
+            expected.len(),
+            found.len()
+        );
+        for (fence, expected) in found.iter_mut().zip(expected) {
             let (manifest, _warnings) = parse_document(&fence.body)
-                .unwrap_or_else(|errors| panic!("{}", describe_failure(file, &fence, &errors)));
-            // The shape is pinned per page, not absorbed by an "or": a fence
-            // that degraded from views to a static mount fails here. A page
-            // that documents an all-static site pins `Shape::StaticSite`; a page
-            // whose document has both views and a mount — the Django page's
-            // `static` mount, a PHP page whose `public/` is served as files too
-            // — pins `Shape::ViewsAndMount`; nothing else can execute a
-            // document, so an unpinned page panics rather than passing.
-            let expected = match file {
-                "docs/frameworks/static-and-spa.md" => Shape::StaticSite,
-                "docs/frameworks/python/django.md"
-                | "docs/frameworks/php/index.md"
-                | "docs/frameworks/php/symfony.md"
-                | "docs/frameworks/php/laravel.md" => Shape::ViewsAndMount,
-                "README.md"
-                | "docs/index.md"
-                | "docs/getting-started.md"
-                | "docs/local.md"
-                | "docs/blastfile.md"
-                | "docs/frameworks/python/index.md"
-                | "docs/frameworks/python/flask.md" => Shape::Application,
-                other => panic!("{other}: a page with an executed document needs its shape pinned"),
-            };
+                .unwrap_or_else(|errors| panic!("{}", describe_failure(file, fence, &errors)));
+            // The shape is pinned per document, in page order: the Python tab of
+            // a spine page is `Application`, its PHP tab `ViewsAndMount` where it
+            // mounts `public/`, its static tab `StaticSite`. A tab that degraded
+            // from views to a static mount fails here instead of passing.
             assert_eq!(
                 shape_of(&manifest),
-                expected,
+                *expected,
                 "{file}:{}: the {} opened here documents {expected:?}",
                 fence.opening_line,
                 fence.opening
@@ -645,6 +711,73 @@ fn a_valid_document_fence_is_collected_parsed_and_counted() {
         parse_document(&collected[0].body).expect("a valid document parses");
     assert_eq!(shape_of(&manifest), Shape::Application);
     verify_page("fixture.md", &document, Counts::new(1, 0)).expect("it matches its own pin");
+}
+
+#[test]
+fn a_broken_document_inside_a_php_tab_fails_the_suite() {
+    // A content tab indents its fence four spaces. The scanner recognises it,
+    // de-indents the body, and the crate parses it — so a broken `Blastfile`
+    // inside `=== "PHP"` is refused, and the same tab passes once fixed.
+    let broken = format!(
+        "=== \"PHP\"\n    {DOCUMENT_OPENING}\n    app \"shop\"\n    not_a_directive\n    ```\n"
+    );
+    let found = documents(&broken).expect("the indented fence closes");
+    assert_eq!(found.len(), 1, "the tab's document is collected");
+    assert!(
+        found[0].body.starts_with("app \"shop\"\n"),
+        "the body is de-indented: {:?}",
+        found[0].body
+    );
+    let errors = parse_document(&found[0].body)
+        .expect_err("a broken Blastfile inside a PHP tab must fail the suite");
+    let parse_error = errors.errors().first().expect("one refusal").to_string();
+    let message = describe_failure("fixture.md", &found[0], &errors);
+    // The generic prefix is emitted unconditionally, so it proves nothing on its
+    // own: the message must carry *this* parse error (the offending directive and
+    // its position), or the test would pass for the wrong refusal.
+    assert!(
+        message.contains(&parse_error),
+        "the failure must quote the parse error {parse_error:?}: {message}"
+    );
+    assert!(
+        parse_error.contains("not_a_directive"),
+        "the refusal names the directive inside the PHP tab: {parse_error}"
+    );
+    assert!(
+        message.contains("fixture.md:") && message.contains("does not boot"),
+        "the failure names the page and the tabbed fence: {message}"
+    );
+
+    let fixed = format!(
+        "=== \"PHP\"\n    {DOCUMENT_OPENING}\n    app \"shop\"\n\n    entrypoint php \"public/index.php\"\n\n    view app GET \"/*\" {{\n    }}\n    ```\n"
+    );
+    let found = documents(&fixed).expect("the indented fence closes");
+    assert_eq!(found.len(), 1);
+    let (manifest, _warnings) =
+        parse_document(&found[0].body).expect("the fixed PHP tab parses and validates");
+    assert_eq!(
+        shape_of(&manifest),
+        Shape::Application,
+        "the fixed tab is the document the page promises"
+    );
+}
+
+#[test]
+fn an_eight_space_indented_document_is_de_indented_once() {
+    // An admonition inside a tab indents eight spaces; only the opening's own
+    // indentation is removed, so the body's relative indentation survives.
+    let document = format!(
+        "intro\n\n        {DOCUMENT_OPENING}\n        app \"shop\"\n\n        view shop \"/*\" {{\n            body none\n        }}\n        ```\n"
+    );
+    let found = documents(&document).expect("the indented fence closes");
+    assert_eq!(found.len(), 1);
+    assert!(
+        found[0].body.contains("\n    body none\n"),
+        "the body keeps its own indentation: {:?}",
+        found[0].body
+    );
+    let (manifest, _warnings) = parse_document(&found[0].body).expect("it parses");
+    assert_eq!(shape_of(&manifest), Shape::Application);
 }
 
 #[test]

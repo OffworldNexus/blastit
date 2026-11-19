@@ -45,6 +45,7 @@ CLI = CliHelp(
     blastit=frozenset(),
     dev=frozenset(),
     check=frozenset(),
+    fmt=frozenset(),
     fold=frozenset({"--manifest"}),
     presets=frozenset(),
 )

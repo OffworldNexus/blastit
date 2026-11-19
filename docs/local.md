@@ -103,7 +103,12 @@ view and statement instead of stopping at the first denial.
 A statement a view is not granted fails with PostgreSQL's `42501`, and the log names
 it normalised, each literal replaced by `…`. Swap every `…` for `$?` and it is what a
 grant must contain — add that `query '…'` to the view's `postgres` block; if it does
-not belong there, the view does more than you thought.
+not belong there, the view does more than you thought. The request itself is a `500`,
+and every other view is untouched:
+
+```console
+15:41:02.118 WARN  sql.denied             products  db  parse  SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?
+```
 
 ## Editors { #editors }
 

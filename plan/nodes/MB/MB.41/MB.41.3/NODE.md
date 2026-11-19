@@ -2,16 +2,16 @@
 id: MB.41.3
 title: "Support indented content-tab fences in docs_fences & runnable_docs, fix rs-test-php-image Docker seccomp, and pass full make check + php-sapi Docker gate"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.41.2]
 paths: [Makefile, "crates/blastit-manifest/tests/**", "python/tests/**", "docs/**", README.md]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T12:44"
-updated: "2026-11-19T12:44"
+updated: "2026-11-19T13:54"
 ---
 
 # Goal
