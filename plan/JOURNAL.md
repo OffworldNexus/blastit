@@ -3783,3 +3783,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T13:36 [MB.41.3] (lead) lead spot-check: real 'blastit dev' banner prints compiled regex '/.*' (verified live on a hello fixture) — implementer's correction to MB.41.1 is right
 - 2026-11-19T13:39 [MB.41.3] (lead) REVIEW FIX (filtered): six 'example' fences whose reason claims CLI flag checking must become mode=static; php/index.md '$ blastit fmt --check' can actually run
 - 2026-11-19T13:54 [MB.41.3] (lead) status review -> done
+- 2026-11-19T13:54 [MB.41.3] (lead) commit 953cefec8e3372b8b7d977904484279ade7bc8d2; fast-check green, docs_fences 13 passed, docs-unit/docs-test 60 fences (36 executed), critical_guard clean
+- 2026-11-19T14:11 [MB.41] (lead) status ready -> done

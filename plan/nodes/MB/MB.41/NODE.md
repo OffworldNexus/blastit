@@ -2,7 +2,7 @@
 id: MB.41
 title: "Global multi-language golden-path documentation overhaul (Linux + cloud app-server framing + linked Python/PHP/Static tabs) & Docker php-sapi fix"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths: ["**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T12:44"
-updated: "2026-11-19T12:44"
+updated: "2026-11-19T14:11"
 ---
 
 # Goal
