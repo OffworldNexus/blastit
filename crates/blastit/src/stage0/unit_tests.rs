@@ -1089,8 +1089,8 @@ view web regex '.*' {}
             "{message}"
         );
         for package in [
-            "apt install libphp-embed",
-            "apk add php85-embed",
+            "apt install libphp8.6-embed",
+            "apk add php86-embed",
             "dnf install php-embedded",
         ] {
             assert!(
@@ -1377,7 +1377,7 @@ view web regex '.*' {}
             "libphp8.2.so",
             &shared_object_without_php_version(&["executor_globals"]),
         );
-        let sentence = "PHP 8.2 is not supported — Blastit supports PHP 8.3, 8.4 and 8.5";
+        let sentence = "PHP 8.2 is not supported — Blastit supports PHP 8.3, 8.4, 8.5 and 8.6";
 
         // `BLASTIT_LIBPHP` names it: the object is opened, and the version its
         // own name states is refused before the symbol walk.
@@ -1431,9 +1431,11 @@ view web regex '.*' {}
     fn the_alpine_embed_directories_are_searched() {
         let dirs = library_dirs();
         for wanted in [
+            "/usr/lib/php86",
             "/usr/lib/php85",
             "/usr/lib/php84",
             "/usr/lib/php83",
+            "/usr/local/lib/php86",
             "/usr/local/lib/php85",
             "/usr/local/lib/php84",
             "/usr/local/lib/php83",
@@ -1450,8 +1452,8 @@ view web regex '.*' {}
                 .position(|dir| dir == Path::new(wanted))
                 .unwrap_or(usize::MAX)
         };
-        assert!(position("/usr/lib") < position("/usr/lib/php85"));
-        assert!(position("/usr/lib/php85") < position("/usr/local/lib"));
+        assert!(position("/usr/lib") < position("/usr/lib/php86"));
+        assert!(position("/usr/lib/php86") < position("/usr/local/lib"));
     }
 
     /// `MB.3.61`: a host carrying **two** embed packages must serve from the

@@ -2,7 +2,7 @@
 id: MB.42.5
 title: "Add PHP 8.6 support end-to-end (shim, discovery, 16-leg matrix, packaging, docs) for PHP 8.3-8.6"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2]
@@ -19,11 +19,11 @@ paths:
   - CHANGELOG.md
   - AGENTS.md
   - ARCHITECTURE.md
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T15:48"
-updated: "2026-11-19T15:48"
+updated: "2026-11-20T00:27"
 ---
 
 # Goal

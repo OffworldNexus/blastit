@@ -11,11 +11,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The PHP minors this crate has a shim ABI for, newest first.
-pub const SUPPORTED_MINORS: [Minor; 3] = [Minor::Php85, Minor::Php84, Minor::Php83];
+pub const SUPPORTED_MINORS: [Minor; 4] = [Minor::Php86, Minor::Php85, Minor::Php84, Minor::Php83];
 
 /// The `php-config` names searched on `PATH`, in order.
-pub const CONFIG_NAMES: [&str; 4] = [
+pub const CONFIG_NAMES: [&str; 5] = [
     "php-config",
+    "php-config8.6",
     "php-config8.5",
     "php-config8.4",
     "php-config8.3",
@@ -30,13 +31,16 @@ pub enum Minor {
     Php84,
     /// PHP 8.5 — `ZEND_MODULE_API_NO` 20250925.
     Php85,
+    /// PHP 8.6 — the minor `libphp8.6-embed` (`debian:bookworm-slim` + the
+    /// Surý repository) and `php86-embed` (`alpine:edge`) ship.
+    Php86,
 }
 
 impl Minor {
     /// Parses a `php-config --version` reply (`"8.5.4"`, `"8.5"`).
     ///
-    /// Anything whose first two components are not `8.3`, `8.4` or `8.5` is
-    /// `None`: an older or newer minor is refused, not guessed at.
+    /// Anything whose first two components are not `8.3`, `8.4`, `8.5` or
+    /// `8.6` is `None`: an older or newer minor is refused, not guessed at.
     pub fn parse(version: &str) -> Option<Self> {
         let mut parts = version.trim().split('.');
         let major = parts.next()?.parse::<u32>().ok()?;
@@ -45,6 +49,7 @@ impl Minor {
             (8, 3) => Some(Self::Php83),
             (8, 4) => Some(Self::Php84),
             (8, 5) => Some(Self::Php85),
+            (8, 6) => Some(Self::Php86),
             _ => None,
         }
     }
@@ -55,6 +60,7 @@ impl Minor {
             Self::Php83 => 803,
             Self::Php84 => 804,
             Self::Php85 => 805,
+            Self::Php86 => 806,
         }
     }
 
@@ -64,6 +70,7 @@ impl Minor {
             Self::Php83 => "83",
             Self::Php84 => "84",
             Self::Php85 => "85",
+            Self::Php86 => "86",
         }
     }
 
@@ -73,6 +80,7 @@ impl Minor {
             Self::Php83 => "8.3",
             Self::Php84 => "8.4",
             Self::Php85 => "8.5",
+            Self::Php86 => "8.6",
         }
     }
 
@@ -107,6 +115,7 @@ impl Minor {
             Self::Php83 => ["php-config8.3", "php-config"],
             Self::Php84 => ["php-config8.4", "php-config"],
             Self::Php85 => ["php-config8.5", "php-config"],
+            Self::Php86 => ["php-config8.6", "php-config"],
         }
     }
 }
@@ -365,9 +374,10 @@ impl fmt::Display for ToolchainError {
             Self::NotFound => write!(
                 f,
                 "no php-config found (searched PHP_CONFIG, then {} on PATH); install the PHP embed \
-                 development package — Debian/Ubuntu: apt install php8.5-dev libphp8.5-embed, \
-                 Alpine: apk add php85-dev php85-embed, Fedora/RHEL: dnf install php85-php-devel \
-                 php-embedded — or set PHP_CONFIG=/path/to/php-config8.5",
+                 development package — Debian/Ubuntu: apt install php8.6-dev libphp8.6-embed \
+                 (stock Debian: apt install libphp-embed), Alpine: apk add php86-dev php86-embed, \
+                 Fedora/RHEL: dnf install php86-php-devel php-embedded — or set \
+                 PHP_CONFIG=/path/to/php-config8.6",
                 CONFIG_NAMES.join(", ")
             ),
             Self::NotExecutable { path } => write!(
@@ -384,8 +394,8 @@ impl fmt::Display for ToolchainError {
             ),
             Self::UnsupportedVersion { path, version } => write!(
                 f,
-                "{} reports PHP {version}; this build has SAPI shims for 8.3, 8.4 and 8.5 only \
-                 (install the matching php8.X-dev package, or set PHP_CONFIG to one of them)",
+                "{} reports PHP {version}; this build has SAPI shims for 8.3, 8.4, 8.5 and 8.6 \
+                 only (install the matching php8.X-dev package, or set PHP_CONFIG to one of them)",
                 path.display()
             ),
             Self::IncludeDir { path, detail } => write!(

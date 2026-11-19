@@ -197,7 +197,11 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// It is a **copy** of `stage0.rs`'s `LIBPHP_PROBES`, because this suite may not
 /// lean on the code under test; [`the_probe_table_matches_stage0`] is what keeps
 /// the copy honest (`MB.3.62`).
-const PROBES: [(&str, Option<&str>); 13] = [
+const PROBES: [(&str, Option<&str>); 17] = [
+    ("libphp8.6.so", None),
+    ("libphp-8.6.so", None),
+    ("libphp86.so", None),
+    ("libphp.so", Some("php86")),
     ("libphp8.5.so", None),
     ("libphp-8.5.so", None),
     ("libphp85.so", None),

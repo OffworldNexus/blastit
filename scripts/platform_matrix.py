@@ -116,9 +116,14 @@ PYTHONS = ("3.13", "3.14")
 
 # The distro that carries the headers *and* the embedded SAPI for each
 # (minor, libc). Every entry is a signed distro package on a distro that ships
-# that minor: no single distro ships 8.3, 8.4 and 8.5, and Alpine and Debian
-# disagree about both the package names (`php85-dev` vs `php8.5-dev`) and where
-# the library lives (`/usr/lib/php85/libphp.so` vs `/usr/lib/libphp8.5.so`).
+# that minor: no single distro ships 8.3, 8.4, 8.5 and 8.6, and Alpine and Debian
+# disagree about both the package names (`php86-dev` vs `php8.6-dev`) and where
+# the library lives (`/usr/lib/php86/libphp.so` vs `/usr/lib/libphp8.6.so`).
+#
+# `extra_repo` is the repository a leg needs *before* its packages exist, as a
+# name this file declares and the consumers switch on (`MB.42.5`): no leg
+# hard-codes a keyring or an `edge/testing` line in the Dockerfile, the workflow
+# or the probe driver. `""` is a stock image's own repositories.
 #
 # `suites` is whether this leg also compiles and runs the two protected suites
 # (`critical_php_backend`, `critical_php_embed`) **in its own image**
@@ -127,6 +132,38 @@ PYTHONS = ("3.13", "3.14")
 # condition buried in a workflow: "the shim builds and probes here, but the
 # worker-level suites cannot run" is a claim a reader has to be able to see.
 PHP_BUILDS = {
+    ("8.6", "gnu"): {
+        # `dpkg -L libphp8.6-embed` in `debian:bookworm-slim` (glibc 2.36, the
+        # lowest floor of any PHP leg) with Ondřej Surý's signed repository:
+        # the package is 8.6.0 and the NTS library is `/usr/lib/libphp8.6.so`.
+        "base": "debian:bookworm-slim",
+        "extra_repo": "sury",
+        "dev": "php8.6-dev",
+        "embed": "libphp8.6-embed",
+        "curl": "php8.6-curl",
+        "libphp": "/usr/lib/libphp8.6.so",
+        "suites": True,
+    },
+    ("8.6", "musl"): {
+        # `apk info -L php86-embed` in `alpine:edge` after appending
+        # `edge/testing`: `/usr/lib/php86/libphp.so`. The shim and the probe run
+        # here; the worker-level suites cannot compile `blastit` on this image
+        # yet — see `suites_because`.
+        "base": "alpine:edge",
+        "extra_repo": "alpine-edge-testing",
+        "dev": "php86-dev",
+        "embed": "php86-embed",
+        "curl": "php86-curl",
+        "libphp": "/usr/lib/php86/libphp.so",
+        "suites": False,
+        "suites_because": (
+            "`crates/blastit/src/cli/handoff.rs` calls `libc::execveat`, which "
+            '`libc 0.2.191` does not declare for `target_env = "musl"`, so '
+            "`cargo test -p blastit` cannot compile on any musl leg until that "
+            "call is given a musl declaration; the shim and the real-load probe "
+            "still build and run here (`MB.42.5` follow-up)"
+        ),
+    },
     ("8.5", "gnu"): {
         # `dpkg -L libphp8.5-embed` in `ubuntu:26.04`: `/usr/lib/libphp8.5.so`.
         "base": "ubuntu:26.04",
@@ -183,7 +220,19 @@ PHP_BUILDS = {
     },
 }
 
-PHP_MINORS = {"8.5": "85", "8.4": "84", "8.3": "83"}
+PHP_MINORS = {"8.6": "86", "8.5": "85", "8.4": "84", "8.3": "83"}
+
+# The repository setup a leg can declare in `extra_repo`. The Dockerfile
+# (`e2e/php-sapi/Dockerfile`) performs the named setup before installing the
+# four packages, so a new leg's repository is one word here and no consumer
+# grows a second list (`MB.42.5`):
+#
+#   sury                  Ondřej Surý's signed APT repository for Debian
+#                         (the key at `packages.sury.org/php/apt.gpg`, the
+#                         `bookworm main` suite)
+#   alpine-edge-testing   `https://dl-cdn.alpinelinux.org/alpine/edge/testing`
+#                         appended to `/etc/apk/repositories`
+EXTRA_REPOS = ("", "sury", "alpine-edge-testing")
 
 # A leg is `(arch, libc)`. `enabled` is the switch that turns a target into an
 # artifact; a disabled leg must say why in one sentence.
@@ -200,6 +249,8 @@ LEGS = (
 # who/when is the claim this file exists to keep honest.
 PROVEN: dict[tuple, str] = {
     # `MB.3.12` built and probed 8.4 on x86_64-gnu; `MB.3.18` did the rest.
+    ("shims", "8.6", "x86_64", "gnu"): "MB.42.5",
+    ("shims", "8.6", "x86_64", "musl"): "MB.42.5",
     ("shims", "8.4", "x86_64", "gnu"): "MB.3.12",
     ("shims", "8.3", "x86_64", "gnu"): "MB.3.18",
     ("shims", "8.5", "x86_64", "gnu"): "MB.3.65",
@@ -239,6 +290,21 @@ PROVEN: dict[tuple, str] = {
 # `served` is the support statement: 6 of the 12 declared shims are served today
 # (12 once the aarch64 legs run), so the docs may say "PHP 8.3/8.4/8.5 anywhere".
 SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
+    ("8.6", "gnu", "x86_64"): (
+        "served",
+        "measured by MB.42.5 in the `debian:bookworm-slim` image with Ondřej Surý's "
+        "signed repository: with `BLASTIT_LIBPHP` unset the boot reaches "
+        "`/usr/lib/libphp8.6.so` and serves `GET / → app 200`; `critical_php_backend` "
+        "and `critical_php_embed` pass in the same image",
+    ),
+    ("8.6", "musl", "x86_64"): (
+        "probed",
+        "measured by MB.42.5 in the `alpine:edge` image with `edge/testing` "
+        "appended: with `BLASTIT_LIBPHP` unset the boot reaches "
+        "`/usr/lib/php86/libphp.so` through the per-minor directory and the "
+        "real-load probe serves `GET / → 200`; the worker-level suites cannot "
+        "compile on this image yet (`suites_because`)",
+    ),
     ("8.5", "gnu", "x86_64"): (
         "served",
         "measured by MB.3.65 in the `ubuntu:26.04` image: with `BLASTIT_LIBPHP` "
@@ -410,6 +476,9 @@ def shim_legs() -> list[dict]:
             "embed": PHP_BUILDS[(minor, leg["libc"])]["embed"],
             "curl": PHP_BUILDS[(minor, leg["libc"])]["curl"],
             "libphp": PHP_BUILDS[(minor, leg["libc"])]["libphp"],
+            # The repository this leg needs before its packages exist: named,
+            # never performed here. `""` is a stock image's own repositories.
+            "extra_repo": PHP_BUILDS[(minor, leg["libc"])].get("extra_repo", ""),
             # A JSON string, not a bool: GitHub compares `matrix.suites` to
             # `'true'`, and the workflow auditor stringifies every matrix value,
             # so one spelling has to work for both.
@@ -827,6 +896,14 @@ def check(problems: list[str], notes: list[str]) -> None:
                 problems.append(
                     f"PHP {minor} on {libc}: no {key}: the leg cannot be built"
                 )
+        # `MB.42.5`: the repository a leg needs is a matrix fact with a fixed
+        # vocabulary, so the Dockerfile's switch and this table cannot disagree
+        # about how a leg's packages come to exist.
+        if spec.get("extra_repo", "") not in EXTRA_REPOS:
+            problems.append(
+                f"PHP {minor} on {libc}: extra_repo {spec.get('extra_repo')!r} is not one "
+                f"of {EXTRA_REPOS}: the Dockerfile would install no repository"
+            )
         # `MB.3.58`: whether the worker-level suites run in this leg's image is a
         # matrix fact, so a leg that cannot carry them says so where the leg is
         # declared. A silent `False` and a `True` that carries a reason are both
@@ -1250,7 +1327,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--minor",
         default="",
-        help="with --leg/--count shims: filter by PHP minor (8.3, 8.4, 8.5)",
+        help="with --leg/--count shims: filter by PHP minor (8.3, 8.4, 8.5, 8.6)",
     )
     parser.add_argument(
         "--python",

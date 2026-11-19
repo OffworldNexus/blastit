@@ -6,9 +6,12 @@
 
 The probe image's base distro and its four package names come from
 `scripts/platform_matrix.py --leg shims --minor <m>`, never from a second list
-here: no distro ships PHP 8.3, 8.4 *and* 8.5 (Ubuntu noble is 8.3, Debian
-trixie is 8.4, Ubuntu 26.04 and Alpine 3.23 are 8.5), so `MB.3.18` runs this
-driver once per leg.
+here: no distro ships PHP 8.3, 8.4, 8.5 *and* 8.6 (Ubuntu noble is 8.3, Debian
+trixie is 8.4, Ubuntu 26.04 and Alpine 3.23 are 8.5, `debian:bookworm-slim` +
+the Surý repository and `alpine:edge` + `edge/testing` are 8.6), so `MB.3.18`
+runs this driver once per leg. The leg's declarative `extra_repo` (`sury`,
+`alpine-edge-testing`) is passed through as a build arg, so the image performs
+the repository setup from the matrix instead of this driver knowing a keyring.
 
 Stdlib only, same shape as the other e2e drivers: build the image, run it,
 parse the one JSON line the probe prints, and fail non-zero with the container
@@ -137,8 +140,8 @@ def leg(minor, libc="gnu", arch=None):
     """The one minor's build tuple, read from the matrix (MB.3.18).
 
     `scripts/platform_matrix.py` is the single place a leg is declared, and no
-    single distro ships PHP 8.3, 8.4 *and* 8.5: the probe image for each minor is
-    therefore a different base image with different package names. Reading them
+    single distro ships PHP 8.3, 8.4, 8.5 *and* 8.6: the probe image for each minor
+    is therefore a different base image with different package names. Reading them
     from the matrix is what keeps this driver from growing a second copy of that
     table — and from silently probing Debian trixie's 8.3, which does not exist.
     """
@@ -195,6 +198,8 @@ def build(image, minor, libc="gnu"):
         f"PHP_CURL={spec.get('curl', spec['dev'].replace('-dev', '-curl'))}",
         "--build-arg",
         f"LIBPHP={spec['libphp']}",
+        "--build-arg",
+        f"EXTRA_REPO={spec.get('extra_repo', '')}",
         "--build-arg",
         f"PHP_SAPI_SUITES={suites}",
         "-t",
@@ -330,7 +335,7 @@ def verify(report):
 
     want(report.get("abi") == 1, f"ABI version {report.get('abi')!r} is not 1")
     want(
-        str(report.get("php_minor")) in {"803", "804", "805"},
+        str(report.get("php_minor")) in {"803", "804", "805", "806"},
         f"php_minor {report.get('php_minor')!r} is not a supported minor",
     )
     want(

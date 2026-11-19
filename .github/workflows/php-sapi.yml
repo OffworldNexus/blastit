@@ -9,8 +9,11 @@
 #
 # Each leg builds the ADR-0010 §4.1 shim `libblastit_php<major><minor>-<arch>-<libc>.so`
 # natively, in the **distro that ships that PHP minor** — Ubuntu noble is 8.3,
-# Debian trixie is 8.4, Ubuntu 26.04 and Alpine 3.23 are 8.5, and no single
-# distro ships all three.
+# Debian trixie is 8.4, Ubuntu 26.04 and Alpine 3.23 are 8.5,
+# `debian:bookworm-slim` + the Surý repository and `alpine:edge` + `edge/testing`
+# are 8.6, and no single distro ships all four. The leg's `extra_repo` travels
+# from the matrix into `e2e/php_sapi_probe.py`, so a new repository is one word
+# there and no step here.
 # A shim is never cross-compiled against a foreign `php_config.h`: its type
 # widths and `ZEND_MM_ALIGNMENT` only disagree at `dlopen`. The shim is then
 # `dlopen`ed beside that distro's signed NTS `libphp` and real requests run

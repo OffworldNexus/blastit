@@ -2,14 +2,17 @@
 # per (PHP minor, libc) (node MB.3.18).
 #
 # The base image and the four package names are build args because **no single
-# distro ships all three minors, and Alpine and Debian disagree about the
+# distro ships all four minors, and Alpine and Debian disagree about the
 # names**: Debian trixie is PHP 8.4, Ubuntu noble is 8.3, Ubuntu 26.04 and
-# Alpine 3.23 are 8.5, Alpine 3.21 is 8.4/8.3 — each with its own signed
-# `libphpX.Y-embed` (Debian/Ubuntu: `/usr/lib/libphp8.5.so`) or `phpXY-embed`
-# (Alpine: `/usr/lib/libphp83.so` for 8.3, `/usr/lib/php8X/libphp.so` for 8.4
-# and 8.5).
+# Alpine 3.23 are 8.5, `debian:bookworm-slim` + the Surý repository and
+# `alpine:edge` + `edge/testing` are 8.6 — each with its own signed
+# `libphpX.Y-embed` (Debian/Ubuntu: `/usr/lib/libphp8.6.so`) or `phpXY-embed`
+# (Alpine: `/usr/lib/libphp83.so` for 8.3, `/usr/lib/php8X/libphp.so` for 8.4,
+# 8.5 and 8.6).
 # They come from `scripts/platform_matrix.py` (the one place a leg is declared),
-# never from a second list here.
+# never from a second list here. `EXTRA_REPO` is that leg's declarative
+# repository (`sury` / `alpine-edge-testing`): this file performs the setup by
+# name, so no workflow and no driver carries a keyring or a repository line.
 #
 # `debian:trixie-slim`, not `php:8.4-cli`: upstream's docker-library images are
 # built without `--enable-embed`, so they carry no `libphp.so` at all
@@ -40,6 +43,11 @@ ARG PHP_DEV=php8.4-dev
 ARG PHP_EMBED=libphp8.4-embed
 ARG PHP_CURL=php8.4-curl
 ARG LIBPHP=/usr/lib/libphp8.4.so
+# The repository this leg needs before its packages exist, as the name
+# `scripts/platform_matrix.py` declares (`""` for a stock image):
+#   sury                  Ondřej Surý's signed APT repository (Debian bookworm)
+#   alpine-edge-testing   `edge/testing` appended to `/etc/apk/repositories`
+ARG EXTRA_REPO=
 ARG RUST_TOOLCHAIN=stable
 # Whether this image compiles the protected suites (`MB.3.39`, `MB.23.4.2`),
 # driven by the leg's `suites` field in `scripts/platform_matrix.py`
@@ -52,20 +60,41 @@ ARG PHP_SAPI_SUITES=1
 ENV DEBIAN_FRONTEND=noninteractive \
     PHP_MINOR=${PHP_MINOR} \
     LIBPHP=${LIBPHP} \
+    EXTRA_REPO=${EXTRA_REPO} \
     PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # One layer, two package managers. The glibc legs are Debian/Ubuntu (`apt-get`,
 # `libc6-dev`); the musl legs are Alpine (`apk`, `musl-dev`, `pkgconf`). Detected
 # rather than declared so a leg cannot name the wrong one and still build.
 #
+# The extra repository comes first, because the PHP packages do not exist in a
+# stock `debian:bookworm-slim` (8.6 is Ondřej Surý's) or a stock `alpine:edge`
+# (8.6 is in `edge/testing`). `EXTRA_REPO` is the leg's name from the matrix, so
+# the setup lives here once instead of in every workflow and driver.
+#
 # `clang`/`libclang-dev` are on the glibc branch, and Alpine's `clang`/
-# `llvm-dev`/`clang19-libclang` on the musl branch: the protected suites
-# (`MB.3.39`) are compiled in this image too, and `pg_query`'s bindgen needs
-# libclang by name. The Alpine legs now carry the suites as well (`MB.3.59`):
-# once the boot serves with Alpine's own package names, the worker-level proof
-# has to run where the shim is built, exactly like the glibc legs.
+# `llvm-dev` plus whichever `clang<version>-libclang` this rolling image ships
+# on the musl branch (named, never guessed: `alpine:edge` moved past
+# `clang19-libclang`): the protected suites (`MB.3.39`) are compiled in this
+# image too, and `pg_query`'s bindgen needs libclang by name. The Alpine legs
+# now carry the suites as well (`MB.3.59`): once the boot serves with Alpine's
+# own package names, the worker-level proof has to run where the shim is built,
+# exactly like the glibc legs.
 RUN set -eux; \
     if command -v apt-get >/dev/null; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends ca-certificates curl; \
+        if [ "${EXTRA_REPO}" = "sury" ]; then \
+            mkdir -p /etc/apt/keyrings; \
+            curl -fsSL https://packages.sury.org/php/apt.gpg \
+                -o /etc/apt/keyrings/sury.gpg; \
+            echo "deb [signed-by=/etc/apt/keyrings/sury.gpg] \
+https://packages.sury.org/php/ bookworm main" \
+                > /etc/apt/sources.list.d/sury.list; \
+        elif [ -n "${EXTRA_REPO}" ]; then \
+            echo "unknown EXTRA_REPO '${EXTRA_REPO}' for this image" >&2; \
+            exit 1; \
+        fi; \
         apt-get update; \
         apt-get install -y --no-install-recommends \
             "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
@@ -73,11 +102,26 @@ RUN set -eux; \
             clang libclang-dev; \
         rm -rf /var/lib/apt/lists/*; \
     else \
+        if [ "${EXTRA_REPO}" = "alpine-edge-testing" ]; then \
+            echo "https://dl-cdn.alpinelinux.org/alpine/edge/testing" \
+                >> /etc/apk/repositories; \
+        elif [ -n "${EXTRA_REPO}" ]; then \
+            echo "unknown EXTRA_REPO '${EXTRA_REPO}' for this image" >&2; \
+            exit 1; \
+        fi; \
+        apk update; \
         apk add --no-cache \
             "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
             gcc make pkgconf musl-dev binutils ca-certificates curl bash tar xz; \
         if [ "${PHP_SAPI_SUITES:-1}" = "1" ]; then \
-            apk add --no-cache clang llvm-dev clang19-libclang; \
+            apk add --no-cache clang llvm-dev; \
+            libclang=$(apk search -q 'clang*-libclang' \
+                | grep -xE 'clang[0-9]+-libclang' | sort -V | tail -n 1); \
+            [ -n "$libclang" ] || { \
+                echo "no clang<version>-libclang package on this image (bindgen needs it)" >&2; \
+                exit 1; \
+            }; \
+            apk add --no-cache "$libclang"; \
         fi; \
     fi
 
@@ -145,7 +189,12 @@ RUN bash -euo pipefail -c '\
         extra=""; \
         if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then \
             extra="-C target-feature=-crt-static"; \
-            export LIBCLANG_PATH=/usr/lib/llvm19/lib; \
+            clang_lib=$(find /usr/lib -name libclang.so -print -quit); \
+            if [ -z "$clang_lib" ]; then \
+                echo "no libclang.so in this image: the pg_query bindgen cannot build" >&2; \
+                exit 1; \
+            fi; \
+            export LIBCLANG_PATH=$(dirname "$clang_lib"); \
         fi; \
         RUSTFLAGS="$extra" cargo test --locked -p blastit --test critical_php_backend --test critical_php_embed --no-run \
             2>&1 | tee /dev/stderr \

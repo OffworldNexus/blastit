@@ -382,7 +382,7 @@ fn a_missing_toolchain_names_php_config_and_the_package() {
     .unwrap_err();
     assert_eq!(error, ToolchainError::NotFound);
     let message = error.to_string();
-    for needle in ["php-config", "libphp8.5-embed", "PHP_CONFIG"] {
+    for needle in ["php-config", "libphp8.6-embed", "PHP_CONFIG"] {
         assert!(
             message.contains(needle),
             "the refusal must name {needle}: {message}"
@@ -400,14 +400,14 @@ fn a_missing_toolchain_names_php_config_and_the_package() {
 
 #[test]
 fn an_unsupported_minor_is_refused_by_name() {
-    let fake = FakeConfig::new("8.6.0", true);
+    let fake = FakeConfig::new("8.7.0", true);
     let error = Toolchain::discover_with(&FakeEnv {
         path: Some(fake.path()),
         php_config: None,
     })
     .unwrap_err();
     match error {
-        ToolchainError::UnsupportedVersion { version, .. } => assert_eq!(version, "8.6.0"),
+        ToolchainError::UnsupportedVersion { version, .. } => assert_eq!(version, "8.7.0"),
         other => panic!("expected UnsupportedVersion, got {other:?}"),
     }
 }

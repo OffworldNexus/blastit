@@ -55,17 +55,21 @@ use blastit_sys::elf::{Elf, MAX_SECTION_BYTES, SHF_ALLOC, SHF_WRITE, STT_FUNC};
 /// (`ADR-0010` §3).
 ///
 /// A fixed list rather than a directory scan: the order *is* the preference, so
-/// a `libphp8.5.so` somebody dropped into `/usr/local/lib` never changes which
-/// library an 8.4 host embeds. Both spellings the distros install are here: the
-/// dotted Debian/Ubuntu name and the **packed** Alpine 8.3 one (`libphp83.so`;
-/// Alpine's 8.4 and 8.5 state their minor in `/usr/lib/php84` and
-/// `/usr/lib/php85` instead, `MB.3.59`), so a host with `BLASTIT_LIBPHP` unset
-/// reaches Alpine's package without a copy.
+/// a `libphp8.6.so` somebody dropped into `/usr/local/lib` never changes which
+/// library an 8.5 host embeds. Both spellings the distros install are here: the
+/// dotted Debian/Ubuntu name and the **packed** Alpine name (`libphp83.so`,
+/// `libphp86.so`); Alpine's 8.4, 8.5 and 8.6 state their minor in
+/// `/usr/lib/php84`, `/usr/lib/php85` and `/usr/lib/php86` instead (`MB.3.59`,
+/// `MB.42.5`), so a host with `BLASTIT_LIBPHP` unset reaches Alpine's package
+/// without a copy.
 ///
 /// The unversioned `libphp.so` is last here because on its own it states no
 /// minor; the per-minor directory it sits in states one, which is why
 /// `LIBPHP_PROBES` also tries it there, under that minor (`MB.3.61`).
-pub const LIBPHP_CANDIDATES: [&str; 10] = [
+pub const LIBPHP_CANDIDATES: [&str; 13] = [
+    "libphp8.6.so",
+    "libphp-8.6.so",
+    "libphp86.so",
     "libphp8.5.so",
     "libphp-8.5.so",
     "libphp85.so",
@@ -97,14 +101,30 @@ pub struct LibphpProbe {
 /// `libphp.so` — are all tried before the next minor's, so the newest *library*
 /// wins rather than the first name in a list. That is what makes a host with two
 /// embed packages installed serve from the newest one: Alpine's `php83-embed`
-/// puts `libphp83.so` in `/usr/lib` and `php85-embed` puts `libphp.so` in
-/// `/usr/lib/php85`, and a name-major walk preferred `libphp83.so` — an older
-/// library — while the 8.5 library beside it would serve.
+/// puts `libphp83.so` in `/usr/lib` and `php86-embed` puts `libphp.so` in
+/// `/usr/lib/php86`, and a name-major walk preferred `libphp83.so` — an older
+/// library — while the 8.6 library beside it would serve.
 ///
 /// The unversioned `libphp.so` in the plain directories stays last: its minor is
 /// only known from the descriptor's link target or the object's own bytes, so it
 /// is a fallback, not a preference.
-pub const LIBPHP_PROBES: [LibphpProbe; 13] = [
+pub const LIBPHP_PROBES: [LibphpProbe; 17] = [
+    LibphpProbe {
+        name: "libphp8.6.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp-8.6.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp86.so",
+        per_minor_dir: None,
+    },
+    LibphpProbe {
+        name: "libphp.so",
+        per_minor_dir: Some("php86"),
+    },
     LibphpProbe {
         name: "libphp8.5.so",
         per_minor_dir: None,
@@ -159,18 +179,55 @@ pub const LIBPHP_PROBES: [LibphpProbe; 13] = [
     },
 ];
 
+/// The newest minor this build ships a shim for: the package a refusal names
+/// when the object states no version.
+const NEWEST_PHP: PhpVersion = PhpVersion::new(8, 6);
+
 /// The distributions' PHP embed packages, named once so every refusal says the
 /// same thing (`ADR-0010` §4.1).
-const PHP_PACKAGES: &str = "install the PHP embed package — Debian/Ubuntu: \
-     apt install libphp-embed, Alpine: apk add php85-embed, Fedora/RHEL: \
-     dnf install php-embedded";
+///
+/// Minor-aware (`MB.42.5`): the version the object or its path states names
+/// *its* package, and `None` names [`NEWEST_PHP`]'s. The stock Debian spelling
+/// stays beside the per-minor one because Debian 13 and Ubuntu 24.04 install
+/// exactly `libphp-embed`.
+fn php_packages_hint(version: Option<PhpVersion>) -> String {
+    let (dotted, digits) = version.map_or_else(
+        || (NEWEST_PHP.dotted(), NEWEST_PHP.number()),
+        |version| (version.dotted(), version.number()),
+    );
+    format!(
+        "install the PHP embed package — Debian/Ubuntu: apt install libphp{dotted}-embed \
+         (stock Debian: apt install libphp-embed), Alpine: apk add php{digits}-embed, \
+         Fedora/RHEL: dnf install php-embedded"
+    )
+}
+
+/// The minor a refusal names, when it names one — the package the sentence
+/// offers is that minor's.
+fn refusal_version(refusal: &PhpRefusal) -> Option<PhpVersion> {
+    match refusal {
+        PhpRefusal::Missing { .. }
+        | PhpRefusal::NotAbsolute { .. }
+        | PhpRefusal::NotAFile { .. }
+        | PhpRefusal::NoVersion { .. } => None,
+        PhpRefusal::NotElf { version, .. }
+        | PhpRefusal::ThreadSafe { version, .. }
+        | PhpRefusal::NotLibphp { version, .. } => *version,
+        PhpRefusal::NoPhpVersion { named, .. } => *named,
+        PhpRefusal::UnsupportedVersion { version } => Some(*version),
+        PhpRefusal::VersionConflict {
+            stated, measured, ..
+        } => measured.or_else(|| stated.first().map(|stated| stated.0)),
+        PhpRefusal::NoShim { version, .. } => Some(*version),
+    }
+}
 
 /// The minors this build ships a shim for, as one sentence.
 ///
-/// `docs/frameworks/php.md` states the same three minors and nothing else; a
+/// `docs/frameworks/php.md` states the same four minors and nothing else; a
 /// host on another minor is refused with exactly this sentence
 /// ([`PhpRefusal::UnsupportedVersion`]).
-const SUPPORTED_PHP: &str = "PHP 8.3, 8.4 and 8.5";
+const SUPPORTED_PHP: &str = "PHP 8.3, 8.4, 8.5 and 8.6";
 
 /// The one override `ADR-0010` §3 allows.
 const PHP_OVERRIDE: &str = "set BLASTIT_LIBPHP=/path/to/libphp.so";
@@ -245,14 +302,14 @@ pub fn shim_name(version: PhpVersion) -> String {
 /// (`ADR-0010` §3).
 ///
 /// The per-minor directories come after the plain `/usr/lib` and before the
-/// `/usr/local` half: Alpine installs 8.4 as `/usr/lib/php84/libphp.so` and 8.5
-/// as `/usr/lib/php85/libphp.so`, and with `BLASTIT_LIBPHP` unset a fixed name
-/// alone cannot reach them — the directory is half of the package's spelling
-/// (`MB.3.59`). `/usr/local/lib/php8x` is the twin of a copy an operator put
-/// there.
+/// `/usr/local` half: Alpine installs 8.4 as `/usr/lib/php84/libphp.so`, 8.5 as
+/// `/usr/lib/php85/libphp.so` and 8.6 as `/usr/lib/php86/libphp.so`, and with
+/// `BLASTIT_LIBPHP` unset a fixed name alone cannot reach them — the directory
+/// is half of the package's spelling (`MB.3.59`, `MB.42.5`). `/usr/local/lib/php8x`
+/// is the twin of a copy an operator put there.
 ///
 /// The directory order is *within* one minor: [`LIBPHP_PROBES`] picks the minor
-/// first, so `/usr/lib/php85` outranks `/usr/lib/libphp84.so` even though it is
+/// first, so `/usr/lib/php86` outranks `/usr/lib/libphp85.so` even though it is
 /// listed later (`MB.3.61`).
 pub fn library_dirs() -> Vec<PathBuf> {
     let triplet = multiarch_triplet();
@@ -260,11 +317,13 @@ pub fn library_dirs() -> Vec<PathBuf> {
         format!("/usr/lib/{triplet}"),
         "/usr/lib64".to_string(),
         "/usr/lib".to_string(),
+        "/usr/lib/php86".to_string(),
         "/usr/lib/php85".to_string(),
         "/usr/lib/php84".to_string(),
         "/usr/lib/php83".to_string(),
         format!("/usr/local/lib/{triplet}"),
         "/usr/local/lib".to_string(),
+        "/usr/local/lib/php86".to_string(),
         "/usr/local/lib/php85".to_string(),
         "/usr/local/lib/php84".to_string(),
         "/usr/local/lib/php83".to_string(),
@@ -462,22 +521,23 @@ pub fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> St
     // routes must let the operator tell which front controller the host cannot
     // serve, and the entry is the only thing that distinguishes them.
     let prefix = format!("route {route:?}: entrypoint php {entry:?}: ");
+    let packages = php_packages_hint(refusal_version(refusal));
     match refusal {
         PhpRefusal::Missing { searched } => format!(
             "{prefix}no usable NTS libphp was found (searched BLASTIT_LIBPHP, then {} in {}); \
-             {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+             {packages}, or {PHP_OVERRIDE}",
             LIBPHP_CANDIDATES.join(", "),
             display_paths(searched),
         ),
         PhpRefusal::NotAbsolute { path } => format!(
             "{prefix}BLASTIT_LIBPHP ({}) is not an absolute path, so the library the \
-             boot inspected and the one a worker loads could differ; {PHP_PACKAGES}, or \
+             boot inspected and the one a worker loads could differ; {packages}, or \
              {PHP_OVERRIDE}",
             path.display()
         ),
         PhpRefusal::NotAFile { path, detail } => format!(
             "{prefix}BLASTIT_LIBPHP ({}) cannot be opened or is not a regular file \
-             ({detail}); {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+             ({detail}); {packages}, or {PHP_OVERRIDE}",
             path.display()
         ),
         PhpRefusal::NotElf {
@@ -518,7 +578,7 @@ pub fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> St
                 "{prefix}{} is an NTS libphp whose `.dynsym` exports no `php_version` — the \
                  symbol the embedded worker resolves before `php_module_startup` — so the worker \
                  cannot determine its minor at load time and no shim can be chosen for it{name}; \
-                 {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+                 {packages}, or {PHP_OVERRIDE}",
                 path.display()
             )
         }
@@ -545,7 +605,7 @@ pub fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> St
                 "{prefix}{} states more than one PHP minor — {} — so no single shim can be \
                  chosen for it; give it one versioned name (libphp8.4.so, libphp-8.4.so, …), \
                  keep the distro's directory and file name consistent, or {PHP_OVERRIDE}; \
-                 {PHP_PACKAGES}",
+                 {packages}",
                 path.display(),
                 candidates.join(", ")
             )
@@ -556,7 +616,7 @@ pub fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> St
              `return PHP_VERSION;` body — a symbol typed `STT_NOTYPE` or sized `0` is one), and \
              neither its file name nor its directory states a PHP major.minor, so no shim can \
              be chosen for it; give it a versioned name (libphp8.4.so, libphp-8.4.so, …), or \
-             {PHP_OVERRIDE}; {PHP_PACKAGES}",
+             {PHP_OVERRIDE}; {packages}",
             path.display()
         ),
         PhpRefusal::NoShim {
@@ -566,7 +626,7 @@ pub fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> St
             searched,
         } => format!(
             "{prefix}no shim {shim} was found for the NTS libphp {} (looked in {}); \
-             this host is (PHP {}, {}), and {shim} is what that tuple needs; {PHP_PACKAGES}, \
+             this host is (PHP {}, {}), and {shim} is what that tuple needs; {packages}, \
              or {PHP_OVERRIDE}",
             libphp.display(),
             display_paths(searched),
@@ -579,15 +639,16 @@ pub fn php_refusal_message(route: &str, entry: &str, refusal: &PhpRefusal) -> St
 /// The version-specific half of [`php_refusal_message`]: the problem, then the
 /// tuple, the shim, the package and the override.
 fn present_refusal(prefix: &str, problem: &str, version: Option<PhpVersion>) -> String {
+    let packages = php_packages_hint(version);
     match abi_tuple(version) {
         Some((dotted, shim)) => format!(
             "{prefix}{problem}; this host is (PHP {dotted}, {}), whose embedded shim \
-             is {shim}; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+             is {shim}; {packages}, or {PHP_OVERRIDE}",
             target_tuple(),
         ),
         None => format!(
             "{prefix}{problem}; this host is (PHP ?, {}), so no shim can be chosen \
-             until the object's version is known; {PHP_PACKAGES}, or {PHP_OVERRIDE}",
+             until the object's version is known; {packages}, or {PHP_OVERRIDE}",
             target_tuple(),
         ),
     }
@@ -1459,13 +1520,13 @@ impl PhpVersion {
 
     /// Whether this build ships a shim for this minor (`ADR-0010` §4.1).
     ///
-    /// The supported set is `8.3`, `8.4` and `8.5` — the minors
+    /// The supported set is `8.3`, `8.4`, `8.5` and `8.6` — the minors
     /// `crates/blastit-php-sapi` has an ABI for. A host on any other minor is
     /// refused with one sentence naming that set, never with the `.dynsym`
     /// story of a symbol it may or may not export.
     #[must_use]
     pub const fn supported(self) -> bool {
-        self.major == 8 && self.minor >= 3 && self.minor <= 5
+        self.major == 8 && self.minor >= 3 && self.minor <= 6
     }
 
     /// `"84"`, the `libblastit_php84-<arch>-<libc>.so` infix.

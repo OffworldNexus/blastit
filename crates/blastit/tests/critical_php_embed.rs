@@ -873,7 +873,11 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 /// It is a **copy** of `stage0.rs`'s `LIBPHP_PROBES`, because this suite may not
 /// lean on the code under test; [`the_probe_table_matches_stage0`] is what keeps
 /// the copy honest (`MB.3.62`).
-const PROBES: [(&str, Option<&str>); 13] = [
+const PROBES: [(&str, Option<&str>); 17] = [
+    ("libphp8.6.so", None),
+    ("libphp-8.6.so", None),
+    ("libphp86.so", None),
+    ("libphp.so", Some("php86")),
     ("libphp8.5.so", None),
     ("libphp-8.5.so", None),
     ("libphp85.so", None),
@@ -2016,7 +2020,7 @@ fn an_unsupported_php_minor_refuses_the_boot_naming_the_supported_set() {
         stdout, "",
         "a startup error writes nothing on stdout (§1.1)"
     );
-    let sentence = "PHP 8.2 is not supported — Blastit supports PHP 8.3, 8.4 and 8.5";
+    let sentence = "PHP 8.2 is not supported — Blastit supports PHP 8.3, 8.4, 8.5 and 8.6";
     assert!(
         stderr.contains(sentence),
         "the refusal is exactly the support sentence: {stderr}"

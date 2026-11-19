@@ -496,7 +496,7 @@ e2e-universal: ## One staged bundle proves CPython 3.13/3.14, PHP 8.4, static an
 		--binary "$(E2E_UNIVERSAL_PREFIX)/bin/blastit" $(E2E_UNIVERSAL_LEGS)
 
 # Build per-minor C SAPI shims (`libblastit_php<mm>-<arch>-<libc>.so`) using `-isystem` for PHP headers.
-PHP_MINORS ?= 8.5 8.4 8.3
+PHP_MINORS ?= 8.6 8.5 8.4 8.3
 PHP_SAPI_CRATE := $(CURDIR)/crates/blastit-php-sapi
 PHP_SAPI_OUT ?= $(CURDIR)/target/php-sapi
 PHP_SAPI_CC ?= $(CC)

@@ -134,10 +134,14 @@ mod tests {
 
     /// The table `critical_php_embed.rs` and `critical_php_backend.rs` both
     /// carry, written out here so this module's own tests have an oracle that is
-    /// not read out of `stage0.rs`: 13 entries, minor-major, each minor's own
+    /// not read out of `stage0.rs`: 17 entries, minor-major, each minor's own
     /// spellings before the next minor's, and the unversioned `libphp.so` last
     /// with no directory constraint.
-    const EXPECTED: [(&str, Option<&str>); 13] = [
+    const EXPECTED: [(&str, Option<&str>); 17] = [
+        ("libphp8.6.so", None),
+        ("libphp-8.6.so", None),
+        ("libphp86.so", None),
+        ("libphp.so", Some("php86")),
         ("libphp8.5.so", None),
         ("libphp-8.5.so", None),
         ("libphp85.so", None),
@@ -156,7 +160,7 @@ mod tests {
     /// The reader finds every entry, the per-minor constraints included, and the
     /// final unconstrained `libphp.so` stays unconstrained.
     #[test]
-    fn the_declaration_reads_as_thirteen_ordered_probes() {
+    fn the_declaration_reads_as_seventeen_ordered_probes() {
         let declared = probes_in(STAGE0).expect("stage0.rs's LIBPHP_PROBES reads");
         assert_eq!(declared.len(), EXPECTED.len(), "{declared:?}");
         assert_eq!(
@@ -186,15 +190,15 @@ mod tests {
     /// two entries out of order.
     #[test]
     fn a_changed_entry_is_reported_at_its_index() {
-        let dropped_constraint = STAGE0.replacen(CONSTRAINT_SOME_85, CONSTRAINT_NONE, 1);
+        let dropped_constraint = STAGE0.replacen(CONSTRAINT_SOME_86, CONSTRAINT_NONE, 1);
         assert_ne!(
             dropped_constraint, STAGE0,
-            "the source states `Some(\"php85\")`"
+            "the source states `Some(\"php86\")`"
         );
         assert!(
             assert_matches(&EXPECTED, &dropped_constraint)
                 .is_err_and(|drift| drift.contains("entry 3")),
-            "`libphp.so` outside `/usr/lib/php85` must be entry 3's difference"
+            "`libphp.so` outside `/usr/lib/php86` must be entry 3's difference"
         );
 
         let fallback_constrained = constrain_the_fallback(STAGE0);
@@ -204,13 +208,13 @@ mod tests {
         );
         assert!(
             assert_matches(&EXPECTED, &fallback_constrained)
-                .is_err_and(|drift| drift.contains("entry 12")),
-            "a constraint on the final `libphp.so` must be entry 12's difference"
+                .is_err_and(|drift| drift.contains("entry 16")),
+            "a constraint on the final `libphp.so` must be entry 16's difference"
         );
 
         let reordered = STAGE0
-            .replacen("name: \"libphp8.5.so\",", "name: \"libphp85.so\",", 1)
-            .replacen("name: \"libphp-8.5.so\",", "name: \"libphp8.5.so\",", 1);
+            .replacen("name: \"libphp8.6.so\",", "name: \"libphp86.so\",", 1)
+            .replacen("name: \"libphp-8.6.so\",", "name: \"libphp8.6.so\",", 1);
         assert_ne!(
             reordered, STAGE0,
             "the first two entries are dotted then hyphenated"
@@ -221,9 +225,9 @@ mod tests {
         );
     }
 
-    /// The `per_minor_dir` field of the 8.5 per-minor entry, as `stage0.rs`
+    /// The `per_minor_dir` field of the newest per-minor entry, as `stage0.rs`
     /// spells it.
-    const CONSTRAINT_SOME_85: &str = "per_minor_dir: Some(\"php85\")";
+    const CONSTRAINT_SOME_86: &str = "per_minor_dir: Some(\"php86\")";
 
     /// The same field unconstrained.
     const CONSTRAINT_NONE: &str = "per_minor_dir: None";

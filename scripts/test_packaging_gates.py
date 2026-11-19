@@ -575,8 +575,8 @@ def test_platform_matrix_cases() -> int:
     cases_run = 0
     # CLI `--count` and `--leg` behaviour on the live script (read-only).
     for flags, expected in (
-        (("--count", "shims", "--libc", "gnu", "--arch", "x86_64"), "3"),
-        (("--count", "shims"), "12"),
+        (("--count", "shims", "--libc", "gnu", "--arch", "x86_64"), "4"),
+        (("--count", "shims"), "16"),
         (("--count", "wheels"), "8"),
         (("--count", "binaries"), "4"),
     ):

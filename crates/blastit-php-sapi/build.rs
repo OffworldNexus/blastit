@@ -10,22 +10,24 @@
 //! worlds, so the degrade is tested rather than assumed.
 //!
 //! Search order (the plan's "Toolchain reality" section): `PHP_CONFIG`, then
-//! `php-config`, `php-config8.5`, `php-config8.4`, `php-config8.3` on `PATH`.
+//! `php-config`, `php-config8.6`, `php-config8.5`, `php-config8.4`,
+//! `php-config8.3` on `PATH`.
 
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The unversioned name first, then one per supported minor, newest first.
-const CANDIDATES: [&str; 4] = [
+const CANDIDATES: [&str; 5] = [
     "php-config",
+    "php-config8.6",
     "php-config8.5",
     "php-config8.4",
     "php-config8.3",
 ];
 
 /// The minors this crate has an ABI for, newest first.
-const SUPPORTED: [&str; 3] = ["8.5", "8.4", "8.3"];
+const SUPPORTED: [&str; 4] = ["8.6", "8.5", "8.4", "8.3"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -44,11 +46,12 @@ fn main() {
         None => {
             println!(
                 "cargo:warning=no PHP development toolchain found (looked for PHP_CONFIG, then \
-                 php-config, php-config8.5, php-config8.4, php-config8.3 on PATH): the C SAPI shim \
-                 is not built and the ABI surface is not compiled. Install it with `apt install \
-                 php8.5-dev libphp8.5-embed` (Debian/Ubuntu), `apk add php85-dev php85-embed` \
-                 (Alpine) or `dnf install php85-php-devel php-embedded` (Fedora/RHEL), or set \
-                 PHP_CONFIG=/path/to/php-config8.5. `make php-sapi-e2e` builds and exercises the \
+                 php-config, php-config8.6, php-config8.5, php-config8.4, php-config8.3 on PATH): \
+                 the C SAPI shim is not built and the ABI surface is not compiled. Install it with \
+                 `apt install php8.6-dev libphp8.6-embed` (Debian/Ubuntu; stock Debian: \
+                 `apt install libphp-embed`), `apk add php86-dev php86-embed` (Alpine) or \
+                 `dnf install php86-php-devel php-embedded` (Fedora/RHEL), or set \
+                 PHP_CONFIG=/path/to/php-config8.6. `make php-sapi-e2e` builds and exercises the \
                  shim in its container."
             );
         }

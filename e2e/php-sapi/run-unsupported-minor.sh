@@ -52,7 +52,7 @@ if ( cd "$app" && BLASTIT_LIBPHP= BLASTIT_PHP_SHIM_DIR= /src/target/debug/blasti
     exit 1
 fi
 
-sentence="PHP 8.2 is not supported — Blastit supports PHP 8.3, 8.4 and 8.5"
+sentence="PHP 8.2 is not supported — Blastit supports PHP 8.3, 8.4, 8.5 and 8.6"
 grep -qF "$sentence" "$log" || {
     echo "unsupported-minor: FAIL — the refusal does not carry the sentence:" >&2
     cat "$log" >&2
