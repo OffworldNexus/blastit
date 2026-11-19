@@ -2,7 +2,7 @@
 id: MB.42.2.0
 title: "Pin fork/zygote/GIL ownership invariants in universal-distribution §1.2.1 (design addendum)"
 kind: task
-status: active
+status: done
 owner: architect
 priority: 1
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: architect
 created: "2026-11-19T17:20"
-updated: "2026-11-19T17:20"
+updated: "2026-11-19T18:45"
 ---
 
 # Goal

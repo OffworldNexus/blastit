@@ -27,3 +27,7 @@ REVIEW FIX (filtered): BLOCKER serve_view returns 1 on success vs blastit-view-p
 ## 2026-11-19T18:25 [lead]
 
 status review -> done
+
+## 2026-11-19T18:25 [lead]
+
+commit dcb870f1601fd30d05673025412985fa4783fa47; fast-check green, critical_guard clean, guard OK; py-sapi asserts T blastit_py_abi_version/py_minor/abi_v1 via nm -D --defined-only

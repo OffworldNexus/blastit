@@ -3841,3 +3841,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T18:19 [MB.42.2.0] (lead) status active -> review
 - 2026-11-19T18:22 [MB.42.2.0] (lead) REVIEW FIX (filtered): BLOCKER §1.2.1 order only valid for Interpreter::Embed — wheel/Hosted has CPython live before stage 1 so fork(http)/fork(scheduler) need 
 - 2026-11-19T18:25 [MB.42.2.1.2] (lead) status review -> done
+- 2026-11-19T18:25 [MB.42.2.1.2] (lead) commit dcb870f1601fd30d05673025412985fa4783fa47; fast-check green, critical_guard clean, guard OK; py-sapi asserts T blastit_py_abi_version/py_minor/abi_v1 via 
+- 2026-11-19T18:45 [MB.42.2.0] (lead) status review -> done
