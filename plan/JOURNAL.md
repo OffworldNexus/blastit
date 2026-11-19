@@ -3659,3 +3659,14 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T02:45 [MB.40.4] (lead) attempt 1/3 started
 - 2026-11-19T02:45 [MB.40.4] (lead) base 0490e41
 - 2026-11-19T03:04 [MB.40.4] (lead) status active -> review
+- 2026-11-19T03:12 [MB.40.4] (lead) committed scheduler split; needs_split: config.rs, sqlpolicy/analysis.rs, stage0/stage1 remain
+- 2026-11-19T03:12 [MB.40.4] (unknown) edited fields
+- 2026-11-19T03:12 [MB.40.4] (lead) status review -> ready
+- 2026-11-19T03:13 [MB.40.4.1] (planner) created (task) Split crates/blastit/src/config.rs into cohesive modules + serde wire structs
+- 2026-11-19T03:13 [MB.40.4.2] (planner) created (task) Split blastit-sqlpolicy analysis.rs into cohesive modules + injected AnalysisCache
+- 2026-11-19T03:13 [MB.40.4.3] (planner) created (task) Split blastit stage0.rs/stage1.rs into cohesive modules + fork/exec parameter structs
+- 2026-11-19T03:13 [MB.40.4.1] (lead) status ready -> active
+- 2026-11-19T03:13 [MB.40.4.1] (lead) attempt 1/3 started
+- 2026-11-19T03:13 [MB.40.4.1] (lead) base fd9e28e
+- 2026-11-19T03:25 [MB.40.4.1] (lead) status active -> review
+- 2026-11-19T03:32 [MB.40.4.1] (lead) status review -> done
