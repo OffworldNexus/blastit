@@ -46,6 +46,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use blastit_sys::elf::{Elf, ElfError, SHT_DYNAMIC, SHT_STRTAB};
 use blastit_sys::exe_path;
 
 /// The environment variable that names a standalone install's capability-free
@@ -668,12 +669,6 @@ const DT_RPATH: u64 = 15;
 /// `DT_RUNPATH`: the same for the modern linker (`--enable-new-dtags`).
 const DT_RUNPATH: u64 = 29;
 
-/// `SHT_DYNAMIC`: the section holding an object's dynamic array.
-const SHT_DYNAMIC: u32 = 6;
-
-/// `SHT_STRTAB`: a string table.
-const SHT_STRTAB: u32 = 3;
-
 /// The largest dynamic string table this walk will read into memory. An object's
 /// `DT_STRTAB` is a few hundred bytes; this is the bound that keeps a hostile
 /// file from being an allocation.
@@ -685,12 +680,15 @@ const MAX_DYNAMIC_STRTAB: u64 = 4 * 1024 * 1024;
 /// This is the static half of design `R7`: an object whose search path names a
 /// directory a route uid can write is one that uid chooses the `DT_NEEDED`
 /// resolution of, so the boot refuses it. **Nothing is loaded** — no `dlopen`,
-/// no `mmap`: the section header table and the `SHT_DYNAMIC` array are
-/// `seek`/`read` with every offset bounds-checked, the same shape as
-/// `stage0::zend_abi`'s `.dynsym` walk. The two readers are separate on
-/// purpose: that one is private to the PHP gate and answers "which Zend globals
-/// does this export", this one answers a provenance question and has to be
-/// reachable from the protected suite, which can only see this public module.
+/// no `mmap`: the header, the section header table and the `SHT_DYNAMIC` array
+/// are `seek`/`read` through [`blastit_sys::elf`], which bounds-checks every
+/// offset and length against the file's own length and refuses a truncated or
+/// hostile object instead of panicking.
+///
+/// That layer is shared with the PHP gate's `.dynsym` walk
+/// (`blastit_view_php::discovery`); the walk below stays here, because "which
+/// directories does the loader search" is a provenance question and this public
+/// module is what the protected suite can reach.
 ///
 /// # Errors
 ///
@@ -701,110 +699,23 @@ const MAX_DYNAMIC_STRTAB: u64 = 4 * 1024 * 1024;
 pub fn dynamic_search_paths(path: &Path) -> Result<Vec<String>, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
-    let size = file
-        .metadata()
-        .map_err(|err| format!("{}: it cannot be inspected ({err})", path.display()))?
-        .len();
-    let ident = read_exact_at(&mut file, 0, usize::try_from(size.min(16)).unwrap_or(16))
-        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
-    if ident.get(..4) != Some(b"\x7fELF") {
-        return Err(format!(
-            "{}: it is not an ELF object (no ELF magic)",
-            path.display()
-        ));
-    }
-    if ident.len() < 16 {
-        return Err(format!(
-            "{}: its ELF identification is truncated",
-            path.display()
-        ));
-    }
-    // 1 is `ELFCLASS32`, 2 is `ELFCLASS64`; the two differ only in the width of
-    // the fields below.
-    let wide = match ident.get(4) {
-        Some(1) => false,
-        Some(2) => true,
-        _ => {
-            return Err(format!(
-                "{}: it is not an ELF object (unknown class)",
-                path.display()
-            ));
-        }
-    };
-    if ident.get(5) != Some(&1) {
-        return Err(format!(
-            "{}: it is a big-endian ELF object, and only little-endian objects are embedded",
-            path.display()
-        ));
-    }
-    let (head_len, shoff_at, shentsize_at, shnum_at, min_entsize) = if wide {
-        (64usize, 0x28usize, 0x3ausize, 0x3cusize, 64usize)
-    } else {
-        (52usize, 0x20usize, 0x2eusize, 0x30usize, 40usize)
-    };
-    if size < u64::try_from(head_len).unwrap_or(u64::MAX) {
-        return Err(format!("{}: its ELF header is truncated", path.display()));
-    }
-    let head = read_exact_at(&mut file, 0, head_len)
-        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
-    let truncated = || format!("{}: its ELF header is truncated", path.display());
-    let shoff = if wide {
-        le_u64(&head, shoff_at)
-    } else {
-        le_u32(&head, shoff_at).map(u64::from)
-    }
-    .ok_or_else(truncated)?;
-    let shentsize = usize::from(le_u16(&head, shentsize_at).ok_or_else(truncated)?);
-    let shnum = usize::from(le_u16(&head, shnum_at).ok_or_else(truncated)?);
-    if shnum == 0 {
-        return Err(format!(
-            "{}: it has no section headers, so its dynamic section cannot be read",
-            path.display()
-        ));
-    }
-    if shentsize < min_entsize {
-        return Err(format!(
-            "{}: its section header table's entries are too small to be section headers",
-            path.display()
-        ));
-    }
-    let table_len = shentsize
-        .checked_mul(shnum)
-        .ok_or_else(|| format!("{}: its section header table is too large", path.display()))?;
-    let table_end = shoff
-        .checked_add(u64::try_from(table_len).unwrap_or(u64::MAX))
-        .ok_or_else(|| format!("{}: its section header table is too large", path.display()))?;
-    if table_end > size {
-        return Err(format!(
-            "{}: its section header table is past the end of the file",
-            path.display()
-        ));
-    }
-    let table = read_exact_at(&mut file, shoff, table_len)
-        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
-
+    let mut elf = Elf::parse(&mut file).map_err(|err| object_error(path, &err))?;
+    let wide = elf.class().is_64();
     let mut paths = Vec::new();
-    for index in 0..shnum {
-        let at = index.saturating_mul(shentsize);
-        let Some(kind) = le_u32(&table, at.saturating_add(4)) else {
-            continue;
-        };
-        if kind != SHT_DYNAMIC {
+    for index in 0..elf.section_count() {
+        let section = elf.section(index).map_err(|err| object_error(path, &err))?;
+        if section.kind != SHT_DYNAMIC {
             continue;
         }
-        let Some((offset, dyn_len, link, entsize)) = dynamic_fields(wide, &table, at) else {
-            return Err(format!(
-                "{}: its dynamic section header is truncated",
-                path.display()
-            ));
-        };
-        let dyn_len = bounded_dynamic(offset, dyn_len, size)
-            .ok_or_else(|| format!("{}: its dynamic section is unusable", path.display()))?;
-        let strtab = dynamic_strtab(&mut file, wide, &table, shnum, shentsize, link, size)
+        let entries = elf
+            .section_bytes(&section, MAX_DYNAMIC_STRTAB)
+            .map_err(|err| match err {
+                ElfError::Io(err) => format!("{}: it cannot be read ({err})", path.display()),
+                _ => format!("{}: its dynamic section is unusable", path.display()),
+            })?;
+        let strtab = dynamic_strtab(&mut elf, section.link)
             .map_err(|reason| format!("{}: {reason}", path.display()))?;
-        let entries = read_exact_at(&mut file, offset, dyn_len)
-            .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
-        let entsize = usize::try_from(entsize).unwrap_or(0);
+        let entsize = usize::try_from(section.entsize).unwrap_or(0);
         let minimum = if wide { 16 } else { 8 };
         let entry_size = if entsize >= minimum { entsize } else { minimum };
         for entry in 0..entries.len() / entry_size {
@@ -846,88 +757,60 @@ pub fn dynamic_search_paths(path: &Path) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
-/// `(sh_offset, sh_size, sh_link, sh_entsize)` of the `SHT_DYNAMIC` section
-/// header at `at`.
-fn dynamic_fields(wide: bool, table: &[u8], at: usize) -> Option<(u64, u64, u32, u64)> {
-    if wide {
-        Some((
-            le_u64(table, at.saturating_add(0x18))?,
-            le_u64(table, at.saturating_add(0x20))?,
-            le_u32(table, at.saturating_add(0x28))?,
-            le_u64(table, at.saturating_add(0x38))?,
-        ))
-    } else {
-        Some((
-            u64::from(le_u32(table, at.saturating_add(0x10))?),
-            u64::from(le_u32(table, at.saturating_add(0x14))?),
-            le_u32(table, at.saturating_add(0x18))?,
-            u64::from(le_u32(table, at.saturating_add(0x24))?),
-        ))
-    }
-}
-
-/// A dynamic section's length in memory, refused when it is absurd or past the
-/// end of the file.
-fn bounded_dynamic(offset: u64, size: u64, file_size: u64) -> Option<usize> {
-    if size > MAX_DYNAMIC_STRTAB {
-        return None;
-    }
-    if offset.checked_add(size)? > file_size {
-        return None;
-    }
-    usize::try_from(size).ok()
+/// The sentence [`dynamic_search_paths`] prints for a failure in the shared
+/// reader.
+///
+/// The wording of a provenance refusal is this module's: an operator reads "its
+/// section header table is past the end of the file", and the shared layer's
+/// `Display` is only the generic spelling of the same fact.
+fn object_error(path: &Path, err: &ElfError) -> String {
+    let detail = match err {
+        ElfError::Io(err) => return format!("{}: it cannot be read ({err})", path.display()),
+        ElfError::NoMagic => "it is not an ELF object (no ELF magic)",
+        ElfError::IdentTooShort => "its ELF identification is truncated",
+        ElfError::UnknownClass(_) => "it is not an ELF object (unknown class)",
+        ElfError::BigEndian => {
+            "it is a big-endian ELF object, and only little-endian objects are embedded"
+        }
+        ElfError::HeaderTruncated => "its ELF header is truncated",
+        ElfError::NoSections => "it has no section headers, so its dynamic section cannot be read",
+        ElfError::SectionEntriesTooSmall => {
+            "its section header table's entries are too small to be section headers"
+        }
+        ElfError::SectionTableTooLarge => "its section header table is too large",
+        ElfError::SectionTablePastEnd => "its section header table is past the end of the file",
+        other => return format!("{}: {other}", path.display()),
+    };
+    format!("{}: {detail}", path.display())
 }
 
 /// The dynamic string table `SHT_DYNAMIC`'s `sh_link` names, read into memory.
-fn dynamic_strtab(
-    file: &mut std::fs::File,
-    wide: bool,
-    table: &[u8],
-    shnum: usize,
-    shentsize: usize,
-    link: u32,
-    file_size: u64,
-) -> Result<Vec<u8>, String> {
+fn dynamic_strtab(elf: &mut Elf<impl io::Read + io::Seek>, link: u32) -> Result<Vec<u8>, String> {
     let index = usize::try_from(link)
         .map_err(|_| "its dynamic string-table index does not fit this build".to_string())?;
-    if index >= shnum {
+    if index >= elf.section_count() {
         return Err("its dynamic string-table index is past the section table".to_string());
     }
-    let at = index.saturating_mul(shentsize);
-    let kind = le_u32(table, at.saturating_add(4))
-        .ok_or_else(|| "its dynamic string table's section header is truncated".to_string())?;
-    if kind != SHT_STRTAB {
+    let section = elf
+        .section(index)
+        .map_err(|_| "its dynamic string table's section header is truncated".to_string())?;
+    if section.kind != SHT_STRTAB {
         return Err("its dynamic section does not link a string table".to_string());
     }
-    let (offset, size) = if wide {
-        (
-            le_u64(table, at.saturating_add(0x18)),
-            le_u64(table, at.saturating_add(0x20)),
-        )
-    } else {
-        (
-            le_u32(table, at.saturating_add(0x10)).map(u64::from),
-            le_u32(table, at.saturating_add(0x14)).map(u64::from),
-        )
-    };
-    let (Some(offset), Some(size)) = (offset, size) else {
-        return Err("its dynamic string table's section header is truncated".to_string());
-    };
-    if size > MAX_DYNAMIC_STRTAB {
-        return Err(format!(
-            "a {size}-byte dynamic string table is larger than this build will inspect"
-        ));
-    }
-    let end = offset
-        .checked_add(size)
-        .ok_or_else(|| "its dynamic string table runs past the end of the file".to_string())?;
-    if end > file_size {
-        return Err("its dynamic string table runs past the end of the file".to_string());
-    }
-    let len = usize::try_from(size).map_err(|_| {
-        "its dynamic string table is larger than this build can address".to_string()
-    })?;
-    read_exact_at(file, offset, len).map_err(|err| format!("it cannot be read ({err})"))
+    elf.section_bytes(&section, MAX_DYNAMIC_STRTAB)
+        .map_err(|err| match err {
+            ElfError::SectionTooLarge { size } => {
+                format!("a {size}-byte dynamic string table is larger than this build will inspect")
+            }
+            ElfError::SectionPastEnd => {
+                "its dynamic string table runs past the end of the file".to_string()
+            }
+            ElfError::SectionTooLargeToAddress => {
+                "its dynamic string table is larger than this build can address".to_string()
+            }
+            ElfError::Io(err) => format!("it cannot be read ({err})"),
+            other => format!("it cannot be read ({other})"),
+        })
 }
 
 /// The `d_tag` of one dynamic array entry.
@@ -941,15 +824,6 @@ fn dynamic_tag(wide: bool, entries: &[u8], at: usize) -> Option<i64> {
     }
 }
 
-/// `len` bytes at `offset`, from a file this process has open read-only.
-fn read_exact_at(file: &mut std::fs::File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
-    use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(offset))?;
-    let mut bytes = vec![0u8; len];
-    file.read_exact(&mut bytes)?;
-    Ok(bytes)
-}
-
 /// The NUL-terminated UTF-8 string at `offset`, or `None`.
 fn c_str(bytes: &[u8], offset: usize) -> Option<String> {
     let rest = bytes.get(offset..)?;
@@ -957,12 +831,6 @@ fn c_str(bytes: &[u8], offset: usize) -> Option<String> {
     std::str::from_utf8(rest.get(..end)?)
         .ok()
         .map(ToOwned::to_owned)
-}
-
-/// A little-endian `u16` at `offset`, or `None` past the end.
-fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    let slice: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
-    Some(u16::from_le_bytes(slice))
 }
 
 /// A little-endian `u32` at `offset`, or `None` past the end.

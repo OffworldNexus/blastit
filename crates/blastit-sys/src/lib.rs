@@ -7,6 +7,13 @@
 //! `execve`, signals and reaping — each wrapped in one safe, documented and
 //! tested function, so the `C1b` binary is mostly wiring.
 //!
+//! [`elf`] is the one module here that is not a syscall wrapper: a pure,
+//! `unsafe`-free reader for the ELF header, section header table and section
+//! bytes of an object a boot inspects **without loading it**. It lives in this
+//! crate because its two callers — the boot's `DT_RPATH`/`DT_RUNPATH` scan and
+//! the PHP discovery gate's `.dynsym` walk — must refuse the same malformed
+//! object the same way, with one typed error and no panic.
+//!
 //! # Rules this crate implements
 //!
 //! * **Linux only.** Every function is a thin, documented wrapper around a
@@ -143,6 +150,7 @@ mod sock;
 
 pub mod caps;
 pub mod child;
+pub mod elf;
 pub mod fanotify;
 pub mod mem;
 

@@ -3638,3 +3638,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T01:53 [MB.40.3.1] (lead) status active -> review
 - 2026-11-19T02:03 [MB.40.3.1] (lead) status review -> done
 - 2026-11-19T02:03 [MB.40.3.1] (lead) committed; flaky-parallel note: 3 distinct timing-sensitive tests (critical_dev_reload x2, critical_rewrite x1) failed only under full-workspace runs at loadavg
+- 2026-11-19T02:03 [MB.40.3.2] (lead) status ready -> active
+- 2026-11-19T02:03 [MB.40.3.2] (lead) attempt 1/3 started
+- 2026-11-19T02:03 [MB.40.3.2] (lead) base 8cdf457
+- 2026-11-19T02:13 [MB.40.3.2] (lead) status active -> review
+- 2026-11-19T02:19 [MB.40.3.2] (lead) status review -> done

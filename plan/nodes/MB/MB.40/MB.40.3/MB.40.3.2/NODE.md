@@ -2,7 +2,7 @@
 id: MB.40.3.2
 title: "One shared safe ELF reader in blastit-sys::elf for host.rs and view-php discovery.rs"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.40.3.1]
@@ -13,11 +13,11 @@ paths:
   - "crates/blastit-view-php/src/discovery.rs"
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T01:45"
-updated: "2026-11-19T01:45"
+updated: "2026-11-19T02:19"
 ---
 
 # Goal

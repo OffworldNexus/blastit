@@ -34,19 +34,22 @@
 //!
 //! # Reachable from `init` without a `dlopen`
 //!
-//! Everything here is plain `std` (the ELF walker reads bytes) plus the manifest
-//! data model. `cargo tree -p blastit-view-php` still carries
+//! Everything here is `std` and [`blastit_sys::elf`] (the shared,
+//! bounds-checked ELF reader: header, section header table, section bytes) plus
+//! the manifest data model. `cargo tree -p blastit-view-php` still carries
 //! `blastit-php-sapi`, because the crate's worker half needs it — the
 //! enforceable invariant is "no `dlopen` before the fork", proved by the
 //! `critical_php_embed` canary legs and by the source-level test that this
 //! module's text names no loader.
 
 use std::ffi::OsStr;
+use std::io::{Read, Seek};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use blastit_manifest::Manifest;
+use blastit_sys::elf::{Class, Elf, SHF_ALLOC, SHF_WRITE, SectionHeader};
 
 /// The distro file names a host NTS `libphp` is looked for under, newest first
 /// (`ADR-0010` §3).
@@ -1148,34 +1151,13 @@ fn choose_version(
 /// being an allocation.
 const MAX_SECTION_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The ELF class a walk is reading.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ElfClass {
-    /// 32-bit (`e_ident[EI_CLASS] == 1`).
-    Elf32,
-    /// 64-bit (`e_ident[EI_CLASS] == 2`).
-    Elf64,
-}
-
-/// The header fields the `.dynsym` walk needs.
-struct ElfHeader {
-    class: ElfClass,
-    /// `e_machine`: which decoder a `php_version` body needs.
-    machine: u16,
-    /// Offset of the section header table.
-    shoff: u64,
-    /// Size of one section header.
-    shentsize: usize,
-    /// Number of section headers.
-    shnum: usize,
-    /// The file's size, for the bounds checks.
-    size: u64,
-}
-
 /// `SHT_DYNSYM`: the dynamic symbol table.
-pub const SHT_DYNSYM: u32 = 11;
+///
+/// Spelled once, in [`blastit_sys::elf`], and re-exported here because the
+/// boot's fixtures build objects out of these names.
+pub const SHT_DYNSYM: u32 = blastit_sys::elf::SHT_DYNSYM;
 /// `SHT_STRTAB`: a string table.
-pub const SHT_STRTAB: u32 = 3;
+pub const SHT_STRTAB: u32 = blastit_sys::elf::SHT_STRTAB;
 /// `EM_X86_64`: the machine whose `lea`-based `php_version` body is read.
 pub const EM_X86_64: u16 = 62;
 /// `EM_AARCH64`: the machine whose `adrp`/`add` body is read.
@@ -1204,33 +1186,25 @@ struct ObjectFacts {
 /// Reads the `.dynsym` of `file` and — when the path stated no minor — the
 /// compile-time version the object carries (`ADR-0010` §3, `MB.3.59`).
 ///
-/// No dependency, no `dlopen`, no `mmap`: `seek`/`read` of the section header
-/// table, the dynamic symbol table and its string table, the `php_version`
-/// body (bounded), and the string it returns (bounded), with every offset
-/// bounds-checked. A file that is not a little-endian ELF, has no `.dynsym`, or
-/// is truncated is an `Err` naming what was wrong.
+/// No `dlopen`, no `mmap`: [`blastit_sys::elf`] `seek`s/`read`s the header, the
+/// section header table and one section at a time with every offset and length
+/// bounds-checked, and this walk adds only what a Zend object means — the
+/// `.dynsym`, its linked string table, the `php_version` body (bounded) and the
+/// string it returns (bounded). A file that is not a little-endian ELF, has no
+/// `.dynsym`, or is truncated is an `Err` naming what was wrong.
 fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
-    let header = read_elf_header(file)?;
-    let table_len = header
-        .shentsize
-        .checked_mul(header.shnum)
-        .ok_or_else(|| "the section header table is too large".to_string())?;
-    let table_end = header
-        .shoff
-        .checked_add(
-            u64::try_from(table_len)
-                .map_err(|_| "the section header table is too large".to_string())?,
-        )
-        .ok_or_else(|| "the section header table is too large".to_string())?;
-    if table_end > header.size {
-        return Err("the section header table is past the end of the file".to_string());
-    }
-    let table = read_at(file, header.shoff, table_len)?;
-    let (dynsym, strtab_index) = find_dynsym(&header, &table)?;
-    let strtab = find_strtab(&header, &table, strtab_index)?;
-    let symbols = read_at(file, dynsym.offset, dynsym.len)?;
-    let names = read_at(file, strtab.offset, strtab.len)?;
-    let symbols = scan_symbols(&header.class, &symbols, dynsym.entsize, &names)?;
+    let mut elf = Elf::parse(file).map_err(|err| err.to_string())?;
+    let (dynsym, strtab_index) = find_dynsym(&mut elf)?;
+    let strtab = find_strtab(&mut elf, strtab_index)?;
+    let symbols = elf
+        .section_bytes(&dynsym, MAX_SECTION_BYTES)
+        .map_err(|err| err.to_string())?;
+    let names = elf
+        .section_bytes(&strtab, MAX_SECTION_BYTES)
+        .map_err(|err| err.to_string())?;
+    let entsize = usize::try_from(dynsym.entsize)
+        .map_err(|_| "the .dynsym entry size does not fit this build".to_string())?;
+    let symbols = scan_symbols(elf.class(), &symbols, entsize, &names)?;
     let abi = match (symbols.executor_globals, symbols.tsrm_startup) {
         (true, false) => ZendAbi::Nts,
         (false, false) => ZendAbi::NotLibphp,
@@ -1238,7 +1212,7 @@ fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
     };
     let version = symbols
         .php_version_body
-        .and_then(|symbol| php_version_string(file, &header, &table, symbol));
+        .and_then(|symbol| php_version_string(&mut elf, symbol));
     Ok(ObjectFacts {
         abi,
         exports_php_version: symbols.exports_php_version,
@@ -1246,176 +1220,36 @@ fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
     })
 }
 
-/// One section's location, bounded by [`MAX_SECTION_BYTES`].
-#[derive(Clone, Copy, Debug)]
-struct Section {
-    offset: u64,
-    len: usize,
-    entsize: usize,
-}
-
-/// Parses and bounds-checks the ELF header.
-fn read_elf_header(file: &mut std::fs::File) -> Result<ElfHeader, String> {
-    let size = file
-        .metadata()
-        .map_err(|err| format!("the file could not be inspected ({err})"))?
-        .len();
-    if size < 16 {
-        return Err("it is shorter than an ELF identification".to_string());
-    }
-    let ident = read_at(file, 0, 16)?;
-    if ident.get(..4) != Some(b"\x7fELF") {
-        return Err("no ELF magic".to_string());
-    }
-    let class = match ident.get(4) {
-        Some(1) => ElfClass::Elf32,
-        Some(2) => ElfClass::Elf64,
-        _ => return Err("not an ELF file: unknown class".to_string()),
-    };
-    if ident.get(5) != Some(&1) {
-        return Err("a big-endian ELF object: only little-endian objects are embedded".to_string());
-    }
-    let (head_len, shoff_off, shentsize_off, shnum_off, min_shentsize) = match class {
-        ElfClass::Elf64 => (64usize, 0x28, 0x3a, 0x3c, 64usize),
-        ElfClass::Elf32 => (52usize, 0x20, 0x2e, 0x30, 40usize),
-    };
-    if size < u64::try_from(head_len).map_err(|_| "the header is too large".to_string())? {
-        return Err("the header is truncated".to_string());
-    }
-    let head = read_at(file, 0, head_len)?;
-    let missing = || "the header is truncated".to_string();
-    let machine = le_u16(&head, 0x12).ok_or_else(missing)?;
-    let shoff = match class {
-        ElfClass::Elf64 => le_u64(&head, shoff_off),
-        ElfClass::Elf32 => le_u32(&head, shoff_off).map(u64::from),
-    }
-    .ok_or_else(missing)?;
-    let shentsize = le_u16(&head, shentsize_off).ok_or_else(missing)?;
-    let shnum = le_u16(&head, shnum_off).ok_or_else(missing)?;
-    let shentsize = usize::from(shentsize);
-    let shnum = usize::from(shnum);
-    if shnum == 0 {
-        return Err("it has no section headers".to_string());
-    }
-    if shentsize < min_shentsize {
-        return Err("a section header table whose entries are too small".to_string());
-    }
-    Ok(ElfHeader {
-        class,
-        machine,
-        shoff,
-        shentsize,
-        shnum,
-        size,
-    })
-}
-
 /// The `.dynsym` section and the index of its string table.
-fn find_dynsym(header: &ElfHeader, table: &[u8]) -> Result<(Section, usize), String> {
-    for index in 0..header.shnum {
-        let at = index.saturating_mul(header.shentsize);
-        let Some(kind) = le_u32(table, at.saturating_add(4)) else {
-            continue;
-        };
-        if kind != SHT_DYNSYM {
+///
+/// The walk is this module's — "which Zend symbols does this object export" —
+/// while the header, the section table and every bounds check are
+/// [`blastit_sys::elf`]'s.
+fn find_dynsym(elf: &mut Elf<impl Read + Seek>) -> Result<(SectionHeader, usize), String> {
+    for index in 0..elf.section_count() {
+        let section = elf.section(index).map_err(|err| err.to_string())?;
+        if section.kind != SHT_DYNSYM {
             continue;
         }
-        let Some((offset, size, link, entsize)) = section_fields(header.class, table, at) else {
-            return Err("the .dynsym section header is truncated".to_string());
-        };
-        let len = bounded_section(offset, size, header.size)?;
-        let entsize = usize::try_from(entsize)
-            .map_err(|_| "the .dynsym entry size does not fit this build".to_string())?;
-        return Ok((
-            Section {
-                offset,
-                len,
-                entsize,
-            },
-            usize::try_from(link).map_err(|_| {
-                "the .dynsym string-table index does not fit this build".to_string()
-            })?,
-        ));
+        let link = usize::try_from(section.link)
+            .map_err(|_| "the .dynsym string-table index does not fit this build".to_string())?;
+        return Ok((section, link));
     }
     Err("it has no .dynsym section".to_string())
 }
 
 /// The string table `index` names, checked to be one.
-fn find_strtab(header: &ElfHeader, table: &[u8], index: usize) -> Result<Section, String> {
-    if index >= header.shnum {
+fn find_strtab(elf: &mut Elf<impl Read + Seek>, index: usize) -> Result<SectionHeader, String> {
+    if index >= elf.section_count() {
         return Err("the .dynsym string-table index is past the section table".to_string());
     }
-    let at = index.saturating_mul(header.shentsize);
-    let kind = le_u32(table, at.saturating_add(4))
-        .ok_or_else(|| "the .dynstr section header is truncated".to_string())?;
-    if kind != SHT_STRTAB {
+    let section = elf
+        .section(index)
+        .map_err(|_| "the .dynstr section header is truncated".to_string())?;
+    if section.kind != SHT_STRTAB {
         return Err("the .dynsym string table is not a string table".to_string());
     }
-    let (offset, size, _, _) = section_fields(header.class, table, at)
-        .ok_or_else(|| "the .dynstr section header is truncated".to_string())?;
-    let len = bounded_section(offset, size, header.size)?;
-    Ok(Section {
-        offset,
-        len,
-        entsize: 0,
-    })
-}
-
-/// `(sh_offset, sh_size, sh_link, sh_entsize)` of the section at `at`.
-fn section_fields(class: ElfClass, table: &[u8], at: usize) -> Option<(u64, u64, u32, u64)> {
-    match class {
-        ElfClass::Elf64 => Some((
-            le_u64(table, at.saturating_add(0x18))?,
-            le_u64(table, at.saturating_add(0x20))?,
-            le_u32(table, at.saturating_add(0x28))?,
-            le_u64(table, at.saturating_add(0x38))?,
-        )),
-        ElfClass::Elf32 => Some((
-            u64::from(le_u32(table, at.saturating_add(0x10))?),
-            u64::from(le_u32(table, at.saturating_add(0x14))?),
-            le_u32(table, at.saturating_add(0x18))?,
-            u64::from(le_u32(table, at.saturating_add(0x24))?),
-        )),
-    }
-}
-
-/// `sh_addr`: the address a section is mapped at, which turns a symbol's
-/// `st_value` into a file offset (`MB.3.59`).
-fn section_addr(class: ElfClass, table: &[u8], at: usize) -> Option<u64> {
-    match class {
-        ElfClass::Elf64 => le_u64(table, at.saturating_add(0x10)),
-        ElfClass::Elf32 => le_u32(table, at.saturating_add(0x0c)).map(u64::from),
-    }
-}
-
-/// `SHF_ALLOC`: the section is mapped into the process image.
-const SHF_ALLOC: u64 = 0x2;
-/// `SHF_WRITE`: the section is writable — never where a compile-time string
-/// or a `return <constant>;` body is read from.
-const SHF_WRITE: u64 = 0x1;
-
-/// `sh_flags` of the section at `at`.
-fn section_flags(class: ElfClass, table: &[u8], at: usize) -> Option<u64> {
-    match class {
-        ElfClass::Elf64 => le_u64(table, at.saturating_add(0x8)),
-        ElfClass::Elf32 => le_u32(table, at.saturating_add(0x8)).map(u64::from),
-    }
-}
-
-/// A section's length in memory, refused when it is absurd or past the file.
-fn bounded_section(offset: u64, size: u64, file_size: u64) -> Result<usize, String> {
-    if size > MAX_SECTION_BYTES {
-        return Err(format!(
-            "a {size}-byte section is larger than this build will inspect"
-        ));
-    }
-    let end = offset
-        .checked_add(size)
-        .ok_or_else(|| "a section runs past the end of the file".to_string())?;
-    if end > file_size {
-        return Err("a section runs past the end of the file".to_string());
-    }
-    usize::try_from(size).map_err(|_| "a section is larger than this build can address".to_string())
+    Ok(section)
 }
 
 /// The dynamic symbols the walk cares about (`ADR-0010` §3, `MB.3.59`).
@@ -1435,14 +1269,14 @@ struct DynSymbols {
 
 /// Which of the symbols above the dynamic table exports.
 fn scan_symbols(
-    class: &ElfClass,
+    class: Class,
     dynsym: &[u8],
     entsize: usize,
     strtab: &[u8],
 ) -> Result<DynSymbols, String> {
     let minimum = match class {
-        ElfClass::Elf64 => 24usize,
-        ElfClass::Elf32 => 16usize,
+        Class::Elf64 => 24usize,
+        Class::Elf32 => 16usize,
     };
     if entsize < minimum {
         return Err("a .dynsym entry is too small to be a symbol".to_string());
@@ -1472,10 +1306,10 @@ fn scan_symbols(
                 // is a second fact, read only when it is the shape the version
                 // decode understands.
                 symbols.exports_php_version = true;
-                if symbol_is_function(*class, dynsym, at)
+                if symbol_is_function(class, dynsym, at)
                     && let (Some(value), Some(size)) = (
-                        symbol_value(*class, dynsym, at),
-                        symbol_size(*class, dynsym, at),
+                        symbol_value(class, dynsym, at),
+                        symbol_size(class, dynsym, at),
                     )
                 {
                     symbols.php_version_body = Some((value, size));
@@ -1488,27 +1322,27 @@ fn scan_symbols(
 }
 
 /// `st_info`'s type nibble: `STT_FUNC`, the only kind the worker can call.
-fn symbol_is_function(class: ElfClass, dynsym: &[u8], at: usize) -> bool {
+fn symbol_is_function(class: Class, dynsym: &[u8], at: usize) -> bool {
     let info = match class {
-        ElfClass::Elf64 => dynsym.get(at.saturating_add(4)).copied(),
-        ElfClass::Elf32 => dynsym.get(at.saturating_add(12)).copied(),
+        Class::Elf64 => dynsym.get(at.saturating_add(4)).copied(),
+        Class::Elf32 => dynsym.get(at.saturating_add(12)).copied(),
     };
     info.is_some_and(|info| info & 0x0f == 2)
 }
 
 /// `st_value`: where the symbol's code or data lives.
-fn symbol_value(class: ElfClass, dynsym: &[u8], at: usize) -> Option<u64> {
+fn symbol_value(class: Class, dynsym: &[u8], at: usize) -> Option<u64> {
     match class {
-        ElfClass::Elf64 => le_u64(dynsym, at.checked_add(8)?),
-        ElfClass::Elf32 => le_u32(dynsym, at.checked_add(4)?).map(u64::from),
+        Class::Elf64 => le_u64(dynsym, at.checked_add(8)?),
+        Class::Elf32 => le_u32(dynsym, at.checked_add(4)?).map(u64::from),
     }
 }
 
 /// `st_size`: how many bytes the symbol's body occupies.
-fn symbol_size(class: ElfClass, dynsym: &[u8], at: usize) -> Option<u64> {
+fn symbol_size(class: Class, dynsym: &[u8], at: usize) -> Option<u64> {
     match class {
-        ElfClass::Elf64 => le_u64(dynsym, at.checked_add(16)?),
-        ElfClass::Elf32 => le_u32(dynsym, at.checked_add(8)?).map(u64::from),
+        Class::Elf64 => le_u64(dynsym, at.checked_add(16)?),
+        Class::Elf32 => le_u32(dynsym, at.checked_add(8)?).map(u64::from),
     }
 }
 
@@ -1524,28 +1358,26 @@ fn symbol_size(class: ElfClass, dynsym: &[u8], at: usize) -> Option<u64> {
 /// anything this walk does not understand is `None` (a refusal), never a guess
 /// at a neighbouring library's version.
 fn php_version_string(
-    file: &mut std::fs::File,
-    header: &ElfHeader,
-    table: &[u8],
+    elf: &mut Elf<impl Read + Seek>,
     (value, size): (u64, u64),
 ) -> Option<PhpVersion> {
     // 32 bytes is more than the longest body either decoder reads; a bigger
     // symbol is not a `return <constant>;` and is left to the refusal.
     let len = usize::try_from(size.min(32)).ok().filter(|len| *len > 0)?;
-    let body_offset = vaddr_to_offset(header, table, value)?;
-    let body = read_at(file, body_offset, len).ok()?;
-    let string_vaddr = match header.machine {
+    let body_offset = vaddr_to_offset(elf, value)?;
+    let body = elf.read(body_offset, len).ok()?;
+    let string_vaddr = match elf.machine() {
         EM_X86_64 => decode_x86_64(&body, value)?,
         EM_AARCH64 => decode_aarch64(&body, value)?,
         _ => return None,
     };
-    let string_offset = vaddr_to_offset(header, table, string_vaddr)?;
-    let available = usize::try_from(header.size.checked_sub(string_offset)?).ok()?;
+    let string_offset = vaddr_to_offset(elf, string_vaddr)?;
+    let available = usize::try_from(elf.file_len().checked_sub(string_offset)?).ok()?;
     let wanted = available.min(32);
     if wanted == 0 {
         return None;
     }
-    let bytes = read_at(file, string_offset, wanted).ok()?;
+    let bytes = elf.read(string_offset, wanted).ok()?;
     let end = bytes.iter().position(|byte| *byte == 0)?;
     let text = std::str::from_utf8(bytes.get(..end)?).ok()?;
     version_prefix(text)
@@ -1555,21 +1387,18 @@ fn php_version_string(
 ///
 /// A section's `sh_addr` is its load address and `sh_offset` its file offset;
 /// the difference is the mapping, so no program header is needed.
-fn vaddr_to_offset(header: &ElfHeader, table: &[u8], vaddr: u64) -> Option<u64> {
-    for index in 0..header.shnum {
-        let at = index.saturating_mul(header.shentsize);
-        let flags = section_flags(header.class, table, at)?;
+fn vaddr_to_offset(elf: &mut Elf<impl Read + Seek>, vaddr: u64) -> Option<u64> {
+    for index in 0..elf.section_count() {
+        let section = elf.section(index).ok()?;
         // A body and the constant it returns live in mapped, read-only
         // sections; a pointer into `.data` or `.bss` is not the shape this
         // walk understands.
-        if flags & SHF_ALLOC == 0 || flags & SHF_WRITE != 0 {
+        if section.flags & SHF_ALLOC == 0 || section.flags & SHF_WRITE != 0 {
             continue;
         }
-        let (offset, size, _, _) = section_fields(header.class, table, at)?;
-        let addr = section_addr(header.class, table, at)?;
-        let end = addr.checked_add(size)?;
-        if vaddr >= addr && vaddr < end {
-            return offset.checked_add(vaddr.checked_sub(addr)?);
+        let end = section.addr.checked_add(section.size)?;
+        if vaddr >= section.addr && vaddr < end {
+            return section.offset.checked_add(vaddr.checked_sub(section.addr)?);
         }
     }
     None
@@ -1664,23 +1493,6 @@ fn c_str(bytes: &[u8], offset: usize) -> &[u8] {
         .position(|byte| *byte == 0)
         .unwrap_or(rest.len());
     rest.get(..end).unwrap_or_default()
-}
-
-/// `len` bytes at `offset`, from a file this process has open read-only.
-fn read_at(file: &mut std::fs::File, offset: u64, len: usize) -> Result<Vec<u8>, String> {
-    use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(offset))
-        .map_err(|err| format!("the file could not be read ({err})"))?;
-    let mut bytes = vec![0u8; len];
-    file.read_exact(&mut bytes)
-        .map_err(|err| format!("the file is truncated ({err})"))?;
-    Ok(bytes)
-}
-
-/// A little-endian `u16` at `offset`, or `None` past the end.
-fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
-    let slice: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
-    Some(u16::from_le_bytes(slice))
 }
 
 /// A little-endian `u32` at `offset`, or `None` past the end.
