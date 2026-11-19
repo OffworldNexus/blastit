@@ -903,7 +903,7 @@ blastit check: 6 requests, 5 statements, 5/6 views, 2 proxies
   request GET /robots.txt: no view matches
       fix: add a `view` whose pattern matches this request
   proxy analytics: declared, 0 statements observed
-      fix: remove `proxy analytics` or add the call that uses it
+      fix: remove the store, or add the call that uses it
 blastit check: 11 problems · `--json` for the machine-readable list
 ";
     let human = audit_v1::human(&report);
@@ -936,9 +936,9 @@ blastit check: 0 requests, 0 statements, 0/6 views, 2 proxies
   suite exercised 0 views or 0 proxy statements
       fix: run the suite against this app (does DATABASE_URL point at blastit?)
   proxy analytics: declared, 0 statements observed
-      fix: remove `proxy analytics` or add the call that uses it
+      fix: remove the store, or add the call that uses it
   proxy db: declared, 0 statements observed
-      fix: remove `proxy db` or add the call that uses it
+      fix: remove the store, or add the call that uses it
 blastit check: 4 problems · `--json` for the machine-readable list
 ";
     assert_eq!(audit_v1::human(&report), expected);

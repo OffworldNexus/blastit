@@ -90,7 +90,7 @@ blastit check: 4 requests, 2 statements, 3/4 views, 2 proxies
   view upload: takes a body and declares no ingress validation; observed application/x-www-form-urlencoded
       fix: write `body form`
   proxy analytics: declared, 0 statements observed
-      fix: remove `proxy analytics` or add the call that uses it
+      fix: remove the store, or add the call that uses it
 blastit check: 6 problems · `--json` for the machine-readable list
 ```
 

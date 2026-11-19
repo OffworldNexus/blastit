@@ -3916,3 +3916,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T23:35 [MB.42.6] (lead) status ready -> active
 - 2026-11-19T23:35 [MB.42.6] (lead) attempt 1/3 started
 - 2026-11-19T23:35 [MB.42.6] (lead) base 9e64b7fac2723bb6e5dd5e70f0b49445d5dae692
+- 2026-11-19T23:41 [MB.42.6] (unknown) edited fields
+- 2026-11-19T23:41 [MB.42.6] (lead) lead: README.md was edited outside the declared paths (item 4's 'grep the rest of the repo' took it literally). The 1-line fix is the same wrong-noun bug, so pa
+- 2026-11-19T23:41 [MB.42.6] (lead) status active -> done

@@ -144,9 +144,13 @@ pub fn human(report: &Report) -> String {
                 out.push_str(&format!(
                     "  proxy {proxy}: declared, 0 statements observed\n"
                 ));
-                out.push_str(&format!(
-                    "      fix: remove `proxy {proxy}` or add the call that uses it\n"
-                ));
+                // The declaration the finding is about is a store (`postgres
+                // <name> $URL`), and the file has no `proxy <name>` directive:
+                // the sentence names the store, the same noun `--json` documents
+                // for `proxy_unused`. The `observe` action carries no single
+                // edit, so both forms leave the choice open rather than name a
+                // node the file cannot produce.
+                out.push_str("      fix: remove the store, or add the call that uses it\n");
                 at += 1;
             }
         }
