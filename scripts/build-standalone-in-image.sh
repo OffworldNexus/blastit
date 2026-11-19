@@ -260,18 +260,26 @@ docker run --rm \
             export PATH="$toolchain_bin:$PATH"
         fi
 
-        # The build body is a heredoc because it runs as HOST_UID. `CARGO_HOME`
-        # is a *writable* directory **seeded by copying** the read-only host
-        # cache: cargo extracts `registry/src/<crate>` and `git/checkouts/<dep>`
-        # into `CARGO_HOME`, so symlinking those at the read-only mount is what
-        # made the first cold-cache extraction die with
+        # The build body runs as HOST_UID, so it is a heredoc written straight to
+        # a file rather than a quoted string. It is deliberately NOT wrapped in
+        # `$(cat <<...)`: manylinux_2_28 is AlmaLinux 8 and ships Bash 4.4, whose
+        # parser fails on a comment carrying a closing parenthesis inside a
+        # command-substitution heredoc, with `unexpected EOF while looking for
+        # matching )`, before a single byte of the build ran (PR #64). The
+        # delimiter is backslash-quoted rather than `<<BUILD_BODY` so the body is
+        # literal, and NOT apostrophe-quoted because this whole container script
+        # is one single-quoted `bash -c` argument: a literal quote ends it early.
+        # `CARGO_HOME` is a *writable* directory **seeded by copying** the
+        # read-only host cache: cargo extracts `registry/src/<crate>` and
+        # `git/checkouts/<dep>` into `CARGO_HOME`, so symlinking those at the
+        # read-only mount is what made the first cold-cache extraction die with
         #
         #   failed to create directory `/tmp/cargo-home/registry/src/...`
-        #   Read-only file system (os error 30)
+        #   Read-only file system os error 30
         #
-        # (`MB.3.63`). Nothing below writes outside `$CARGO_HOME` (in /tmp),
+        # see MB.3.63. Nothing below writes outside `$CARGO_HOME` in /tmp,
         # `$CARGO_TARGET_DIR` and `$OUT`; the repository is only read.
-        build_body=$(cat <<\BUILD_BODY
+        cat <<\BUILD_BODY > /tmp/blastit-inner-build.sh
 set -euo pipefail
 mkdir -p "$HOME" "$CARGO_HOME/registry" "$CARGO_HOME/git"
 if [ -d /host-cargo/registry ]; then
@@ -290,17 +298,17 @@ build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
        --max-glibc "$MAX_GLIBC" --builder-image "$BUILDER_IMAGE")
 # `scripts/build-standalone.sh` owns the feature spelling (`--no-default-features
 # --features php,static`): this script chooses *where* the archive is built, never
-# *what* it carries, so the shipped archive's capabilities have one home.
+# *what* it carries, so the shipped capabilities have one home.
 if [ -n "$SHIM_DIR" ]; then
     build+=(--shim-dir "$SHIM_DIR")
 fi
 bash scripts/build-standalone.sh "${build[@]}"
 BUILD_BODY
-        )
+        chmod 0755 /tmp/blastit-inner-build.sh
 
         exec setpriv --reuid "$HOST_UID" --regid "$HOST_GID" --clear-groups \
             env HOME=/tmp/build-home \
-            bash -euo pipefail -c "$build_body"
+            bash -euo pipefail /tmp/blastit-inner-build.sh
     '
 
 echo "build-standalone-in-image: $out/blastit-$target.tar.gz"

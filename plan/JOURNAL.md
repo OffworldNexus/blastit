@@ -3725,3 +3725,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T05:39 [MB.40.6] (lead) status review -> done
 - 2026-11-19T05:55 [MB.40] (lead) status ready -> done
 - 2026-11-19T05:56 AUTOPILOT off by conductor awaiting human merge of updated release PR v0.2.0 (includes MB.40 GEPA G4 & 6 slices)
+- 2026-11-19T09:57 [MB.40] (conductor) status done -> ready: Re-opening for MB.40.7 CI fixes on PR #64
+- 2026-11-19T09:57 [MB.40.7] (conductor) created (task) Fix the 3 PR #64 CI failures: Ubuntu 24.04 AppArmor userns sysctl, Windows build-lsp mktemp, and Bash 4.4 heredoc in manylinux_2_28
+- 2026-11-19T09:57 [MB.40.7] (conductor) status ready -> active
+- 2026-11-19T09:57 [MB.40.7] (conductor) attempt 1/3 started
+- 2026-11-19T09:57 [MB.40.7] (conductor) base cbba102a6bbdca2ba7c7af4a9243bd4d53fcf002
+- 2026-11-19T10:04 [MB.40.7] (conductor) status active -> done
+- 2026-11-19T10:04 [MB.40] (conductor) status ready -> done

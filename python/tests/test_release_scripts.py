@@ -598,3 +598,115 @@ def test_rewrite_still_moves_the_version_its_requirements_and_the_lock(tmp_path)
     lock = (tree / "Cargo.lock").read_text()
     assert 'version = "0.2.0-dev42"' in lock
     assert 'version = "1.0.0"' in lock, "an unrelated lock entry must not move"
+
+
+# --------------------------------------------------------------------------- #
+# The in-image builds: Git Bash temp bases and AlmaLinux 8's Bash 4.4 (PR #64)
+# --------------------------------------------------------------------------- #
+
+BUILD_STANDALONE_IN_IMAGE = SCRIPTS / "build-standalone-in-image.sh"
+BUILD_LSP = SCRIPTS / "build-lsp.sh"
+INNER_BUILD = "/tmp/blastit-inner-build.sh"
+
+
+def inner_build_body(script: Path) -> str:
+    """The build script a container writes and then runs as the caller's uid."""
+    lines = script.read_text().splitlines()
+    openers = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == rf"cat <<\BUILD_BODY > {INNER_BUILD}"
+    ]
+    assert len(openers) == 1, (
+        f"{script.name}: expected exactly one heredoc writing {INNER_BUILD} "
+        f"(found {len(openers)}): the body has to reach the container as a file"
+    )
+    start = openers[0] + 1
+    end = next(
+        (index for index in range(start, len(lines)) if lines[index] == "BUILD_BODY"),
+        None,
+    )
+    assert end is not None, f"{script.name}: the heredoc for {INNER_BUILD} never closes"
+    body = "\n".join(lines[start:end])
+    assert body.strip(), f"{script.name}: the inner build script is empty"
+    return body
+
+
+def test_the_container_build_body_is_not_a_command_substitution_heredoc():
+    """Bash 4.4 (manylinux_2_28 is AlmaLinux 8) cannot parse one with `)` in a comment."""
+    offenders = []
+    for script in (BUILD_STANDALONE_IN_IMAGE, BUILD_LSP):
+        for number, line in enumerate(script.read_text().splitlines(), 1):
+            # A whole-line comment may quote the broken form to explain it: the
+            # regression lives in code, exactly as the offline scan above decides.
+            if line.lstrip().startswith("#"):
+                continue
+            if "$(cat<<" in line.replace(" ", "") or 'bash -c "$build_body"' in line:
+                offenders.append(f"{script.name}:{number}: {line.strip()}")
+    assert not offenders, (
+        "the container build body must not be wrapped in `$(cat <<...)`: "
+        "manylinux_2_28 is AlmaLinux 8, whose Bash 4.4 dies with `unexpected EOF "
+        "while looking for matching )` on such a comment before a byte of the "
+        f"build runs (PR #64). Write the heredoc to {INNER_BUILD} and run it.\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_container_build_body_is_written_to_a_file_and_executed():
+    """The file is written, made executable, and run by the dropped uid."""
+    for script in (BUILD_STANDALONE_IN_IMAGE, BUILD_LSP):
+        text = script.read_text()
+        for needle, why in (
+            (
+                rf"cat <<\BUILD_BODY > {INNER_BUILD}",
+                "the body is not written to a file",
+            ),
+            (f"chmod 0755 {INNER_BUILD}", "the body is never made executable"),
+            (f"bash -euo pipefail {INNER_BUILD}", "the body file is never executed"),
+            (
+                'exec setpriv --reuid "$HOST_UID" --regid "$HOST_GID" --clear-groups',
+                "the build no longer drops to the caller's uid",
+            ),
+            ("env HOME=/tmp/build-home", "the dropped build lost its HOME"),
+        ):
+            assert needle in text, f"{script.name}: {why} ({needle!r} is absent)"
+
+
+def test_the_shipping_build_scripts_parse_as_bash():
+    """A stray quote inside the single-quoted `bash -c` argument breaks the script."""
+    for script in (BUILD_STANDALONE_IN_IMAGE, BUILD_LSP):
+        result = subprocess.run(
+            ["bash", "-n", str(script)], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, f"{script.name}: {result.stderr}"
+
+
+def test_the_container_build_body_parses_as_bash(tmp_path):
+    """The text handed to the container is a real bash script, not fragments."""
+    for script in (BUILD_STANDALONE_IN_IMAGE, BUILD_LSP):
+        path = tmp_path / f"{script.stem}-inner-build.sh"
+        path.write_text(inner_build_body(script) + "\n")
+        result = subprocess.run(
+            ["bash", "-n", str(path)], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, (
+            f"{script.name}: the inner build body does not parse:\n{result.stderr}"
+        )
+
+
+def test_build_lsp_never_assumes_var_tmp_exists():
+    """Git Bash on `windows-latest` has `/tmp` and no `/var/tmp` (PR #64)."""
+    offenders = []
+    for number, line in enumerate(BUILD_LSP.read_text().splitlines(), 1):
+        if "/var/tmp" not in line:
+            continue
+        if line.lstrip().startswith("#") or "[ -d /var/tmp ]" in line:
+            continue
+        offenders.append(f"scripts/build-lsp.sh:{number}: {line.strip()}")
+    assert not offenders, (
+        "scripts/build-lsp.sh names /var/tmp without checking it exists: the "
+        "Windows leg then dies at `mktemp` with `No such file or directory`. "
+        "Resolve $TMPDIR, then /var/tmp when it is a directory, then /tmp.\n"
+        + "\n".join(offenders)
+    )
+    assert '"$tmp_base/blastit-lsp-stage.XXXXXX"' in BUILD_LSP.read_text()

@@ -72,6 +72,21 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Ubuntu 24.04+ (today's `ubuntu-latest`) ships
+      # `kernel.apparmor_restrict_unprivileged_userns=1`, so an unprivileged
+      # child cannot create a user namespace and
+      # `critical_fanotify::an_overlay_parent_handle_is_the_at_handle_fid_handle`
+      # dies writing `/proc/self/setgroups` with `EACCES` (errno 13) — a red
+      # `test` job that says nothing about the code under test. The sysctl only
+      # exists on the kernels that restrict it, so the `-e` keeps older images
+      # untouched, and `--non-interactive` turns a sudo that would prompt into an
+      # immediate readable error.
+      - name: Allow unprivileged user namespaces for the fanotify overlay test (Ubuntu 24.04+)
+        run: |
+          set -euo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo --non-interactive sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - run: cargo test --workspace --all-targets --locked --features python
       - run: cargo test --workspace --doc --locked --features python
 

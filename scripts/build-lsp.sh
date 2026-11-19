@@ -287,13 +287,22 @@ if [ -n "$image" ]; then
                 export PATH="$toolchain_bin:$PATH"
             fi
 
-            # The body runs as HOST_UID, so it is a heredoc rather than a quoted
-            # string with its own copy of the build. `CARGO_HOME` is a writable
+            # The body runs as HOST_UID, so it is a heredoc written straight to a
+            # file rather than a quoted string with its own copy of the build.
+            # It is deliberately NOT wrapped in `$(cat <<...)`: manylinux_2_28 is
+            # AlmaLinux 8 and ships Bash 4.4, whose parser fails on a comment
+            # carrying a closing parenthesis inside a command-substitution
+            # heredoc, with `unexpected EOF while looking for matching )`, before
+            # a single byte of the build ran (PR #64). The delimiter is
+            # backslash-quoted rather than `<<BUILD_BODY` so the body is taken
+            # literally, and NOT apostrophe-quoted because this whole container
+            # script is one single-quoted `bash -c` argument: a literal quote
+            # would end it early. `CARGO_HOME` is a writable
             # directory **seeded by copying** the read-only host cache: cargo
             # extracts `registry/src/<crate>` there, and a symlink into the mount
             # made the first cold-cache extraction die with
-            # `Read-only file system (os error 30)` (`MB.3.63`).
-            build_body=$(cat <<\BUILD_BODY
+            # `Read-only file system os error 30` (MB.3.63).
+            cat <<\BUILD_BODY > /tmp/blastit-inner-build.sh
 set -euo pipefail
 mkdir -p "$HOME" "$CARGO_HOME/registry" "$CARGO_HOME/git"
 if [ -d /host-cargo/registry ]; then
@@ -310,11 +319,11 @@ echo "build-lsp: building as uid $(id -u):$(id -g), cache $CARGO_HOME"
 echo "build-lsp: glibc $(getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version | head -1)"
 bash scripts/build-lsp.sh --target "$TARGET" --out "$OUT" --max-glibc "$MAX_GLIBC"
 BUILD_BODY
-            )
+            chmod 0755 /tmp/blastit-inner-build.sh
 
             exec setpriv --reuid "$HOST_UID" --regid "$HOST_GID" --clear-groups \
                 env HOME=/tmp/build-home \
-                bash -euo pipefail -c "$build_body"
+                bash -euo pipefail /tmp/blastit-inner-build.sh
         '
 
     echo "build-lsp: $out/blastit-lsp-$target.$ext"
@@ -463,7 +472,17 @@ fi
 
 # --- stage and archive ------------------------------------------------------
 
-stage=$(mktemp -d "${TMPDIR:-/var/tmp}/blastit-lsp-stage.XXXXXX")
+# A staging directory under a temp base that exists **on this host**. Git Bash on
+# `windows-latest` has `/tmp` (and `$RUNNER_TEMP`) but no `/var/tmp`, so a
+# hardcoded `/var/tmp` makes the Windows leg die at `mktemp` with
+# `failed to create directory via template '/var/tmp/blastit-lsp-stage.XXXXXX':
+# No such file or directory` (PR #64). `$TMPDIR` wins when it is a directory,
+# then `/var/tmp` (the Linux default), then `/tmp`.
+tmp_base=${TMPDIR:-}
+if [ -z "$tmp_base" ] || [ ! -d "$tmp_base" ]; then
+    if [ -d /var/tmp ]; then tmp_base=/var/tmp; else tmp_base=/tmp; fi
+fi
+stage=$(mktemp -d "$tmp_base/blastit-lsp-stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 name=$directory
 mkdir -p "$stage/$name"
