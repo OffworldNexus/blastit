@@ -32,9 +32,8 @@
 //! starts (the C ABI takes one `body` slice), so during the request the only
 //! frames left to arrive are `WINDOW` and `CANCEL`. A response body larger than
 //! the initial credit therefore has to *read* while it waits, which is what
-//! [`RequestIo::write_body`] does here: it asks the credit window for what it
-//! has, and reads the next frame when it has nothing. No second thread, no
-//! deadlock.
+//! `ChanIo::write_body` does here: it asks the credit window for what it has,
+//! and reads the next frame when it has nothing. No second thread, no deadlock.
 //!
 //! # What a request costs
 //!
@@ -413,7 +412,11 @@ impl PhpEmbedRuntime {
     /// `libphp` opens `SCRIPT_FILENAME` (`MB.3.56`, `ADR-0010` §3): a mismatch
     /// answers an empty `500` with the sentence on the worker's stderr, never in
     /// the response.
-    pub fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
+    ///
+    /// Called only by this module's loop ([`serve_forever`] via `serve_loop`):
+    /// the request stream is the loop's to hand out, so the runtime is never a
+    /// second owner of it and nothing outside this crate can drive one.
+    fn serve(&self, io: &mut ChanIo<'_>) -> RequestEnd {
         if let Err(sentence) = verify_entry(&self.cfg.route, &self.cfg.entry, self.cfg.pin) {
             return refuse(io, &sentence);
         }
@@ -526,7 +529,7 @@ impl PhpEmbedRuntime {
 /// The reason belongs in the log, not in an answer a client can steer. The
 /// outcome is `Completed` when the empty head reached the wire: the request was
 /// answered, just not with the application's output.
-fn refuse(io: &mut dyn RequestIo, sentence: &str) -> RequestEnd {
+fn refuse(io: &mut ChanIo<'_>, sentence: &str) -> RequestEnd {
     io.output(OutputStream::Stderr, sentence);
     let head = RespHead {
         status: 500,
@@ -754,7 +757,7 @@ enum BodyError {
 ///
 /// The C ABI takes a single `body` slice, so buffering is not optional; this is
 /// the one place that bounds it.
-fn read_body(io: &mut dyn RequestIo, max: usize) -> Result<Vec<u8>, BodyError> {
+fn read_body(io: &mut ChanIo<'_>, max: usize) -> Result<Vec<u8>, BodyError> {
     let mut body = Vec::new();
     let mut buf = vec![0u8; BODY_READ];
     loop {
@@ -803,12 +806,12 @@ pub fn serve_forever(
 /// It is private because the public seam is the concrete [`PhpEmbedRuntime`]
 /// (`ADR-0016` decision 2): a worker process owns its loop, and there is no
 /// cross-crate trait object left to implement. The unit cases below drive this
-/// function with a stand-in that answers requests without a loaded `libphp`;
+/// function with a test runtime that answers requests without a loaded `libphp`;
 /// nothing outside `#[cfg(test)]` can name it.
 fn serve_loop(
     mut chan: UnixStream,
     limits: Limits,
-    mut serve: impl FnMut(&mut dyn RequestIo) -> RequestEnd,
+    mut serve: impl FnMut(&mut ChanIo<'_>) -> RequestEnd,
     mut recycle: impl FnMut() -> bool,
 ) -> Result<(), ViewError> {
     let writer = Arc::new(Writer::new(chan.try_clone()?, limits));
@@ -913,80 +916,6 @@ impl RequestEnd {
     }
 }
 
-/// The transport, as one request sees it: the `view.chan` framing and nothing
-/// underneath it.
-///
-/// Implemented here by the channel loop and by the unit cases'
-/// stand-ins. Every method is a frame or a flow-control operation on
-/// `view.chan` — `REQ_BODY`/`WINDOW` for the body, `RESP_HEAD`, `RESP_BODY` and
-/// the window for the response — so the runtime never holds a socket, a file
-/// descriptor or a scheduler handle, and cannot write to another request's
-/// stream.
-///
-/// The methods are `&mut self` because a request owns its stream for its
-/// lifetime; the implementation is free to share the process-wide writer behind
-/// it, as `view.chan` requires one writer per frame.
-pub trait RequestIo {
-    /// The head the scheduler dispatched.
-    fn head(&self) -> &ReqHead;
-
-    /// Read request-body bytes.
-    ///
-    /// Returns the number of bytes read, or `Ok(0)` when the body has ended.
-    /// Paced by the request-body credit window (§3.1): a runtime that reads
-    /// slowly is granted more credit slowly, so a slow application slows its
-    /// own client and no one else. Consuming bytes is what returns the credit.
-    ///
-    /// # Errors
-    ///
-    /// The channel could not be read, the stream was cancelled, or the body
-    /// exceeded its window.
-    fn read_body(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-
-    /// Send the response head.
-    ///
-    /// At most once per request: the head must precede the body, and a second
-    /// head is a protocol error the transport refuses.
-    ///
-    /// # Errors
-    ///
-    /// The frame could not be encoded or written, or the stream was cancelled.
-    fn write_head(&mut self, head: RespHead) -> io::Result<()>;
-
-    /// Write response-body bytes.
-    ///
-    /// Paced by the response credit window (§3.1): a runtime that has spent its
-    /// credit blocks here until the scheduler grants more, as it would on a
-    /// slow client's socket, rather than buffering without bound. A cancelled
-    /// stream wakes the write and reports it as an error.
-    ///
-    /// # Errors
-    ///
-    /// The channel could not be written, or the stream was cancelled.
-    fn write_body(&mut self, data: &[u8]) -> io::Result<()>;
-
-    /// Record one line of the runtime's own output.
-    ///
-    /// Not the response: this is the runtime's `STDOUT`/`STDERR` —
-    /// PHP's output outside the response — where a Zend notice goes.
-    /// Implementations keep at most [`OUTPUT_LINE_CAP`] bytes of each line, so
-    /// one huge `echo` cannot bury the log it lands in, and they never fail the
-    /// request for an output error: losing a diagnostic line is better than
-    /// failing a response that was otherwise fine.
-    fn output(&mut self, stream: OutputStream, line: &str);
-
-    /// Push everything written so far onto the channel.
-    ///
-    /// Called once, at the end of a request, so the response a runtime reports
-    /// is on the wire before the caller closes the request with
-    /// `RESP_END`/`DONE`.
-    ///
-    /// # Errors
-    ///
-    /// The channel could not be written, or the stream was cancelled.
-    fn flush_response(&mut self) -> io::Result<()>;
-}
-
 /// Read one frame from `chan`, or `None` at a clean end of channel.
 fn read_frame(
     chan: &mut UnixStream,
@@ -1021,7 +950,20 @@ fn read_frame(
     }
 }
 
-/// One request's view of `view.chan`.
+/// One request's view of `view.chan`: the transport the runtime writes through.
+///
+/// Every method is a frame or a flow-control operation on `view.chan` —
+/// `REQ_BODY`/`WINDOW` for the request body, `RESP_HEAD`, `RESP_BODY` and the
+/// response window for the answer — so the runtime never holds a socket, a file
+/// descriptor or a scheduler handle, and cannot write to another request's
+/// stream. It is a concrete type, not an interface: `serve_loop` builds exactly
+/// one per dispatched request and hands it to `PhpEmbedRuntime::serve`, and
+/// there is no second implementation for a trait to abstract over.
+///
+/// The fields are private and nothing outside this module can build one — the
+/// type does not leave `worker.rs`: a request's stream, its decoder and the
+/// process's one [`Writer`] are the loop's to hand out, so a `ChanIo` cannot be
+/// fabricated for a stream that is not a `view.chan`.
 ///
 /// The response is written through the process's one [`Writer`], one frame at
 /// a time. Reads and writes are sequential — one request is in flight — so a
@@ -1192,11 +1134,23 @@ impl ChanIo<'_> {
     }
 }
 
-impl RequestIo for ChanIo<'_> {
+impl ChanIo<'_> {
+    /// The head the scheduler dispatched.
     fn head(&self) -> &ReqHead {
         &self.head
     }
 
+    /// Read request-body bytes.
+    ///
+    /// Returns the number of bytes read, or `Ok(0)` when the body has ended.
+    /// Paced by the request-body credit window (§3.1): a runtime that reads
+    /// slowly is granted more credit slowly, so a slow application slows its
+    /// own client and no one else. Consuming bytes is what returns the credit.
+    ///
+    /// # Errors
+    ///
+    /// The channel could not be read, the stream was cancelled, or the body
+    /// exceeded its window.
     fn read_body(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         while self.pending.is_empty() && !self.ended {
             let (id, frame) = self.next()?;
@@ -1245,6 +1199,14 @@ impl RequestIo for ChanIo<'_> {
         Ok(n)
     }
 
+    /// Send the response head.
+    ///
+    /// At most once per request: the head must precede the body, and a second
+    /// head is a protocol error the transport refuses.
+    ///
+    /// # Errors
+    ///
+    /// The frame could not be encoded or written, or the stream was cancelled.
     fn write_head(&mut self, head: RespHead) -> io::Result<()> {
         // A cancelled client has nowhere to receive a head; the shim is told
         // the write succeeded so it finishes tidily instead of panicking the
@@ -1264,6 +1226,16 @@ impl RequestIo for ChanIo<'_> {
         Ok(())
     }
 
+    /// Write response-body bytes.
+    ///
+    /// Paced by the response credit window (§3.1): a runtime that has spent its
+    /// credit blocks here until the scheduler grants more, as it would on a
+    /// slow client's socket, rather than buffering without bound. A cancelled
+    /// stream wakes the write and reports it as an error.
+    ///
+    /// # Errors
+    ///
+    /// The channel could not be written, or the stream was cancelled.
     fn write_body(&mut self, data: &[u8]) -> io::Result<()> {
         // Nothing of an abandoned response reaches the channel; the runtime
         // still gets `Ok` so PHP can unwind normally.
@@ -1318,6 +1290,14 @@ impl RequestIo for ChanIo<'_> {
         Ok(())
     }
 
+    /// Record one line of the runtime's own output.
+    ///
+    /// Not the response: this is the runtime's `STDOUT`/`STDERR` — PHP's output
+    /// outside the response — where a Zend notice goes. At most
+    /// [`OUTPUT_LINE_CAP`] bytes of each line are kept, so one huge `echo`
+    /// cannot bury the log it lands in, and an output error never fails the
+    /// request: losing a diagnostic line is better than failing a response that
+    /// was otherwise fine.
     fn output(&mut self, stream: OutputStream, line: &str) {
         // The shim already bounds a log line; the contract is the cap, and one
         // huge `echo` outside the response must not bury the log either.
@@ -1328,6 +1308,15 @@ impl RequestIo for ChanIo<'_> {
         };
     }
 
+    /// Push everything written so far onto the channel.
+    ///
+    /// Called once, at the end of a request, so the response a runtime reports
+    /// is on the wire before the caller closes the request with
+    /// `RESP_END`/`DONE`.
+    ///
+    /// # Errors
+    ///
+    /// The channel could not be written, or the stream was cancelled.
     fn flush_response(&mut self) -> io::Result<()> {
         // Every frame is written synchronously, so there is nothing buffered:
         // the response is on the wire before `serve` returns.
@@ -1336,10 +1325,10 @@ impl RequestIo for ChanIo<'_> {
 }
 
 /// A `ResponseSink` for the shim: headers accumulate until the end-of-head
-/// marker, the body streams straight through `RequestIo`, and logs become the
-/// worker's stderr.
-struct PhpSink<'a> {
-    io: &'a mut dyn RequestIo,
+/// marker, the body streams straight through the request's [`ChanIo`]
+/// transport, and logs become the worker's stderr.
+struct PhpSink<'a, 'io> {
+    io: &'a mut ChanIo<'io>,
     headers: Vec<(Vec<u8>, Vec<u8>)>,
     /// Bytes the accumulated header lines hold, for the cap.
     header_bytes: usize,
@@ -1357,7 +1346,7 @@ const MAX_HEADERS: usize = 256;
 /// The most bytes the accumulated response headers may hold.
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 
-impl Sink for PhpSink<'_> {
+impl Sink for PhpSink<'_, '_> {
     fn head(&mut self, status: i32, name: Option<&[u8]>, value: &[u8]) -> bool {
         let Some(name) = name else {
             // The end-of-head marker: always sent, always carries the status.
@@ -1638,8 +1627,8 @@ mod tests {
     /// that needs. There is no `kind`, no concurrency claim and no trait object
     /// on any wire — only the call the loop makes and the retirement rule.
     trait StandIn: Send + Sync + 'static {
-        /// Run one request against a recording transport.
-        fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd;
+        /// Run one request through the request's real `view.chan` transport.
+        fn serve(&self, io: &mut ChanIo<'_>) -> RequestEnd;
         /// Whether the loop must return after this request.
         fn recycle(&self) -> bool;
     }
@@ -1650,7 +1639,7 @@ mod tests {
     }
 
     impl StandIn for Echo {
-        fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
+        fn serve(&self, io: &mut ChanIo<'_>) -> RequestEnd {
             *lock(&self.requests) += 1;
             let req = io.head().clone();
             let mut buf = [0u8; 16];
@@ -1783,6 +1772,60 @@ mod tests {
         panic!("the worker never wrote {wanted} frames");
     }
 
+    /// Sends frames from the scheduler's end of the channel, all with one id.
+    fn send_frames(chan: &mut UnixStream, limits: Limits, id: u32, frames: Vec<Frame>) {
+        let mut bytes = Vec::new();
+        for frame in frames {
+            limits.encode(&frame, id, &mut bytes).expect("encode");
+        }
+        chan.write_all(&bytes).expect("write");
+    }
+
+    /// One request's transport over a real socketpair, for the cases that drive
+    /// `ChanIo` directly instead of through the loop: the worker end, the
+    /// process-wide writer and decoder it shares, and the scheduler's end the
+    /// case writes `view.chan` frames on.
+    struct Direct {
+        chan: UnixStream,
+        writer: Writer,
+        decoder: Decoder,
+        buf: Vec<u8>,
+    }
+
+    impl Direct {
+        fn new(limits: Limits) -> (Self, UnixStream) {
+            let (worker, scheduler) = UnixStream::pair().expect("socketpair");
+            let writer = Writer::new(worker.try_clone().expect("clone"), limits);
+            (
+                Self {
+                    chan: worker,
+                    writer,
+                    decoder: Decoder::new(limits),
+                    buf: vec![0u8; 1024],
+                },
+                scheduler,
+            )
+        }
+
+        /// The transport for one dispatched request.
+        fn io(&mut self, id: u32) -> ChanIo<'_> {
+            ChanIo {
+                head: ReqHead::default(),
+                id,
+                writer: &self.writer,
+                flow: Flow::new(),
+                chan: &mut self.chan,
+                decoder: &mut self.decoder,
+                buf: &mut self.buf,
+                pending: Vec::new(),
+                ended: false,
+                head_sent: false,
+                cancelled: false,
+                error: None,
+            }
+        }
+    }
+
     #[test]
     fn a_socketpair_request_is_answered_and_closed_in_order() {
         // The whole transport: READY, REQ_HEAD/REQ_BODY/REQ_END in, RESP_HEAD,
@@ -1854,7 +1897,7 @@ mod tests {
         let body = vec![0x5au8; INITIAL_WINDOW as usize + 4096];
         struct Big(Vec<u8>);
         impl StandIn for Big {
-            fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
+            fn serve(&self, io: &mut ChanIo<'_>) -> RequestEnd {
                 let _ = io.write_head(RespHead::default());
                 if io.write_body(&self.0).is_err() {
                     return RequestEnd::new(DoneOutcome::Aborted, None);
@@ -2287,59 +2330,6 @@ mod tests {
         assert_eq!(strip_mount("", "/anything"), "/anything");
     }
 
-    /// A `RequestIo` with a scripted body, recording what the response wrote.
-    struct FakeIo {
-        chunks: std::collections::VecDeque<Vec<u8>>,
-        head: ReqHead,
-        head_written: Option<RespHead>,
-        body: Vec<u8>,
-        lines: Vec<String>,
-    }
-
-    impl FakeIo {
-        fn with_body(chunks: Vec<Vec<u8>>) -> Self {
-            Self {
-                chunks: chunks.into(),
-                head: ReqHead::default(),
-                head_written: None,
-                body: Vec::new(),
-                lines: Vec::new(),
-            }
-        }
-    }
-
-    impl RequestIo for FakeIo {
-        fn head(&self) -> &ReqHead {
-            &self.head
-        }
-        fn read_body(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let Some(chunk) = self.chunks.front_mut() else {
-                return Ok(0);
-            };
-            let n = buf.len().min(chunk.len());
-            buf[..n].copy_from_slice(&chunk[..n]);
-            chunk.drain(..n);
-            if chunk.is_empty() {
-                self.chunks.pop_front();
-            }
-            Ok(n)
-        }
-        fn write_head(&mut self, head: RespHead) -> io::Result<()> {
-            self.head_written = Some(head);
-            Ok(())
-        }
-        fn write_body(&mut self, data: &[u8]) -> io::Result<()> {
-            self.body.extend_from_slice(data);
-            Ok(())
-        }
-        fn output(&mut self, _stream: OutputStream, line: &str) {
-            self.lines.push(line.to_owned());
-        }
-        fn flush_response(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     #[test]
     fn a_contained_bailout_is_its_own_done_outcome() {
         // `MB.3.41`: the shim is the only place that knows a `zend_bailout`
@@ -2376,12 +2366,42 @@ mod tests {
 
     #[test]
     fn a_request_body_past_the_worker_budget_is_refused() {
-        // The accepted twin first: the same body fits a larger budget.
-        let mut io = FakeIo::with_body(vec![vec![0x41; 64], vec![0x42; 64]]);
+        // Real `view.chan` frames over a socketpair: two 64-byte `REQ_BODY`
+        // frames and the `REQ_END` that closes them.
+        let limits = Limits::default();
+        let (mut direct, mut scheduler) = Direct::new(limits);
+        send_frames(
+            &mut scheduler,
+            limits,
+            3,
+            vec![
+                Frame::ReqBody(vec![0x41; 64]),
+                Frame::ReqBody(vec![0x42; 64]),
+                Frame::ReqEnd,
+            ],
+        );
+        let mut io = direct.io(3);
+        // The accepted twin first: the same streamed body fits a larger budget.
         let body = read_body(&mut io, 1024).expect("128 bytes fit");
-        assert_eq!(body.len(), 128);
+        assert_eq!(
+            body,
+            [vec![0x41u8; 64], vec![0x42u8; 64]].concat(),
+            "both body frames reach the runtime, in order"
+        );
 
-        let mut io = FakeIo::with_body(vec![vec![0x41; 64], vec![0x42; 64]]);
+        // The same frames, one byte short of what they carry.
+        let (mut direct, mut scheduler) = Direct::new(limits);
+        send_frames(
+            &mut scheduler,
+            limits,
+            4,
+            vec![
+                Frame::ReqBody(vec![0x41; 64]),
+                Frame::ReqBody(vec![0x42; 64]),
+                Frame::ReqEnd,
+            ],
+        );
+        let mut io = direct.io(4);
         let err = read_body(&mut io, 127).expect_err("128 > 127");
         assert!(matches!(err, BodyError::TooLarge));
     }
@@ -2400,7 +2420,7 @@ mod tests {
         // the request's `DONE`, without waiting for the channel to close.
         struct Once(Mutex<u32>);
         impl StandIn for Once {
-            fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
+            fn serve(&self, io: &mut ChanIo<'_>) -> RequestEnd {
                 *lock(&self.0) += 1;
                 let _ = io.write_head(RespHead::default());
                 RequestEnd::new(DoneOutcome::Completed, None)
@@ -2432,7 +2452,7 @@ mod tests {
     fn a_response_body_before_the_head_is_a_protocol_error() {
         struct BodyFirst;
         impl StandIn for BodyFirst {
-            fn serve(&self, io: &mut dyn RequestIo) -> RequestEnd {
+            fn serve(&self, io: &mut ChanIo<'_>) -> RequestEnd {
                 let _ = io.write_body(b"without a head");
                 RequestEnd::new(DoneOutcome::Errored, None)
             }
@@ -2512,7 +2532,11 @@ mod tests {
 
     #[test]
     fn a_header_burst_past_the_cap_aborts_the_response() {
-        let mut io = FakeIo::with_body(Vec::new());
+        // A real request transport: the burst is refused before the
+        // end-of-head marker, so no header reaches the channel at all.
+        let limits = Limits::default();
+        let (mut direct, _scheduler) = Direct::new(limits);
+        let mut io = direct.io(6);
         let mut sink = PhpSink {
             io: &mut io,
             headers: Vec::new(),

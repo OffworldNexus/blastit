@@ -26,8 +26,8 @@
 //! # Layout
 //!
 //! * [`worker`] — [`PhpEmbedRuntime`], [`PhpRuntimeConfig`], the single-request
-//!   `view.chan` loop ([`serve_forever`]) and the [`RequestIo`] the shim writes
-//!   through.
+//!   `view.chan` loop ([`serve_forever`]) and the concrete `ChanIo` request
+//!   transport the shim writes through.
 //! * [`pinning`] — [`PhpBinding`], [`EntryPin`], `boot_bindings`, `pin_entry`,
 //!   `verify_entry`, and the debug-only swap-point rendezvous `stage 1` pauses
 //!   at so an inode leg has a deterministic window.
@@ -64,7 +64,5 @@ pub use crate::probe::{PhpProbeBoot, PhpProbeReport, probe_bindings};
 pub use crate::spawn::{ForkedPhpView, PhpViewSpawn, fork_php_view};
 // The transport's error type, re-exported so a caller of [`serve_forever`] does
 // not have to name two crates for one result.
-pub use crate::worker::{
-    PhpEmbedRuntime, PhpError, PhpRuntimeConfig, RequestEnd, RequestIo, serve_forever,
-};
+pub use crate::worker::{PhpEmbedRuntime, PhpError, PhpRuntimeConfig, RequestEnd, serve_forever};
 pub use blastit_view::ViewError;

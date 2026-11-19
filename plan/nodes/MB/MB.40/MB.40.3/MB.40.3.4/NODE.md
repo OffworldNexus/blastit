@@ -2,7 +2,7 @@
 id: MB.40.3.4
 title: "RequestIo trait -> concrete ChanIo transport (converge the ADR-0016 exemption)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.40.3.3]
@@ -12,11 +12,11 @@ paths:
   - crates/blastit/tests/critical_artifacts.rs
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T01:47"
-updated: "2026-11-19T01:47"
+updated: "2026-11-19T02:44"
 ---
 
 # Goal
@@ -37,6 +37,8 @@ Retire the last recorded deviation from `R3`: delete the single-implementation `
 In `crates/blastit/tests/critical_artifacts.rs` you may change **only**:
 1. delete the single `"pub trait RequestIo",` element from the `required` array of `the_deleted_transport_trait_stays_deleted`, and
 2. adjust the module-doc sentences that describe `RequestIo` as part of the standing deviation so they state that it is now deleted and only `RequestEnd`/`flush_response` remain exempt (keep the `MB.36.5`/`MB.36.11` deviation history intact).
+
+Also authorized (the tightening the architecture reviewer proved necessary): set the `RequestIo` rule's `allowed` to `&[]`, so the deleted name is refused in **every** file including its old home, and drop the `RequestIo` line from the planted fixture (4) so that fixture plants only `pub struct RequestEnd;` with its count/assertion adjusted to the tightened scan. Never leave a plant that certifies a re-introduced `RequestIo` as acceptable.
 
 Every other assertion must stay: `RequestEnd`, `flush_response`, the `WorkerRuntime`/`flush_request` refusal over all of `crates/`, the planted-path refusal proof, and the count/name of every test. Never add `#[ignore]`, never delete or rename a test, never relax a scan rule. `uv run --no-project tools/critical_guard.py --base e6b1291 --node MB.40.3.4` must pass.
 

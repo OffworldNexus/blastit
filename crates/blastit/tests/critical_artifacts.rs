@@ -19,31 +19,36 @@
 //!   deletes `WorkerRuntime`, `RequestIo`, `RequestEnd` and
 //!   `RequestIo::flush_response`; `OutputStream`/`OUTPUT_LINE_CAP` move to
 //!   `blastit-view::stream` and `serve_forever` takes the concrete
-//!   `PhpEmbedRuntime`. A deleted name leaves nothing for the compiler to
-//!   complain about, so the guard is a source scan — over the tree it walks,
-//!   never `git ls-files`, because an *untracked* file is exactly what a
-//!   re-introduced seam looks like before its first commit (`LESSONS.md`,
-//!   `MB.23.3`).
+//!   `PhpEmbedRuntime`. `MB.40.3.4` finished the trait half: `RequestIo` is
+//!   **deleted** and the worker's request transport is the concrete `ChanIo`, so
+//!   `RequestEnd` and `flush_response` are all that is left to pin below. A
+//!   deleted name leaves nothing for the compiler to complain about, so the
+//!   guard is a source scan — over the tree it walks, never `git ls-files`,
+//!   because an *untracked* file is exactly what a re-introduced seam looks like
+//!   before its first commit (`LESSONS.md`, `MB.23.3`).
 //!
-//! # The one exemption the scan carries: a recorded deviation from `R3`
+//! # The exemption the scan still carries: `MB.36.5`'s recorded deviation
 //!
 //! `R3`, design §4.2.1 and `ADR-0016` decision 2 — whose title is *"The worker
 //! trait is deleted, not re-homed."* — say `RequestIo`, `RequestEnd` and
-//! `flush_response` stop existing. The tree **deviates**: `MB.36.5` moved those
-//! three into `crates/blastit-view-php/src/worker.rs`, the crate that is their
-//! only implementer, because that worker needs a write contract for the
-//! response it is serving, and re-exported the two types from that crate's
-//! `src/lib.rs`. That is a *recorded* deviation from `R3`, not a reading of it —
-//! `MB.36.5`'s `RESULT.md` records the move and `MB.36.11`'s own `RESULT.md`
-//! records it as a deviation, and §4.2.1, §4.2.3 and §7 carry it after
-//! `MB.36.11` corrected them to the tree. This suite does not pretend the
-//! deviation is the requirement: it refuses everything the deviation does not
-//! cover. `WorkerRuntime` and `flush_request` are refused in **every** file under
-//! `crates/`; the per-request view is refused everywhere except exactly those
-//! two files. The exemption is pinned from both sides: the declarations it covers
-//! must still be there (a stale exemption is a failure, not a licence), and its
-//! *path* is proved meaningful by planting `RequestIo` in another fixture path
-//! and requiring a refusal.
+//! `flush_response` stop existing. `MB.36.5` left a *recorded* deviation from
+//! that: it moved those three into `crates/blastit-view-php/src/worker.rs`, the
+//! crate that is their only implementer, because that worker needs a write
+//! contract for the response it is serving — `MB.36.5`'s `RESULT.md` records the
+//! move, and `MB.36.11`'s own `RESULT.md` records it as a deviation. `MB.40.3.4`
+//! closed the trait half of it: `RequestIo` is **deleted** and the worker's
+//! request transport is the concrete `ChanIo`, so only `RequestEnd` and
+//! `flush_response` remain exempt — the end type every `DONE` is written from,
+//! and the flush the request contract calls once before the caller closes it.
+//! This suite does not pretend the remaining deviation is the requirement: it
+//! refuses everything the deviation does not cover. `WorkerRuntime` and
+//! `flush_request` are refused in **every** file under `crates/`; the
+//! per-request view is refused everywhere except exactly those two files — and
+//! the `RequestIo` rule exempts **no file at all**, so re-introducing the trait
+//! where it used to live is refused too. The exemption is pinned from both
+//! sides: the declarations it covers must still be there (a stale exemption is a
+//! failure, not a licence), and its *path* is proved meaningful by planting the
+//! name in another fixture path and requiring a refusal.
 //!
 //! # Failing closed, without a new dependency
 //!
@@ -328,7 +333,10 @@ fn the_deleted_transport_trait_stays_deleted() -> Result<(), String> {
         Rule {
             name: "RequestIo",
             why: "the deleted per-request trait (`ADR-0016` decision 2)",
-            allowed: PHP_SOLE_IMPLEMENTER,
+            // No exemption: `MB.40.3.4` deleted the trait, so its old home is
+            // not a licence to name it again. `RequestEnd`/`flush_response`
+            // below are the only names the PHP worker may still carry.
+            allowed: &[],
         },
         Rule {
             name: "RequestEnd",
@@ -401,11 +409,7 @@ fn assert_transport_layout(crates: &Path) -> Result<(), String> {
          declares `runtime: PhpEmbedRuntime`",
         worker.display()
     );
-    for required in [
-        "pub trait RequestIo",
-        "pub struct RequestEnd",
-        "fn flush_response",
-    ] {
+    for required in ["pub struct RequestEnd", "fn flush_response"] {
         if !text.contains(required) {
             return Err(format!(
                 "{} is exempt from the scan for `RequestIo`/`RequestEnd`/`flush_response`, but it \
@@ -431,7 +435,7 @@ fn the_trait_scan_catches_a_planted_name() -> Result<(), String> {
         Rule {
             name: "RequestIo",
             why: "the deleted per-request trait",
-            allowed: PHP_SOLE_IMPLEMENTER,
+            allowed: &[],
         },
     ];
 
@@ -471,20 +475,38 @@ fn the_trait_scan_catches_a_planted_name() -> Result<(), String> {
         "`RequestIo` outside the PHP worker must be refused, got: {found:?}"
     );
 
-    // (4) ...and the exempted path itself passes, so the tree is clean again.
+    // (4) The old home is no longer a licence to *name* the deleted trait: a
+    // file there that names nothing forbidden scans clean, which is what the
+    // real tree does.
     scratch.write(
         "blastit-view-php/src/worker.rs",
-        b"pub trait RequestIo {}\npub struct RequestEnd;\n",
+        b"pub struct RequestEnd;\n",
     )?;
     let found = scan(&scratch.root, &rules)?;
-    assert!(
-        found.iter().all(|finding| !finding.contains("worker.rs")),
-        "the sole implementer must not be refused for a name it owns, got: {found:?}"
-    );
     assert_eq!(
         found.len(),
         2,
-        "only the two planted names remain refused: {found:?}"
+        "a file that names no forbidden identifier is clean: {found:?}"
+    );
+
+    // (5) ...and re-planting `RequestIo` where it used to live is refused like
+    // anywhere else. `MB.40.3.4` deleted the trait, so its old home carries no
+    // exemption: this is the regression the real rule must catch.
+    scratch.write(
+        "blastit-view-php/src/worker.rs",
+        b"pub struct RequestEnd;\npub trait RequestIo {}\n",
+    )?;
+    let found = scan(&scratch.root, &rules)?;
+    assert_eq!(
+        found.len(),
+        3,
+        "the re-planted name, and only it: {found:?}"
+    );
+    assert!(
+        found
+            .iter()
+            .any(|finding| finding.contains("worker.rs:2") && finding.contains("RequestIo")),
+        "a re-introduced `RequestIo` must be refused in its old home too, got: {found:?}"
     );
     Ok(())
 }
@@ -495,11 +517,15 @@ fn the_trait_scan_catches_a_planted_name() -> Result<(), String> {
 /// 2): `MB.36.5` moved `RequestIo`/`RequestEnd`/`flush_response` out of the
 /// deleted `blastit-view/src/runtime.rs` into the crate that is their only
 /// implementer — which needs a write contract for the response it is serving —
-/// and re-exports the two types from that crate's root. `ADR-0016` decision 2
-/// says “the worker trait is deleted, not re-homed”, so this list is the
-/// deviation made explicit and *narrow*: `WorkerRuntime` and `flush_request`
-/// have no exemption at all, and `assert_transport_layout` refuses a stale
-/// entry here.
+/// and re-exported them from that crate's root. `MB.40.3.4` converged the trait
+/// half by deleting `RequestIo` (the transport there is now the concrete
+/// `ChanIo`), leaving `RequestEnd` and `flush_response` as the exemption. The
+/// `RequestIo` rule sets `allowed: &[]`, so a re-introduced trait is refused
+/// even in the files below. `ADR-0016` decision 2 says “the worker trait is
+/// deleted, not re-homed”, so
+/// this list is the deviation made explicit and *narrow*: `WorkerRuntime` and
+/// `flush_request` have no exemption at all, and `assert_transport_layout`
+/// refuses a stale entry here.
 const PHP_SOLE_IMPLEMENTER: &[&str] = &[
     "blastit-view-php/src/lib.rs",
     "blastit-view-php/src/worker.rs",
