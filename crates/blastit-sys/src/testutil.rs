@@ -82,8 +82,12 @@ pub fn in_child(body: impl FnOnce() -> i32) -> i32 {
 /// from a signal is the answer: a seccomp kill is `SIGSYS`.
 pub fn child_status(body: impl FnOnce() -> i32) -> ExitStatus {
     // SAFETY: the harness is multi-threaded, so the checked `fork()` would
-    // refuse. The child body is a short, syscall-shaped function that ends in
-    // `_exit`, which is the case `fork_unchecked` exists for.
+    // refuse. The child body ends in `_exit`, and it **must make
+    // async-signal-safe calls only**: at the instant of the fork another thread
+    // may hold the allocator's lock, a stdio lock or a lock inside the harness,
+    // and the child has no other thread to release it. A body that allocates can
+    // therefore wait on that lock forever; `seccomp.rs`'s tests pass raw-syscall
+    // bodies for exactly that reason.
     let fork = must(unsafe { fork_unchecked() });
     match fork {
         Fork::Child => {
@@ -100,6 +104,73 @@ pub fn child_status(body: impl FnOnce() -> i32) -> ExitStatus {
 pub fn child_ok(label: &str, body: impl FnOnce() -> i32) {
     let code = in_child(body);
     assert_eq!(code, 0, "{label}: the forked child reported failure {code}");
+}
+
+/// The environment variable naming the probe a spawned test process runs.
+///
+/// A probe is the escape hatch for a body that cannot run in a child of
+/// `fork()`: it allocates, starts a thread, or drives a function that allocates
+/// on its success path (`drop_privileges` reads the capability sets from
+/// `/proc/self/status`). See [`run_probe`].
+pub const PROBE_VAR: &str = "BLASTIT_SYS_PROBE";
+
+/// The prefix of the line a probe process writes to its stdout.
+pub const PROBE_MARKER: &str = "blastit-sys-probe:";
+
+/// Run probe `name` in a **fresh process** of the test binary and return the
+/// code it reported.
+///
+/// `runner` is the full test name of the module's `probe_runner` (`"proc::tests::probe_runner"`),
+/// so a binary that has one per module starts only the one that knows `name`.
+///
+/// The process is spawned with [`std::process::Command`], i.e. `execve`: it gets
+/// a private, unshared address space, where allocating and starting threads are
+/// safe — unlike a child of `fork()` inside the multi-threaded harness, which
+/// must make async-signal-safe calls only (see [`child_status`]).
+///
+/// The probe reports its code on a marker line, so a spawned process that exits
+/// `0` because its filter matched nothing is a failure, never a silent pass.
+pub fn run_probe(runner: &str, name: &str) -> i32 {
+    let exe = must(std::env::current_exe());
+    let output = must(
+        std::process::Command::new(exe)
+            .args(["--test-threads=1", "--nocapture", runner])
+            .env(PROBE_VAR, name)
+            .output(),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let reported = stdout
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix(PROBE_MARKER))
+        .and_then(|rest| rest.rsplit_once(':'))
+        .and_then(|(seen, code)| Some((seen, code.parse::<i32>().ok()?)));
+    let Some((seen, code)) = reported else {
+        panic!(
+            "probe {name} never ran: exited {:?}\nstdout:\n{stdout}\nstderr:\n{}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    assert_eq!(seen, name, "the test binary ran another probe");
+    assert_eq!(
+        output.status.code(),
+        Some(code),
+        "probe {name} reported {code} but exited with {:?}",
+        output.status.code()
+    );
+    code
+}
+
+/// Report `code` for probe `name` on stdout and exit with it. Never returns.
+///
+/// Called by a module's probe entry point once it has run its body.
+pub fn report_probe(name: &str, code: i32) -> ! {
+    let line = format!("{PROBE_MARKER}{name}:{code}\n");
+    // SAFETY: `line` is a live buffer of `line.len()` bytes and 1 is this
+    // process's stdout. A raw write, so the report does not depend on a
+    // buffered writer being flushed by `process::exit` below.
+    unsafe { libc::write(1, line.as_ptr().cast::<libc::c_void>(), line.len()) };
+    std::process::exit(code);
 }
 
 /// Block until `pid` has been reaped, and return how it ended.

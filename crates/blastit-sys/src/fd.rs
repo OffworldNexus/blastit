@@ -248,18 +248,20 @@ mod tests {
         // lowest-first, so nothing here is anywhere near 250.
         let target = 250;
         must(dup_onto(log_write.as_fd(), target));
-        // SAFETY: `dup_onto` just put a live descriptor on `target`.
-        let target_fd = unsafe { BorrowedFd::borrow_raw(target) };
+        // SAFETY: `dup_onto` just put a live descriptor on `target`, and this
+        // `OwnedFd` owns it from here — including when an assertion below
+        // panics. A descriptor without `FD_CLOEXEC` must not outlive this test,
+        // or a sibling test's forked child inherits it.
+        let target_fd = unsafe { OwnedFd::from_raw_fd(target) };
         assert!(
-            !must(fd_is_cloexec(target_fd)),
+            !must(fd_is_cloexec(target_fd.as_fd())),
             "the whole point of dup_onto is that the child's 0/1/2 survive execve"
         );
 
-        crate::testutil::write_all(target_fd, b"to the log pipe");
+        crate::testutil::write_all(target_fd.as_fd(), b"to the log pipe");
         drop(log_write);
-        // SAFETY: `target` is ours for this test; closing it here lets the read
-        // end see end-of-file.
-        assert_eq!(unsafe { libc::close(target) }, 0);
+        // Dropping the last write end is what lets the read end see end-of-file.
+        drop(target_fd);
         assert_eq!(crate::testutil::read_to_end(log_read), b"to the log pipe");
     }
 
@@ -269,6 +271,10 @@ mod tests {
         assert!(must(fd_is_cloexec(write_end.as_fd())));
         must(dup_onto(write_end.as_fd(), write_end.as_raw_fd()));
         assert!(!must(fd_is_cloexec(write_end.as_fd())));
+        // Leave the harness the way it was found: this test's subject is a
+        // descriptor the test process keeps, and a sibling test's forked child
+        // must not inherit it without `FD_CLOEXEC`.
+        must(set_cloexec(write_end.as_fd(), true));
     }
 
     #[test]

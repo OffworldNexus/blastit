@@ -3891,3 +3891,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T21:23 [MB.42.2.3] (unknown) edited fields
 - 2026-11-19T21:23 [MB.42.2.3] (lead) REVIEW FIX (filtered): MAJOR wheel wrapper sets BLASTIT_HANDOFF_DONE unconditionally (__main__.py:30, _blastit.py:473) so a pip-installed blastit NEVER probes .
 - 2026-11-19T21:30 [MB.42.2.3] (lead) status review -> done
+- 2026-11-19T21:30 [MB.42.2.4] (lead) status ready -> active
+- 2026-11-19T21:30 [MB.42.2.4] (lead) attempt 1/3 started
+- 2026-11-19T21:30 [MB.42.2.4] (lead) base 4dc0c2f569d60195bf6b682b0175294ab4d156f7
+- 2026-11-19T22:52 [MB.42.7] (unknown) created (task) Make blastit-sys seccomp unit-test forked children async-signal-safe (fork-inside-libtest deadlock)
+- 2026-11-19T22:52 [MB.42] (lead) created MB.42.7 from conductor diagnostic: blastit-sys seccomp::tests forks inside multi-threaded libtest, child deadlocked on futex_wait_queue (allocator mutex
+- 2026-11-19T22:54 [MB.42.2.4] (lead) status active -> review
+- 2026-11-19T22:58 [MB.42.2.4] (lead) REVIEW PENDING FIXES (filtered, to apply after MB.42.7): MAJOR PHP leg proves a build-tree shim not the bundle (BLASTIT_PHP_SHIM_DIR=target/php-sapi = Developme
+- 2026-11-19T22:58 [MB.42.7] (lead) status ready -> active
+- 2026-11-19T22:58 [MB.42.7] (lead) attempt 1/3 started
+- 2026-11-19T22:58 [MB.42.7] (lead) base 4dc0c2f569d60195bf6b682b0175294ab4d156f7
+- 2026-11-19T23:08 [MB.42.7] (lead) authorized protected-test hardening: crates/blastit-sys/tests/critical_embedded_seccomp.rs forks (libc::fork at :244 via try_fork at :163,340,368) and its child
+- 2026-11-19T23:19 [MB.42.7] (lead) status active -> done

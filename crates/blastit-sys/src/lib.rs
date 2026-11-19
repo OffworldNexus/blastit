@@ -172,7 +172,7 @@ pub use crate::privs::{
     Rlimits, drop_privileges, dumpable, harden_child, set_dumpable, set_rlimits, set_umask,
 };
 pub use crate::proc::{Fork, chdir, fork, fork_unchecked, thread_count};
-pub use crate::seccomp::{SeccompRole, install};
+pub use crate::seccomp::{InstallFailure, PreparedFilter, SeccompRole, install};
 pub use crate::signal::{
     SignalFd, SignalMask, current_signal_mask, kill, reap, restore_signal_mask_in_child,
 };

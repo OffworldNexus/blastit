@@ -258,7 +258,12 @@ mod tests {
     use super::*;
     use crate::caps::{CapSet, Capabilities};
     use crate::error::Error;
-    use crate::testutil::{child_ok, euid, in_child, is_root, must, must_err, root_only};
+    use crate::testutil::{
+        PROBE_VAR, child_ok, euid, is_root, must, must_err, report_probe, root_only, run_probe,
+    };
+
+    /// The test a probe process matches, so only this module's runner starts.
+    const PROBE_RUNNER: &str = "privs::tests::probe_runner";
 
     #[test]
     fn set_umask_sets_and_returns_the_previous_mask() {
@@ -340,21 +345,14 @@ mod tests {
         if !root_only() {
             return;
         }
-        // The order the crate documents: drop first, harden second.
-        let uid = 20_500;
-        let code = in_child(move || {
-            if drop_privileges(uid).is_err() {
-                return 1;
-            }
-            if harden_child(Signal::KILL).is_err() {
-                return 2;
-            }
-            match pdeathsig() == Signal::KILL.as_raw() {
-                true => 0,
-                false => 3,
-            }
-        });
-        assert_eq!(code, 0, "child failure code {code}");
+        // The order the crate documents: drop first, harden second. A fresh
+        // process, not a forked child: `drop_privileges` reads the capability
+        // sets from `/proc/self/status`, so it allocates (see `run_probe`).
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "harden-after-drop"),
+            0,
+            "the death signal did not survive the drop"
+        );
     }
 
     #[test]
@@ -365,23 +363,11 @@ mod tests {
         // `setresgid` and `setresuid` clear `PR_SET_PDEATHSIG` (prctl(2) lists
         // `set*gid`/`set*uid`), which is why the sequence in the crate docs
         // hardens *after* the drop. This is that hazard, on purpose.
-        let uid = 20_500;
-        let code = in_child(move || {
-            if harden_child(Signal::KILL).is_err() {
-                return 1;
-            }
-            if pdeathsig() != Signal::KILL.as_raw() {
-                return 2;
-            }
-            if drop_privileges(uid).is_err() {
-                return 3;
-            }
-            match pdeathsig() {
-                0 => 0,
-                _ => 4,
-            }
-        });
-        assert_eq!(code, 0, "child failure code {code}");
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "drop-after-harden"),
+            0,
+            "hardening before the drop kept a death signal it must lose"
+        );
     }
 
     #[test]
@@ -426,15 +412,11 @@ mod tests {
         // skipped rather than treated as a failure, because a container without
         // `cap_setpcap` must keep working). The boot refuses long before this, in
         // `caps::decide`, with the list of capabilities that are missing.
-        let uid = euid();
-        let code = in_child(move || match drop_privileges(uid) {
-            Ok(()) => 1,
-            Err(err) => match Error::from_io(&err) {
-                Some(Error::PrivilegeDrop { stage, .. }) if *stage == "setgroups(0, NULL)" => 0,
-                _ => 2,
-            },
-        });
-        assert_eq!(code, 0, "child failure code {code}");
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "drop-without-root"),
+            0,
+            "an unprivileged drop did not fail at setgroups"
+        );
     }
 
     #[test]
@@ -442,32 +424,11 @@ mod tests {
         if !root_only() {
             return;
         }
-        let uid = 20_500;
-        let code = in_child(move || {
-            if drop_privileges(uid).is_err() {
-                return 1;
-            }
-            // SAFETY: the four getters take no arguments and cannot fail.
-            unsafe {
-                if libc::getuid() != uid
-                    || libc::geteuid() != uid
-                    || libc::getgid() != uid
-                    || libc::getegid() != uid
-                {
-                    return 2;
-                }
-                // No supplementary groups are left over.
-                if libc::getgroups(0, std::ptr::null_mut()) != 0 {
-                    return 3;
-                }
-                // The way back to root is gone.
-                if libc::setuid(0) == 0 {
-                    return 4;
-                }
-            }
-            0
-        });
-        assert_eq!(code, 0, "child failure code {code}");
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "drop-to-view-uid"),
+            0,
+            "the dropped process kept a way back to root"
+        );
     }
 
     /// ROADMAP D6: a drop that *starts* with the capabilities of a rootless
@@ -484,34 +445,133 @@ mod tests {
         if !root_only() {
             return;
         }
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "rootless-caps"),
+            0,
+            "a rootless drop left a capability behind"
+        );
+    }
+
+    /// The one test a probe process runs; a no-op in an ordinary test run.
+    #[test]
+    fn probe_runner() {
+        let Ok(name) = std::env::var(PROBE_VAR) else {
+            return;
+        };
+        report_probe(&name, probe(&name).unwrap_or(1));
+    }
+
+    /// The bodies that need a private address space, where allocating is safe.
+    fn probe(name: &str) -> Option<i32> {
+        match name {
+            "harden-after-drop" => Some(probe_harden_after_drop()),
+            "drop-after-harden" => Some(probe_drop_after_harden()),
+            "drop-without-root" => Some(probe_drop_without_root()),
+            "drop-to-view-uid" => Some(probe_drop_to_view_uid()),
+            "rootless-caps" => Some(probe_rootless_caps()),
+            _ => None,
+        }
+    }
+
+    /// The documented order: drop, then harden — the death signal survives.
+    fn probe_harden_after_drop() -> i32 {
         let uid = 20_500;
-        let code = in_child(move || {
-            // The capabilities a rootless init is started with: the whole set a
-            // deployment is advised to give (M1 — with `cap_setpcap` the
-            // bounding set is emptied too), as permitted and effective, which is
-            // what a launcher hands over. As root we raise them ourselves.
-            let needs = crate::caps::Capability::WANTED
-                .iter()
-                .fold(0_u64, |mask, cap| mask | (1_u64 << cap.raw()));
-            if crate::caps::capset(needs, needs, needs).is_err() {
-                return 1;
-            }
-            if !Capabilities::read()
-                .unwrap()
-                .holds(CapSet::Permitted, crate::caps::Capability::SETUID)
+        if drop_privileges(uid).is_err() {
+            return 1;
+        }
+        if harden_child(Signal::KILL).is_err() {
+            return 2;
+        }
+        match pdeathsig() == Signal::KILL.as_raw() {
+            true => 0,
+            false => 3,
+        }
+    }
+
+    /// The same two steps the other way round: the death signal is cleared.
+    fn probe_drop_after_harden() -> i32 {
+        let uid = 20_500;
+        if harden_child(Signal::KILL).is_err() {
+            return 1;
+        }
+        if pdeathsig() != Signal::KILL.as_raw() {
+            return 2;
+        }
+        if drop_privileges(uid).is_err() {
+            return 3;
+        }
+        match pdeathsig() {
+            0 => 0,
+            _ => 4,
+        }
+    }
+
+    /// No privileges: the first step that needs one reports it by name.
+    fn probe_drop_without_root() -> i32 {
+        let uid = euid();
+        match drop_privileges(uid) {
+            Ok(()) => 1,
+            Err(err) => match Error::from_io(&err) {
+                Some(Error::PrivilegeDrop { stage, .. }) if *stage == "setgroups(0, NULL)" => 0,
+                _ => 2,
+            },
+        }
+    }
+
+    /// After the drop: every id is the target uid and `setuid(0)` fails.
+    fn probe_drop_to_view_uid() -> i32 {
+        let uid = 20_500;
+        if drop_privileges(uid).is_err() {
+            return 1;
+        }
+        // SAFETY: the four getters take no arguments and cannot fail.
+        unsafe {
+            if libc::getuid() != uid
+                || libc::geteuid() != uid
+                || libc::getgid() != uid
+                || libc::getegid() != uid
             {
                 return 2;
             }
-            if drop_privileges(uid).is_err() {
+            // No supplementary groups are left over.
+            if libc::getgroups(0, std::ptr::null_mut()) != 0 {
                 return 3;
             }
-            let left = Capabilities::read().unwrap();
-            if !left.is_clear() {
+            // The way back to root is gone.
+            if libc::setuid(0) == 0 {
                 return 4;
             }
-            // The identity checks ran, so the capabilities are gone for good.
-            0
-        });
-        assert_eq!(code, 0, "child failure code {code}");
+        }
+        0
+    }
+
+    /// A rootless drop clears a permitted/effective/ambient set it started with.
+    fn probe_rootless_caps() -> i32 {
+        let uid = 20_500;
+        // The capabilities a rootless init is started with: the whole set a
+        // deployment is advised to give (M1 — with `cap_setpcap` the bounding
+        // set is emptied too), as permitted and effective, which is what a
+        // launcher hands over. As root we raise them ourselves.
+        let needs = crate::caps::Capability::WANTED
+            .iter()
+            .fold(0_u64, |mask, cap| mask | (1_u64 << cap.raw()));
+        if crate::caps::capset(needs, needs, needs).is_err() {
+            return 1;
+        }
+        if !Capabilities::read()
+            .unwrap()
+            .holds(CapSet::Permitted, crate::caps::Capability::SETUID)
+        {
+            return 2;
+        }
+        if drop_privileges(uid).is_err() {
+            return 3;
+        }
+        let left = Capabilities::read().unwrap();
+        if !left.is_clear() {
+            return 4;
+        }
+        // The identity checks ran, so the capabilities are gone for good.
+        0
     }
 }

@@ -172,55 +172,130 @@ pub fn install(role: SeccompRole) -> io::Result<()> {
         Err(err) => return Err(step("counting threads", err)),
     }
 
-    let mut program = Program::new();
-    build(role, &mut program)?;
-    install_program(&program)
+    match PreparedFilter::for_role(role)?.install() {
+        Ok(()) => Ok(()),
+        Err(failure) => Err(step(
+            failure.stage,
+            io::Error::from_raw_os_error(failure.errno),
+        )),
+    }
 }
 
-/// Hands `program` to the kernel: the BPF half of [`install`], separate so that
-/// a test can install a program it built itself.
+/// A filter built and resolved ahead of the fork that installs it.
 ///
-/// This sets `PR_SET_NO_NEW_PRIVS` itself — §7.3: that, and nothing else, is
-/// what allows an unprivileged process to install a filter, and it also means
-/// no child of this one may gain privileges.
-fn install_program(program: &Program) -> io::Result<()> {
-    // SAFETY: `PR_SET_NO_NEW_PRIVS` takes one integer, 1 to enable it, and
-    // ignores the remaining arguments.
-    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == -1 {
-        return Err(step("PR_SET_NO_NEW_PRIVS", io::Error::last_os_error()));
+/// The program is a fixed stack array, so preparing a filter allocates nothing
+/// and [`PreparedFilter::install`] is a pair of syscalls. That pair is exactly
+/// what a **child of `fork()`** may run, which is where blastit installs its
+/// filters — the filter has to go on while the process is still single-threaded
+/// (§4, §7.3), and allocating in such a child can wait forever on a lock another
+/// thread held at the instant of the fork.
+///
+/// [`install`] is the checked entry point init uses. This type exists for a
+/// caller that prepares the program somewhere else, or that has to install one
+/// in a process which cannot satisfy [`install`]'s single-threaded precondition
+/// (a test process whose harness has threads of its own) — the filter's rules
+/// are then still the ones this module builds.
+pub struct PreparedFilter {
+    filter: [libc::sock_filter; MAX_PROGRAM],
+    len: u16,
+}
+
+impl PreparedFilter {
+    /// Builds `role`'s filter, resolved and ready to install.
+    ///
+    /// # Errors
+    ///
+    /// [`std::io::Error`] when the program does not fit its buffer or a branch
+    /// does not resolve — a bug in this module, never a reaction to input.
+    pub fn for_role(role: SeccompRole) -> io::Result<Self> {
+        Self::for_arch(role, AUDIT_ARCH)
     }
 
-    let (mut bytes, len) = program.resolve()?;
-    let mut descriptor = libc::sock_fprog {
-        len,
-        filter: bytes.as_mut_ptr(),
-    };
-
-    // SAFETY: `descriptor` describes a program of `len` instructions that lives
-    // on this stack frame and outlives both calls; the kernel copies the
-    // program before returning.
-    unsafe {
-        let installed = libc::syscall(
-            libc::SYS_seccomp,
-            libc::SECCOMP_SET_MODE_FILTER as libc::c_long,
-            0 as libc::c_long,
-            &mut descriptor as *mut libc::sock_fprog,
-        );
-        if installed == 0 {
-            return Ok(());
-        }
-        // A kernel without `seccomp(2)` (before 3.17) still has the `prctl`
-        // spelling, which takes the same program.
-        if libc::prctl(
-            libc::PR_SET_SECCOMP,
-            libc::SECCOMP_MODE_FILTER as libc::c_ulong,
-            &mut descriptor as *mut libc::sock_fprog,
-        ) == 0
-        {
-            return Ok(());
-        }
+    /// [`for_role`] for the architecture the caller names, so a test can build
+    /// a filter that has to kill.
+    fn for_arch(role: SeccompRole, arch: u32) -> io::Result<Self> {
+        let mut program = Program::new();
+        build_for(role, arch, &mut program)?;
+        let (filter, len) = program.resolve()?;
+        Ok(Self { filter, len })
     }
-    Err(step("installing the filter", io::Error::last_os_error()))
+
+    /// Hands the filter to the kernel: `PR_SET_NO_NEW_PRIVS` first — §7.3: that,
+    /// and nothing else, is what allows an unprivileged process to install a
+    /// filter, and it also means no child of this one may gain privileges — then
+    /// `seccomp(SECCOMP_SET_MODE_FILTER)`, with the older `prctl(PR_SET_SECCOMP)`
+    /// spelling as the fallback.
+    ///
+    /// Makes syscalls and nothing else: no allocation, no lock, no destructor,
+    /// and a [`Copy`] failure value instead of an `io::Error`. A child of
+    /// `fork()` may therefore call it. The filter cannot be removed afterwards.
+    pub fn install(&self) -> Result<(), InstallFailure> {
+        // The kernel's `sock_fprog` wants `*mut`; this stack copy keeps
+        // `install` callable on a shared reference, and copying a fixed array
+        // allocates nothing.
+        let mut filter = self.filter;
+        let mut descriptor = libc::sock_fprog {
+            len: self.len,
+            filter: filter.as_mut_ptr(),
+        };
+
+        // SAFETY: `PR_SET_NO_NEW_PRIVS` takes one integer, 1 to enable it, and
+        // ignores the rest. `descriptor` describes `self.len` instructions in
+        // `filter`, which lives on this frame across both calls; the kernel
+        // copies the program before returning.
+        unsafe {
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1 {
+                return Err(InstallFailure {
+                    stage: "PR_SET_NO_NEW_PRIVS",
+                    errno: current_errno(),
+                });
+            }
+
+            let installed = libc::syscall(
+                libc::SYS_seccomp,
+                libc::SECCOMP_SET_MODE_FILTER as libc::c_long,
+                0 as libc::c_long,
+                &mut descriptor as *mut libc::sock_fprog,
+            );
+            if installed == 0 {
+                return Ok(());
+            }
+            // A kernel without `seccomp(2)` (before 3.17) still has the `prctl`
+            // spelling, which takes the same program.
+            if libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER as libc::c_ulong,
+                &mut descriptor as *mut libc::sock_fprog,
+            ) == 0
+            {
+                return Ok(());
+            }
+        }
+        Err(InstallFailure {
+            stage: "installing the filter",
+            errno: current_errno(),
+        })
+    }
+}
+
+/// Which step of [`PreparedFilter::install`] failed, and the `errno` there.
+///
+/// [`Copy`] and heap-free, so a child of `fork()` can hold one without
+/// allocating: [`install`] is what turns it into the `io::Error` a caller
+/// reports.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct InstallFailure {
+    /// The step, named as the boot message names it.
+    pub stage: &'static str,
+    /// The `errno` that step returned.
+    pub errno: i32,
+}
+
+/// The `errno` of the last failed call, read without building an `io::Error`.
+fn current_errno() -> i32 {
+    io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EINVAL)
 }
 
 /// The `AUDIT_ARCH_*` value `seccomp_data.arch` must carry.
@@ -559,18 +634,16 @@ fn labelled(label: Label, step: Step) -> Step {
     }
 }
 
-/// Builds the filter for `role`, in the order the kernel walks it.
+/// Builds the filter for `role` on the architecture `arch`, in the order the
+/// kernel walks it.
 ///
 /// The shape is: check the architecture, then the syscall number against the
 /// refusal list, then the address family of the two socket calls and the flags
 /// of `clone`, and finally the shared actions. Every branch is forward, which
 /// is all classic BPF has.
-fn build(role: SeccompRole, program: &mut Program) -> io::Result<()> {
-    build_for(role, AUDIT_ARCH, program)
-}
-
-/// [`build`] with the architecture the filter expects spelled out, so a test
-/// can build one that has to kill.
+///
+/// `arch` is spelled out — [`PreparedFilter::for_role`] passes the running one —
+/// so a test can build a filter that has to kill.
 fn build_for(role: SeccompRole, arch: u32, program: &mut Program) -> io::Result<()> {
     // A filter written for one architecture's syscall table means nothing on
     // another, so a foreign `arch` kills the process (§7.3). Nothing
@@ -759,8 +832,9 @@ fn bad_program(detail: &'static str) -> io::Error {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::ExitStatus;
     use crate::error::Error;
-    use crate::testutil::{child_ok, child_status};
+    use crate::testutil::{PROBE_VAR, child_status, report_probe, run_probe};
 
     /// Every role, so the tests cannot forget one.
     const ROLES: &[SeccompRole] = &[
@@ -785,41 +859,90 @@ mod tests {
         0x4000_0000, // CLONE_NEWNET
     ];
 
+    // # The async-signal-safe rule for every child of `fork()` in these tests
+    //
+    // The `fork()` happens inside the **multi-threaded** `libtest` process. At
+    // the instant of the fork another thread may hold the allocator's lock, a
+    // stdio lock or a lock inside the harness itself, and the child has no
+    // other thread to release it: it waits there forever (`futex_wait_queue`),
+    // which is how a `make fast-check` run once hung for ten minutes and how a
+    // second one was OOM-killed while spawning a thread.
+    //
+    // So a child body here makes **raw syscalls only**. Inside it and in
+    // everything it calls: no `Vec`, `String`, `format!`, `println!`,
+    // `assert!`/`assert_eq!`, `unwrap`, `Box`, `panic!`, no `Drop` that frees,
+    // and no function that can allocate or take a lock. Everything that needs
+    // any of those runs in the parent — before the fork (the resolved
+    // [`PreparedFilter`], which `Program::resolve` writes into a fixed stack
+    // array) or after `waitpid` (every assertion and every message). The only
+    // thing a child reports is an exit code.
+    //
+    // [`PreparedFilter::install`] is the child-side primitive: `prctl` and
+    // `seccomp` and nothing else, with a `Copy` failure value instead of an
+    // `io::Error`. The two bodies that *need* to allocate or start a thread run
+    // in a fresh process instead ([`run_probe`]).
+
+    /// Close every descriptor at or above 3, with one raw syscall.
+    ///
+    /// A sibling test deliberately holds a descriptor **without**
+    /// `FD_CLOEXEC` — that is `dup_onto`'s whole subject — and a child must not
+    /// keep it open. Production closes them the same way in `close_fds_except`;
+    /// a child cannot run that function's allocating scan fallback, so a kernel
+    /// older than 5.9 keeps them for the microseconds until `_exit`.
+    fn close_inherited() {
+        // SAFETY: `close_range` takes three integers and no pointers.
+        unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3 as libc::c_uint,
+                u32::MAX,
+                0 as libc::c_uint,
+            )
+        };
+    }
+
+    /// This thread's `errno`, read without allocating or taking a lock.
+    fn raw_errno() -> i32 {
+        // SAFETY: `__errno_location` returns this thread's `errno` cell.
+        unsafe { *libc::__errno_location() }
+    }
+
     /// `socket(domain, SOCK_STREAM, 0)`, closing what it created.
     ///
-    /// Returns the `errno` of a refusal, or `None` when the call succeeded.
-    fn try_socket(domain: libc::c_int) -> Option<i32> {
+    /// `0` when the family is permitted, else the `errno` of the refusal.
+    fn raw_socket(domain: libc::c_int) -> i32 {
         // SAFETY: `socket` takes three integers and returns a descriptor.
         let fd = unsafe { libc::socket(domain, libc::SOCK_STREAM, 0) };
         if fd == -1 {
-            return io::Error::last_os_error().raw_os_error();
+            return raw_errno();
         }
         // SAFETY: the descriptor was just created here and nothing else owns it.
         unsafe { libc::close(fd) };
-        None
+        0
     }
 
     /// `socketpair(domain, SOCK_STREAM, 0, sv)`, closing what it created.
-    fn try_socketpair(domain: libc::c_int) -> Option<i32> {
+    fn raw_socketpair(domain: libc::c_int) -> i32 {
         let mut fds = [0 as libc::c_int; 2];
         // SAFETY: `socketpair` writes two descriptors into the two-element
         // array, which is exactly the storage it needs.
         let created = unsafe { libc::socketpair(domain, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         if created == -1 {
-            return io::Error::last_os_error().raw_os_error();
+            return raw_errno();
         }
         // SAFETY: both descriptors were just created here.
         unsafe {
             libc::close(fds[0]);
             libc::close(fds[1]);
         }
-        None
+        0
     }
 
     /// `ptrace(PTRACE_TRACEME, 0, 0, 0)`, which an unprivileged process may
     /// otherwise call on itself.
-    fn try_ptrace() -> Option<i32> {
-        // SAFETY: `ptrace` takes an enum and three word-sized arguments.
+    fn raw_ptrace() -> i32 {
+        // SAFETY: `ptrace` takes an enum and three word-sized arguments, none of
+        // which `PTRACE_TRACEME` reads.
         let traced = unsafe {
             libc::ptrace(
                 libc::PTRACE_TRACEME,
@@ -828,40 +951,31 @@ mod tests {
                 std::ptr::null_mut::<libc::c_void>(),
             )
         };
-        match traced {
-            -1 => io::Error::last_os_error().raw_os_error(),
-            _ => None,
-        }
+        if traced == -1 { raw_errno() } else { 0 }
     }
 
-    /// The `errno` of the last failed call.
-    fn errno() -> Option<i32> {
-        io::Error::last_os_error().raw_os_error()
-    }
-
-    /// Reap a child this test created, and return `None` ("the call was
-    /// permitted"); a `waitpid` that fails for any other reason is `EINVAL`,
-    /// which no test accepts.
-    fn reap(pid: libc::pid_t) -> Option<i32> {
+    /// Reap `pid` with raw syscalls: `0` when it was reaped, `1` when `waitpid`
+    /// failed for a reason other than `EINTR` — no test accepts that.
+    fn raw_wait(pid: libc::pid_t) -> i32 {
         let mut status = 0;
         loop {
             // SAFETY: `waitpid` writes one status word into the valid storage
             // `status`; only this process's own child is waited for.
             let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
             if waited == pid {
-                return None;
+                return 0;
             }
-            if errno() != Some(libc::EINTR) {
-                return Some(libc::EINVAL);
+            if raw_errno() != libc::EINTR {
+                return 1;
             }
         }
     }
 
     /// `clone(flags, NULL, NULL, NULL, 0)`.
     ///
-    /// Returns the refusal's `errno`, or `None` when a process child was
-    /// created — the child `_exit`s immediately and the parent reaps it.
-    fn try_clone(flags: libc::c_ulong) -> Option<i32> {
+    /// `0` when a process child was created — it `_exit`s immediately and this
+    /// process reaps it — else the `errno` of the refusal.
+    fn raw_clone(flags: libc::c_ulong) -> i32 {
         // SAFETY: the five arguments are the flags, three optionally-null
         // pointer arguments and the TLS value; without `CLONE_VM` the null
         // stack makes this a process fork, which is what the child body
@@ -877,19 +991,19 @@ mod tests {
             )
         };
         if pid == -1 {
-            return errno();
+            return raw_errno();
         }
         if pid == 0 {
             // SAFETY: this is the new process; `_exit` never returns and runs
             // no destructors.
             unsafe { libc::_exit(0) }
         }
-        reap(pid as libc::pid_t)
+        raw_wait(pid as libc::pid_t)
     }
 
     /// `clone3(NULL, 0)`: `EFAULT` on a kernel without the filter, `ENOSYS`
     /// once the filter answers it.
-    fn try_clone3() -> Option<i32> {
+    fn raw_clone3() -> i32 {
         // SAFETY: `clone3` takes the `args` pointer and its size; a null
         // pointer is rejected by the kernel with `EFAULT` before it is read.
         let ret = unsafe {
@@ -899,22 +1013,29 @@ mod tests {
                 0_usize,
             )
         };
-        if ret == -1 { errno() } else { None }
+        if ret == -1 { raw_errno() } else { 0 }
     }
 
-    /// `fork(2)`, on the architecture whose syscall table has it.
+    /// `fork(2)` or `vfork(2)` by syscall number; the child body is one
+    /// `_exit`.
     #[cfg(target_arch = "x86_64")]
-    fn try_fork() -> Option<i32> {
-        // SAFETY: `fork` takes no arguments; the child only `_exit`s.
-        let pid = unsafe { libc::syscall(libc::SYS_fork) };
+    fn raw_fork_like(number: libc::c_long) -> i32 {
+        // SAFETY: both take no arguments; the child only `_exit`s.
+        let pid = unsafe { libc::syscall(number) };
         if pid == -1 {
-            return errno();
+            return raw_errno();
         }
         if pid == 0 {
             // SAFETY: this is the new process; `_exit` never returns.
             unsafe { libc::_exit(0) }
         }
-        reap(pid as libc::pid_t)
+        raw_wait(pid as libc::pid_t)
+    }
+
+    /// `fork(2)`, on the architecture whose syscall table has it.
+    #[cfg(target_arch = "x86_64")]
+    fn raw_fork() -> i32 {
+        raw_fork_like(libc::SYS_fork)
     }
 
     /// `vfork(2)`, on the architecture whose syscall table has it.
@@ -922,22 +1043,13 @@ mod tests {
     /// Only ever called against `EmbeddedView`, where the filter refuses it
     /// before a child exists: a real `vfork` child shares this stack.
     #[cfg(target_arch = "x86_64")]
-    fn try_vfork() -> Option<i32> {
-        // SAFETY: `vfork` takes no arguments. The child body is one `_exit`.
-        let pid = unsafe { libc::syscall(libc::SYS_vfork) };
-        if pid == -1 {
-            return errno();
-        }
-        if pid == 0 {
-            // SAFETY: this is the new process; `_exit` never returns.
-            unsafe { libc::_exit(0) }
-        }
-        reap(pid as libc::pid_t)
+    fn raw_vfork() -> i32 {
+        raw_fork_like(libc::SYS_vfork)
     }
 
     /// `execve("/nonexistent", ...)`: `ENOENT` when permitted, `EPERM` when
     /// the role refuses it.
-    fn try_execve() -> Option<i32> {
+    fn raw_execve() -> i32 {
         let path = b"/nonexistent-blastit-seccomp\0";
         let argv = [std::ptr::null::<libc::c_char>()];
         let envp = [std::ptr::null::<libc::c_char>()];
@@ -951,15 +1063,15 @@ mod tests {
                 envp.as_ptr(),
             )
         };
-        if ret == -1 { errno() } else { None }
+        if ret == -1 { raw_errno() } else { 0 }
     }
 
     /// `execveat(AT_FDCWD, "/nonexistent", ...)`.
-    fn try_execveat() -> Option<i32> {
+    fn raw_execveat() -> i32 {
         let path = b"/nonexistent-blastit-seccomp\0";
         let argv = [std::ptr::null::<libc::c_char>()];
         let envp = [std::ptr::null::<libc::c_char>()];
-        // SAFETY: the same NUL- and NULL-terminated arguments as `try_execve`,
+        // SAFETY: the same NUL- and NULL-terminated arguments as `raw_execve`,
         // resolved from the current directory.
         let ret = unsafe {
             libc::syscall(
@@ -971,26 +1083,141 @@ mod tests {
                 0 as libc::c_int,
             )
         };
-        if ret == -1 { errno() } else { None }
+        if ret == -1 { raw_errno() } else { 0 }
     }
 
     /// `setsid()`.
-    fn try_setsid() -> Option<i32> {
+    fn raw_setsid() -> i32 {
         // SAFETY: `setsid` takes no arguments.
         if unsafe { libc::setsid() } == -1 {
-            errno()
+            raw_errno()
         } else {
-            None
+            0
         }
     }
 
     /// `setpgid(0, 0)`, the calling process into its own group.
-    fn try_setpgid() -> Option<i32> {
+    fn raw_setpgid() -> i32 {
         // SAFETY: `setpgid` takes two pids; 0 means the calling process.
         if unsafe { libc::setpgid(0, 0) } == -1 {
-            errno()
+            raw_errno()
         } else {
-            None
+            0
+        }
+    }
+
+    /// `fork()`, install `filter`, run `body`, and require exit code `0`.
+    ///
+    /// Every `body` passed here is raw syscalls only — see the rule at the top
+    /// of this module's tests.
+    fn in_filtered_child(label: &str, filter: PreparedFilter, body: impl FnOnce() -> i32) {
+        match filtered_child(filter, body) {
+            ExitStatus::Code(0) => {}
+            ExitStatus::Code(254) => {
+                panic!("{label}: the forked child could not install the filter")
+            }
+            ExitStatus::Code(code) => panic!("{label}: the forked child reported failure {code}"),
+            other => panic!("{label}: the forked child did not exit normally: {other}"),
+        }
+    }
+
+    /// [`in_filtered_child`] without insisting on a normal exit, for the tests
+    /// whose expected answer is a signal death.
+    fn filtered_child(filter: PreparedFilter, body: impl FnOnce() -> i32) -> ExitStatus {
+        // This is the one `fork()` in this module: raw syscalls only from here
+        // to `_exit`, because the harness that called it is multi-threaded.
+        child_status(move || {
+            close_inherited();
+            if filter.install().is_err() {
+                return 254;
+            }
+            body()
+        })
+    }
+
+    /// `role`'s filter, prepared in the parent where allocating is safe.
+    fn prepared(role: SeccompRole) -> PreparedFilter {
+        PreparedFilter::for_role(role).unwrap()
+    }
+
+    /// `role`'s filter for `arch`, so a test can build one that has to kill.
+    fn prepared_for(role: SeccompRole, arch: u32) -> PreparedFilter {
+        PreparedFilter::for_arch(role, arch).unwrap()
+    }
+
+    /// The test a probe process matches, so only this module's runner starts.
+    const PROBE_RUNNER: &str = "seccomp::tests::probe_runner";
+
+    /// The one test a probe process runs; a no-op in an ordinary test run.
+    ///
+    /// Two bodies cannot run in a child of `fork()`: one starts a thread and the
+    /// other must not be single-threaded, and both allocate. They run in a
+    /// process of their own instead — see `crate::testutil::run_probe`.
+    #[test]
+    fn probe_runner() {
+        let Ok(name) = std::env::var(PROBE_VAR) else {
+            return;
+        };
+        report_probe(&name, probe(&name).unwrap_or(1));
+    }
+
+    /// Run probe `name`, in a process that may allocate and start threads.
+    fn probe(name: &str) -> Option<i32> {
+        match name {
+            "thread-refusal" => Some(probe_thread_refusal()),
+            "thread-after-filter-view" => Some(probe_thread_after_filter(SeccompRole::View {
+                egress: false,
+            })),
+            "thread-after-filter-embedded" => {
+                Some(probe_thread_after_filter(SeccompRole::EmbeddedView {
+                    egress: false,
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    /// `install` must refuse a process that already has a second thread, and it
+    /// must refuse **before** the kernel sees the filter.
+    fn probe_thread_refusal() -> i32 {
+        let worker = std::thread::spawn(std::thread::park);
+        for _ in 0..100_000 {
+            match crate::thread_count() {
+                Ok(threads) if threads >= 2 => break,
+                _ => std::thread::yield_now(),
+            }
+        }
+        match install(SeccompRole::View { egress: false }) {
+            Err(err) => match Error::from_io(&err) {
+                Some(Error::NotSingleThreadedSeccomp { threads }) if *threads >= 2 => {}
+                _ => return 2,
+            },
+            Ok(()) => return 1,
+        }
+        // The refusal happened before the filter could be installed: a socket
+        // the filter would have refused still works.
+        if raw_socket(libc::AF_INET) != 0 {
+            return 3;
+        }
+        worker.thread().unpark();
+        0
+    }
+
+    /// `clone3` answers `ENOSYS`, so glibc's `pthread_create` falls back to
+    /// `clone` — and a thread really starts afterwards.
+    fn probe_thread_after_filter(role: SeccompRole) -> i32 {
+        let Ok(filter) = PreparedFilter::for_role(role) else {
+            return 1;
+        };
+        if filter.install().is_err() {
+            return 1;
+        }
+        if raw_clone3() != libc::ENOSYS {
+            return 2;
+        }
+        match std::thread::spawn(|| 7).join() {
+            Ok(7) => 0,
+            _ => 3,
         }
     }
 
@@ -1000,7 +1227,7 @@ mod tests {
     /// `AUDIT_ARCH_*` value, not a syscall number.
     fn compared_syscalls(role: SeccompRole) -> Vec<u32> {
         let mut program = Program::new();
-        build(role, &mut program).unwrap();
+        build_for(role, AUDIT_ARCH, &mut program).unwrap();
         let end = program.steps[..program.len]
             .iter()
             .position(|step| step.code == JA)
@@ -1014,152 +1241,113 @@ mod tests {
 
     #[test]
     fn a_view_without_egress_keeps_unix_and_loses_inet() {
-        child_ok("view socket", || {
-            if install(SeccompRole::View { egress: false }).is_err() {
-                return 1;
-            }
-            if try_socket(libc::AF_UNIX).is_some() {
-                return 2;
-            }
-            match try_socket(libc::AF_INET) {
-                Some(libc::EPERM) => {}
-                _ => return 3,
-            }
-            match try_socket(libc::AF_INET6) {
-                Some(libc::EPERM) => {}
-                _ => return 4,
-            }
-            match try_socket(libc::AF_NETLINK) {
-                Some(libc::EPERM) => {}
-                _ => return 5,
-            }
-            // A pair of descriptors this process owns stays available.
-            match try_socketpair(libc::AF_UNIX) {
-                None => 0,
-                _ => 6,
-            }
-        });
+        in_filtered_child(
+            "view socket",
+            prepared(SeccompRole::View { egress: false }),
+            || {
+                if raw_socket(libc::AF_UNIX) != 0 {
+                    return 1;
+                }
+                if raw_socket(libc::AF_INET) != libc::EPERM {
+                    return 2;
+                }
+                if raw_socket(libc::AF_INET6) != libc::EPERM {
+                    return 3;
+                }
+                if raw_socket(libc::AF_NETLINK) != libc::EPERM {
+                    return 4;
+                }
+                // A pair of descriptors this process owns stays available.
+                if raw_socketpair(libc::AF_UNIX) != 0 {
+                    return 5;
+                }
+                0
+            },
+        );
     }
 
     #[test]
     fn socketpair_is_unix_only_for_every_role() {
-        for (label, role) in [
-            ("view socketpair", SeccompRole::View { egress: false }),
-            ("egress view socketpair", SeccompRole::View { egress: true }),
-            (
-                "embedded view socketpair",
-                SeccompRole::EmbeddedView { egress: false },
-            ),
-            (
-                "egress embedded view socketpair",
-                SeccompRole::EmbeddedView { egress: true },
-            ),
-            ("http socketpair", SeccompRole::Http),
-            ("dbproxy socketpair", SeccompRole::DbProxy),
-        ] {
-            child_ok(label, move || {
-                if install(role).is_err() {
+        for role in ROLES {
+            in_filtered_child(&format!("{role:?} socketpair"), prepared(*role), || {
+                if raw_socketpair(libc::AF_UNIX) != 0 {
                     return 1;
-                }
-                if try_socketpair(libc::AF_UNIX).is_some() {
-                    return 2;
                 }
                 // `EPERM`, not the `EOPNOTSUPP` the kernel itself returns for a
                 // family `socketpair` does not support.
-                match try_socketpair(libc::AF_INET) {
-                    Some(libc::EPERM) => 0,
-                    _ => 3,
+                if raw_socketpair(libc::AF_INET) != libc::EPERM {
+                    return 2;
                 }
+                0
             });
         }
     }
 
     #[test]
     fn a_view_with_egress_keeps_inet_and_inet6() {
-        child_ok("egress view socket", || {
-            if install(SeccompRole::View { egress: true }).is_err() {
-                return 1;
-            }
-            if try_socket(libc::AF_INET).is_some() {
-                return 2;
-            }
-            if try_socket(libc::AF_INET6).is_some() {
-                return 3;
-            }
-            if try_socket(libc::AF_UNIX).is_some() {
-                return 4;
-            }
-            // Egress is a permission, not a requirement: everything else is
-            // still refused.
-            match try_socket(libc::AF_NETLINK) {
-                Some(libc::EPERM) => 0,
-                _ => 5,
-            }
-        });
+        in_filtered_child(
+            "egress view socket",
+            prepared(SeccompRole::View { egress: true }),
+            || {
+                if raw_socket(libc::AF_INET) != 0 {
+                    return 1;
+                }
+                if raw_socket(libc::AF_INET6) != 0 {
+                    return 2;
+                }
+                if raw_socket(libc::AF_UNIX) != 0 {
+                    return 3;
+                }
+                // Egress is a permission, not a requirement: everything else is
+                // still refused.
+                if raw_socket(libc::AF_NETLINK) != libc::EPERM {
+                    return 4;
+                }
+                0
+            },
+        );
     }
 
     #[test]
     fn http_and_the_scheduler_cannot_open_a_socket_at_all() {
-        for (label, role) in [
-            ("http socket", SeccompRole::Http),
-            ("scheduler socket", SeccompRole::Scheduler),
-        ] {
-            child_ok(label, move || {
-                if install(role).is_err() {
-                    return 1;
-                }
+        for role in [SeccompRole::Http, SeccompRole::Scheduler] {
+            in_filtered_child(&format!("{role:?} socket"), prepared(role), || {
                 for domain in [libc::AF_UNIX, libc::AF_INET, libc::AF_INET6] {
-                    match try_socket(domain) {
-                        Some(libc::EPERM) => {}
-                        _ => return 2,
+                    if raw_socket(domain) != libc::EPERM {
+                        return 1;
                     }
                 }
-                match try_socketpair(libc::AF_UNIX) {
-                    None => 0,
-                    _ => 3,
+                if raw_socketpair(libc::AF_UNIX) != 0 {
+                    return 2;
                 }
+                0
             });
         }
     }
 
     #[test]
     fn dbproxy_keeps_unix_and_tcp() {
-        child_ok("dbproxy socket", || {
-            if install(SeccompRole::DbProxy).is_err() {
-                return 1;
-            }
+        in_filtered_child("dbproxy socket", prepared(SeccompRole::DbProxy), || {
             for domain in [libc::AF_UNIX, libc::AF_INET, libc::AF_INET6] {
-                if try_socket(domain).is_some() {
-                    return 2;
+                if raw_socket(domain) != 0 {
+                    return 1;
                 }
             }
-            match try_socket(libc::AF_NETLINK) {
-                Some(libc::EPERM) => 0,
-                _ => 3,
+            if raw_socket(libc::AF_NETLINK) != libc::EPERM {
+                return 2;
             }
+            0
         });
     }
 
     #[test]
     fn every_role_refuses_ptrace() {
-        for (label, role) in [
-            ("view ptrace", SeccompRole::View { egress: false }),
-            ("egress view ptrace", SeccompRole::View { egress: true }),
-            (
-                "embedded view ptrace",
-                SeccompRole::EmbeddedView { egress: false },
-            ),
-            ("http ptrace", SeccompRole::Http),
-            ("dbproxy ptrace", SeccompRole::DbProxy),
-        ] {
-            child_ok(label, move || {
-                if install(role).is_err() {
+        for role in ROLES {
+            in_filtered_child(&format!("{role:?} ptrace"), prepared(*role), || {
+                if raw_ptrace() != libc::EPERM {
                     return 1;
                 }
-                match try_ptrace() {
-                    Some(libc::EPERM) => 0,
-                    _ => 2,
-                }
+                0
             });
         }
     }
@@ -1220,7 +1408,7 @@ mod tests {
     fn every_role_fits_the_program_buffer_and_resolves() {
         for role in ROLES {
             let mut program = Program::new();
-            build(*role, &mut program).unwrap();
+            build_for(*role, AUDIT_ARCH, &mut program).unwrap();
             assert!(
                 program.len <= MAX_PROGRAM,
                 "{role:?} needs {} instructions",
@@ -1272,7 +1460,7 @@ mod tests {
     /// The length of `build(role)`.
     fn program_len(role: SeccompRole) -> usize {
         let mut program = Program::new();
-        build(role, &mut program).unwrap();
+        build_for(role, AUDIT_ARCH, &mut program).unwrap();
         program.len
     }
 
@@ -1408,7 +1596,7 @@ mod tests {
     fn the_clone_handler_carries_the_namespace_mask_and_embedded_the_thread_bit() {
         let bitsets = |role: SeccompRole| {
             let mut program = Program::new();
-            build(role, &mut program).unwrap();
+            build_for(role, AUDIT_ARCH, &mut program).unwrap();
             let masks: Vec<u32> = program.steps[..program.len]
                 .iter()
                 .filter(|step| step.code == JSET)
@@ -1455,12 +1643,7 @@ mod tests {
         // child dies on its first syscall. This is the branch that makes an
         // x32 syscall number fatal too, and this is the only way to watch a
         // `SECCOMP_RET_KILL_PROCESS` happen without an x32 userland.
-        let mut program = Program::new();
-        build_for(SeccompRole::Http, 0xc000_ffff, &mut program).unwrap();
-        let status = child_status(|| {
-            if install_program(&program).is_err() {
-                return 1;
-            }
+        let status = filtered_child(prepared_for(SeccompRole::Http, 0xc000_ffff), || {
             // SAFETY: `getpid` takes no arguments and cannot fail. The child
             // dies here, so nothing after this line runs.
             unsafe { libc::getpid() };
@@ -1478,10 +1661,7 @@ mod tests {
         // on a foreign architecture (§7.3).
         #[cfg(target_arch = "x86_64")]
         {
-            let status = child_status(|| {
-                if install(SeccompRole::View { egress: false }).is_err() {
-                    return 1;
-                }
+            let status = filtered_child(prepared(SeccompRole::View { egress: false }), || {
                 // SAFETY: `syscall` takes a number and up to six word
                 // arguments; the x32 `getpid` takes none. The child dies here,
                 // so nothing after this line runs.
@@ -1495,16 +1675,10 @@ mod tests {
     #[test]
     fn an_ordinary_syscall_still_works() {
         for role in ROLES {
-            child_ok("ordinary", move || {
-                if install(*role).is_err() {
-                    return 1;
-                }
+            in_filtered_child(&format!("{role:?} getpid"), prepared(*role), || {
                 // SAFETY: `getpid` takes no arguments and cannot fail. If the
                 // filter killed or refused it, the child would not get here.
-                match unsafe { libc::getpid() } {
-                    pid if pid > 0 => 0,
-                    _ => 2,
-                }
+                if unsafe { libc::getpid() } > 0 { 0 } else { 1 }
             });
         }
     }
@@ -1513,79 +1687,44 @@ mod tests {
     fn install_refuses_a_process_that_is_not_single_threaded() {
         // The check is what turns a wrong fork order into a failed boot instead
         // of a half-sandboxed process, so it has to fire before the kernel sees
-        // anything. A forked child of the harness is one thread; this one adds
-        // a second and parks it, so the count is stable while `install` reads
-        // `/proc/self/status`.
-        child_ok("threads", || {
-            let worker = std::thread::spawn(std::thread::park);
-            for _ in 0..100_000 {
-                match crate::thread_count() {
-                    Ok(threads) if threads >= 2 => break,
-                    _ => std::thread::yield_now(),
-                }
-            }
-            match install(SeccompRole::View { egress: false }) {
-                Err(err) => match Error::from_io(&err) {
-                    Some(Error::NotSingleThreadedSeccomp { threads }) if *threads >= 2 => {}
-                    _ => return 2,
-                },
-                Ok(()) => return 1,
-            }
-            // The refusal happened before the filter could be installed: a
-            // socket the filter would have refused still works.
-            if try_socket(libc::AF_INET).is_some() {
-                return 3;
-            }
-            worker.thread().unpark();
-            0
-        });
+        // anything. It needs a process with a second thread, and a child of
+        // `fork()` cannot make one — thread creation allocates — so this body
+        // runs in a fresh process of its own (`run_probe`).
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "thread-refusal"),
+            0,
+            "install did not refuse a multi-threaded process"
+        );
     }
 
     #[test]
     fn clone3_is_enosys_and_a_thread_still_starts_on_both_views() {
         // `ENOSYS` is what makes glibc's `pthread_create` fall back to
-        // `clone`, so the two facts belong in one child: the refusal, then a
-        // thread that really starts.
-        for (label, role) in [
-            ("view clone3", SeccompRole::View { egress: false }),
-            (
-                "embedded view clone3",
-                SeccompRole::EmbeddedView { egress: false },
-            ),
+        // `clone`, so the two facts belong in one body: the refusal, then a
+        // thread that really starts. `std::thread::spawn` allocates, so each
+        // role gets a fresh process of its own (`run_probe`).
+        for (label, name) in [
+            ("view clone3", "thread-after-filter-view"),
+            ("embedded view clone3", "thread-after-filter-embedded"),
         ] {
-            child_ok(label, move || {
-                if install(role).is_err() {
-                    return 1;
-                }
-                match try_clone3() {
-                    Some(libc::ENOSYS) => {}
-                    _ => return 2,
-                }
-                match std::thread::spawn(|| 7).join() {
-                    Ok(7) => 0,
-                    _ => 3,
-                }
-            });
+            assert_eq!(
+                run_probe(PROBE_RUNNER, name),
+                0,
+                "{label}: the thread did not start after the filter"
+            );
         }
     }
 
     #[test]
     fn every_new_namespace_clone_flag_is_refused_by_both_views() {
-        for (label, role) in [
-            ("view namespaces", SeccompRole::View { egress: false }),
-            (
-                "embedded view namespaces",
-                SeccompRole::EmbeddedView { egress: false },
-            ),
+        for role in [
+            SeccompRole::View { egress: false },
+            SeccompRole::EmbeddedView { egress: false },
         ] {
-            child_ok(label, move || {
-                if install(role).is_err() {
-                    return 1;
-                }
+            in_filtered_child(&format!("{role:?} namespaces"), prepared(role), || {
                 for flag in CLONE_NEW_FLAGS {
-                    match try_clone(flag) {
-                        Some(libc::EPERM) => {}
-                        _ => return 2,
+                    if raw_clone(flag) != libc::EPERM {
+                        return 1;
                     }
                 }
                 0
@@ -1595,29 +1734,21 @@ mod tests {
 
     #[test]
     fn setsid_and_setpgid_are_refused_by_both_views() {
-        for (label, role) in [
-            ("view session", SeccompRole::View { egress: false }),
-            (
-                "embedded view session",
-                SeccompRole::EmbeddedView { egress: false },
-            ),
+        for role in [
+            SeccompRole::View { egress: false },
+            SeccompRole::EmbeddedView { egress: false },
         ] {
-            child_ok(label, move || {
-                if install(role).is_err() {
+            in_filtered_child(&format!("{role:?} session"), prepared(role), || {
+                if raw_setsid() != libc::EPERM {
                     return 1;
                 }
-                match try_setsid() {
-                    Some(libc::EPERM) => {}
-                    _ => return 2,
-                }
-                match try_setpgid() {
-                    Some(libc::EPERM) => {}
-                    _ => return 3,
+                if raw_setpgid() != libc::EPERM {
+                    return 2;
                 }
                 // The accepted twin: reading the ids is still allowed.
                 // SAFETY: `getpgrp` takes no arguments and cannot fail.
                 if unsafe { libc::getpgrp() } < 0 {
-                    return 4;
+                    return 3;
                 }
                 0
             });
@@ -1626,102 +1757,97 @@ mod tests {
 
     #[test]
     fn embedded_view_refuses_process_creation_and_exec_while_view_keeps_them() {
-        child_ok("embedded view exec", || {
-            if install(SeccompRole::EmbeddedView { egress: false }).is_err() {
-                return 1;
-            }
-            match try_execve() {
-                Some(libc::EPERM) => {}
-                _ => return 2,
-            }
-            match try_execveat() {
-                Some(libc::EPERM) => {}
-                _ => return 3,
-            }
-            // A `clone` without `CLONE_THREAD` is a new process.
-            match try_clone(libc::SIGCHLD as libc::c_ulong) {
-                Some(libc::EPERM) => {}
-                _ => return 4,
-            }
-            #[cfg(target_arch = "x86_64")]
-            {
-                match try_fork() {
-                    Some(libc::EPERM) => {}
-                    _ => return 5,
+        in_filtered_child(
+            "embedded view exec",
+            prepared(SeccompRole::EmbeddedView { egress: false }),
+            || {
+                if raw_execve() != libc::EPERM {
+                    return 1;
                 }
-                match try_vfork() {
-                    Some(libc::EPERM) => {}
-                    _ => return 6,
+                if raw_execveat() != libc::EPERM {
+                    return 2;
                 }
-            }
-            0
-        });
+                // A `clone` without `CLONE_THREAD` is a new process.
+                if raw_clone(libc::SIGCHLD as libc::c_ulong) != libc::EPERM {
+                    return 3;
+                }
+                #[cfg(target_arch = "x86_64")]
+                {
+                    if raw_fork() != libc::EPERM {
+                        return 4;
+                    }
+                    if raw_vfork() != libc::EPERM {
+                        return 5;
+                    }
+                }
+                0
+            },
+        );
 
-        child_ok("view exec", || {
-            if install(SeccompRole::View { egress: false }).is_err() {
-                return 1;
-            }
-            // The same two calls are permitted: a missing file is `ENOENT`,
-            // which only an image lookup can produce.
-            match try_execve() {
-                Some(libc::ENOENT) => {}
-                _ => return 2,
-            }
-            match try_execveat() {
-                Some(libc::ENOENT) => {}
-                _ => return 3,
-            }
-            // And a process-creating `clone` still works.
-            if try_clone(libc::SIGCHLD as libc::c_ulong).is_some() {
-                return 4;
-            }
-            #[cfg(target_arch = "x86_64")]
-            if try_fork().is_some() {
-                return 5;
-            }
-            0
-        });
+        in_filtered_child(
+            "view exec",
+            prepared(SeccompRole::View { egress: false }),
+            || {
+                // The same two calls are permitted: a missing file is `ENOENT`,
+                // which only an image lookup can produce.
+                if raw_execve() != libc::ENOENT {
+                    return 1;
+                }
+                if raw_execveat() != libc::ENOENT {
+                    return 2;
+                }
+                // And a process-creating `clone` still works.
+                if raw_clone(libc::SIGCHLD as libc::c_ulong) != 0 {
+                    return 3;
+                }
+                #[cfg(target_arch = "x86_64")]
+                if raw_fork() != 0 {
+                    return 4;
+                }
+                0
+            },
+        );
     }
 
     #[test]
     fn embedded_view_egress_reflects_the_flag() {
-        child_ok("embedded view no egress", || {
-            if install(SeccompRole::EmbeddedView { egress: false }).is_err() {
-                return 1;
-            }
-            if try_socket(libc::AF_UNIX).is_some() {
-                return 2;
-            }
-            match try_socket(libc::AF_INET) {
-                Some(libc::EPERM) => {}
-                _ => return 3,
-            }
-            match try_socket(libc::AF_INET6) {
-                Some(libc::EPERM) => {}
-                _ => return 4,
-            }
-            match try_socketpair(libc::AF_UNIX) {
-                None => 0,
-                _ => 5,
-            }
-        });
+        in_filtered_child(
+            "embedded view no egress",
+            prepared(SeccompRole::EmbeddedView { egress: false }),
+            || {
+                if raw_socket(libc::AF_UNIX) != 0 {
+                    return 1;
+                }
+                if raw_socket(libc::AF_INET) != libc::EPERM {
+                    return 2;
+                }
+                if raw_socket(libc::AF_INET6) != libc::EPERM {
+                    return 3;
+                }
+                if raw_socketpair(libc::AF_UNIX) != 0 {
+                    return 4;
+                }
+                0
+            },
+        );
 
-        child_ok("embedded view egress", || {
-            if install(SeccompRole::EmbeddedView { egress: true }).is_err() {
-                return 1;
-            }
-            if try_socket(libc::AF_INET).is_some() {
-                return 2;
-            }
-            if try_socket(libc::AF_INET6).is_some() {
-                return 3;
-            }
-            // Egress is a permission, not a requirement.
-            match try_socket(libc::AF_NETLINK) {
-                Some(libc::EPERM) => 0,
-                _ => 4,
-            }
-        });
+        in_filtered_child(
+            "embedded view egress",
+            prepared(SeccompRole::EmbeddedView { egress: true }),
+            || {
+                if raw_socket(libc::AF_INET) != 0 {
+                    return 1;
+                }
+                if raw_socket(libc::AF_INET6) != 0 {
+                    return 2;
+                }
+                // Egress is a permission, not a requirement.
+                if raw_socket(libc::AF_NETLINK) != libc::EPERM {
+                    return 3;
+                }
+                0
+            },
+        );
     }
 
     #[test]

@@ -19,23 +19,124 @@ use crate::pid::{Pid, impossible};
 /// deliberate race. When the count cannot be read at all the answer is
 /// [`Error::ThreadCount`], and the C1b binary treats that as fatal: if the
 /// invariant cannot be *checked*, init does not fork.
+///
+/// **It allocates nothing.** The file is read with raw `open`/`read`/`close`
+/// into a fixed stack buffer: [`fork`] and [`crate::install`] call this from
+/// inside a child of `fork()`, where an allocation can wait forever on a lock
+/// another thread held at the instant of the fork (`crate::testutil`'s
+/// `child_status` has the long version).
 pub fn thread_count() -> io::Result<usize> {
-    let status = std::fs::read_to_string("/proc/self/status")?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Threads:") {
-            return match rest.trim().parse::<usize>() {
-                Ok(threads) => Ok(threads),
-                Err(_) => Err(Error::ThreadCount {
-                    detail: "the Threads: line of /proc/self/status is not a number",
+    // SAFETY: the path is a NUL-terminated literal and neither flag takes an
+    // argument.
+    let fd = unsafe {
+        libc::open(
+            c"/proc/self/status".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let found = scan_threads(fd);
+    // SAFETY: `fd` was opened above and nothing else in this process owns it.
+    unsafe { libc::close(fd) };
+    match found? {
+        Some(threads) => Ok(threads),
+        None => Err(Error::ThreadCount {
+            detail: "/proc/self/status has no Threads: line",
+        }
+        .into()),
+    }
+}
+
+/// The `Threads:` value of the `/proc/self/status` behind `fd`, or `None` when
+/// the file has no such line.
+///
+/// Reads in fixed-size chunks and carries its state between them, so the field
+/// may straddle a read boundary. Every step is a syscall or arithmetic on this
+/// frame — [`thread_count`] runs in a child of `fork()`.
+fn scan_threads(fd: libc::c_int) -> io::Result<Option<usize>> {
+    /// The field this scan looks for.
+    const FIELD: &[u8] = b"Threads:";
+    /// How much of the file is read at a time.
+    const CHUNK: usize = 512;
+
+    /// What the scan is waiting for next.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        /// Matching the `Threads:` prefix.
+        Field,
+        /// Past the colon, before the first digit (a tab, usually).
+        Value,
+        /// Reading the digits.
+        Digits,
+    }
+
+    let mut buffer = [0_u8; CHUNK];
+    let mut phase = Phase::Field;
+    let mut matched = 0;
+    let mut value = 0_usize;
+    loop {
+        // SAFETY: `buffer` is `CHUNK` bytes of writable storage, which `read`
+        // fills at most completely.
+        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), CHUNK) };
+        if read == -1 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(err);
+        }
+        if read == 0 {
+            break;
+        }
+        for &byte in &buffer[..read as usize] {
+            match phase {
+                Phase::Field => {
+                    if byte == FIELD[matched] {
+                        matched += 1;
+                        if matched == FIELD.len() {
+                            phase = Phase::Value;
+                        }
+                    } else {
+                        // Restart, keeping a first byte that could begin again.
+                        matched = usize::from(byte == FIELD[0]);
+                    }
                 }
-                .into()),
-            };
+                Phase::Value => {
+                    if byte.is_ascii_digit() {
+                        value = usize::from(byte - b'0');
+                        phase = Phase::Digits;
+                    } else if byte == b'\n' {
+                        return Err(not_a_number());
+                    }
+                }
+                Phase::Digits => {
+                    if byte.is_ascii_digit() {
+                        value = value
+                            .checked_mul(10)
+                            .and_then(|current| current.checked_add(usize::from(byte - b'0')))
+                            .ok_or_else(not_a_number)?;
+                    } else {
+                        return Ok(Some(value));
+                    }
+                }
+            }
         }
     }
-    Err(Error::ThreadCount {
-        detail: "/proc/self/status has no Threads: line",
+    match phase {
+        Phase::Digits => Ok(Some(value)),
+        Phase::Value => Err(not_a_number()),
+        Phase::Field => Ok(None),
     }
-    .into())
+}
+
+/// The `Threads:` line was there but held no number.
+fn not_a_number() -> io::Error {
+    Error::ThreadCount {
+        detail: "the Threads: line of /proc/self/status is not a number",
+    }
+    .into()
 }
 
 /// The result of a successful [`fork`].
@@ -124,17 +225,61 @@ pub fn chdir(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::{AsFd, AsRawFd};
     use std::sync::mpsc;
 
     use super::*;
     use crate::error::Error;
     use crate::pid::ExitStatus;
-    use crate::testutil::{child_ok, in_child, must, spawn_exiting, wait_for};
+    use crate::testutil::{
+        PROBE_VAR, TempDir, child_ok, in_child, must, must_err, report_probe, run_probe,
+        spawn_exiting, wait_for,
+    };
+
+    /// The test a probe process matches, so only this module's runner starts.
+    const PROBE_RUNNER: &str = "proc::tests::probe_runner";
 
     #[test]
     fn thread_count_reports_at_least_the_calling_thread() {
         let threads = must(thread_count());
         assert!(threads >= 1, "a process has at least one thread: {threads}");
+    }
+
+    #[test]
+    fn thread_count_reads_a_status_file() {
+        // The real file is parsed by every test that forks; this pins the
+        // scanner itself, including a field that straddles a read chunk.
+        let mut status = Vec::new();
+        status.extend_from_slice(b"Name:\tblastit-sys\nState:\tS (sleeping)\n");
+        status.extend_from_slice(&[b'.'; 700]);
+        status.extend_from_slice(b"\nThreads:\t7\n");
+        assert_eq!(must(scan_pipe(&status)), Some(7));
+    }
+
+    #[test]
+    fn thread_count_reports_a_missing_field() {
+        assert_eq!(
+            must(scan_pipe(b"Name:\tblastit-sys\nTgid:\t42\n")),
+            None,
+            "a status file without the field has no count"
+        );
+    }
+
+    #[test]
+    fn thread_count_reports_a_line_without_a_number() {
+        let err = must_err(scan_pipe(b"Threads:\n"));
+        assert!(
+            matches!(Error::from_io(&err), Some(Error::ThreadCount { .. })),
+            "got {err}"
+        );
+    }
+
+    /// Run `scan_threads` over `bytes` through a pipe.
+    fn scan_pipe(bytes: &[u8]) -> io::Result<Option<usize>> {
+        let (read_end, write_end) = must(crate::pipe());
+        crate::testutil::write_all(write_end.as_fd(), bytes);
+        drop(write_end);
+        scan_threads(read_end.as_raw_fd())
     }
 
     #[test]
@@ -166,6 +311,7 @@ mod tests {
     #[test]
     fn fork_unchecked_makes_a_child_that_is_not_the_parent() {
         let parent = Pid::current();
+        // The body is async-signal-safe: `getpid` and `getppid` are syscalls.
         let code = in_child(move || {
             if Pid::current() == parent {
                 return 1;
@@ -190,7 +336,9 @@ mod tests {
     #[test]
     fn fork_accepts_a_single_threaded_child() {
         // The harness is multi-threaded, so the checked `fork()` is only
-        // allowed inside a forked child, which has exactly one thread.
+        // allowed inside a forked child, which has exactly one thread. The body
+        // stays async-signal-safe: `thread_count` reads `/proc/self/status`
+        // into a stack buffer, and `waitpid` is a syscall.
         child_ok("fork in a single-threaded child", || {
             match fork() {
                 Err(_) => 1,
@@ -216,30 +364,64 @@ mod tests {
 
     #[test]
     fn chdir_moves_the_working_directory() {
-        let dir = crate::testutil::TempDir::new("chdir");
-        must(std::fs::create_dir_all(dir.path()));
-        let target = dir.path().to_path_buf();
-        let code = in_child(move || {
-            if chdir(&target).is_err() {
-                return 1;
-            }
-            match std::env::current_dir() {
-                Ok(now) if now == target => {}
-                Ok(_) => return 2,
-                Err(_) => return 3,
-            }
-            0
-        });
-        assert_eq!(code, 0, "child failure code {code}");
+        // A fresh process, not a forked child: the subject (`crate::chdir`) and
+        // the reader (`std::env::current_dir`) both allocate.
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "chdir-moves"),
+            0,
+            "the fresh process could not move its working directory"
+        );
     }
 
     #[test]
     fn chdir_reports_a_missing_directory() {
-        let code = in_child(|| match chdir(Path::new("/nonexistent-blastit-sys")) {
+        assert_eq!(
+            run_probe(PROBE_RUNNER, "chdir-missing"),
+            0,
+            "chdir did not report a missing directory"
+        );
+    }
+
+    /// The one test a probe process runs; a no-op in an ordinary test run.
+    #[test]
+    fn probe_runner() {
+        let Ok(name) = std::env::var(PROBE_VAR) else {
+            return;
+        };
+        report_probe(&name, probe(&name).unwrap_or(1));
+    }
+
+    /// The bodies that need a private address space, where allocating is safe.
+    fn probe(name: &str) -> Option<i32> {
+        match name {
+            "chdir-moves" => Some(probe_chdir_moves()),
+            "chdir-missing" => Some(probe_chdir_missing()),
+            _ => None,
+        }
+    }
+
+    /// `crate::chdir` puts the process in the directory it was given.
+    fn probe_chdir_moves() -> i32 {
+        let dir = TempDir::new("chdir");
+        if std::fs::create_dir_all(dir.path()).is_err() {
+            return 1;
+        }
+        if chdir(dir.path()).is_err() {
+            return 2;
+        }
+        match std::env::current_dir() {
+            Ok(now) if now == dir.path() => 0,
+            Ok(_) => 3,
+            Err(_) => 4,
+        }
+    }
+
+    /// A missing directory is `NotFound`, from `crate::chdir`.
+    fn probe_chdir_missing() -> i32 {
+        match chdir(Path::new("/nonexistent-blastit-sys")) {
             Ok(()) => 1,
             Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
             Err(_) => 2,
-        });
-        assert_eq!(code, 0, "child failure code {code}");
+        }
     }
 }
