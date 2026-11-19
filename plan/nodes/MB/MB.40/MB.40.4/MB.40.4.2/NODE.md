@@ -2,7 +2,7 @@
 id: MB.40.4.2
 title: "Split blastit-sqlpolicy analysis.rs into cohesive modules + injected AnalysisCache"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.40.4.1]
@@ -13,11 +13,11 @@ paths:
   - "crates/blastit-sqlpolicy/src/lru.rs"
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T03:13"
-updated: "2026-11-19T03:13"
+updated: "2026-11-19T03:43"
 ---
 
 # Goal

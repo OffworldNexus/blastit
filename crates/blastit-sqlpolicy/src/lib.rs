@@ -103,6 +103,7 @@ pub use template::{
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+use analysis::AnalysisCache;
 use statements::is_transaction_control;
 
 /// Why a statement is refused when no exact grant lists it and the grant has no
@@ -149,6 +150,13 @@ pub struct Allowlist {
     transaction_control: bool,
     unrestricted: bool,
     tables: TableGrants,
+    /// The bounded analysis memo this allowlist checks statements against.
+    ///
+    /// It is a handle to a shared cache, not process-wide state read behind the
+    /// allowlist's back: `Allowlist::new` and `Default` hand over the
+    /// per-process memo blastit has always used, and [`Allowlist::check`]
+    /// analyses against exactly the handle the allowlist holds.
+    analysis: AnalysisCache,
 }
 
 impl Allowlist {
@@ -178,6 +186,7 @@ impl Allowlist {
             transaction_control,
             unrestricted: false,
             tables: TableGrants::default(),
+            analysis: AnalysisCache::default(),
         }
     }
 
@@ -211,6 +220,7 @@ impl Allowlist {
             transaction_control: false,
             unrestricted: true,
             tables: TableGrants::default(),
+            analysis: AnalysisCache::default(),
         }
     }
 
@@ -271,7 +281,11 @@ impl Allowlist {
             } else {
                 Cow::Borrowed(sql)
             };
-        match analysis::analyze_cached(&analysable, &normalized).as_ref() {
+        match self
+            .analysis
+            .analyze_cached(&analysable, &normalized)
+            .as_ref()
+        {
             Ok(analysis) => match self.tables.check(analysis) {
                 Ok(()) => Decision::Allowed,
                 Err(denied) => Decision::Denied {
