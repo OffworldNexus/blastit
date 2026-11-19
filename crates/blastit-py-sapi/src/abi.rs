@@ -40,6 +40,16 @@ pub fn dotted_py_minor(py_minor: u32) -> String {
 }
 
 /// One owned byte buffer a shim returns, freed by its `free_buf`.
+///
+/// # Ownership
+///
+/// A slot a boundary writes into (`out` in [`BlastitPyVtableV1::init_paths`],
+/// `err` everywhere) **must arrive zeroed** — `ptr == null`, `len == 0`,
+/// `cap == 0`. A non-null `ptr` therefore always means "a buffer this shim
+/// returned": the shim allocates, the caller reclaims through
+/// [`BlastitPyVtableV1::free_buf`] and never through `free(3)`. The shim does
+/// not free a slot on entry (a slot it did not allocate cannot be reconstructed
+/// as a `Vec`), so a caller that reuses a slot frees the previous answer first.
 #[repr(C)]
 pub struct PyBufV1 {
     /// The bytes, or null with `len == 0`.
@@ -85,6 +95,10 @@ pub struct BlastitPyVtableV1 {
         err: *mut PyBufV1,
     ) -> i32,
     /// `PyCode::compile` with `PyCodeInput::File` without execution (`dev` reload preflight).
+    ///
+    /// `zygote` is an identity check only — the compile runs in the calling
+    /// process, so the preloaded parent is not used — but a null or misaligned
+    /// pointer is refused like every other entry that takes one.
     pub check_syntax: extern "C" fn(
         zygote: *mut PyZygoteOpaque,
         code: *const u8,
@@ -95,7 +109,12 @@ pub struct BlastitPyVtableV1 {
     ) -> i32,
     /// Post-`blastit_sys::child::enter(plan)` child entry: sets Python
     /// `os.environ["HOME"/"TMPDIR"]`, adopts `view_fd` + optional
-    /// `(loaded_fd, loaded_source)`, runs `serve_reporting` (returns `1` or `70`).
+    /// `(loaded_fd, loaded_source)`, runs `serve_reporting`.
+    ///
+    /// Returns the child's exit code, and the three values are the child
+    /// sequence's own: `0` the channel ended and every accepted request was
+    /// served, `1` a refusal (one sentence in `err`), `70` a panic caught at the
+    /// boundary.
     pub serve_view: extern "C" fn(
         zygote: *mut PyZygoteOpaque,
         req: *const u8,

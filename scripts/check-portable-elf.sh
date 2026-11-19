@@ -30,6 +30,22 @@
 # everywhere, and the standalone artifact (the default, no flag) still carries no
 # search path at all.
 #
+# # A Python shim is a `.so`, and the two shapes are not the same
+#
+# `target/py-sapi/libblastit_py3{13,14}-<arch>-<libc>.so` is the one artifact this
+# script accepts that is *supposed* to reference an interpreter — and it does so
+# with **undefined dynamic symbols**, which is precisely what lets stage 1
+# `dlopen` the host's `libpython` first (`RTLD_GLOBAL`) and the shim second
+# (`RTLD_LOCAL`). `nm -uD <shim>` therefore shows `Py_InitializeEx`, and that is
+# the contract, not a leak: `readelf -d` shows no `NEEDED libpython`, because the
+# shim binds nothing until the library is already loaded.
+#
+# The refusal this script owes is the *other* shape — a shim or a binary that
+# carries `NEEDED libpython3.x.so` and would therefore only run on a machine with
+# that CPython installed. The distinction is exactly the two `readelf` queries
+# below, and `scripts/test_packaging_gates.py` builds one fixture of each shape to
+# keep them from collapsing into "any mention of Python is refused".
+#
 # Usage: scripts/check-portable-elf.sh [--allow-origin-rpath] PATH [PATH...]
 set -euo pipefail
 
@@ -58,8 +74,15 @@ for artifact in "$@"; do
     if [ -n "$linked" ]; then
         echo "error: $artifact links an interpreter, so it only runs where CPython is installed:" >&2
         printf '  %s\n' "$linked" >&2
-        echo "  fix: build the standalone artifact (cargo build -p blastit --locked). The wheel enables" >&2
-        echo "  the python capability explicitly through crates/blastit-py/Cargo.toml." >&2
+        case "$artifact" in
+            *.so)
+                echo "  fix: build it with \`make py-sapi\` (\`--features extension-module\`). A Python shim" >&2
+                echo "  binds the host's libpython at dlopen, so its DT_NEEDED list must never name one:" >&2
+                echo "  its unresolved Py_* symbols are the contract, not a leak." >&2 ;;
+            *)
+                echo "  fix: build the standalone artifact (cargo build -p blastit --locked). The wheel enables" >&2
+                echo "  the python capability explicitly through crates/blastit-py/Cargo.toml." >&2 ;;
+        esac
         artifact_status=1
     fi
 

@@ -27,6 +27,7 @@ PLATFORM_MATRIX = REPO / "scripts" / "platform_matrix.py"
 CHECK_WHEEL_TAG = REPO / "scripts" / "check_wheel_tag.py"
 CHECK_EXEC_ENV = REPO / "scripts" / "check-exec-env.sh"
 CHECK_NO_TEST_SEAM = REPO / "scripts" / "check-no-test-seam.sh"
+CHECK_PORTABLE_ELF = REPO / "scripts" / "check-portable-elf.sh"
 
 # Recorded verbatim from the shipped `aarch64-unknown-linux-musl` artifact of
 # `0.2.0` (`readelf --version-info blastit/_blastit.cpython-314-aarch64-linux-musl.so`):
@@ -1531,16 +1532,142 @@ def test_test_seam_cases() -> int:
     return cases_run
 
 
+def test_portable_elf_shim_cases() -> int:
+    """A Python shim's *undefined* `Py_*` is not a `DT_NEEDED` on libpython.
+
+    `libblastit_py3{13,14}-<arch>-<libc>.so` is the one artifact that must carry
+    `UND Py_InitializeEx`: stage 1 `dlopen`s the host's `libpython` first and the
+    shim second, so the shim binds nothing at load time. The gate exists to
+    refuse the *other* shape — a shim that links an interpreter of its own and
+    would only run on the machine that built it — and these two fixtures keep the
+    two from collapsing into "any mention of Python is refused".
+    """
+    cc = shutil.which("cc")
+    if cc is None:
+        print("portable-elf: skipped (no cc to build the two fixtures)")
+        return 0
+
+    cases_run = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        libdir = tmp / "lib"
+        libdir.mkdir()
+
+        source = tmp / "fake_libpython.c"
+        source.write_text(
+            "int blastit_fake_libpython(void) { return 0; }\n", encoding="utf-8"
+        )
+        fake = libdir / "libpython3.13.so.1.0"
+        subprocess.run(
+            [
+                cc,
+                "-shared",
+                "-fPIC",
+                "-Wl,-soname,libpython3.13.so.1.0",
+                "-o",
+                str(fake),
+                str(source),
+            ],
+            check=True,
+        )
+
+        # The refused shape: a shim carrying `NEEDED libpython3.13.so.1.0`.
+        linked_c = tmp / "linked.c"
+        linked_c.write_text("int blastit_probe(void) { return 0; }\n", encoding="utf-8")
+        linked = tmp / "libblastit_py313-linked.so"
+        subprocess.run(
+            [
+                cc,
+                "-shared",
+                "-fPIC",
+                f"-L{libdir}",
+                "-Wl,--no-as-needed",
+                "-l:libpython3.13.so.1.0",
+                "-Wl,-soname,libblastit_py313-linked.so",
+                "-o",
+                str(linked),
+                str(linked_c),
+            ],
+            check=True,
+        )
+        res = subprocess.run(
+            [str(CHECK_PORTABLE_ELF), str(linked)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _expect(
+            res.returncode == 1 and "links an interpreter" in res.stderr,
+            f"a shim with DT_NEEDED libpython must be refused; got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # The accepted shape: the same `Py_*` name, undefined and resolved later.
+        shim_c = tmp / "shim.c"
+        shim_c.write_text(
+            "extern void Py_InitializeEx(int);\n"
+            "void blastit_probe(void) { Py_InitializeEx(0); }\n",
+            encoding="utf-8",
+        )
+        shim = tmp / "libblastit_py313-x86_64-gnu.so"
+        subprocess.run(
+            [
+                cc,
+                "-shared",
+                "-fPIC",
+                "-Wl,-soname,libblastit_py313-x86_64-gnu.so",
+                "-o",
+                str(shim),
+                str(shim_c),
+            ],
+            check=True,
+        )
+        dynamic = subprocess.run(
+            ["readelf", "-d", str(shim)], capture_output=True, text=True, check=True
+        ).stdout
+        _expect(
+            "libpython" not in dynamic,
+            "the fixture must not need libpython, or the case proves nothing",
+            dynamic,
+        )
+        undefined = subprocess.run(
+            ["nm", "-uD", str(shim)], capture_output=True, text=True, check=True
+        ).stdout
+        _expect(
+            "Py_InitializeEx" in undefined,
+            "the shim fixture must carry an undefined dynamic Py_InitializeEx",
+            undefined,
+        )
+        res = subprocess.run(
+            [str(CHECK_PORTABLE_ELF), str(shim)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _expect(
+            res.returncode == 0 and "ok   " in res.stdout,
+            "a shim with UND Py_* and no DT_NEEDED libpython must be accepted; "
+            f"got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+    return cases_run
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
     wt = test_wheel_tag_guard_cases()
     ee = test_exec_env_cases()
     ts = test_test_seam_cases()
-    total = wf + pm + wt + ee + ts
+    pe = test_portable_elf_shim_cases()
+    total = wf + pm + wt + ee + ts + pe
     print(
         f"packaging-gates-test: ok — {total} cases passed "
-        f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts})"
+        f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts}, "
+        f"portable-elf={pe})"
     )
     return 0
 

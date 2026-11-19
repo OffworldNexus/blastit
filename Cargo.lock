@@ -251,6 +251,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "blastit-py-shim"
+version = "0.2.0"
+dependencies = [
+ "blastit-py-sapi",
+ "blastit-sys",
+ "blastit-view",
+ "blastit-view-python",
+ "pyo3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "blastit-scheduler"
 version = "0.2.0"
 dependencies = [

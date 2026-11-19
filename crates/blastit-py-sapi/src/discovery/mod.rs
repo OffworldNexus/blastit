@@ -235,6 +235,7 @@ fn dev_interpreter(
         .unwrap_or_default();
     search(&directories).ok_or_else(|| DiscoveryError::NoInterpreter {
         command: command.to_owned(),
+        searched: directories,
     })
 }
 
@@ -277,6 +278,7 @@ fn production_interpreter(
         .collect();
     search(&directories).ok_or_else(|| DiscoveryError::NoInterpreter {
         command: command.to_owned(),
+        searched: directories,
     })
 }
 
@@ -631,6 +633,27 @@ mod tests {
                  reinstall it without --free-threaded (uv python install cpython-3.14)",
                 interpreter.display()
             )
+        );
+    }
+
+    #[test]
+    fn no_interpreter_names_where_it_looked_and_one_command() {
+        let error = DiscoveryError::NoInterpreter {
+            command: "check".to_owned(),
+            searched: vec![
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ],
+        };
+        assert_eq!(
+            error.to_string(),
+            "blastit check: no CPython 3.13 or 3.14 interpreter was found (searched \
+             /usr/local/bin, /usr/bin, /bin); run uv python install 3.14"
+        );
+        assert!(
+            !error.to_string().contains("distribution's"),
+            "a distro package that does not exist everywhere is never named"
         );
     }
 

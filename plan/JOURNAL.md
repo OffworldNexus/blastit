@@ -3833,3 +3833,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T17:47 [MB.42.2.1.1] (lead) status active -> review
 - 2026-11-19T17:50 [MB.42.2.1.1] (lead) REVIEW FIX (filtered): MAJOR loader.rs duplicates blastit_sys::elf c_str/le_u32/le_u64 + 3rd .dynamic/.dynsym walk (extend elf with dynamic_strings/dynsym_names
 - 2026-11-19T18:01 [MB.42.2.1.1] (lead) status review -> done
+- 2026-11-19T18:01 [MB.42.2.1.2] (lead) status ready -> active
+- 2026-11-19T18:01 [MB.42.2.1.2] (lead) attempt 1/3 started
+- 2026-11-19T18:01 [MB.42.2.1.2] (lead) base b3c23ef6740d36765ad88e5b533a2ba7be8c8095
+- 2026-11-19T18:13 [MB.42.2.1.2] (lead) status active -> review
+- 2026-11-19T18:16 [MB.42.2.1.2] (lead) REVIEW FIX (filtered): BLOCKER serve_view returns 1 on success vs blastit-view-python zygote.rs child_exit 0 (clean shutdown looks like a crash); MAJOR report_f
+- 2026-11-19T18:19 [MB.42.2.0] (lead) status active -> review
+- 2026-11-19T18:22 [MB.42.2.0] (lead) REVIEW FIX (filtered): BLOCKER §1.2.1 order only valid for Interpreter::Embed — wheel/Hosted has CPython live before stage 1 so fork(http)/fork(scheduler) need 
+- 2026-11-19T18:25 [MB.42.2.1.2] (lead) status review -> done

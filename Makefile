@@ -82,7 +82,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 .PHONY: help fast-check check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
-        docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e \
+        docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
         packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp
 
@@ -494,6 +494,119 @@ php-sapi: ## Build C SAPI shims whose php-config exists; skip absent minors
 		built=$$((built + 1)); \
 	done; \
 	echo "php-sapi: $$built shim(s) for $$arch-$$libc in $(PHP_SAPI_OUT); skipped:$${skipped:- none}"
+
+# Build per-minor CPython shims (`libblastit_py3{13,14}-<arch>-<libc>.so`): each carries
+# `UND Py_*` symbols (resolved by the host's libpython at stage-1 `dlopen`) and its own
+# `DT_SONAME`, and links no libpython of its own (design §1.1/§1.2). Not part of `check`:
+# it needs interpreters, and `rs-no-python` already proves the binary links none.
+# Interpreter resolution per minor: `PY_SAPI_PYTHON_<digits>` -> manylinux
+# `/opt/python/cp<digits>-cp<digits>/bin/python3` -> `uv python find --no-project <minor>`
+# -> `python<minor>` on `PATH`. A minor with no interpreter, or a free-threaded one, is
+# skipped; `PY_SAPI_REQUIRE_ALL=1` fails closed instead.
+PY_MINORS ?= 3.14 3.13
+PY_SAPI_OUT ?= $(CURDIR)/target/py-sapi
+PY_SAPI_PROFILE ?= release
+PY_SAPI_ARCH ?=
+PY_SAPI_LIBC ?=
+PY_SAPI_REQUIRE_ALL ?=
+PY_SAPI_PYTHON_313 ?=
+PY_SAPI_PYTHON_314 ?=
+
+py-sapi: ## Build CPython shims per minor (PY_MINORS="3.14 3.13"; PY_SAPI_REQUIRE_ALL=1 fails closed)
+	@set -eu; \
+	for tool in readelf nm; do \
+		command -v "$$tool" >/dev/null 2>&1 || { \
+			echo "py-sapi: $$tool is required to assert the shim's ELF contract (install binutils: apt install binutils, apk add binutils, dnf install binutils)" >&2; \
+			exit 2; \
+		}; \
+	done; \
+	arch="$(PY_SAPI_ARCH)"; \
+	libc="$(PY_SAPI_LIBC)"; \
+	if [ -z "$$arch" ]; then arch="$$(uname -m)"; fi; \
+	if [ -z "$$libc" ]; then \
+		if [ -e "/lib/ld-musl-$$arch.so.1" ]; then libc=musl; else libc=gnu; fi; \
+	fi; \
+	case "$$arch" in \
+		x86_64|aarch64) ;; \
+		*) echo "py-sapi: unsupported architecture '$$arch' (supported: x86_64, aarch64)" >&2; exit 1 ;; \
+	esac; \
+	case "$$libc" in \
+		gnu|musl) ;; \
+		*) echo "py-sapi: unsupported libc '$$libc' (supported: gnu, musl)" >&2; exit 1 ;; \
+	esac; \
+	mkdir -p "$(PY_SAPI_OUT)"; \
+	built=0; skipped=""; reasons=""; \
+	for minor in $(PY_MINORS); do \
+		digits="$$(printf '%s' "$$minor" | tr -d '.')"; \
+		interp=""; \
+		eval "explicit=\$${PY_SAPI_PYTHON_$$digits:-}"; \
+		if [ -n "$$explicit" ]; then interp="$$explicit"; fi; \
+		if [ -z "$$interp" ] && [ -x "/opt/python/cp$$digits-cp$$digits/bin/python3" ]; then \
+			interp="/opt/python/cp$$digits-cp$$digits/bin/python3"; \
+		fi; \
+		if [ -z "$$interp" ]; then \
+			interp="$$($(UV) python find --no-project "$$minor" 2>/dev/null || true)"; \
+		fi; \
+		if [ -z "$$interp" ]; then \
+			interp="$$(command -v "python$$minor" 2>/dev/null || true)"; \
+		fi; \
+		if [ -z "$$interp" ] || [ ! -x "$$interp" ]; then \
+			echo "py-sapi: skipped $$minor: no interpreter (set PY_SAPI_PYTHON_$$digits, or uv python install $$minor)"; \
+			skipped="$$skipped $$minor"; reasons="$$reasons $$minor (no interpreter)"; continue; \
+		fi; \
+		found="$$("$$interp" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"; \
+		if [ "$$found" != "$$minor" ]; then \
+			echo "py-sapi: refused $$minor: $$interp is CPython $${found:-unknown} (set PY_SAPI_PYTHON_$$digits)" >&2; \
+			exit 1; \
+		fi; \
+		if [ "$$("$$interp" -c 'import sysconfig; print(int(sysconfig.get_config_var("Py_GIL_DISABLED") or 0))')" = 1 ]; then \
+			echo "py-sapi: skipped $$minor: $$interp is free-threaded, and a WSGI view needs the GIL (uv python install cpython-$$minor)"; \
+			skipped="$$skipped $$minor"; reasons="$$reasons $$minor (free-threaded)"; continue; \
+		fi; \
+		soname="libblastit_py$$digits-$$arch-$$libc.so"; \
+		out="$(PY_SAPI_OUT)/$$soname"; \
+		target="$(PY_SAPI_OUT)/build-$$digits"; \
+		profile="$(PY_SAPI_PROFILE)"; \
+		extra=""; if [ "$$profile" = release ]; then extra="--release"; fi; \
+		rustflags="-C link-arg=-Wl,-soname,$$soname"; \
+		if [ "$$libc" = musl ]; then rustflags="$$rustflags -C target-feature=-crt-static"; fi; \
+		echo "py-sapi: cpython $$minor -> $$out ($$interp)"; \
+		CARGO_TARGET_DIR="$$target" PYO3_PYTHON="$$interp" \
+			RUSTFLAGS="$${RUSTFLAGS:+$$RUSTFLAGS }$$rustflags" \
+			$(CARGO) build -p blastit-py-shim --locked --features extension-module $$extra; \
+		built_so="$$target/$$profile/libblastit_py_shim.so"; \
+		if [ ! -f "$$built_so" ]; then \
+			echo "py-sapi: cargo produced no $$built_so" >&2; exit 1; \
+		fi; \
+		cp "$$built_so" "$$out"; \
+		scripts/check-portable-elf.sh "$$out"; \
+		readelf -d "$$out" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p' | grep -qx "$$soname" \
+			|| { echo "py-sapi: $$out does not carry DT_SONAME $$soname" >&2; exit 1; }; \
+		nm -uD "$$out" | grep -q ' Py_InitializeEx$$' \
+			|| { echo "py-sapi: $$out carries no undefined dynamic Py_InitializeEx" >&2; exit 1; }; \
+		for symbol in blastit_py_abi_v1 blastit_py_abi_version blastit_py_minor; do \
+			nm -D --defined-only "$$out" | awk '{print $$2" "$$3}' | grep -qx "T $$symbol" \
+				|| { echo "py-sapi: $$out does not export $$symbol" >&2; exit 1; }; \
+		done; \
+		echo "py-sapi: proving $$out with the self-contained dlopen probe"; \
+		libdir="$$("$$interp" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"; \
+		libpython="$$(ls "$$libdir/libpython$${minor}"*.so* 2>/dev/null | head -n 1 || true)"; \
+		if [ -z "$$libpython" ]; then \
+			echo "py-sapi: CPython $$minor has no shared libpython under $$libdir, so this shim cannot be proven on this host; install it — Debian/Ubuntu: apt install libpython$$minor, Alpine: apk add python3, Fedora/RHEL: dnf install python3-libs" >&2; \
+			exit 1; \
+		fi; \
+		BLASTIT_PY_SAPI_SHIM="$$out" BLASTIT_PY_SAPI_LIBPYTHON="$$libpython" \
+			PYO3_PYTHON="$$interp" \
+			LD_LIBRARY_PATH="$$libdir$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
+			$(CARGO) test -p blastit-py-shim --locked --features extension-module \
+				--test abi_load -- --ignored --nocapture; \
+		built=$$((built + 1)); \
+	done; \
+	if [ -n "$$skipped" ] && [ "$(PY_SAPI_REQUIRE_ALL)" = 1 ]; then \
+		echo "py-sapi: PY_SAPI_REQUIRE_ALL=1 and these minors were not built:$$reasons; run uv python install$$skipped (drop --free-threaded where that is the reason) and rerun" >&2; \
+		exit 1; \
+	fi; \
+	echo "py-sapi: $$built shim(s) for $$arch-$$libc in $(PY_SAPI_OUT); skipped:$${skipped:- none}"
 
 php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (not in `check`)
 	$(UV) run --no-project e2e/php_sapi_probe.py \

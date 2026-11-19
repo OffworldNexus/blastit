@@ -2,7 +2,7 @@
 id: MB.42.2.1.2
 title: "blastit-py-shim cdylib (9 C exports) + make py-sapi for CPython 3.13/3.14"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2.1.1]
@@ -13,11 +13,11 @@ paths:
   - "scripts/**"
   - "crates/blastit-py-shim/**"
   - "crates/blastit-py-sapi/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T17:21"
-updated: "2026-11-19T17:21"
+updated: "2026-11-19T18:25"
 ---
 
 # Goal
@@ -47,7 +47,7 @@ Produce the artifact the universal binary will `dlopen`: a per-minor `cdylib` sh
 - `make py-sapi` on the host for both minors (installing interpreters with `uv python install 3.13 3.14` into the uv cache is fine)
 - `readelf -d target/py-sapi/libblastit_py313-*.so | grep SONAME` and `nm -uD target/py-sapi/libblastit_py313-*.so | grep Py_InitializeEx` (and the same for `py314`)
 - `scripts/check-portable-elf.sh target/py-sapi/libblastit_py314-*.so` -> zero `libpython`/`libphp` `DT_NEEDED`
-- `cargo test -p blastit-py-shim --features extension-module` (vtable/export assignment test + `PyBufV1` round trip)
+- `cargo test -p blastit-py-shim` (the vtable/export assignment test lives in this build) **and** `cargo test -p blastit-py-shim --features extension-module` (`PyBufV1` round trip; note the vtable test is compiled out in this build — do not present it as coverage)
 - `cargo test -p blastit-py-shim --features extension-module --test abi_load -- --ignored` with `BLASTIT_PY_SAPI_SHIM=<path>` for each minor
 - `make fast-check`
 

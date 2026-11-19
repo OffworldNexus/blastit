@@ -59,7 +59,7 @@ impl fmt::Display for PinError {
                 found_ino,
             } => write!(
                 f,
-                "{} was replaced after stage 0 inspected it (inode {expected_ino} is now \
+                "{} was replaced after blastit inspected it (inode {expected_ino} is now \
                  {found_ino}); restore the file and restart blastit",
                 path.display()
             ),
@@ -250,6 +250,11 @@ mod tests {
         let text = refusal.to_string();
         assert!(text.contains(&path.display().to_string()), "{text}");
         assert!(text.contains("restart blastit"), "{text}");
+        assert!(
+            text.contains("was replaced after blastit inspected it"),
+            "a user-facing refusal never names an internal stage: {text}"
+        );
+        assert!(!text.contains("stage 0"), "{text}");
         assert!(
             text.contains(&format!(
                 "inode {} is now {}",

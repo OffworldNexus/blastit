@@ -111,8 +111,10 @@ pub enum LoadError {
     },
     /// `DT_SONAME` names a free-threaded CPython (`*t.so*`).
     FreeThreaded {
-        /// The path stage 0 opened.
-        path: PathBuf,
+        /// The command the refusal names (`blastit <cmd>:`).
+        command: String,
+        /// The interpreter the boot resolved — never the library path.
+        interpreter: PathBuf,
         /// The SONAME that was read.
         soname: String,
     },
@@ -189,11 +191,15 @@ impl fmt::Display for LoadError {
                     path.display()
                 )
             }
-            Self::FreeThreaded { path, soname } => write!(
+            Self::FreeThreaded {
+                command,
+                interpreter,
+                soname,
+            } => write!(
                 f,
-                "{} is {soname}, a free-threaded CPython and cannot serve WSGI views; reinstall \
-                 without --free-threaded (e.g. uv python install cpython-3.14)",
-                path.display()
+                "blastit {command}: CPython at {} is free-threaded ({soname}) and cannot serve \
+                 WSGI views; reinstall it without --free-threaded (uv python install cpython-3.14)",
+                interpreter.display()
             ),
             Self::NullVtable => {
                 f.write_str("blastit_py_abi_v1() returned NULL; this is not a blastit Python shim")
@@ -222,13 +228,21 @@ impl std::error::Error for LoadError {}
 /// The `.dynsym`/`DT_SONAME` gate of §2.4, over the pinned descriptor.
 ///
 /// `py_minor` is the minor the boot discovered; it only names the package in the
-/// refusal (`libpython3.14`).
+/// refusal (`libpython3.14`). `command` is the boot's verb (`dev`, `check`,
+/// `serve`) and `interpreter` the interpreter it resolved, so a refusal reads as
+/// one sentence an operator can act on and never repeats the library path as if
+/// it were the cause.
 ///
 /// # Errors
 ///
 /// [`LoadError::Unreadable`], [`LoadError::NotAnElf`],
 /// [`LoadError::FreeThreaded`] and [`LoadError::MissingSymbols`].
-pub fn gate_libpython(object: &SharedObject, py_minor: u32) -> Result<(), LoadError> {
+pub fn gate_libpython(
+    object: &SharedObject,
+    py_minor: u32,
+    command: &str,
+    interpreter: &Path,
+) -> Result<(), LoadError> {
     let source = object.source().to_path_buf();
     let file = File::open(object.path()).map_err(|err| LoadError::Unreadable {
         path: source.clone(),
@@ -242,7 +256,8 @@ pub fn gate_libpython(object: &SharedObject, py_minor: u32) -> Result<(), LoadEr
     };
     if let Some(soname) = sonames.into_iter().find(|soname| soname.contains("t.so")) {
         return Err(LoadError::FreeThreaded {
-            path: source,
+            command: command.to_owned(),
+            interpreter: interpreter.to_path_buf(),
             soname,
         });
     }
@@ -483,7 +498,8 @@ mod tests {
         std::fs::write(&path, b"this is not an ELF object").expect("the text file");
         let object = SharedObject::open(&path, None).expect("it is a regular file");
 
-        let error = gate_libpython(&object, 314).expect_err("a text file is not an ELF");
+        let error = gate_libpython(&object, 314, "dev", Path::new("/usr/bin/python3.14"))
+            .expect_err("a text file is not an ELF");
         assert!(matches!(error, LoadError::NotAnElf { .. }), "{error}");
         assert!(error.to_string().contains("not an ELF object"));
     }
@@ -495,7 +511,8 @@ mod tests {
         // the gate must refuse (and never panic on).
         let path = std::env::current_exe().expect("the test binary");
         let object = SharedObject::open(&path, None).expect("a regular file");
-        let error = gate_libpython(&object, 314).expect_err("a non-libpython ELF");
+        let error = gate_libpython(&object, 314, "dev", Path::new("/usr/bin/python3.14"))
+            .expect_err("a non-libpython ELF");
         let message = error.to_string();
         match error {
             LoadError::MissingSymbols { missing, .. } => {
@@ -533,13 +550,21 @@ mod tests {
             "a refusal never prints the wire encoding: {mismatch}"
         );
         let free = LoadError::FreeThreaded {
-            path: PathBuf::from("/usr/local/lib/libpython3.13t.so.1.0"),
+            command: "serve".to_owned(),
+            interpreter: PathBuf::from("/opt/python/3.13t/bin/python3.13t"),
             soname: "libpython3.13t.so.1.0".to_owned(),
         }
         .to_string();
-        assert!(free.contains("libpython3.13t.so.1.0"), "{free}");
-        assert!(free.contains("free-threaded CPython"), "{free}");
-        assert!(free.contains("--free-threaded"), "{free}");
+        assert_eq!(
+            free,
+            "blastit serve: CPython at /opt/python/3.13t/bin/python3.13t is free-threaded \
+             (libpython3.13t.so.1.0) and cannot serve WSGI views; reinstall it without \
+             --free-threaded (uv python install cpython-3.14)"
+        );
+        assert!(
+            !free.contains("is libpython3.13t.so.1.0"),
+            "the file must not be reported as its own cause: {free}"
+        );
     }
 
     #[test]
@@ -558,7 +583,8 @@ mod tests {
         let object = SharedObject::open(&path, Some((metadata.dev(), metadata.ino())))
             .expect("the named libpython is pinnable");
 
-        if let Err(refusal) = gate_libpython(&object, 314) {
+        if let Err(refusal) = gate_libpython(&object, 314, "dev", Path::new("/usr/bin/python3.14"))
+        {
             // A free-threaded build is a legitimate refusal of a real library.
             assert!(
                 matches!(refusal, LoadError::FreeThreaded { .. }),

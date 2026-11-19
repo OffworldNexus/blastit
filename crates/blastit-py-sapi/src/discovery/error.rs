@@ -50,6 +50,8 @@ pub enum DiscoveryError {
     NoInterpreter {
         /// The command the refusal names.
         command: String,
+        /// The directories that were searched, in order.
+        searched: Vec<PathBuf>,
     },
     /// The interpreter's installation prefix could not be resolved.
     Unresolvable {
@@ -135,10 +137,15 @@ impl fmt::Display for DiscoveryError {
                  {DEFAULT_MINOR}",
                 interpreter.display()
             ),
-            Self::NoInterpreter { command } => write!(
+            Self::NoInterpreter { command, searched } => write!(
                 f,
-                "blastit {command}: no CPython interpreter was found; install it (uv python \
-                 install {DEFAULT_MINOR}, or your distribution's python3.14 package)"
+                "blastit {command}: no CPython 3.13 or 3.14 interpreter was found (searched {}); \
+                 run uv python install 3.14",
+                searched
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Self::Unresolvable {
                 path,
