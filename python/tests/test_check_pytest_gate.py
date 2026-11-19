@@ -202,5 +202,142 @@ class GateTest(unittest.TestCase):
         return buffered.decode("utf-8").strip()
 
 
+class StdlibProbeTest(unittest.TestCase):
+    """The sample without the C extension (`MB.40.8`).
+
+    A staged bundle can carry `_blastit` for another CPython minor, so
+    :func:`blastit._check_pytest._probe` falls back to this pure-stdlib twin.
+    It answers exactly the keys the audit reads, over the same bounded prefix.
+    """
+
+    def test_a_json_body_is_valid_and_a_duplicate_key_is_not(self) -> None:
+        sample = _check_pytest._probe_stdlib(
+            "application/json; charset=utf-8", b'{"a": 1}', 8
+        )
+        self.assertEqual(sample["mime"], "application/json")
+        self.assertFalse(sample["truncated"])
+        self.assertTrue(sample["valid_json"])
+        self.assertFalse(sample["valid_form"])
+
+        # Denied twin: a repeated key, `NaN` and a trailing byte are all
+        # rejected by the gate's own parser, so the sample must say so too.
+        for body in (b'{"a": 1, "a": 2}', b'{"a": NaN}', b"{} trailing"):
+            denied = _check_pytest._probe_stdlib("application/json", body, len(body))
+            self.assertFalse(denied["valid_json"], body)
+
+    def test_a_truncated_body_loses_both_validity_flags(self) -> None:
+        prefix = b'{"a": 1}'
+        sample = _check_pytest._probe_stdlib(
+            "application/json", prefix, _check_pytest.MAX_SAMPLE_BYTES + 1
+        )
+        self.assertTrue(sample["truncated"])
+        self.assertFalse(sample["valid_json"])
+        self.assertFalse(sample["valid_form"])
+
+    def test_a_form_body_is_validated_like_the_gate(self) -> None:
+        sample = _check_pytest._probe_stdlib(
+            "application/x-www-form-urlencoded; charset=UTF-8",
+            b"a=1&b=hello+world",
+            17,
+        )
+        self.assertTrue(sample["valid_form"])
+        self.assertFalse(sample["valid_json"])
+
+        # Denied twins: a bad percent escape and a decoded NUL.
+        for body in (b"a=%ZZ", b"a=%00", b"a=\xff"):
+            denied = _check_pytest._probe_stdlib(
+                "application/x-www-form-urlencoded", body, len(body)
+            )
+            self.assertFalse(denied["valid_form"], body)
+
+    def test_no_content_type_reports_the_absent_essence(self) -> None:
+        sample = _check_pytest._probe_stdlib(None, b"raw", 3)
+        self.assertEqual(sample["mime"], _check_pytest.NO_MIME)
+        self.assertFalse(sample["valid_json"])
+        self.assertFalse(sample["valid_form"])
+
+
+def _extension_probe():
+    """`_blastit.probe_ingress` as a callable, or `None` without the extension.
+
+    `make test-critical` stages the extension beside the package; a bare
+    `uv run` of this file does not. The corpus test therefore always asserts the
+    documented sample, and compares against the extension byte for byte whenever
+    it is importable.
+    """
+    try:
+        from blastit import _blastit
+    except ImportError:
+        return None
+
+    def probe(content_type, body):
+        return json.loads(_blastit.probe_ingress(content_type, body, len(body)))
+
+    return probe
+
+
+#: One body per row the two probes must agree on (`MB.40.8`).
+SHARED_CORPUS = [
+    ("application/json; charset=utf-8", b'{"a": [1, 2, {"b": null}]}'),
+    (None, b'{"a": 1}'),
+    ("application/vnd.api+json", b'{"x": true}'),
+    ("application/json", b'{"a": 1, "a": 2}'),
+    ("application/json", b'{"a": NaN}'),
+    ("application/json", b'{"a": 18446744073709551616}'),
+    ("application/json", b"[" * 64 + b"]" * 64),
+    ("application/json", b"[" * 65 + b"]" * 65),
+    ("application/json", b"[" * 2000 + b"]" * 2000),
+    ("APPLICATION/JSON\u212a", b"{}"),
+    ("application/" + "\u00e9" * 40, b"{}"),
+    ("application/x-www-form-urlencoded", b"a=1&b=hello+world"),
+    ("application/x-www-form-urlencoded", b"a=%ZZ"),
+    ("application/x-www-form-urlencoded", b"a=%00"),
+    ("text/plain", b"{}"),
+]
+
+
+class SharedCorpusTest(unittest.TestCase):
+    """The stdlib probe against the Rust gate, on one shared corpus (`MB.40.8`)."""
+
+    def test_the_shared_corpus_matches_the_extension(self) -> None:
+        extension = _extension_probe()
+        for content_type, body in SHARED_CORPUS:
+            sample = _check_pytest._probe_stdlib(content_type, body, len(body))
+            self.assertIsInstance(sample["mime"], str, content_type)
+            self.assertIsInstance(sample["valid_json"], bool, content_type)
+            self.assertIsInstance(sample["valid_form"], bool, content_type)
+            self.assertEqual(
+                sample["truncated"],
+                len(body) > _check_pytest.MAX_SAMPLE_BYTES,
+                content_type,
+            )
+            if extension is not None:
+                self.assertEqual(sample, extension(content_type, body), content_type)
+
+    def test_depth_is_capped_like_the_rust_parser(self) -> None:
+        at_cap = _check_pytest._probe_stdlib(
+            "application/json", b"[" * 64 + b"]" * 64, 128
+        )
+        self.assertTrue(at_cap["valid_json"])
+        for depth in (65, 2000):
+            body = b"[" * depth + b"]" * depth
+            sample = _check_pytest._probe_stdlib("application/json", body, len(body))
+            self.assertFalse(sample["valid_json"], depth)
+
+    def test_a_depth_bomb_never_raises(self) -> None:
+        body = b'{"a":' * 2000 + b"0" + b"}" * 2000
+        sample = _check_pytest._probe_stdlib("application/json", body, len(body))
+        self.assertFalse(sample["valid_json"])
+
+    def test_the_essence_is_ascii_lowercased_and_byte_capped(self) -> None:
+        # Rust's `to_ascii_lowercase` leaves U+212A (KELVIN SIGN) alone, so
+        # Python's Unicode `str.lower()` would produce a different report.
+        kelvin = _check_pytest._probe_stdlib("APPLICATION/JSON\u212a", b"{}", 2)
+        self.assertEqual(kelvin["mime"], "application/json\u212a")
+        wide = _check_pytest._probe_stdlib("application/" + "\u00e9" * 40, b"{}", 2)
+        self.assertEqual(len(wide["mime"].encode("utf-8")), 64)
+        self.assertTrue(wide["mime"].startswith("application/"))
+
+
 if __name__ == "__main__":
     unittest.main()

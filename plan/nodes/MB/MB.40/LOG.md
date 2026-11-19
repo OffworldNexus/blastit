@@ -15,3 +15,11 @@ status done -> ready: Re-opening for MB.40.7 CI fixes on PR #64
 ## 2026-11-19T10:04 [conductor]
 
 status ready -> done
+
+## 2026-11-19T10:35 [conductor]
+
+status done -> ready: Re-opening for MB.40.8 local make install/uninstall bundle
+
+## 2026-11-19T11:02 [conductor]
+
+status ready -> done

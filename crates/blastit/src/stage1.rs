@@ -341,15 +341,20 @@ pub(super) fn load(
     // it was started in, and whatever an embedded interpreter had to be told
     // about.
     let scope = PyDict::new(py);
-    if hosted {
-        if let Err(err) = restore_sys_path(py, &config.sys_path) {
-            python_fail(py, emitter, dev, "sys.path", &err);
-        }
-    } else {
+    if !hosted {
         // §9.3: an embedded interpreter does not find the distribution's
         // site-packages on its own. Best effort — a system without sysconfig is
         // not a reason to refuse to start.
         let _ = py.run(SITE_PACKAGES, Some(&scope), None);
+    }
+    // The entries stage 0 recorded go in **front** of everything above: a
+    // wheel's `-I` dropped `PYTHONPATH` and the working directory, and an
+    // embedded binary's project `.venv` has to win over the base interpreter's
+    // purelib or the application's own dependencies are never imported
+    // (`MB.40.8`). Appending `SITE_PACKAGES` first and inserting these at the
+    // front is exactly that order.
+    if let Err(err) = restore_sys_path(py, &config.sys_path) {
+        python_fail(py, emitter, dev, "sys.path", &err);
     }
     if let Err(err) = put_cwd_first(py, config.cwd.as_deref()) {
         python_fail(py, emitter, dev, "the working directory on sys.path", &err);

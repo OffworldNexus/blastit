@@ -25,6 +25,7 @@ use blastit_view_php::discovery::{Deployment, PhpBoot, PhpSearch, PhpShimScope, 
 use crate::py::Python;
 
 use super::current_uid;
+use super::project_python::Venv;
 
 /// The half of `R13`'s app rule that every caller owns: an all-static manifest
 /// needs no `app`, and a `BLASTIT_APP` that names one there is refused rather
@@ -531,7 +532,12 @@ pub(crate) fn no_php_support(manifest: &Manifest) -> Option<String> {
 /// A build that embeds CPython in stage 1 (`cargo` development builds, where
 /// `interpreter` is `false`) has no interpreter *here*: the facts exist one
 /// stage later, and inventing a version would be worse than saying nothing.
-pub(super) fn emit_runtime(emitter: &Emitter, config: &Config, interpreter: bool) {
+pub(super) fn emit_runtime(
+    emitter: &Emitter,
+    config: &Config,
+    interpreter: bool,
+    venv: Option<&Venv>,
+) {
     // A build without the `php` feature has no record to ask: no manifest that
     // reaches this point declares one (the gate refuses it first), so "no PHP
     // entrypoint" is the answer that cannot invent a line.
@@ -539,9 +545,25 @@ pub(super) fn emit_runtime(emitter: &Emitter, config: &Config, interpreter: bool
     let entrypoint_php = config.php.is_some();
     #[cfg(not(feature = "php"))]
     let entrypoint_php = false;
-    if let Some(runtime) = runtime_shape(entrypoint_php, config.app.is_some(), interpreter) {
+    // A standalone `entrypoint python` boot has no interpreter in *this*
+    // process, so [`runtime_shape`] honestly says nothing — but stage 0 found
+    // the project's venv and matched it against the embedded CPython, and that
+    // venv is exactly what the line exists to name (`MB.40.8`).
+    let runtime = runtime_shape(entrypoint_php, config.app.is_some(), interpreter)
+        .or_else(|| venv.map(embedded_runtime));
+    if let Some(runtime) = runtime {
         emitter.emit(&Event::now(Component::Init, EventKind::Runtime(runtime)));
     }
+}
+
+/// The `runtime` line of a standalone `entrypoint python` boot (`MB.40.8`).
+///
+/// The version is the release `pyvenv.cfg` records (`3.14.10`), which is the
+/// embedded CPython minor's patch level, or the matched `major.minor` when the
+/// file names none; the environment is the venv root, the directory a developer
+/// named with `uv venv`.
+fn embedded_runtime(venv: &Venv) -> Runtime {
+    Runtime::python(venv.release.clone(), venv.root.display().to_string())
 }
 
 /// The decision table behind [`emit_runtime`], as a value: which shape a boot

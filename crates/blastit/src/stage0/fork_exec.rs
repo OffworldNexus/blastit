@@ -18,7 +18,7 @@ use crate::child::{ChildIo, Deadline, read_one, wait_readable};
 use crate::config::Config;
 // The two provenance types are the deployment gate's (`php` only): the rest of
 // stage 0 names neither.
-use crate::host::{Host, Placement, Reexec};
+use crate::host::{Host, Install, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 // The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
@@ -308,12 +308,33 @@ pub(super) fn exec_stage1_dev(request: DevExec<'_>) -> ! {
         }
     }
 
-    let env: Vec<(String, String)> = app_env
+    let env = stage1_env(app_env, boot.host.install());
+    let err = exec(&cstring_dev(boot.root, &stage1.program), &argv, &env);
+    fail_dev_root(boot.root, &format!("exec stage 1: {err}"))
+}
+
+/// The environment the stage-1 `execve` hands its program.
+///
+/// The application's secret-free environment plus the one variable a standalone
+/// install must add: the `PYTHONHOME` of the interpreter it embeds (`MB.40.8`).
+/// Stage 1 owns no `PYTHONPATH` and no working directory (§4), and under
+/// `env -i` nothing else tells CPython where its stdlib is. An operator's own
+/// `PYTHONHOME` always wins: it names an interpreter this build did not choose.
+fn stage1_env(app_env: &BTreeMap<String, String>, install: Install) -> Vec<(String, String)> {
+    // Only a `python` build ever pushes the home, so the binding is not
+    // mutated in the standalone archive's build.
+    #[allow(unused_mut)]
+    let mut env: Vec<(String, String)> = app_env
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    let err = exec(&cstring_dev(boot.root, &stage1.program), &argv, &env);
-    fail_dev_root(boot.root, &format!("exec stage 1: {err}"))
+    #[cfg(feature = "python")]
+    if let Some(home) = super::project_python::python_home(install, app_env) {
+        env.push(("PYTHONHOME".to_string(), home));
+    }
+    #[cfg(not(feature = "python"))]
+    let _ = install;
+    env
 }
 /// Forks dbproxy, hands it the secrets and waits for its ready byte (§4).
 ///
@@ -637,10 +658,7 @@ pub(super) fn exec_stage1(
         }
     }
 
-    let env: Vec<(String, String)> = app_env
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
+    let env = stage1_env(app_env, host.install());
     let err = exec(&program(emitter, &stage1), &argv, &env);
     fail(emitter, &format!("exec stage 1: {err}"))
 }

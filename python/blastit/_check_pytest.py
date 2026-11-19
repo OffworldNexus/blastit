@@ -70,15 +70,17 @@ real server.
 
 from __future__ import annotations
 
+import codecs
 import copy
 import json
+import math
 import os
 import socket
 import stat
 import tempfile
 from contextvars import ContextVar
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote_to_bytes, urlsplit
 
 __all__ = [
     "MAX_SAMPLE_BYTES",
@@ -632,15 +634,266 @@ def _replay_body(environ: dict[str, Any]) -> tuple[bytes, int, Any]:
 def _probe(
     content_type: str | None, prefix: bytes, total: int
 ) -> dict[str, Any] | None:
-    """`_blastit.probe_ingress`, or `None` when the extension is not there."""
+    """The bounded body sample: ``_blastit.probe_ingress`` or its stdlib twin.
+
+    A bundle staged outside the application's venv can carry an extension built
+    for another CPython minor: ``from blastit import _blastit`` then raises
+    ``ImportError``, and a run that would otherwise audit fine would lose every
+    sample. The sample is a MIME essence and three booleans, so the fallback
+    reads the same bytes with :mod:`json` and :mod:`urllib.parse` and answers the
+    same keys, exactly as :func:`blastit.audit_v1.probe_ingress_json` does.
+    """
     try:
         from blastit import _blastit
     except ImportError:
-        return None
+        return _probe_stdlib(content_type, prefix, total)
     try:
-        return json.loads(_blastit.probe_ingress(content_type, prefix, total))
+        sample = json.loads(_blastit.probe_ingress(content_type, prefix, total))
     except Exception:  # noqa: BLE001 - a probe must never fail a request
-        return None
+        return _probe_stdlib(content_type, prefix, total)
+    if not isinstance(sample, dict):
+        return _probe_stdlib(content_type, prefix, total)
+    return sample
+
+
+#: The largest `Content-Type` essence a report carries (`MAX_MIME_REPORT_BYTES`).
+MAX_MIME_BYTES = 64
+
+#: The deepest JSON container the gate accepts (`MAX_JSON_DEPTH`).
+MAX_JSON_DEPTH = 64
+
+#: The essence reported when the request carried no `Content-Type` at all.
+NO_MIME = "none"
+
+#: The two essences the probe recognises.
+JSON_ESSENCE = "application/json"
+FORM_ESSENCE = "application/x-www-form-urlencoded"
+
+#: ASCII-only lowercasing: Rust's `to_ascii_lowercase` leaves U+212A alone.
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _ascii_lower(text: str) -> str:
+    """Lowercases ASCII letters only, exactly as the Rust gate does."""
+    return text.translate(_ASCII_LOWER)
+
+
+def _cap_mime(value: str) -> str:
+    """Cuts `value` to at most `MAX_MIME_BYTES` bytes on a `char` boundary."""
+    if len(value.encode("utf-8")) <= MAX_MIME_BYTES:
+        return value
+    capped: list[str] = []
+    used = 0
+    for character in value:
+        size = len(character.encode("utf-8"))
+        if used + size > MAX_MIME_BYTES:
+            break
+        capped.append(character)
+        used += size
+    return "".join(capped)
+
+
+def _probe_stdlib(
+    content_type: str | None, prefix: bytes, total: int
+) -> dict[str, Any]:
+    """The body sample, computed without the C extension (`MB.40.8`).
+
+    Untrusted bytes must never raise: a body this gate cannot judge is a body
+    with no proven codec, which is what the audit reads. Every failure —
+    including a depth-bomb JSON body that would raise ``RecursionError`` — is
+    that answer, never an exception a request could see.
+    """
+    try:
+        return _probe_sample(content_type, prefix, total)
+    except Exception:  # noqa: BLE001 - untrusted bytes never fail a request
+        return {
+            "mime": NO_MIME,
+            "truncated": isinstance(total, int) and total > MAX_SAMPLE_BYTES,
+            "valid_json": False,
+            "valid_form": False,
+        }
+
+
+def _probe_sample(
+    content_type: str | None, prefix: bytes, total: int
+) -> dict[str, Any]:
+    """The sample itself, under [`_probe_stdlib`]'s no-exception guard."""
+    essence, charset = _parse_mime(content_type)
+    truncated = total > MAX_SAMPLE_BYTES
+    charset_ok = charset in (None, "utf-8", "utf8")
+    return {
+        "mime": essence,
+        "truncated": truncated,
+        "valid_json": (
+            not truncated
+            and charset_ok
+            and bool(prefix)
+            and _is_json_essence(essence)
+            and _valid_json(prefix)
+        ),
+        "valid_form": (
+            not truncated
+            and charset_ok
+            and essence == FORM_ESSENCE
+            and _valid_form(prefix)
+        ),
+    }
+
+
+def _parse_mime(content_type: str | None) -> tuple[str, str | None]:
+    """The lowercase essence and the optional charset, as Rust's `mime::parse`."""
+    if content_type is None:
+        return NO_MIME, None
+    parts = _split_parameters(content_type)
+    essence = parts[0].strip() if parts else ""
+    essence = NO_MIME if not essence else _cap_mime(_ascii_lower(essence))
+    charset = None
+    for parameter in parts[1:]:
+        name, separator, value = parameter.partition("=")
+        if separator and _ascii_lower(name.strip()) == "charset" and charset is None:
+            charset = _ascii_lower(value.strip().strip('"').strip())
+    return essence, charset
+
+
+def _split_parameters(raw: str) -> list[str]:
+    """Splits on `;`, ignoring separators inside a quoted parameter value."""
+    parts: list[str] = []
+    start = 0
+    quoted = False
+    for index, character in enumerate(raw):
+        if character == '"':
+            quoted = not quoted
+        elif character == ";" and not quoted:
+            parts.append(raw[start:index])
+            start = index + 1
+    parts.append(raw[start:])
+    return parts
+
+
+def _is_json_essence(essence: str) -> bool:
+    """Whether the essence is `application/json` or `application/*+json`."""
+    return essence == JSON_ESSENCE or (
+        essence.startswith("application/") and essence.endswith("+json")
+    )
+
+
+def _reject_constant(lexeme: str) -> Any:
+    """Refuses `NaN` and `Infinity`, which RFC 8259 does not allow."""
+    raise ValueError(f"{lexeme} is not JSON")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Refuses a repeated object key, as the Rust parser does."""
+    members: dict[str, Any] = {}
+    for name, value in pairs:
+        if name in members:
+            raise ValueError(f"duplicate key {name!r}")
+        members[name] = value
+    return members
+
+
+def _valid_json(prefix: bytes) -> bool:
+    """Strict RFC 8259 judgement of one body prefix."""
+    if prefix.startswith(codecs.BOM_UTF8):
+        return False
+    try:
+        text = prefix.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    # Rust's parser refuses the sixty-fifth container before it recurses into
+    # it; a scanner answers the same question without ever recursing, so a
+    # 2000-deep body is a `False` instead of a `RecursionError`.
+    if not _json_depth_ok(text):
+        return False
+    try:
+        value = json.loads(
+            text,
+            parse_constant=_reject_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        # A lone surrogate survives `json.loads` and must not survive this gate.
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except (ValueError, TypeError, RecursionError, UnicodeError):
+        return False
+    return _numbers_fit(value)
+
+
+def _json_depth_ok(text: str) -> bool:
+    """Whether no container in `text` nests past `MAX_JSON_DEPTH`.
+
+    Braces inside a string are text, not containers, so the scan tracks the
+    string state and its escapes exactly as the parser would.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "{[":
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                return False
+        elif character in "}]":
+            depth -= 1
+    return True
+
+
+def _numbers_fit(value: Any) -> bool:
+    """Whether every number is one the gate's parser keeps exactly."""
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, int):
+        return -(2**63) <= value < 2**64
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_numbers_fit(item) for item in value)
+    if isinstance(value, dict):
+        return all(_numbers_fit(item) for item in value.values())
+    return True
+
+
+def _valid_form(prefix: bytes) -> bool:
+    """`application/x-www-form-urlencoded` validation, as Rust's `form::decode`."""
+    for segment in prefix.split(b"&"):
+        if not segment:
+            continue
+        name, _, value = segment.partition(b"=")
+        if not _valid_component(name) or not _valid_component(value):
+            return False
+    return True
+
+
+def _valid_component(component: bytes) -> bool:
+    """One `+`-and-`%XX` component: good escapes, UTF-8, and no NUL."""
+    index = 0
+    while index < len(component):
+        if component[index] == 0x25:  # "%"
+            escape = component[index + 1 : index + 3]
+            if len(escape) != 2 or not _hex_digits(escape):
+                return False
+            index += 3
+        else:
+            index += 1
+    try:
+        decoded = unquote_to_bytes(component.replace(b"+", b" ")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return "\x00" not in decoded
+
+
+def _hex_digits(escape: bytes) -> bool:
+    """Whether both bytes of one percent escape are hexadecimal digits."""
+    return all(byte in b"0123456789abcdefABCDEF" for byte in escape)
 
 
 def _append(line: dict[str, Any]) -> None:

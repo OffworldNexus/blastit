@@ -3732,3 +3732,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T09:57 [MB.40.7] (conductor) base cbba102a6bbdca2ba7c7af4a9243bd4d53fcf002
 - 2026-11-19T10:04 [MB.40.7] (conductor) status active -> done
 - 2026-11-19T10:04 [MB.40] (conductor) status ready -> done
+- 2026-11-19T10:35 [MB.40] (conductor) status done -> ready: Re-opening for MB.40.8 local make install/uninstall bundle
+- 2026-11-19T10:35 [MB.40.8] (conductor) created (task) Add make install / uninstall (~/.local/share/blastit bundle + symlinks) with embedded PYTHONHOME & .venv auto-discovery
+- 2026-11-19T10:35 [MB.40.8] (conductor) status ready -> active
+- 2026-11-19T10:35 [MB.40.8] (conductor) attempt 1/3 started
+- 2026-11-19T10:35 [MB.40.8] (conductor) base 94dffa212e3ce18b0e74ec70ea0a4495c592c709
+- 2026-11-19T11:02 [MB.40.8] (conductor) status active -> done
+- 2026-11-19T11:02 [MB.40] (conductor) status ready -> done

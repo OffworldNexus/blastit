@@ -11,6 +11,8 @@
 #   make test-critical    # run critical skip check + staged Python critical tests (offline)
 #   make rs-test-critical # run every crates/*/tests/critical_*.rs suite standalone
 #   make e2e              # build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
+#   make install          # stage a self-contained release bundle under PREFIX (default ~/.local)
+#   make uninstall        # remove the bundle `make install` staged under PREFIX
 #   make php-sapi         # build the per-minor C SAPI shims this host has headers for
 #   make php-sapi-e2e     # Docker: build one shim and prove it with the real-load probe
 #   make rs-test-php      # real-pair PHP suites against host libphp + shim
@@ -22,6 +24,19 @@ UV ?= uv
 UVX ?= uvx --offline
 CARGO ?= cargo
 DOCS_PYTEST ?= 9.2.0
+
+# `make install`: one self-contained bundle under PREFIX (`MB.40.8`).
+# `$PREFIX/bin/{blastit,blastit-lsp}` are symlinks into `$PREFIX/share/blastit`,
+# so `--version`, `dev` and `check` work with no `uv`, no wheel and no `PATH`.
+PREFIX ?= $(HOME)/.local
+INSTALL_BINDIR := $(PREFIX)/bin
+INSTALL_LIBDIR := $(PREFIX)/share/blastit/lib
+INSTALL_PYDIR  := $(PREFIX)/share/blastit/python
+# `make PREFIX= install` would stage into `/bin` and `/share`; refuse at parse
+# time instead of writing outside the prefix the caller meant.
+ifneq ($(filter install uninstall,$(MAKECMDGOALS)),)
+$(if $(strip $(PREFIX)),,$(error PREFIX must not be empty: e.g. make install PREFIX=/some/dir))
+endif
 
 # Resolve CPython >= 3.13 via uv and export PYTHONHOME + LD_LIBRARY_PATH for embedded PyO3 test binaries.
 PYO3_BIN := $(shell readlink -f "$$($(UV) python find --no-project '>=3.13' 2>/dev/null || which python3)")
@@ -67,7 +82,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 .PHONY: help fast-check check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
-        docs-serve docs-serve-stage docs-serve-check php-sapi php-sapi-e2e \
+        docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e \
         rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
         packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp
 
@@ -585,3 +600,77 @@ print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 fast-check: guard critical-guard rs-fmt rs-lint rs-test py-lint plan-validate ## Fast per-slice Rust + Python + plan check
 
 check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python rs-no-default seam-check platform-matrix-check workflow-check packaging-gates-test zed-check plan-validate ## Full unprivileged epic/release gate
+
+install: ## Install a self-contained release bundle under PREFIX (default ~/.local)
+	@set -eu; \
+	if [ "$(PREFIX)" = "$(HOME)/.local" ] && [ -L "$(INSTALL_BINDIR)/blastit" ]; then \
+		target=$$(readlink -f "$(INSTALL_BINDIR)/blastit" 2>/dev/null || true); \
+		case "$$target" in \
+			*/uv/tools/blastit/*) \
+				echo "install: removing the stale 'uv tool' blastit ($$target)"; \
+				$(UV) tool uninstall blastit >/dev/null 2>&1 || true ;; \
+		esac; \
+	fi
+	@echo "cargo build --release --locked -> blastit (python,php,static)"
+	$(RUST_ENV) $(CARGO) build --release --locked -p blastit --features python,php,static
+	@echo "cargo build --release --locked -> blastit-lsp"
+	$(RUST_ENV) $(CARGO) build --release --locked -p blastit-lsp
+	@echo "cargo build --release --locked -> blastit-py, blastit-dbproxy"
+	$(RUST_ENV) $(CARGO) build --release --locked -p blastit-py -p blastit-dbproxy --features blastit/python
+	$(MAKE) php-sapi
+	@set -eu; \
+	rm -rf "$(PREFIX)/share/blastit"; \
+	mkdir -p "$(INSTALL_LIBDIR)" "$(INSTALL_PYDIR)/blastit/_bin" "$(INSTALL_BINDIR)"; \
+	install -m 0755 target/release/blastit "$(INSTALL_LIBDIR)/blastit"; \
+	install -m 0755 target/release/blastit-lsp "$(INSTALL_LIBDIR)/blastit-lsp"; \
+	for shim in target/php-sapi/libblastit_php*.so; do \
+		[ -e "$$shim" ] || continue; \
+		install -m 0755 "$$shim" "$(INSTALL_LIBDIR)/"; \
+	done; \
+	install -m 0644 python/blastit/*.py "$(INSTALL_PYDIR)/blastit/"; \
+	ext="$$($(PYO3_BIN) -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX"))')"; \
+	install -m 0755 target/release/lib_blastit.so "$(INSTALL_PYDIR)/blastit/_blastit$$ext"; \
+	install -m 0755 target/release/blastit-dbproxy "$(INSTALL_PYDIR)/blastit/_bin/blastit-dbproxy"; \
+	ln -sfn "$(INSTALL_LIBDIR)/blastit" "$(INSTALL_BINDIR)/blastit"; \
+	ln -sfn "$(INSTALL_LIBDIR)/blastit-lsp" "$(INSTALL_BINDIR)/blastit-lsp"; \
+	shims=""; \
+	for shim in "$(INSTALL_LIBDIR)"/libblastit_php*.so; do \
+		[ -e "$$shim" ] || continue; \
+		shims="$$shims $$(basename "$$shim")"; \
+	done; \
+	echo "install: $(INSTALL_BINDIR)/blastit -> $(INSTALL_LIBDIR)/blastit"; \
+	echo "install: $(INSTALL_BINDIR)/blastit-lsp -> $(INSTALL_LIBDIR)/blastit-lsp"; \
+	echo "install: capabilities: python, php, static"; \
+	[ -n "$$shims" ] || shims=" none on this host (make php-sapi prints why)"; \
+	echo "install: php sapi shims:$$shims"; \
+	echo "install: python gate under $(INSTALL_PYDIR)"; \
+	echo "install: $$("$(INSTALL_BINDIR)/blastit" --version)"; \
+	case ":$$PATH:" in \
+		*":$(INSTALL_BINDIR):"*) echo "install: $(INSTALL_BINDIR) is already on PATH" ;; \
+		*) echo "install: add it to PATH:  export PATH=\"$(INSTALL_BINDIR):\$$PATH\"" ;; \
+	esac
+
+uninstall: ## Remove the bundle `make install` staged under PREFIX
+	@set -eu; \
+	removed=0; \
+	for name in blastit blastit-lsp; do \
+		link="$(INSTALL_BINDIR)/$$name"; \
+		if [ -L "$$link" ]; then \
+			target=$$(readlink -f "$$link" 2>/dev/null || true); \
+			if [ "$$target" = "$(INSTALL_LIBDIR)/$$name" ]; then \
+				rm -f "$$link"; removed=$$((removed + 1)); \
+			else \
+				echo "uninstall: leaving $$link: it points at $${target:-nowhere}, not $(INSTALL_LIBDIR)/$$name" >&2; \
+			fi; \
+		elif [ -e "$$link" ]; then \
+			echo "uninstall: leaving $$link: it is not a symlink into $(INSTALL_LIBDIR)" >&2; \
+		fi; \
+	done; \
+	if [ -d "$(PREFIX)/share/blastit" ]; then \
+		rm -rf "$(PREFIX)/share/blastit"; removed=$$((removed + 1)); \
+	fi; \
+	if [ "$$removed" -eq 0 ]; then \
+		echo "uninstall: nothing installed under $(PREFIX)"; \
+	else \
+		echo "uninstall: removed the bundle under $(PREFIX)"; \
+	fi

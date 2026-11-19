@@ -229,7 +229,7 @@ fn execute(host: &Host, options: &CheckOptions, colour: Colour) -> Result<u8, St
     // Both preflights run before dbproxy or the suite start, so a suite that
     // cannot run at all is exit `2` — never a proxy left behind, and never a
     // Django run that could reach the developer's own database (`R4`, `R30`).
-    let python = python_program(host)?;
+    let python = python_program(host, &config.manifest_dir)?;
     require_pytest(&python, &prepared)?;
     let handshake = Handshake::new(django_setup(
         &DjangoPreflight {
@@ -280,15 +280,16 @@ fn execute(host: &Host, options: &CheckOptions, colour: Colour) -> Result<u8, St
     }
 
     let http_path = runtime.path().join("http_obs.jsonl");
-    let status = run_pytest(
+    let status = run_pytest(PytestSpawn {
+        host,
         options,
-        &prepared,
-        &python,
-        &http_path,
-        ctl_python.as_ref().map(AsRawFd::as_raw_fd),
-        options.json,
-        handshake.path(),
-    );
+        prepared: &prepared,
+        python: &python,
+        http_path: &http_path,
+        ctl_fd: ctl_python.as_ref().map(AsRawFd::as_raw_fd),
+        json: options.json,
+        django: handshake.path(),
+    });
     // The child closes its end; ours is dropped once pytest is gone.
     drop(ctl_python);
     let code = match status {
@@ -951,17 +952,34 @@ impl Drop for EventDrain {
     }
 }
 
-/// Runs the suite, mapping a spawn failure to exit `2` (`R4`).
-#[allow(clippy::too_many_arguments)]
-fn run_pytest(
-    options: &CheckOptions,
-    prepared: &blastit_env::Prepared,
-    python: &Path,
-    http_path: &Path,
+/// Everything one `pytest` spawn reads (`MB.40.8`).
+///
+/// A struct rather than eight positional arguments: the output-stream flag, the
+/// optional control descriptor and the optional paths read as one document, and
+/// a caller cannot swap two of them by accident.
+struct PytestSpawn<'a> {
+    host: &'a Host,
+    options: &'a CheckOptions,
+    prepared: &'a blastit_env::Prepared,
+    python: &'a Path,
+    http_path: &'a Path,
     ctl_fd: Option<RawFd>,
     json: bool,
-    django: Option<&Path>,
-) -> Result<i32, String> {
+    django: Option<&'a Path>,
+}
+
+/// Runs the suite, mapping a spawn failure to exit `2` (`R4`).
+fn run_pytest(spawn: PytestSpawn<'_>) -> Result<i32, String> {
+    let PytestSpawn {
+        host,
+        options,
+        prepared,
+        python,
+        http_path,
+        ctl_fd,
+        json,
+        django,
+    } = spawn;
     let mut command = Command::new(python);
     command.arg("-m").arg("pytest").arg("-q");
     // R30: `-p no:blastit` disables the installed `0.1.0` entry point, and the
@@ -972,6 +990,24 @@ fn run_pytest(
     command.env_clear();
     for (name, value) in prepared.app_env() {
         command.env(name, value);
+    }
+    // `MB.40.8`: the bundle `make install` stages carries the gate itself at
+    // `<exe_dir>/../python`, so `-p blastit._check_pytest` imports even when
+    // `blastit` was never installed into the application's own venv. An existing
+    // `PYTHONPATH` keeps its entries, after the bundle's.
+    if let Some(directory) = bundled_python(host) {
+        let existing = prepared
+            .app_env()
+            .get("PYTHONPATH")
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .unwrap_or_default();
+        let joined = if existing.is_empty() {
+            directory
+        } else {
+            format!("{directory}:{existing}")
+        };
+        command.env("PYTHONPATH", joined);
     }
     command.env(HTTP_OBS, http_path);
     // A store-less app runs no dbproxy, so there is no channel to push a target
@@ -1009,19 +1045,65 @@ fn run_pytest(
     Ok(status.code().unwrap_or(-1))
 }
 
-/// The interpreter `pytest` runs on.
+/// The interpreter `pytest` runs on (`MB.40.8`).
 ///
-/// A wheel's is the one it was installed into (`sys.executable`); a standalone
-/// binary has none of its own, so `BLASTIT_PYTHON` names it, and `python3` on
-/// `PATH` is the last resort.
-fn python_program(host: &Host) -> Result<PathBuf, String> {
+/// A wheel's is the one it was installed into (`sys.executable`). A standalone
+/// binary has none of its own, so it asks, in the order a developer's shell
+/// answers it: `BLASTIT_PYTHON`, the activated `$VIRTUAL_ENV`, the project's
+/// `.venv`, `PATH`, and finally the interpreter prefix this build recorded — so
+/// an `env -i PATH=/usr/bin:/bin` run still finds a `python3` with the project's
+/// pytest, while an activated venv or `PATH` always wins.
+fn python_program(host: &Host, manifest_dir: &Path) -> Result<PathBuf, String> {
     if let Some(explicit) = std::env::var_os("BLASTIT_PYTHON") {
         return Ok(PathBuf::from(explicit));
     }
     if host.install() == Install::Wheel {
         return Ok(host.stage1().program.clone());
     }
-    let path = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(found) = std::env::var_os("VIRTUAL_ENV")
+        .map(PathBuf::from)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .and_then(|directory| venv_python(&directory))
+    {
+        return Ok(found);
+    }
+    if let Some(found) = venv_python(&manifest_dir.join(".venv")) {
+        return Ok(found);
+    }
+    if let Some(found) = path_python() {
+        return Ok(found);
+    }
+    // The build's own interpreter is the fallback for a `PATH` that names no
+    // `python3` at all (`env -i PATH=/usr/bin:/bin` on a host whose python is
+    // elsewhere), never for an environment with no `PATH` whatsoever: a caller
+    // that cleared its whole environment cannot say which project is being
+    // audited, and "no interpreter to run pytest on" is the honest answer.
+    if std::env::var_os("PATH").is_some()
+        && let Some(found) = embedded_python()
+    {
+        return Ok(found);
+    }
+    Err(
+        "no interpreter to run pytest on: set BLASTIT_PYTHON to the `python3` \
+         that has pytest installed"
+            .to_string(),
+    )
+}
+
+/// `<venv>/bin/python3` (or `bin/python`), when it exists.
+fn venv_python(venv: &Path) -> Option<PathBuf> {
+    for name in ["python3", "python"] {
+        let candidate = venv.join("bin").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// The first `python3` (or `python`) on `PATH`.
+fn path_python() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
     for directory in path.to_string_lossy().split(':') {
         if directory.is_empty() {
             continue;
@@ -1029,15 +1111,51 @@ fn python_program(host: &Host) -> Result<PathBuf, String> {
         for name in ["python3", "python"] {
             let candidate = Path::new(directory).join(name);
             if candidate.is_file() {
-                return Ok(candidate);
+                return Some(candidate);
             }
         }
     }
-    Err(
-        "no interpreter to run pytest on: set BLASTIT_PYTHON to the `python3` \
-         that has pytest installed"
-            .to_string(),
-    )
+    None
+}
+
+/// `<BLASTIT_PYTHON_HOME>/bin/python3`, the interpreter this build embedded.
+///
+/// The last resort, so a machine where `PATH` holds no `python3` at all — an
+/// `env -i` run, a minimal container — still audits a suite against the
+/// interpreter the binary was built with. Silent in a build that links no
+/// `libpython`, which records no prefix.
+fn embedded_python() -> Option<PathBuf> {
+    let home = option_env!("BLASTIT_PYTHON_HOME")?;
+    let candidate = Path::new(home).join("bin").join("python3");
+    if !candidate.is_file() {
+        return None;
+    }
+    Some(candidate)
+}
+
+/// `<exe_dir>/../python` when it holds the staged `blastit` gate (`MB.40.8`).
+///
+/// `make install` symlinks `$PREFIX/bin/blastit` to
+/// `$PREFIX/share/blastit/lib/blastit` and stages the Python package beside it,
+/// so `std::env::current_exe` — which resolves the symlink — names the bundle
+/// that `../python` belongs to. Both staged markers must be there:
+/// `_check_pytest.py` is what `-p` imports, and `_bin/blastit-dbproxy` is what
+/// only the bundle ships, so a `cargo` build tree whose `target/<profile>` sits
+/// beside the repository's own `python/` can never be mistaken for one
+/// (`MB.40.8`). Without them the suite's own venv is used unchanged.
+fn bundled_python(host: &Host) -> Option<String> {
+    if host.install() != Install::Binary {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let directory = exe.parent()?.parent()?.join("python");
+    let package = directory.join("blastit");
+    if !package.join("_check_pytest.py").is_file()
+        || !package.join("_bin").join("blastit-dbproxy").is_file()
+    {
+        return None;
+    }
+    Some(directory.to_string_lossy().into_owned())
 }
 
 /// The `blastit-dbproxy` program this installation runs.
@@ -1749,6 +1867,21 @@ view upload regex '/upload/.*' {}
         let broken = "view cart \"/cart/\" {\n    body xml\n}\n";
         let refused = plan.proposal(broken).expect_err("the editor refuses");
         assert!(!refused.is_empty(), "{refused}");
+    }
+
+    #[test]
+    fn a_project_venvs_interpreter_is_preferred_over_a_bare_one() {
+        let root = CheckRoot::create().expect("a runtime root");
+        let venv = root.path().join("venv");
+        let bin = venv.join("bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        // Denied twin: a directory with no interpreter is not a venv.
+        assert!(venv_python(&venv).is_none());
+        std::fs::write(bin.join("python"), b"#!/bin/sh\n").expect("python");
+        assert_eq!(venv_python(&venv), Some(bin.join("python")));
+        // The `python3` name wins over `python` when both are there.
+        std::fs::write(bin.join("python3"), b"#!/bin/sh\n").expect("python3");
+        assert_eq!(venv_python(&venv), Some(bin.join("python3")));
     }
 
     #[test]

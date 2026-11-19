@@ -42,6 +42,7 @@ use blastit_view_php::discovery::{PhpBoot, PhpShimScope};
 mod dev;
 mod fork_exec;
 mod gates;
+mod project_python;
 
 #[cfg(test)]
 mod unit_tests;
@@ -533,10 +534,19 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
             EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
         ));
     }
+    // `MB.40.8`: a standalone `entrypoint python` boot serves from the project's
+    // venv, matched against the CPython minor this binary embeds. Refused here,
+    // before any listener binds, with both versions named. A production boot
+    // reads only `<manifest_dir>/.venv`: `$VIRTUAL_ENV` belongs to an operator's
+    // shell, not to the tree being served.
+    let venv = match project_python::project_venv(&config, host, false) {
+        Ok(venv) => venv,
+        Err(message) => fail(&emitter, &message),
+    };
     // §8.1: one `runtime` line saying what this boot will run. PHP's is the
     // probe's (below the fork, after `php_module_startup`); the other two are
     // decided here.
-    emit_runtime(&emitter, &config, interpreter);
+    emit_runtime(&emitter, &config, interpreter, venv.as_ref());
 
     let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
         Ok(prepared) => prepared,
@@ -579,8 +589,17 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
     // The interpreter's import path travels in the configuration, not in the
     // environment: stage 1 is `execve`'d as an interpreter of its own (§4), and
     // a wheel re-executes it with `-I`, which drops `PYTHONPATH` and the
-    // working directory. Empty for the standalone binary.
+    // working directory. Empty for the standalone binary — whose project's
+    // `site-packages` stage 0 discovered above (`MB.40.8`).
     config.sys_path = host.sys_path().to_vec();
+    if let Some(venv) = &venv
+        && !config
+            .sys_path
+            .iter()
+            .any(|entry| entry == &venv.site_packages)
+    {
+        config.sys_path.insert(0, venv.site_packages.clone());
+    }
     // §5.3: and so does the directory blastit was started in, which stage 1 puts
     // first on `sys.path` — the directory gunicorn, uwsgi and granian all make
     // importable, so a project that was never `pip install`ed serves its own

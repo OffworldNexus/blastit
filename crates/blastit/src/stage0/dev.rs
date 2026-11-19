@@ -253,6 +253,22 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
         .map(|(name, names)| (name.as_str().to_string(), names.clone()))
         .collect();
     config.sys_path = host.sys_path().to_vec();
+    // `MB.40.8`: a standalone `entrypoint python` boot imports the application
+    // from the project's venv. A venv built for another CPython minor than the
+    // interpreter this binary embeds is refused here, before anything is
+    // forked, naming both versions and both fixes.
+    let venv = match super::project_python::project_venv(&config, host, true) {
+        Ok(venv) => venv,
+        Err(message) => dev_fail(&message),
+    };
+    if let Some(venv) = &venv
+        && !config
+            .sys_path
+            .iter()
+            .any(|entry| entry == &venv.site_packages)
+    {
+        config.sys_path.insert(0, venv.site_packages.clone());
+    }
     config.cwd = std::env::current_dir()
         .ok()
         .map(|dir| dir.into_os_string().into_vec());
@@ -364,7 +380,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
     // §8.1: one `runtime` line saying what this boot will run, now that the boot
     // is known-good (the banner and `boot` are already on stdout). PHP's line
     // comes from the probe below the fork; the other two are decided here.
-    emit_runtime(&emitter, &config, interpreter);
+    emit_runtime(&emitter, &config, interpreter, venv.as_ref());
     // A boot above the documented default is the operator's call once they
     // raised the knob, and it is also the state in which a view's first spawn
     // may have to wait for memory: say so once, with the reading and the cache
