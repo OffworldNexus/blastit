@@ -164,7 +164,8 @@ pub use crate::error::Error;
 pub use crate::exec::{exe_path, exec};
 pub use crate::fanotify::{Event, Readout, Watcher, WatcherError};
 pub use crate::fd::{
-    close_fds_except, close_fds_except_scan, dup_onto, fd_is_cloexec, set_cloexec,
+    close_fds_except, close_fds_except_scan, dup_onto, fd_is_cloexec, open_dir_nofollow,
+    set_cloexec,
 };
 pub use crate::pid::{ExitStatus, Pid};
 pub use crate::privs::{

@@ -3882,3 +3882,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T20:47 [MB.42.2.2.2] (lead) REVIEW FIX (filtered): MAJOR pyproject.toml:83 maturin manifest-path still names the deleted crates/blastit-py -> uv build/maturin fail at config load = no whee
 - 2026-11-19T21:10 [MB.42.2.2.2] (lead) protected-test deletion verified (crates/blastit-py/tests/critical_check_schema.rs): its subjects are the retired pyo3 bindings; coverage migrated - schema_vers
 - 2026-11-19T21:10 [MB.42.2.2.2] (lead) status review -> done
+- 2026-11-19T21:10 [MB.42.2.2] (lead) status ready -> done
+- 2026-11-19T21:10 [MB.42.2.2] (lead) epic closed on leaf evidence (all children green on the merged tree: critical_internal_json 4/4, 53 protected python tests unedited via real staged _bin/blastit
+- 2026-11-19T21:10 [MB.42.2.3] (lead) status ready -> active
+- 2026-11-19T21:10 [MB.42.2.3] (lead) attempt 1/3 started
+- 2026-11-19T21:10 [MB.42.2.3] (lead) base 852d47578fe1bd4e3df6072037a23fb08fe64aee
+- 2026-11-19T21:20 [MB.42.2.3] (lead) status active -> review
+- 2026-11-19T21:23 [MB.42.2.3] (unknown) edited fields
+- 2026-11-19T21:23 [MB.42.2.3] (lead) REVIEW FIX (filtered): MAJOR wheel wrapper sets BLASTIT_HANDOFF_DONE unconditionally (__main__.py:30, _blastit.py:473) so a pip-installed blastit NEVER probes .
+- 2026-11-19T21:30 [MB.42.2.3] (lead) status review -> done

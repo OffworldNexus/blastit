@@ -2,7 +2,8 @@
 //! not inherit.
 
 use std::io;
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::path::Path;
 
 /// Whether `FD_CLOEXEC` is set on `fd`.
 pub fn fd_is_cloexec(fd: BorrowedFd<'_>) -> io::Result<bool> {
@@ -36,6 +37,24 @@ pub fn set_cloexec(fd: BorrowedFd<'_>, cloexec: bool) -> io::Result<bool> {
         return Err(io::Error::last_os_error());
     }
     Ok(flags & libc::FD_CLOEXEC != 0)
+}
+
+/// Open `path` as a directory descriptor: read-only, no symlink followed, close
+/// on exec.
+///
+/// Everything that acts on what is *inside* the directory then does it relative
+/// to this descriptor (`openat`), so a symlink swapped in under `path` between
+/// the open and the use cannot make the caller touch something else.
+pub fn open_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
+    rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(io::Error::from)
 }
 
 /// `dup2(fd, target)`: put a copy of `fd` on descriptor number `target`,

@@ -14,12 +14,15 @@
 //! tree instead, and so have no flag at all.
 //!
 //! Nothing here reads the environment or a file on the command line's behalf:
-//! stage 0 does that (§4). The two exceptions are documented where they are:
-//! `PORT` (the documented `blastit dev` fallback) and `BLASTIT_PRESET` (which the
-//! same boot reads, checked here so a typo is named before the capability gate).
+//! stage 0 does that (§4). The four documented exceptions are named where they
+//! are read, all before any capability gate: `PORT` (`blastit dev`'s fallback),
+//! `BLASTIT_PRESET` (checked here so a typo is named before the gate), and
+//! `handoff`'s `VIRTUAL_ENV` / `BLASTIT_HANDOFF_DONE` / `BLASTIT_NO_LOCAL_HANDOFF`.
 //!
-//! # The four modules
+//! # The five modules
 //!
+//! * `handoff` — §4: hand `dev`/`check`/`fmt`/`lsp` to the project's own
+//!   `blastit` before this image acts on them.
 //! * `help` — every word a person reads, and the one shape a refusal takes.
 //! * `parse` — the grammar of the four subcommands and the re-exec lines.
 //! * `preset` — the one resolver for `--preset` and `BLASTIT_PRESET`.
@@ -41,6 +44,7 @@ use crate::logs::Colour;
 use crate::stage0;
 use crate::stage1;
 
+mod handoff;
 mod help;
 mod internal_json;
 mod parse;
@@ -197,7 +201,9 @@ pub fn main(host: Host, argv: Vec<String>) -> u8 {
                 println!("{}", help::DEV_USAGE);
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_dev(&host, &options, colour),
+            Ok(Subcommand::Run(options)) => {
+                after_handoff(Command::Dev, &argv, || run_dev(&host, &options, colour))
+            }
             Err(message) => {
                 refuse("blastit dev", &message, false, colour);
                 // `1` for `dev`'s own grammar: the protected CLI matrix pins
@@ -210,7 +216,9 @@ pub fn main(host: Host, argv: Vec<String>) -> u8 {
                 println!("{}", help::CHECK_USAGE);
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_check(&host, &options, colour),
+            Ok(Subcommand::Run(options)) => {
+                after_handoff(Command::Check, &argv, || run_check(&host, &options, colour))
+            }
             Err(message) => {
                 refuse("blastit check", &message, false, colour);
                 CHECK_FAILURE
@@ -221,7 +229,9 @@ pub fn main(host: Host, argv: Vec<String>) -> u8 {
                 println!("{}", help::fmt_usage());
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_fmt(&options),
+            Ok(Subcommand::Run(options)) => {
+                after_handoff(Command::Fmt, &argv, || run_fmt(&options))
+            }
             Err(message) => {
                 refuse("blastit fmt", &message, false, colour);
                 FMT_FAILURE
@@ -232,7 +242,7 @@ pub fn main(host: Host, argv: Vec<String>) -> u8 {
                 println!("{}", help::LSP_USAGE);
                 SUCCESS
             }
-            Ok(Subcommand::Run(())) => run_lsp(),
+            Ok(Subcommand::Run(())) => after_handoff(Command::Lsp, &argv, run_lsp),
             Err(message) => {
                 refuse("blastit lsp", &message, false, colour);
                 LSP_FAILURE
@@ -296,6 +306,20 @@ pub fn main(host: Host, argv: Vec<String>) -> u8 {
                 }
             }
         }
+    }
+}
+
+/// §4: let the project's own `blastit` answer `command`, or run `this` image.
+///
+/// Only `dev`, `check`, `fmt` and `lsp` reach here. `Serve` and
+/// `--internal-json` answer from the binary that was typed, so a deployment is
+/// the artifact the operator installed (`R6`–`R8`); a valid handoff replaces
+/// this process image and never returns, and a refusal has already been
+/// printed, so `Some` is the status to exit with.
+fn after_handoff(command: Command, argv: &[String], this: impl FnOnce() -> u8) -> u8 {
+    match handoff::attempt(command, argv) {
+        Some(status) => status,
+        None => this(),
     }
 }
 

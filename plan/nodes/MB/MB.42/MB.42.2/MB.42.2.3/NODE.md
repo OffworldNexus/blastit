@@ -2,16 +2,16 @@
 id: MB.42.2.3
 title: "Safe local CLI handoff (cli/handoff.rs): zero-TOCTOU venv/vendor/node_modules execveat"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2.2]
-paths: ["crates/**"]
-attempts: 0
+paths: ["crates/**", python/blastit/__main__.py, python/blastit/_blastit.py]
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T17:18"
-updated: "2026-11-19T17:18"
+updated: "2026-11-19T21:30"
 ---
 
 # Goal

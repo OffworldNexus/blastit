@@ -22,12 +22,16 @@ import sys
 def main() -> None:
     """Runs blastit: it becomes the server, or exits non-zero.
 
+    ``BLASTIT_HANDOFF_DONE`` is deliberately not set here: §4's handoff is the
+    binary's, and it sets that variable when it hands the command to a
+    project's own ``blastit``. Setting it here would keep a pip-installed
+    ``blastit`` from ever using ``.venv/bin/blastit``.
+
     Raises `SystemExit`, which is what a console script's exit status is.
     """
     from blastit import _blastit
 
     os.environ.setdefault("BLASTIT_WHEEL_PYTHON", sys.executable)
-    os.environ["BLASTIT_HANDOFF_DONE"] = "1"
     raise SystemExit(_blastit.main(sys.argv[1:], sys.executable, ""))
 
 

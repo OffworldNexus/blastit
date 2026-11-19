@@ -372,11 +372,7 @@ fn runtime_base(uid: u32) -> PathBuf {
 /// Opens `path` with `O_NOFOLLOW | O_DIRECTORY` and checks it is a `0700`
 /// directory owned by `uid`.
 fn verify_private_dir(path: &Path, uid: u32) -> io::Result<()> {
-    let dir = rustix::fs::open(
-        path,
-        rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )?;
+    let dir = blastit_sys::open_dir_nofollow(path)?;
     let stat = rustix::fs::fstat(&dir)?;
     if stat.st_uid != uid {
         return Err(io::Error::new(

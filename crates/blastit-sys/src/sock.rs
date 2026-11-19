@@ -18,6 +18,7 @@ use rustix::net::{
 use std::os::unix::ffi::OsStrExt;
 
 use crate::Error;
+use crate::fd::open_dir_nofollow;
 
 /// A control-message length, as `usize`.
 ///
@@ -383,11 +384,7 @@ pub fn bind_unix_listener(path: &Path, owner_uid: u32, mode: u32) -> io::Result<
     // Hold the directory itself: everything below is done relative to this
     // descriptor, so a symlink swapped in under `path` cannot make init touch
     // something else, and the socket mode is never a path-based `chmod`.
-    let dir = rustix::fs::open(
-        parent,
-        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
+    let dir = open_dir_nofollow(parent)?;
 
     match rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {

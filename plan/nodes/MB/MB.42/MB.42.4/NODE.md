@@ -45,12 +45,17 @@ Rewrite the hero snippet and install/usage commands across `README.md` and `docs
    - `docs/index.md:123` — `wheels for CPython 3.13 and 3.14` -> `one wheel for every CPython 3.12+`.
    - `docs/design/backend-runtimes.md:252` (internal design doc) still describes the `cp313`/`cp314` wheel matrix and `_blastit*.so`.
    - Also state that `blastit --internal-json` is an internal bridge for the Python package — not a command — so a curious user who runs it gets an honest sentence instead of a hang.
-6. **PHP 8.3, 8.4, 8.5 and 8.6 stated consistently** (`MB.42.5` owns the code; you own the prose):
+6. **Document the local-handoff rule and fix a factual error** (`MB.42.2.3` shipped silent handoff; `review-ux` found the reference page says the opposite of the truth):
+   - `docs/reference/cli.md:186` currently says **"There is no `--version`"** — but `-V, --version` exists (`cli.rs`, `USAGE`, `help.rs`). Fix the sentence and add the flag to the argument table at `:176-178`: `| -V, --version | prints this binary's version (--help and --version always answer from the global blastit) |`.
+   - The same page must state the user-facing handoff rule in one paragraph: `dev`, `check`, `fmt` and `lsp` run `./.venv/bin/blastit`, `./vendor/bin/blastit` or `./node_modules/.bin/blastit` when one is present **and safe**; the build that actually ran is in the boot event; `BLASTIT_NO_LOCAL_HANDOFF=1` keeps the global binary for every command.
+   - `docs/reference/settings.md`'s env table gains `BLASTIT_NO_LOCAL_HANDOFF` (`—`, "any value but `0`/empty stops `dev`, `check`, `fmt` and `lsp` from handing off to the project's own `blastit`").
+   - `docs/knowledge/LESSONS.md` gains one bullet from `MB.42.2.3`: a `0775` directory (Debian/Docker `umask 002`, and this repo's own `target/tmp`) makes the handoff's ancestor rule skip a project binary, so §4 fixtures must live under `$HOME` — the tool behaves correctly and the *line* must not read as an incident.
+7. **PHP 8.3, 8.4, 8.5 and 8.6 stated consistently** (`MB.42.5` owns the code; you own the prose):
    - Every page that names supported PHP minors says `PHP 8.3, 8.4, 8.5 and 8.6` (or `8.3–8.6`) — `docs/frameworks/php.md`, `docs/getting-started.md`, `docs/deploy/*`, `docs/reference/*`, `README.md`.
    - The NTS note stays factual: `8.3, 8.4, 8.5, 8.6` embedded (`libphpX.Y-embed` / `phpXY-embed`), never `php-fpm`.
    - `uv run --no-project scripts/platform_matrix.py --check` must stay green (it refuses a page claiming more shims than the 16-leg matrix declares, or more than are proven).
-7. **`docs/deploy/*` simplification:** Dockerfiles become one universal install (`curl -fsSL .../install.sh | sh` as root, apt/dnf path) or `--user`; a single runtime image now serves Python, PHP and Static — delete the "Python image vs PHP image vs archive" branching.
-8. **Sync harnesses & visual QA:**
+8. **`docs/deploy/*` simplification:** Dockerfiles become one universal install (`curl -fsSL .../install.sh | sh` as root, apt/dnf path) or `--user`; a single runtime image now serves Python, PHP and Static — delete the "Python image vs PHP image vs archive" branching.
+9. **Sync harnesses & visual QA:**
    - Update `crates/blastit-manifest/tests/docs_fences.rs` (fence classification: `curl ... install.sh | sh` is `mode=static`/non-runnable; `blastit dev` / `blastit check` fences must be runnable against the built binary), `python/tests/runnable_docs/` (`inventory.toml`, `harness.py`), and `e2e/` where install paths changed.
    - Mermaid `flowchart`/`sequenceDiagram` on every changed guide page; pages stay `<130` lines; `make docs-check` strict clean.
    - Run `visual-checker` on the new hero (`docs/index.md`) and `docs/getting-started.md` in light + dark + mobile.

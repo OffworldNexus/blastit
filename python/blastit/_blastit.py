@@ -464,13 +464,17 @@ def main(argv: list[str], executable: str, dbproxy: str = "") -> int:
     the console script's signature: the binary plays that role itself
     (``--role=dbproxy``), so no second program ships.
 
+    ``BLASTIT_HANDOFF_DONE`` is **not** set here. It belongs to §4's handoff:
+    the binary sets it when it re-execs a project's own ``blastit``, and setting
+    it before the exec would stop a pip-installed ``blastit`` from ever using
+    ``.venv/bin/blastit``, ``vendor/bin/blastit`` or ``node_modules/.bin/blastit``.
+
     An installation the command line cannot start is :class:`SystemExit` with
     the one sentence an operator can act on, never a traceback.
     """
     del dbproxy
     environment = dict(os.environ)
     environment.setdefault("BLASTIT_WHEEL_PYTHON", executable)
-    environment["BLASTIT_HANDOFF_DONE"] = "1"
     try:
         program = bin_path()
         os.execvpe(program, [program, *argv], environment)
