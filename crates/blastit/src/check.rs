@@ -56,6 +56,7 @@ use blastit_dbproxy::{
     DbproxyConfig, ListenerMode, ListenerSpec, ObsTarget, ProxySpec, RoutePolicySpec,
     WILDCARD_ROUTE, WireSqlObs, write_config,
 };
+use blastit_events::Component;
 use blastit_manifest::{Manifest, RoutingTable};
 use serde_json::json;
 
@@ -63,6 +64,7 @@ use crate::audit_v1::{self, CheckObsV1, ObsError, Report};
 use crate::cli::CheckOptions;
 use crate::config::Config;
 use crate::host::{Host, Install};
+use crate::logs::{Colour, Emitter, Pipe};
 #[cfg(feature = "php")]
 use crate::stage0::php_boot_gate;
 use crate::stage0::{is_static_only, static_app_refusal, static_root_permission};
@@ -112,8 +114,8 @@ pub const DJANGO_SETUP: &str = "BLASTIT_CHECK_DJANGO_SETUP";
 /// Every failure this module can name is exit `2` with a one-line diagnostic on
 /// stderr and nothing on stdout. `pytest` never writes to stdout under `--json`.
 #[must_use]
-pub fn run(host: &Host, options: &CheckOptions) -> u8 {
-    match execute(host, options) {
+pub fn run(host: &Host, options: &CheckOptions, colour: Colour) -> u8 {
+    match execute(host, options, colour) {
         Ok(code) => code,
         Err(message) => {
             eprintln!("blastit check: {message}");
@@ -129,7 +131,7 @@ pub fn run(host: &Host, options: &CheckOptions) -> u8 {
 /// A one-line message for everything that is exit `2`: the manifest, the
 /// configuration, a proxy input, `pytest` missing, the runtime directory, or an
 /// observation line that does not parse.
-fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
+fn execute(host: &Host, options: &CheckOptions, colour: Colour) -> Result<u8, String> {
     let mut config = Config::for_check().map_err(|error| error.to_string())?;
     config.validate().map_err(|error| error.to_string())?;
 
@@ -211,6 +213,17 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
         .ok_or_else(|| "the runtime directory is not valid UTF-8".to_string())?
         .to_string();
 
+    // One emitter for dbproxy's own events, built here at the command's root:
+    // the run's configured level and format, on stderr — `check`'s stdout stays
+    // one document under `--json`, and a `BLASTIT_LOG_LEVEL=error` run must not
+    // print a `warn`.
+    let drain_emitter = Emitter::new(
+        std::io::stderr().as_raw_fd(),
+        config.log_format,
+        config.log_level,
+        colour.stderr,
+    );
+
     let platform = platform_env(&manifest)?;
     let prepared = prepare_env(&manifest, &platform, &socket_dir)?;
     // Both preflights run before dbproxy or the suite start, so a suite that
@@ -236,13 +249,14 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     // control channel is not opened either, so nothing can be pushed into a
     // channel nobody reads.
     let mut dbproxy = None;
+    let mut events = None;
     let mut observed = None;
     let mut ctl_python = None;
     if !listeners.is_empty() {
         let (obs_read, obs_child) = socketpair("the observation pipe")?;
         let (ctl_dbproxy, python_end) = socketpair("the control channel")?;
         let (ready_read, ready_child) = socketpair("the ready pipe")?;
-        dbproxy = Some(Dbproxy::start(
+        let (proxy, events_read) = Dbproxy::start(
             host,
             &manifest,
             &prepared,
@@ -253,7 +267,9 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
                 ready: ready_child,
             },
             ready_read,
-        )?);
+        )?;
+        dbproxy = Some(proxy);
+        events = Some(EventDrain::start(events_read, drain_emitter));
         // Only *after* dbproxy's `execve`: the suite's end of the control
         // channel has to cross pytest's `execve` (`Stdio` does not carry it), but
         // dbproxy must never inherit it, so it keeps `FD_CLOEXEC` until it is
@@ -281,6 +297,9 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
             if let Some(proxy) = dbproxy.as_mut() {
                 proxy.stop();
             }
+            if let Some(drain) = events.take() {
+                drain.stop();
+            }
             if let Some(reader) = observed.take() {
                 let _ = reader.stop();
             }
@@ -289,6 +308,12 @@ fn execute(host: &Host, options: &CheckOptions) -> Result<u8, String> {
     };
     if let Some(proxy) = dbproxy.as_mut() {
         proxy.stop();
+    }
+    // The proxy's write end is closed, so the drain's reader sees EOF: every
+    // line dbproxy emitted is forwarded here, before the report and on every
+    // path (`Drop` repeats this for the paths that return early).
+    if let Some(drain) = events.take() {
+        drain.stop();
     }
     let sql_text = observed.map(ObsReader::stop).unwrap_or_default();
 
@@ -673,6 +698,13 @@ struct Dbproxy {
 
 impl Dbproxy {
     /// Forks and `execve`s `blastit-dbproxy` with an empty environment.
+    ///
+    /// Its events go to a pipe of their own rather than to stderr: `pytest -q`
+    /// is drawing its progress line there, and a JSON line written into it
+    /// corrupts the row an operator reads (A10.3). The returned reader is the
+    /// pipe's read end, which the caller hands to an [`EventDrain`] for the
+    /// whole of the suite. It stays a [`std::io::PipeReader`]: a pipe is not a
+    /// socket, and reading it through a `UnixStream` fails with `ENOTSOCK`.
     fn start(
         host: &Host,
         manifest: &Manifest,
@@ -680,7 +712,7 @@ impl Dbproxy {
         mut listeners: Vec<(UnixListener, ListenerSpec)>,
         inherited: Inherited,
         ready_read: OwnedFd,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, std::io::PipeReader), String> {
         for (listener, spec) in &mut listeners {
             spec.fd = listener.as_raw_fd();
         }
@@ -701,11 +733,14 @@ impl Dbproxy {
 
         let (secrets_read, mut secrets_write) =
             std::io::pipe().map_err(|error| format!("the dbproxy secrets pipe: {error}"))?;
+        let (events_read, events_write) =
+            std::io::pipe().map_err(|error| format!("the dbproxy events pipe: {error}"))?;
 
         // Every descriptor the child must inherit: the configuration pipe, the
-        // two channels, the ready pipe, and one per listener.
+        // two channels, the ready pipe, the events pipe, and one per listener.
         let mut inherited_fds = vec![
             secrets_read.as_raw_fd(),
+            events_write.as_raw_fd(),
             inherited.obs.as_raw_fd(),
             inherited.ctl.as_raw_fd(),
             inherited.ready.as_raw_fd(),
@@ -720,7 +755,7 @@ impl Dbproxy {
         command.args(host.dbproxy().prefix.iter());
         command.arg("--role=dbproxy");
         command.arg(format!("--secrets-fd={}", secrets_read.as_raw_fd()));
-        command.arg(format!("--events-fd={}", stderr_fd()));
+        command.arg(format!("--events-fd={}", events_write.as_raw_fd()));
         command.arg(format!("--ready-fd={}", inherited.ready.as_raw_fd()));
         command.arg("--seccomp=1");
         command.env_clear();
@@ -739,6 +774,7 @@ impl Dbproxy {
         })?;
         // The parent's copies of the child's ends are closed right after the
         // `execve`: dbproxy owns them from here.
+        drop(events_write);
         drop(inherited.obs);
         drop(inherited.ctl);
         drop(listeners);
@@ -754,7 +790,7 @@ impl Dbproxy {
             let _ = child.wait();
             return Err(reason);
         }
-        Ok(Self { child })
+        Ok((Self { child }, events_read))
     }
 
     /// Stops dbproxy: `SIGTERM`, a short grace, then `SIGKILL`.
@@ -846,6 +882,72 @@ impl ObsReader {
         };
         let bytes = handle.join().unwrap_or_default();
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+/// Drains dbproxy's *events* pipe, so its lines never share pytest's row
+/// (A10.3).
+///
+/// A `pg.refused` is one JSON line, and dbproxy writes it synchronously: pointed
+/// at fd 2 it lands in the middle of the `-q` progress line pytest is drawing on
+/// the same terminal. The pipe is drained here for the whole of the suite (the
+/// writer blocks otherwise), and every line is forwarded through the run's own
+/// [`Emitter`] once the suite is over — the same component restamp, the same
+/// level filter (`BLASTIT_LOG_LEVEL=error` silences a `warn`) and the same
+/// pretty or JSON shape as any other forwarded pipe.
+///
+/// [`Drop`] is the guarantee that "once the suite is over" is true on *every*
+/// path out of [`execute`], including the `?` that abandons the run: a drain
+/// that is only stopped by hand would take its thread and its bytes with it.
+struct EventDrain {
+    handle: Option<std::thread::JoinHandle<Vec<u8>>>,
+    emitter: Emitter,
+}
+
+impl EventDrain {
+    fn start(read: std::io::PipeReader, emitter: Emitter) -> Self {
+        let mut stream = read;
+        let handle = std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut buffer = [0u8; 8 * 1024];
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(read) => out.extend_from_slice(&buffer[..read]),
+                    Err(_) => break,
+                }
+            }
+            out
+        });
+        Self {
+            handle: Some(handle),
+            emitter,
+        }
+    }
+
+    /// Waits for the pipe's end and forwards every line. Idempotent, so an
+    /// explicit stop and [`Drop`] never print a line twice.
+    fn stop(mut self) {
+        self.drain();
+    }
+
+    fn drain(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let bytes = handle.join().unwrap_or_default();
+        let pipe = Pipe::Events {
+            component: Component::Dbproxy,
+        };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            self.emitter.forward(&pipe, line);
+        }
+    }
+}
+
+impl Drop for EventDrain {
+    fn drop(&mut self) {
+        self.drain();
     }
 }
 
@@ -1189,11 +1291,6 @@ fn clear_cloexec(fd: RawFd) -> Result<(), String> {
     let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
     rustix::io::fcntl_setfd(borrowed, rustix::io::FdFlags::empty())
         .map_err(|error| format!("descriptor {fd}: {error}"))
-}
-
-/// This process's stderr, as a descriptor number.
-fn stderr_fd() -> RawFd {
-    std::io::stderr().as_raw_fd()
 }
 
 /// A duplicate of stderr, for a child whose stdout must not be stdout.

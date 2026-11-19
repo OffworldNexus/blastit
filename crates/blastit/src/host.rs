@@ -629,7 +629,7 @@ fn capable_copy_advice(install: Install, shared: &Path) -> String {
             shared.display()
         ),
         Install::Binary => format!(
-            "  then start the copy, and set {EXEC}={} so that `--role=dbproxy` runs the \
+            "  then start the copy, and set {EXEC}={} so that the database proxy runs the \
              capability-free binary",
             resolved.display()
         ),

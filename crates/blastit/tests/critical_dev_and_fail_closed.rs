@@ -1220,13 +1220,27 @@ view home regex '/.*' {
     );
     dev.wait_for_ready();
 
-    // The exact 3-line banner (§1.2), route count in the third line.
+    // The banner's header (§1.2) plus one line per declared view, route count
+    // in the third line, and the address a terminal can click. The helper reads
+    // three lines, so the view table is asserted from the run's own stdout: a
+    // header with no `  view  ` row behind it is not a banner.
     let banner = dev.banner();
-    assert_eq!(banner.len(), 3, "{banner:?}\n{}", dev.stdout_text());
+    let stdout = dev.stdout_text();
+    let header = stdout
+        .lines()
+        .position(|line| line.contains("blastit dev · single-uid simulation"))
+        .unwrap_or_else(|| panic!("the banner header:\n{stdout}"));
+    assert!(
+        stdout
+            .lines()
+            .skip(header + 1)
+            .any(|line| line.starts_with("  view  ")),
+        "the header is followed by the view table:\n{stdout}"
+    );
     assert_eq!(
         banner[0],
         format!(
-            "  blastit dev · single-uid simulation · 127.0.0.1:{}",
+            "  blastit dev · single-uid simulation · http://127.0.0.1:{}",
             dev.port
         )
     );
@@ -1237,6 +1251,22 @@ view home regex '/.*' {
     assert_eq!(
         banner[2], "  http · scheduler · dbproxy · 2 routes",
         "the banner pluralises and counts the manifest's routes"
+    );
+
+    // The view table: one line per declared route, `view  METHODS pattern`, in
+    // the same run's stdout — the banner names what is actually served.
+    let views: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.starts_with("  view  "))
+        .collect();
+    assert_eq!(views.len(), 2, "one line per declared view:\n{stdout}");
+    assert!(
+        views.iter().any(|line| line.trim() == "view  POST  /json"),
+        "the json view's methods and pattern:\n{stdout}"
+    );
+    assert!(
+        views.iter().any(|line| line.starts_with("  view  *  ")),
+        "a view with no methods answers every method:\n{stdout}"
     );
 
     // `R22`: the boot event says which simulation this is.

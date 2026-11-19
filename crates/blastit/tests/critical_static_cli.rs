@@ -287,9 +287,10 @@ fn an_all_static_site_boots_under_dev_with_no_app() {
     );
     // The documented banner, unchanged and complete: a `static` mount is not a
     // route (§9.5), so a static-only file counts zero of them and the banner
-    // still names every process that runs.
+    // still names every process that runs — with the address as a clickable
+    // loopback URL.
     let lines = [
-        format!("  blastit dev · single-uid simulation · 127.0.0.1:{port}"),
+        format!("  blastit dev · single-uid simulation · http://127.0.0.1:{port}"),
         "  Not a sandbox. Production `blastit` refuses to run like this.".to_string(),
         "  http · scheduler · dbproxy · 0 routes".to_string(),
     ];

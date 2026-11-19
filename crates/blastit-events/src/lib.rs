@@ -1527,6 +1527,31 @@ impl DevReloadUnavailable {
     }
 }
 
+/// `blastit dev`'s live-reload boot line as an event (§4.7 `reload`).
+///
+/// One per boot whose marking pass actually placed marks: `directories` is how
+/// many directories it marked, and the human form spells `1 directory` in the
+/// singular. It is an event so that it takes the same columns as every other
+/// line and the JSON stream carries it too — the boot line used to be free text
+/// printed beside the stream, which no reader could parse and no column lined
+/// up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadBoot {
+    directories: u32,
+}
+
+impl ReloadBoot {
+    /// The boot line's record, from the marks the pass placed.
+    pub fn new(directories: u32) -> Self {
+        Self { directories }
+    }
+
+    /// How many directories the marking pass placed.
+    pub fn directories(&self) -> u32 {
+        self.directories
+    }
+}
+
 /// What an event is about; one variant per row of the §8.1 table.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -1564,6 +1589,9 @@ pub enum EventKind {
     /// `blastit dev` could not watch anything at boot and serves without live
     /// reload (`ADR-0014`).
     DevReloadUnavailable(DevReloadUnavailable),
+    /// `blastit dev` started live reload and marked this many directories
+    /// (§4.7 `reload`).
+    Reload(ReloadBoot),
 }
 
 impl EventKind {
@@ -1586,6 +1614,7 @@ impl EventKind {
             Self::Runtime(_) => "runtime",
             Self::DevReload(_) => "dev.reload",
             Self::DevReloadUnavailable(_) => "dev.reload.unavailable",
+            Self::Reload(_) => "reload",
         }
     }
 
@@ -1623,7 +1652,8 @@ impl EventKind {
             | Self::Ready(_)
             | Self::Shutdown(_)
             | Self::Runtime(_)
-            | Self::DevReload(_) => Level::Info,
+            | Self::DevReload(_)
+            | Self::Reload(_) => Level::Info,
         }
     }
 }

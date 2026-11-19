@@ -388,6 +388,9 @@ pub(super) fn load(
     } else {
         None
     };
+    // `§1.2`: a line before the blocking import, so a slow application never
+    // looks hung. The preload modules and the warm-up are the same wait.
+    crate::logs::phase(emitter, "app", &format!("importing {spec}"));
     let app = match import_callable(py, spec) {
         Ok(app) => app,
         Err(err) => python_fail(py, emitter, dev, &format!("BLASTIT_APP ({spec})"), &err),

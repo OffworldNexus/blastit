@@ -19,13 +19,13 @@ use super::{Boot, load};
 
 /// What the post-preload marking pass owes the boot line (§4.7, `T32`).
 ///
-/// `reload: on` is a claim, and only a pass that actually marked may make it: a
+/// `reload` is a claim, and only a pass that actually marked may make it: a
 /// watcher that latched `ENOSPC`/the cap already emitted the ladder's one
-/// warning, and one that latched dead must print nothing at all.
+/// warning, and one that latched dead must emit nothing at all.
 #[cfg(feature = "python")]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum BootLine {
-    /// `reload: on (N directories)`, with the marks the pass placed.
+    /// One `reload` event, with the marks the pass placed.
     Announce(usize),
     /// No line: the boot already owed its one warning.
     Silent,
@@ -116,7 +116,7 @@ pub(super) fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             // warning, and printing the line over it would be the lie the
             // ladder exists to prevent (§4.7, `T32`).
             BootLine::Announce(dirs) if serving.announce => {
-                crate::supervise::announce_reload(serving.config.log_format, dirs);
+                crate::supervise::announce_reload(emitter, dirs);
             }
             BootLine::Announce(_) => {}
             BootLine::Silent => {}

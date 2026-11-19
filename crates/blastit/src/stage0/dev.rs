@@ -337,7 +337,13 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
     if config.log_format == LogFormat::Pretty {
         print!(
             "{}",
-            crate::dev_learn::banner(&options.host, config.port, manifest.routes().len(), exposed)
+            crate::dev_learn::banner(
+                &options.host,
+                config.port,
+                &manifest,
+                exposed,
+                options.learn
+            )
         );
     }
     emitter.emit(&Event::now(

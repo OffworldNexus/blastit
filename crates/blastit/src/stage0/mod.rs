@@ -107,10 +107,15 @@ impl Early {
 
 /// Fails a boot that has not resolved its configuration yet.
 ///
-/// §8.1: the lines that waited are written as JSON — the format that needs no
-/// settings, and the one an operator reading a failed boot can always parse —
-/// and the error follows them.
-fn fail_early(early: &mut Early, message: &str) -> ! {
+/// §1.1: a person at a terminal reads the refusal as prose on stderr and stdout
+/// stays empty (a startup error writes zero bytes there); a pipeline that asked
+/// for `json` gets the lines that waited, as JSON, and the error after them.
+/// `human` is the composition root's decision ([`crate::logs::text_refusals`]),
+/// taken once before anything can fail.
+fn fail_early(early: &mut Early, human: bool, message: &str) -> ! {
+    if human {
+        crate::logs::refuse_text(message);
+    }
     // JSON needs no settings and takes no colour.
     let json = Emitter::stdout(LogFormat::Json, Level::Info, Colour::PLAIN);
     early.flush(&json);
@@ -261,23 +266,21 @@ fn capability_advice(host: &Host, err: &std::io::Error) -> String {
              default capabilities include them — check `--cap-drop`, `--cap-add` and any \
              bounding-set restriction on the container.\n  \
              A rootless deployment gives them to a *dedicated copy* of the {} instead:\n  \
-             {}\n  {}\n  \
+             {}\n  \
              To run the same tree locally without root, use `blastit dev`; it is a \
              single-uid simulation, not a sandbox",
             install.file(),
-            copy_recipe(install),
-            install.naming()
+            copy_recipe(install)
         );
     }
     format!(
         "init runs as uid {uid} and is missing {missing}.\n  \
          A rootless deployment gives the capabilities to a *dedicated copy* of the {}, \
-         never to the shared one:\n  {}\n  {}\n  \
+         never to the shared one:\n  {}\n  \
          To run the same tree locally without root, use `blastit dev`; it is a \
          single-uid simulation, not a sandbox",
         install.file(),
-        copy_recipe(install),
-        install.naming()
+        copy_recipe(install)
     )
 }
 
@@ -298,7 +301,7 @@ fn copy_recipe(install: Install) -> String {
              chown <the uid init runs as>:<its gid> <the copy>\n  chmod 0500 <the copy>\n  \
              setcap '{}+ep' <the copy>\n  \
              then start <the copy>, and set {EXEC}=<the blastit binary> so that \
-             `--role=dbproxy` runs the capability-free copy",
+             the database proxy runs the capability-free copy",
             blastit_sys::caps::Capability::SETCAP,
         ),
     }
@@ -341,6 +344,10 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
     // read at all writes them as JSON instead, followed by the error: JSON is
     // the one format that needs no settings to print.
     let mut early = Early::default();
+    // §1.1/A10.3: a boot that has not read its settings yet still owes a person
+    // at a terminal a sentence they can read, and a `json` pipeline the format
+    // it asked for. Read once here, by the composition root.
+    let human_refusals = crate::logs::text_refusals(colour);
     // D6: root or a handful of capabilities is read from the kernel, and it
     // decides whether the boot can build its sandboxes at all. It comes before
     // the first event, because the event has to report it.
@@ -357,7 +364,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
                 Component::Init,
                 EventKind::Boot(stage0_lifecycle(None)),
             ));
-            fail_early(&mut early, &capability_advice(host, &err));
+            fail_early(&mut early, human_refusals, &capability_advice(host, &err));
         }
     };
     let privilege = privilege_from(&held);
@@ -372,7 +379,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
                 Component::Init,
                 EventKind::Boot(stage0_lifecycle(Some(&privilege))),
             ));
-            fail_early(&mut early, &message);
+            fail_early(&mut early, human_refusals, &message);
         }
     };
     early.emit(Event::now(
@@ -402,7 +409,7 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
 
     let mut config = match Config::from_env(preset) {
         Ok(config) => config,
-        Err(err) => fail_early(&mut early, &err.to_string()),
+        Err(err) => fail_early(&mut early, human_refusals, &err.to_string()),
     };
     // D6: init's mode belongs in the configuration, because stage 1's preload
     // `boot` event reports the same thing stage 0's does. It is set here, before

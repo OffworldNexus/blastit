@@ -6,16 +6,24 @@ use crate::{
 };
 
 const RESET: &str = "\u{1b}[0m";
-/// Column the event name starts at.
-const NAME_COLUMN: usize = 12;
+/// The width every event name is padded to.
+///
+/// Every event name is padded to this many columns, so the summary starts at
+/// the same place on every line — that is what makes a stream of events a
+/// table. It is the longest name this crate can emit
+/// (`dev.reload.unavailable`, 22 bytes) plus the one space that keeps the
+/// summary readable: a narrower column pushed *that* line's summary right and
+/// broke the alignment on every other line.
+const NAME_COLUMN: usize = 23;
 
 /// Encode one event as a single human-readable line, without a trailing
 /// newline.
 ///
 /// The shape is `HH:MM:SS.mmm LEVEL event  summary`, with the event name
-/// padded to twelve columns, as in the §8.1 example. `color` wraps the level
-/// word in ANSI colours (a handful of escape codes, no crate); the padding is
-/// applied to the text, so coloured and plain lines line up.
+/// padded to [`NAME_COLUMN`] columns, as in the §8.1 example. `color` wraps the
+/// level word — and a `request`'s HTTP status — in ANSI colours (a handful of
+/// escape codes, no crate); the padding is applied to the text, so coloured and
+/// plain lines line up.
 ///
 /// Control characters from the event are escaped, so the result is always
 /// exactly one line, and a line longer than [`MAX_EVENT_BYTES`] is cut and
@@ -28,13 +36,13 @@ pub fn encode_pretty(event: &Event, color: bool) -> String {
     out.push(' ');
     let name = event.kind.name();
     out.push_str(name);
-    // Twelve columns, and always at least one space before the summary so a
-    // long event name such as `manifest.warning` stays readable.
+    // [`NAME_COLUMN`] columns, and always at least one space before the summary
+    // so a name wider than the column stays readable.
     let width = NAME_COLUMN.max(name.chars().count() + 1);
     for _ in name.chars().count()..width {
         out.push(' ');
     }
-    out.push_str(&summary(event));
+    out.push_str(&summary(event, color));
     cap(&mut out);
     out
 }
@@ -57,13 +65,13 @@ fn level_word(level: Level, color: bool) -> String {
     word
 }
 
-fn summary(event: &Event) -> String {
+fn summary(event: &Event, color: bool) -> String {
     let route = || match event.route.as_deref() {
         Some(route) => escape_inline(route),
         None => "-".to_owned(),
     };
     match &event.kind {
-        EventKind::Request(info) => request_summary(event, info),
+        EventKind::Request(info) => request_summary(event, info, color),
         EventKind::SqlDenied(info) => format!(
             "{}  {}  {}  {}",
             route(),
@@ -131,6 +139,17 @@ fn summary(event: &Event) -> String {
             info.files.len()
         ),
         EventKind::DevReloadUnavailable(info) => reload_disabled_summary(info),
+        // §4.7's boot line: `1 directory` / `N directories`, in the summary
+        // column like every other event.
+        EventKind::Reload(info) => format!(
+            "{} {}",
+            info.directories(),
+            if info.directories() == 1 {
+                "directory"
+            } else {
+                "directories"
+            }
+        ),
     }
 }
 
@@ -185,7 +204,7 @@ fn runtime_summary(info: &Runtime) -> String {
     }
 }
 
-fn request_summary(event: &Event, info: &RequestInfo) -> String {
+fn request_summary(event: &Event, info: &RequestInfo, color: bool) -> String {
     let target = match event.route.as_deref() {
         Some(route) => escape_inline(route),
         None => "(unmatched)".to_owned(),
@@ -195,7 +214,7 @@ fn request_summary(event: &Event, info: &RequestInfo) -> String {
         escape_inline(&info.method),
         escape_inline(&info.path),
         target,
-        info.status
+        status_word(info.status, color)
     );
     if info.outcome != Outcome::Ok {
         out.push(' ');
@@ -203,6 +222,25 @@ fn request_summary(event: &Event, info: &RequestInfo) -> String {
     }
     out.push_str(&format!("  {:.1}ms", info.duration_ms));
     out
+}
+
+/// A `request`'s HTTP status, coloured by class when the stream is coloured.
+///
+/// 2xx green, 3xx cyan, 4xx yellow, 5xx red; anything outside those classes —
+/// and every line on an uncoloured stream — is the bare number, so a log an
+/// operator pipes into a file is exactly the bytes it always was.
+fn status_word(status: u16, color: bool) -> String {
+    if !color {
+        return status.to_string();
+    }
+    let code = match status / 100 {
+        2 => "32",
+        3 => "36",
+        4 => "33",
+        5 => "31",
+        _ => return status.to_string(),
+    };
+    format!("\u{1b}[{code}m{status}{RESET}")
 }
 
 fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
@@ -347,12 +385,25 @@ mod tests {
     use crate::fixture;
     use crate::{
         AppOutput, DevReload, ExitKind, Lifecycle, ManifestWarning, Outcome, ProcessCap,
-        ProcessExited, ProcessRetired, ProcessSpawned, ReloadReason, RequestInfo, RetireReason,
-        Stream,
+        ProcessExited, ProcessRetired, ProcessSpawned, ReloadBoot, ReloadReason, RequestInfo,
+        RetireReason, Stream,
     };
 
     fn plain(event: &Event) -> String {
         encode_pretty(event, false)
+    }
+
+    /// The event name's column: what every summary line starts after.
+    fn summary_column(name: &str) -> String {
+        format!("{name:<NAME_COLUMN$}")
+    }
+
+    #[test]
+    fn the_name_column_fits_the_longest_event_name() {
+        // A narrower column pushes the longest name's summary to the right and
+        // breaks the alignment on every other line, so the width is the widest
+        // name this crate can emit plus the one space before the summary.
+        assert_eq!(NAME_COLUMN, "dev.reload.unavailable".len() + 1);
     }
 
     #[test]
@@ -360,7 +411,15 @@ mod tests {
         let line = plain(&fixture::request_event());
         assert_eq!(
             line,
-            "14:02:11.384 INFO  request     GET /products/42/ → product-detail  200  18.4ms"
+            format!(
+                "14:02:11.384 INFO  {}GET /products/42/ → product-detail  200  18.4ms",
+                summary_column("request")
+            )
+        );
+        assert_eq!(
+            line.find("GET /products/42/"),
+            Some(12 + 1 + 5 + 1 + NAME_COLUMN),
+            "the summary starts in the one shared column: {line}"
         );
     }
 
@@ -369,8 +428,9 @@ mod tests {
         let line = plain(&fixture::sql_denied_event());
         assert_eq!(
             line,
-            concat!(
-                "14:02:12.007 WARN  sql.denied  product-detail  db  parse  ",
+            format!(
+                "14:02:12.007 WARN  {}product-detail  db  parse  {}",
+                summary_column("sql.denied"),
                 r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#
             )
         );
@@ -449,6 +509,7 @@ mod tests {
                 "EPERM",
                 "overlayfs",
             ))),
+            fixture::event(EventKind::Reload(ReloadBoot::new(2))),
         ];
         for event in &events {
             for color in [false, true] {
@@ -503,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn colour_wraps_only_the_level_word() {
+    fn colour_wraps_the_level_word_and_a_request_status() {
         let event = fixture::request_event();
         let plain_line = plain(&event);
         let coloured = encode_pretty(&event, true);
@@ -511,13 +572,44 @@ mod tests {
         assert!(!coloured.contains("\u{1b}[0m\u{1b}[0m"));
         let stripped = coloured.replace("\u{1b}[32m", "").replace("\u{1b}[0m", "");
         assert_eq!(stripped, plain_line);
-        assert_eq!(coloured.len(), plain_line.len() + 9);
+        // The level word and the `200` each cost one open code and one reset.
+        assert_eq!(coloured.len(), plain_line.len() + 2 * 9);
+        assert!(
+            coloured.contains("\u{1b}[32m200\u{1b}[0m"),
+            "a 2xx status is green: {coloured:?}"
+        );
 
         assert!(encode_pretty(&event.clone().with_level(Level::Warn), true).contains("\u{1b}[33m"));
         assert!(
             encode_pretty(&event.clone().with_level(Level::Error), true).contains("\u{1b}[31m")
         );
         assert!(encode_pretty(&event.with_level(Level::Debug), true).contains("\u{1b}[2m"));
+    }
+
+    /// Each status class has its own colour, and an uncoloured stream is the
+    /// bare number: a log piped into a file is exactly the bytes it always was.
+    #[test]
+    fn a_request_status_is_coloured_by_class_only_on_a_coloured_stream() {
+        let line = |status: u16, color: bool| {
+            let info = RequestInfo::from_target("GET", "/a")
+                .with_status(status)
+                .with_remote_addr("203.0.113.7");
+            encode_pretty(&fixture::event(EventKind::Request(info)), color)
+        };
+        for (status, code) in [(200, "32"), (301, "36"), (404, "33"), (503, "31")] {
+            let coloured = line(status, true);
+            assert!(
+                coloured.contains(&format!("\u{1b}[{code}m{status}\u{1b}[0m")),
+                "{status} is `{code}`: {coloured:?}"
+            );
+            assert!(
+                !line(status, false).contains(&format!("\u{1b}[{code}m")),
+                "an uncoloured line is plain"
+            );
+        }
+        // No class at all: no colour on the status, not even a reset.
+        let informational = line(102, true);
+        assert!(informational.contains("  102"), "{informational}");
     }
 
     #[test]
@@ -539,20 +631,45 @@ mod tests {
         assert!(line.ends_with('…'));
     }
 
+    /// The whole point of a fixed name column: a short name and the longest one
+    /// start their summary at the same place.
     #[test]
-    fn name_padding_lines_up_short_names() {
-        let ready = plain(&fixture::event(EventKind::Ready(Lifecycle::default())));
-        assert!(
-            ready.starts_with("14:02:11.384 INFO  ready       "),
-            "{ready}"
-        );
+    fn name_padding_lines_up_short_and_long_names() {
+        let ready = plain(&fixture::event(EventKind::Ready(
+            Lifecycle::default().with_routes(2),
+        )));
         let warning = plain(&fixture::event(EventKind::ManifestWarning(
             ManifestWarning::new("x"),
         )));
+        let widest = plain(&fixture::event(EventKind::DevReloadUnavailable(
+            DevReloadUnavailable::new("EPERM", "overlayfs"),
+        )));
         assert!(
-            warning.starts_with("14:02:11.384 WARN  manifest.warning x"),
+            ready.starts_with(&format!(
+                "14:02:11.384 INFO  {}routes=2",
+                summary_column("ready")
+            )),
+            "{ready}"
+        );
+        assert!(
+            warning.starts_with(&format!(
+                "14:02:11.384 WARN  {}x",
+                summary_column("manifest.warning")
+            )),
             "{warning}"
         );
+        let column = ready.find("routes=2");
+        assert_eq!(
+            column,
+            warning.find("x"),
+            "two names, one summary column: {warning:?}"
+        );
+        assert_eq!(
+            column,
+            widest.find("reload disabled"),
+            "the longest name keeps the same column: {widest:?}"
+        );
+        assert_eq!(column, Some(12 + 1 + 5 + 1 + NAME_COLUMN));
     }
 
     #[test]
@@ -671,7 +788,40 @@ mod tests {
         let line = plain(&event);
         assert_eq!(
             line,
-            "14:02:11.384 INFO  dev.reload  -  routes=3  reason=loaded  files=2"
+            format!(
+                "14:02:11.384 INFO  {}-  routes=3  reason=loaded  files=2",
+                summary_column("dev.reload")
+            )
+        );
+    }
+
+    /// §4.7's boot line as an event: the count in the summary column, with the
+    /// singular spelled out and every mark counted.
+    #[test]
+    fn the_reload_boot_line_counts_directories_in_the_plural() {
+        let line = |directories: u32| {
+            plain(&fixture::event(EventKind::Reload(ReloadBoot::new(
+                directories,
+            ))))
+        };
+        assert_eq!(
+            line(1),
+            format!("14:02:11.384 INFO  {}1 directory", summary_column("reload"))
+        );
+        assert_eq!(
+            line(3),
+            format!(
+                "14:02:11.384 INFO  {}3 directories",
+                summary_column("reload")
+            )
+        );
+        let json = crate::encode_json(&fixture::event(EventKind::Reload(ReloadBoot::new(2))));
+        assert!(json.contains(r#""event":"reload""#), "{json}");
+        assert!(json.contains(r#""directories":2"#), "{json}");
+        assert_eq!(
+            crate::decode_json(&json).map(|event| event.kind.name()),
+            Some("reload"),
+            "the line reads back into the event it came from"
         );
     }
 
@@ -686,8 +836,11 @@ mod tests {
         )));
         assert_eq!(
             plain(&php),
-            "14:02:11.384 INFO  runtime     php 8.5.4  libphp /usr/lib/libphp8.5.so  \
-             php.ini /etc/php/8.5/embed/php.ini"
+            format!(
+                "14:02:11.384 INFO  {}php 8.5.4  libphp /usr/lib/libphp8.5.so  \
+                 php.ini /etc/php/8.5/embed/php.ini",
+                summary_column("runtime")
+            )
         );
 
         // `null` is PHP's built-in defaults, and it says so in one word.
@@ -698,8 +851,11 @@ mod tests {
         )));
         assert_eq!(
             plain(&none),
-            "14:02:11.384 INFO  runtime     php 8.4.27  libphp /usr/lib/libphp8.4.so  \
-             php.ini none"
+            format!(
+                "14:02:11.384 INFO  {}php 8.4.27  libphp /usr/lib/libphp8.4.so  \
+                 php.ini none",
+                summary_column("runtime")
+            )
         );
 
         let python = fixture::event(EventKind::Runtime(Runtime::python(
@@ -708,13 +864,19 @@ mod tests {
         )));
         assert_eq!(
             plain(&python),
-            "14:02:11.384 INFO  runtime     python 3.14.0  environment /home/you/shop/.venv"
+            format!(
+                "14:02:11.384 INFO  {}python 3.14.0  environment /home/you/shop/.venv",
+                summary_column("runtime")
+            )
         );
 
         let static_only = fixture::event(EventKind::Runtime(Runtime::Static));
         assert_eq!(
             plain(&static_only),
-            "14:02:11.384 INFO  runtime     static  serving static assets only"
+            format!(
+                "14:02:11.384 INFO  {}static  serving static assets only",
+                summary_column("runtime")
+            )
         );
     }
 

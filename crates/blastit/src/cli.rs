@@ -206,7 +206,7 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
                 println!("{}", help::CHECK_USAGE);
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_check(&host, &options),
+            Ok(Subcommand::Run(options)) => run_check(&host, &options, colour),
             Err(message) => {
                 refuse("blastit check", &message, false, colour);
                 CHECK_FAILURE

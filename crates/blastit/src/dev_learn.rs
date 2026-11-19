@@ -62,24 +62,66 @@ pub fn expose_requested() -> bool {
     std::env::var_os(EXPOSE_VARIABLE).is_some_and(|value| value == "1")
 }
 
-/// The exact 3-line banner (§1.2).
+/// The startup banner (`docs/design/ma-lean-dx.md` §1.2).
 ///
-/// `routes` is the manifest's route count; `exposed` is whether a non-loopback
-/// host was accepted, which is the only case that names the uid.
-pub fn banner(host: &std::net::IpAddr, port: u16, routes: usize, exposed: bool) -> String {
-    let first = if exposed {
-        format!(
-            "  blastit dev · single-uid simulation · {host}:{port} · uid {} (EXPOSED, no auth)",
-            euid()
-        )
-    } else {
-        format!("  blastit dev · single-uid simulation · {host}:{port}")
-    };
-    let noun = if routes == 1 { "route" } else { "routes" };
-    format!(
-        "{first}\n  Not a sandbox. Production `blastit` refuses to run like this.\n  \
-         http · scheduler · dbproxy · {routes} {noun}\n"
-    )
+/// It is informational, printed once, before the server binds: never an event.
+/// Line 1 names the address as something a terminal can click
+/// (`http://127.0.0.1:8080`, `http://[::1]:8080` for IPv6 — a bare IPv6 address
+/// in a URL has to be bracketed), with `[LEARN MODE]` when `--learn` is on. An
+/// exposed non-loopback bind keeps the bare `host:port` form, because the point
+/// there is which address the whole network reaches, not a link.
+///
+/// Then the honesty line, the components that run, and one line per declared
+/// view: `view  METHODS pattern`. `routes` and the marks count are spelled in
+/// the singular when there is one (`1 route`, `1 directory`).
+pub fn banner(
+    host: &std::net::IpAddr,
+    port: u16,
+    manifest: &Manifest,
+    exposed: bool,
+    learn: bool,
+) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("  blastit dev · single-uid simulation · ");
+    out.push_str(&address(host, port, exposed));
+    if exposed {
+        out.push_str(&format!(" · uid {} (EXPOSED, no auth)", euid()));
+    }
+    if learn {
+        out.push_str("  [LEARN MODE]");
+    }
+    out.push('\n');
+    out.push_str("  Not a sandbox. Production `blastit` refuses to run like this.\n");
+    let routes = manifest.routes().len();
+    out.push_str(&format!(
+        "  http · scheduler · dbproxy · {routes} {}\n",
+        route_noun(routes)
+    ));
+    for route in manifest.routes() {
+        let methods = match route.methods() {
+            Some(methods) => methods.join(", "),
+            // A view with no method list answers every method the front end
+            // lets through (§8.4), and the banner says so the same way.
+            None => "*".to_string(),
+        };
+        out.push_str(&format!("  view  {methods}  {}\n", route.path().join(", ")));
+    }
+    out
+}
+
+/// The address line 1 names: a clickable loopback URL, or the bare bind.
+fn address(host: &std::net::IpAddr, port: u16, exposed: bool) -> String {
+    match (exposed, host.is_ipv6()) {
+        (false, false) => format!("http://{host}:{port}"),
+        (false, true) => format!("http://[{host}]:{port}"),
+        (true, true) => format!("[{host}]:{port}"),
+        (true, false) => format!("{host}:{port}"),
+    }
+}
+
+/// `1 route` / `2 routes`: the noun that matches the count.
+fn route_noun(count: usize) -> &'static str {
+    if count == 1 { "route" } else { "routes" }
 }
 
 /// The ephemeral `0700` runtime root of one `blastit dev` run (`R20`).
@@ -729,29 +771,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_banner_is_exactly_the_documented_three_lines() {
-        let host = "127.0.0.1".parse().unwrap();
+    fn the_banner_names_a_clickable_address_every_view_and_the_learn_badge() {
+        let (manifest, _) = Manifest::parse_blastfile(
+            "view home GET \"/\" {}\n\nview cart GET \"/cart\" {}\n",
+            20_000,
+        )
+        .unwrap();
+        let host: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let rendered = banner(&host, 8080, &manifest, false, false);
+        let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
-            banner(&host, 8080, 1, false),
-            "  blastit dev · single-uid simulation · 127.0.0.1:8080\n  \
-             Not a sandbox. Production `blastit` refuses to run like this.\n  \
-             http · scheduler · dbproxy · 1 route\n"
+            lines[0],
+            "  blastit dev · single-uid simulation · http://127.0.0.1:8080"
         );
-        let two = banner(&host, 9000, 2, false);
+        assert_eq!(
+            lines[1],
+            "  Not a sandbox. Production `blastit` refuses to run like this."
+        );
+        assert_eq!(lines[2], "  http · scheduler · dbproxy · 2 routes");
+        assert_eq!(lines[3], "  view  GET, HEAD  /");
+        assert_eq!(lines[4], "  view  GET, HEAD  /cart");
+        assert_eq!(lines.len(), 5, "one line per declared view:\n{rendered}");
+
+        // IPv6 has to be bracketed, or the URL is not one a terminal links.
+        let v6: std::net::IpAddr = "::1".parse().unwrap();
         assert!(
-            two.ends_with("http · scheduler · dbproxy · 2 routes\n"),
-            "{two}"
+            banner(&v6, 9000, &manifest, false, false)
+                .starts_with("  blastit dev · single-uid simulation · http://[::1]:9000"),
+            "an IPv6 address is bracketed in the URL"
         );
 
-        let exposed = banner(&host, 8080, 1, true);
-        let uid = euid();
+        // `--learn` says so on the first line, once.
+        let learn = banner(&host, 8080, &manifest, false, true);
+        assert_eq!(
+            learn.lines().next().unwrap(),
+            "  blastit dev · single-uid simulation · http://127.0.0.1:8080  [LEARN MODE]"
+        );
+
+        // An exposed bind names the address the network reaches and the uid,
+        // exactly as before: it is not a link, it is a warning.
+        let exposed = banner(&host, 8080, &manifest, true, false);
         assert_eq!(
             exposed.lines().next().unwrap(),
             format!(
-                "  blastit dev · single-uid simulation · 127.0.0.1:8080 · uid {uid} (EXPOSED, no auth)"
+                "  blastit dev · single-uid simulation · 127.0.0.1:8080 · uid {} (EXPOSED, no auth)",
+                euid()
             )
         );
-        assert!(exposed.contains("1 route\n"), "{exposed}");
+    }
+
+    #[test]
+    fn the_banner_counts_one_route_and_pluralises() {
+        let (one, _) = Manifest::parse_blastfile("view home GET \"/\" {}\n", 20_000).unwrap();
+        let (two, _) = Manifest::parse_blastfile(
+            "view home GET \"/\" {}\n\nview cart GET \"/cart\" {}\n",
+            20_000,
+        )
+        .unwrap();
+        let host: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(
+            banner(&host, 8080, &one, false, false).contains("dbproxy · 1 route\n"),
+            "one route is singular"
+        );
+        assert!(
+            banner(&host, 8080, &two, false, false).contains("dbproxy · 2 routes\n"),
+            "two routes are plural"
+        );
+        assert_eq!(route_noun(0), "routes", "zero routes are plural");
     }
 
     #[test]

@@ -24,8 +24,8 @@ pub(super) fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colo
 /// The grammar above decided *what* to audit; this hands the options to
 /// [`crate::check::run`], which owns the transaction: validate, start dbproxy,
 /// run pytest, audit, and — under `--learn` only — write (`R3..R5`, `R30`).
-pub(super) fn run_check(host: &Host, options: &CheckOptions) -> u8 {
-    crate::check::run(host, options)
+pub(super) fn run_check(host: &Host, options: &CheckOptions, colour: Colour) -> u8 {
+    crate::check::run(host, options, colour)
 }
 
 // The `blastit lsp` session lives in `cli.rs`, beside the dispatcher: a protected

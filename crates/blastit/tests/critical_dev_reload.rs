@@ -1617,26 +1617,67 @@ fn a_queue_overflow_reloads_every_view_once_and_logs_one_line() {
 
 // ------------------------------------------- the boot line and the contract
 
-/// The boot line: one pretty-only line, `reload: on (N directories)`, and no
-/// event for it — the machine contract stays at two events (§4.7, §4.9).
+/// The boot report: one pretty `reload` event in the same columns as every
+/// other line, and exactly one `reload` event on the machine stream — never a
+/// raw free-text line (§4.7, §4.9).
 #[test]
 fn the_boot_line_is_one_pretty_line_and_never_an_event() {
     let fixture = Fixture::new("line");
     let mut pretty = fixture.start("line-pretty", "pretty");
     let transcript = pretty.stop();
-    let lines: Vec<&String> = transcript
+    // The summary column, measured as the byte offset of the fourth whitespace
+    // token, so "aligned with the other events" is a fact, not an assumption.
+    let summary_column = |line: &str| -> usize {
+        let mut tokens = 0;
+        let mut in_token = false;
+        for (index, character) in line.char_indices() {
+            if character.is_whitespace() {
+                in_token = false;
+            } else if !in_token {
+                in_token = true;
+                tokens += 1;
+                if tokens == 4 {
+                    return index;
+                }
+            }
+        }
+        panic!("a line with a summary column: {line:?}")
+    };
+    let reloads: Vec<&String> = transcript
         .iter()
-        .filter(|line| line.contains("reload: on ("))
+        .filter(|line| line.split_whitespace().nth(2) == Some("reload"))
         .collect();
-    assert_eq!(lines.len(), 1, "one boot line, once: {transcript:?}");
-    let line = lines[0];
-    let count = line
-        .trim()
-        .strip_prefix("reload: on (")
-        .and_then(|rest| rest.strip_suffix(" directories)"))
-        .and_then(|count| count.parse::<usize>().ok())
-        .unwrap_or_else(|| panic!("the documented sentence, exactly: {line:?}"));
+    assert_eq!(reloads.len(), 1, "one `reload` event, once: {transcript:?}");
+    let line = reloads[0];
+    assert!(
+        !transcript.iter().any(|line| line.contains("reload: on (")),
+        "the report is an event, not free text: {transcript:?}"
+    );
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    let count: usize = tokens
+        .get(3)
+        .and_then(|count| count.parse().ok())
+        .unwrap_or_else(|| panic!("the documented count, exactly: {line:?}"));
+    let noun = if count == 1 {
+        "directory"
+    } else {
+        "directories"
+    };
+    assert_eq!(
+        tokens.get(4),
+        Some(&noun),
+        "`1 directory` / `N directories`: {line:?}"
+    );
     assert!(count >= 1, "the app root is always marked: {line:?}");
+    let ready = transcript
+        .iter()
+        .find(|line| line.split_whitespace().nth(2) == Some("ready"))
+        .unwrap_or_else(|| panic!("a `ready` event: {transcript:?}"));
+    assert_eq!(
+        summary_column(line),
+        summary_column(ready),
+        "the reload report sits in every other event's columns: {line:?} vs {ready:?}"
+    );
 
     let mut json = fixture.start("line-json", "json");
     assert!(
@@ -1646,7 +1687,24 @@ fn the_boot_line_is_one_pretty_line_and_never_an_event() {
     let transcript = json.stop();
     assert!(
         !transcript.iter().any(|line| line.contains("reload: on (")),
-        "the line is pretty output, not part of the JSON contract: {transcript:?}"
+        "no free-text report survives on either stream: {transcript:?}"
+    );
+    let reloads: Vec<Value> = json
+        .events()
+        .into_iter()
+        .filter(|event| event["event"] == "reload")
+        .collect();
+    assert_eq!(
+        reloads.len(),
+        1,
+        "one `reload` event on the machine stream, once: {reloads:?}"
+    );
+    let directories = reloads[0]["directories"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the documented count: {}", reloads[0]));
+    assert!(
+        directories >= 1,
+        "the app root is always marked: {reloads:?}"
     );
     assert!(
         json.reloads().is_empty(),

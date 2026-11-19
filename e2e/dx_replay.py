@@ -78,7 +78,7 @@ view bare POST "/bare" {}
 
 view home GET "/" {}
 """
-WSGI_APP = '''def application(environ, start_response):
+WSGI_APP = """def application(environ, start_response):
     length = int(environ.get("CONTENT_LENGTH") or 0)
     body = environ["wsgi.input"].read(length) if length else b""
     if environ.get("PATH_INFO") == "/echo":
@@ -86,7 +86,7 @@ WSGI_APP = '''def application(environ, start_response):
         return [b'{"received":' + str(len(body)).encode() + b"}"]
     start_response("200 OK", [("Content-Type", "text/plain")])
     return [b"wsgi-fixture"]
-'''
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +127,12 @@ def normalise(text, fields):
     except json.JSONDecodeError:
         pass
     else:
-        return json.dumps(mask_json(document, fields), sort_keys=True, separators=(",", ":")) + "\n"
+        return (
+            json.dumps(
+                mask_json(document, fields), sort_keys=True, separators=(",", ":")
+            )
+            + "\n"
+        )
     out = []
     for number, line in enumerate(text.splitlines(), start=1):
         stripped = line.lstrip()
@@ -135,8 +140,14 @@ def normalise(text, fields):
             try:
                 value = json.loads(stripped)
             except json.JSONDecodeError as error:
-                raise Failure(f"line {number} looks like JSON but does not parse: {error}")
-            out.append(json.dumps(mask_json(value, fields), sort_keys=True, separators=(",", ":")))
+                raise Failure(
+                    f"line {number} looks like JSON but does not parse: {error}"
+                )
+            out.append(
+                json.dumps(
+                    mask_json(value, fields), sort_keys=True, separators=(",", ":")
+                )
+            )
             continue
         match = ETAG_LINE.match(line)
         if match:
@@ -144,7 +155,7 @@ def normalise(text, fields):
             plain = value[2:] if value.startswith("W/") else value
             if not ETAG.match(plain):
                 raise Failure(
-                    f'line {number} is an ETag header whose value is not the documented '
+                    f"line {number} is an ETag header whose value is not the documented "
                     f'"<hex>-<hex>" shape: {value}'
                 )
             out.append('ETag: "<hex>-<hex>"')
@@ -272,8 +283,12 @@ def serve(binary, cwd, port, extra_env=None, flags=(), requests=()):
                 ready.set()
 
     pumps = [
-        threading.Thread(target=pump, args=(process.stdout, stdout_lines, True), daemon=True),
-        threading.Thread(target=pump, args=(process.stderr, stderr_lines, False), daemon=True),
+        threading.Thread(
+            target=pump, args=(process.stdout, stdout_lines, True), daemon=True
+        ),
+        threading.Thread(
+            target=pump, args=(process.stderr, stderr_lines, False), daemon=True
+        ),
     ]
     for thread in pumps:
         thread.start()
@@ -367,7 +382,9 @@ def row_static(binary, run, out):
         ("GET", "/missing", b"", None),
         ("GET", "/..%2fetc", b"", None),
     )
-    stdout, stderr, transcript = serve(binary, static, PORTS["static"], requests=requests)
+    stdout, stderr, transcript = serve(
+        binary, static, PORTS["static"], requests=requests
+    )
     write(out / "row1.stdout", stdout)
     write(out / "row1.stderr", stderr)
     write(out / "row1.http", transcript)
@@ -384,11 +401,13 @@ def row_php(binary, run, out):
     requests = (("GET", "/", b"", None), ("GET", "/", b"", None))
     shims = shim_dir()
     env = {"BLASTIT_PHP_SHIM_DIR": shims} if shims else {}
-    stdout, stderr, transcript = serve(binary, php, PORTS["php"], env, requests=requests)
+    stdout, stderr, transcript = serve(
+        binary, php, PORTS["php"], env, requests=requests
+    )
     write(out / "row2.stdout", stdout)
     write(out / "row2.stderr", stderr)
     write(out / "row2.http", transcript)
-    events = re.findall(r"INFO  request     GET / → \S+  200 ", stdout)
+    events = re.findall(r"INFO  request\s+GET / → \S+  200 ", stdout)
     if transcript.count("200 OK") != 2 or len(events) != 2:
         raise Failure(
             "row 2 must show two 200s and two request events with the same status: "
@@ -432,6 +451,7 @@ def row_check(binary, run, out, python):
     """Row 5: the complete fixture, then one missing a grant."""
     sys.path.insert(0, str(ROOT / "python/tests/runnable_docs"))
     import pgstub
+
     stub = pgstub.PgStub("127.0.0.1", 0)
     stub.start()
     url = f"postgresql://shop:secret@127.0.0.1:{stub.port}/shop"
@@ -442,7 +462,9 @@ def row_check(binary, run, out, python):
         for name, expected in (("shop", 0), ("findings", CHECK_EXIT_FINDINGS)):
             project = run / "fixtures" / name
             shutil.copytree(
-                ROOT / "python/tests/runnable_docs/fixtures" / name, project, dirs_exist_ok=True
+                ROOT / "python/tests/runnable_docs/fixtures" / name,
+                project,
+                dirs_exist_ok=True,
             )
             for suffix, args in (("", ["check"]), ("-json", ["check", "--json"])):
                 completed = finish(binary, project, args, env)
@@ -506,7 +528,9 @@ def run_all(args):
         "4": lambda: row_no_reload(binary, run, out),
         "5": lambda: row_check(binary, run, out, args.python),
         "6": lambda: row_libphp_refusal(binary, run, out),
-        "7": lambda: row_no_interpreter(Path(args.binary_no_default).resolve(), run, out),
+        "7": lambda: row_no_interpreter(
+            Path(args.binary_no_default).resolve(), run, out
+        ),
     }
     for row in rows:
         handlers[row]()
@@ -570,8 +594,12 @@ def self_test(vectors=ROOT / "crates/blastit/tests", mask=MASK, host_mask=HOST_M
     except Failure:
         pass
     else:
-        raise Failure("an empty capture must be refused, as `CaptureError::Empty` refuses it")
-    print("dx-replay self-test: parity with dx_capture.rs on dx-parity.txt, empty refused")
+        raise Failure(
+            "an empty capture must be refused, as `CaptureError::Empty` refuses it"
+        )
+    print(
+        "dx-replay self-test: parity with dx_capture.rs on dx-parity.txt, empty refused"
+    )
 
 
 def main(argv):
@@ -588,7 +616,9 @@ def main(argv):
     run.add_argument("--mask", default=str(MASK))
     run.add_argument("--mask-host", default=str(HOST_MASK))
     run.add_argument("--rows", default="1,2,3,4,5,6,7")
-    normalise = commands.add_parser("normalise", help="normalise captures another driver wrote")
+    normalise = commands.add_parser(
+        "normalise", help="normalise captures another driver wrote"
+    )
     normalise.add_argument("--out", required=True)
     normalise.add_argument("--mask", default=str(MASK))
     normalise.add_argument("--mask-host", default=str(HOST_MASK))

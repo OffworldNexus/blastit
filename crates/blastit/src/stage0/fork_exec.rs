@@ -127,6 +127,8 @@ pub(super) fn fork_dbproxy_dev(
             }
             drop(secrets);
 
+            // `§1.2`: a line before the wait, so a slow dbproxy never looks hung.
+            crate::logs::phase(emitter, "dbproxy", "waiting for the ready byte");
             if let Err(reason) = wait_ready(&ready_read, DBPROXY_READY_TIMEOUT) {
                 emit_child_output(emitter, &stdout_read, Stream::Stdout);
                 emit_child_output(emitter, &stderr_read, Stream::Stderr);
@@ -393,6 +395,8 @@ pub(super) fn fork_dbproxy(
             }
             drop(secrets);
 
+            // `§1.2`: a line before the wait, so a slow dbproxy never looks hung.
+            crate::logs::phase(emitter, "dbproxy", "waiting for the ready byte");
             if let Err(reason) = wait_ready(&ready_read, DBPROXY_READY_TIMEOUT) {
                 // Whatever dbproxy said on the way out is in the pipes init is
                 // holding for stage 1, and a boot that fails with nothing but

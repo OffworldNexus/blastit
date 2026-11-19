@@ -37,6 +37,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(feature = "python")]
+use blastit_events::ReloadBoot;
 use blastit_events::{
     Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind, Level, Lifecycle,
     ManifestWarning, ProcessExited, ReloadReason,
@@ -2197,18 +2199,19 @@ pub const FAULT_OPEN: &str = "open";
 #[cfg(all(not(debug_assertions), feature = "python"))]
 pub const FAULT_OPEN: &str = "\u{0}release-has-no-seam";
 
-/// The boot line: `reload: on (N directories)`, pretty output only (§4.7).
+/// The live-reload boot line, as an event (§4.7 `reload`).
 ///
-/// It is deliberately **not** an event: the machine contract stays at the two
-/// events of §4.9. `N` is the number of directories the boot marked.
+/// One event, emitted exactly once by a boot whose marking pass placed marks:
+/// `directories` is how many directories it marked. It is deliberately no
+/// longer free text printed beside the stream — a `json` boot carries it on the
+/// machine stream, and a `pretty` one puts it in the same columns as every
+/// other line, with `1 directory` spelled in the singular.
 #[cfg(feature = "python")]
-pub fn announce_reload(format: crate::config::LogFormat, dirs: usize) {
-    if format == crate::config::LogFormat::Pretty {
-        crate::logs::write_line(
-            libc::STDOUT_FILENO,
-            &format!("reload: on ({dirs} directories)"),
-        );
-    }
+pub fn announce_reload(emitter: &Emitter, dirs: usize) {
+    emitter.emit(&Event::now(
+        Component::Init,
+        EventKind::Reload(ReloadBoot::new(u32::try_from(dirs).unwrap_or(u32::MAX))),
+    ));
 }
 
 /// The one `dev.reload.unavailable` the ladder emits (§4.7).

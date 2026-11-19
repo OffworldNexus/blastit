@@ -3686,3 +3686,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T04:04 [MB.40.5] (lead) base 1fde3df
 - 2026-11-19T04:15 [MB.40.5] (lead) status active -> review
 - 2026-11-19T04:27 [MB.40.5] (lead) committed groups 1-2; needs_split: groups 3 (banner/phases/alignment, blocked by 3 protected tests) and 4 (check/fmt actionable output)
+- 2026-11-19T04:27 [MB.40.5] (unknown) edited fields
+- 2026-11-19T04:27 [MB.40.5] (lead) status review -> ready
+- 2026-11-19T04:27 [MB.40.5.1] (unknown) created (task) dev banner, learn badge, structured reload event, aligned columns, phase lines & clean stderr refusals
+- 2026-11-19T04:27 [MB.40.5.2] (unknown) created (task) Actionable human check output (dead-grant SQL, proxy, MIME, fix.to), fmt --check unified diff & --learn --dry-run proposal
+- 2026-11-19T04:27 [MB.40.5.1] (lead) status ready -> active
+- 2026-11-19T04:27 [MB.40.5.1] (lead) attempt 1/3 started
+- 2026-11-19T04:27 [MB.40.5.1] (lead) base 7caf56a
+- 2026-11-19T04:34 [MB.40.5.1] (lead) attempt 2/3 started
+- 2026-11-19T04:34 [MB.40.5.1] (lead) attempt 1 hit its step limit mid-edit (tree uncompiled, ~5 compile errors left); re-dispatching as attempt 2 to finish + verify
+- 2026-11-19T04:42 [MB.40.5.1] (lead) status active -> review
+- 2026-11-19T04:44 [MB.40.5.1] (unknown) edited fields
+- 2026-11-19T04:44 [MB.40.5.1] (lead) REVIEW FIX: (a) EventDrain never stopped on the success path -> pg.refused/sql.denied warn+ events swallowed; stop it after proxy.stop() or give it Drop, and fo
+- 2026-11-19T04:54 [MB.40.5.1] (lead) status review -> done

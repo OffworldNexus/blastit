@@ -10,7 +10,7 @@ use time::{OffsetDateTime, UtcOffset};
 use crate::{
     AppOutput, Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind,
     HttpRejected, Level, Lifecycle, MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason,
-    PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason,
+    PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, ReloadBoot,
     ReloadReason, RequestInfo, RetireReason, Runtime, SqlDenied, SqlKind, Stream, floor_boundary,
 };
 
@@ -256,6 +256,9 @@ fn encode_into_with(out: &mut Vec<u8>, event: &Event, truncated: &[&'static str]
         EventKind::DevReloadUnavailable(info) => {
             push_str_member(out, "errno", &info.errno);
             push_str_member(out, "filesystem", &info.filesystem);
+        }
+        EventKind::Reload(info) => {
+            push_u64_member(out, "directories", u64::from(info.directories()));
         }
     }
 
@@ -844,6 +847,7 @@ fn decode_kind(name: &str, object: &Map<String, Value>) -> Option<EventKind> {
             text(object, "errno")?,
             text(object, "filesystem")?,
         )),
+        "reload" => EventKind::Reload(ReloadBoot::new(number_u32(object, "directories")?)),
         _ => return None,
     };
     Some(kind)
@@ -1284,6 +1288,8 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
             slots.push(("errno", &mut info.errno));
             slots.push(("filesystem", &mut info.filesystem));
         }
+        // The boot line carries one integer and no string that can grow.
+        EventKind::Reload(_) => {}
         EventKind::ProcessSpawned(_) | EventKind::ProcessExited(_) | EventKind::ProcessCap(_) => {}
     }
     slots
@@ -1406,8 +1412,8 @@ mod tests {
     use crate::{
         AppOutput, Component, DevReload, DevReloadUnavailable, ExitKind, HttpRejected,
         ManifestWarning, Outcome, PgRefuseReason, PgRefused, ProcessCap, ProcessExited,
-        ProcessRetired, ProcessSpawned, RejectReason, ReloadReason, RequestInfo, RetireReason,
-        SqlDenied, Stream,
+        ProcessRetired, ProcessSpawned, RejectReason, ReloadBoot, ReloadReason, RequestInfo,
+        RetireReason, SqlDenied, Stream,
     };
 
     /// The keys of the top-level object, in order.
@@ -1570,6 +1576,7 @@ mod tests {
                 "EPERM",
                 "overlayfs",
             ))),
+            fixture::event(EventKind::Reload(ReloadBoot::new(2))),
         ]
     }
 

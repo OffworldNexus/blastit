@@ -100,25 +100,52 @@ pub struct Emitter {
     format: LogFormat,
     level: Level,
     color: bool,
+    /// Whether a fatal refusal is printed as text on stderr (a person is
+    /// watching) instead of as `app.output` events on the stream.
+    refusals: bool,
 }
 
 impl Emitter {
     /// An emitter writing to `fd`, with the given format and minimum level.
     ///
-    /// `color` is only consulted in [`LogFormat::Pretty`].
+    /// `color` is only consulted in [`LogFormat::Pretty`], and it is also what
+    /// decides a fatal refusal's shape: a coloured stream is a terminal, and a
+    /// terminal gets prose on stderr rather than JSON on stdout. [`Emitter::stdout`]
+    /// makes the same decision from the stderr side of [`Colour`].
     pub fn new(fd: RawFd, format: LogFormat, level: Level, color: bool) -> Self {
         Self {
             fd,
             format,
             level,
             color,
+            refusals: color && format != LogFormat::Json,
         }
     }
 
     /// An emitter writing to stdout, coloured only when the process decided
     /// stdout should be.
     pub fn stdout(format: LogFormat, level: Level, colour: Colour) -> Self {
-        Self::new(libc::STDOUT_FILENO, format, level, colour.stdout)
+        Self {
+            fd: libc::STDOUT_FILENO,
+            format,
+            level,
+            color: colour.stdout,
+            // A refusal goes where a *person* reads: stderr is the terminal's
+            // stream, so `colour.stderr` — the TTY-and-not-dumb decision taken
+            // once by the composition root — is the one that counts here, not
+            // `colour.stdout`. A `json` boot keeps the events for its pipeline.
+            refusals: colour.stderr && format != LogFormat::Json,
+        }
+    }
+
+    /// Whether this emitter's stream is the human format (§8.1).
+    pub fn is_pretty(&self) -> bool {
+        self.format == LogFormat::Pretty
+    }
+
+    /// Whether a fatal refusal from this emitter is text on stderr.
+    pub fn refuses_in_text(&self) -> bool {
+        self.refusals
     }
 
     /// Prints one of init's own events, if it passes the level filter.
@@ -545,10 +572,19 @@ pub fn output_event(
 /// Prints `message` as error-level `app.output` events, one per line, and exits
 /// non-zero (§4: a half-started sandbox is worse than a crash loop).
 ///
+/// On a stream a person is watching — a TTY, [`LogFormat::Pretty`] — the same
+/// sentence is written to stderr as prose instead, and stdout stays empty: a
+/// machine reading the event stream is not there, and JSON on the terminal was
+/// the one refusal nobody could read (`§1.1`, A10.3). The decision was taken
+/// once, by the composition root, when the [`Emitter`] was built.
+///
 /// This uses `_exit`, not `std::process::exit`: init may be running with CPython
 /// initialised and the GIL held, and running libc's `atexit` handlers there can
 /// deadlock.
 pub fn fail(emitter: &Emitter, message: &str) -> ! {
+    if emitter.refuses_in_text() {
+        refuse_text(message);
+    }
     if message.is_empty() {
         emitter.emit(
             &output_event(Component::Init, None, Stream::Stderr, "fatal").with_level(Level::Error),
@@ -562,6 +598,51 @@ pub fn fail(emitter: &Emitter, message: &str) -> ! {
     crate::coverage::flush();
     // SAFETY: `_exit` never returns and runs no handler.
     unsafe { libc::_exit(1) }
+}
+
+/// A fatal refusal as prose on stderr, for a boot a person is watching
+/// (`§1.1`): the first line carries blastit's name, and every continuation line
+/// is printed as it was written (the advice's own indentation).
+pub fn refuse_text(message: &str) -> ! {
+    for (index, line) in message.lines().enumerate() {
+        if index == 0 {
+            eprintln!("blastit: {line}");
+        } else {
+            eprintln!("{line}");
+        }
+    }
+    crate::coverage::flush();
+    // SAFETY: the boot is aborting; `_exit` runs no handler.
+    unsafe { libc::_exit(1) }
+}
+
+/// Whether a boot that has not read its settings yet should refuse in prose.
+///
+/// This is the composition root's one read of `BLASTIT_LOG_FORMAT`, taken
+/// before `Config::from_env` can fail: a pipeline that asked for `json` still
+/// gets the event stream, and a person at a terminal gets a sentence on stderr.
+/// `colour` is the terminal decision the same root made, never a probe here.
+pub fn text_refusals(colour: Colour) -> bool {
+    colour.stderr && std::env::var_os("BLASTIT_LOG_FORMAT").is_none_or(|format| format != "json")
+}
+
+/// One startup phase line, on stderr, before a wait that can take a while
+/// (`§1.2`).
+///
+/// A person watching a boot must always see a line before the server blocks, or
+/// a slow start looks hung. The line goes to stderr — the progress stream, not
+/// the event stream — and only in the human format, so a `json` boot writes
+/// exactly the events it did before.
+pub fn phase(emitter: &Emitter, label: &str, detail: &str) {
+    if emitter.is_pretty() {
+        write_line(libc::STDERR_FILENO, &phase_line(label, detail));
+    }
+}
+
+/// The text of one [`phase`] line: `  <label>  <detail>`, the two columns
+/// wide enough for the labels this build uses (`dbproxy`, `app`).
+pub fn phase_line(label: &str, detail: &str) -> String {
+    format!("  {label:<10} {detail}")
 }
 
 #[cfg(test)]
@@ -590,6 +671,53 @@ mod tests {
             EventKind::ManifestWarning(ManifestWarning::new(name.to_string())),
         )
         .with_level(Level::Info)
+    }
+
+    #[test]
+    fn a_phase_line_names_its_label_in_a_fixed_column() {
+        // `§1.2`: a line before every blocking wait, so a slow boot never looks
+        // hung. The label column is fixed, so two phases read as two rows.
+        let waiting = phase_line("dbproxy", "waiting for the ready byte");
+        let importing = phase_line("app", "importing shop.wsgi:application");
+        assert_eq!(waiting, "  dbproxy    waiting for the ready byte");
+        assert_eq!(importing, "  app        importing shop.wsgi:application");
+        assert_eq!(waiting.find("waiting"), importing.find("importing"));
+        assert!(!waiting.contains('\u{1b}'), "a phase line is plain");
+    }
+
+    #[test]
+    fn a_refusal_is_prose_only_on_a_coloured_human_terminal() {
+        // `§1.1`, A10.3: a person at a terminal reads the refusal as text on
+        // stderr (and stdout stays empty); a `json` pipeline keeps its events.
+        let terminal = Colour {
+            stdout: true,
+            stderr: true,
+        };
+        let stderr_only = Colour {
+            stdout: false,
+            stderr: true,
+        };
+        let stdout_only = Colour {
+            stdout: true,
+            stderr: false,
+        };
+        assert!(Emitter::stdout(LogFormat::Pretty, Level::Info, terminal).refuses_in_text());
+        assert!(
+            Emitter::stdout(LogFormat::Pretty, Level::Info, stderr_only).refuses_in_text(),
+            "a redirected stdout is still a terminal on stderr"
+        );
+        assert!(
+            !Emitter::stdout(LogFormat::Pretty, Level::Info, stdout_only).refuses_in_text(),
+            "the stderr decision is the one that counts"
+        );
+        assert!(
+            !Emitter::stdout(LogFormat::Json, Level::Info, terminal).refuses_in_text(),
+            "`BLASTIT_LOG_FORMAT=json` keeps the machine contract"
+        );
+        assert!(!Emitter::stdout(LogFormat::Pretty, Level::Info, Colour::PLAIN).refuses_in_text());
+        // A boot that never reaches its settings is the same question asked of
+        // the terminal decision alone.
+        assert!(!text_refusals(Colour::PLAIN));
     }
 
     #[test]
