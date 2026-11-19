@@ -2,7 +2,7 @@
 id: MB.40.4
 title: "Split god-files (scheduler.rs, config.rs, sqlpolicy/analysis.rs, stage0/1) into cohesive modules & serde wire structs"
 kind: task
-status: ready
+status: review
 owner: implementer
 priority: 1
 depends_on: [MB.40.3]
@@ -12,11 +12,11 @@ paths:
   - "crates/blastit-sqlpolicy/**"
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T00:16"
+updated: "2026-11-19T03:04"
 ---
 
 # Goal
