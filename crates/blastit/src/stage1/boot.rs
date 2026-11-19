@@ -685,7 +685,6 @@ pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> 
             dev: serving.dev,
             learn: serving.learn,
             reload,
-            dev_reload: serving.dev_reload,
             reload_source: None,
             chan: None,
             policy: None,

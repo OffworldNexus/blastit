@@ -132,6 +132,7 @@
 #![cfg(feature = "php")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -1099,17 +1100,66 @@ fn shim_path(major: u32, minor: u32) -> Option<PathBuf> {
 struct Scratch {
     /// The directory `blastit dev` is started in.
     dir: PathBuf,
+    /// Files this case planted **beside** [`Scratch::dir`] — the escape fixtures
+    /// a symlink points at — removed with it on drop.
+    outside: RefCell<Vec<PathBuf>>,
 }
 
 impl Scratch {
     /// Creates `dir` with `Blastfile` written.
     fn new(name: &str, manifest: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("blastit-php-embed-{}-{name}", std::process::id()));
+        Self::try_at(&std::env::temp_dir(), name, manifest).expect("a fixture directory")
+    }
+
+    /// The same, on `/dev/shm` when this host has a writable one.
+    ///
+    /// A live-reload leg has to keep its tree on **`tmpfs`**: inside
+    /// `make rs-test-php-image`'s Docker container `/tmp` is `overlayfs`, where
+    /// an unprivileged `fanotify_mark` fails with `EPERM` (the boot publishes
+    /// `dev.reload.unavailable` and hands back no watcher), while `/dev/shm` is
+    /// a `tmpfs` there and the mark succeeds. A host without a usable
+    /// `/dev/shm` falls back to `temp_dir()`, which is what a developer's own
+    /// box wants anyway.
+    fn on_tmpfs(name: &str, manifest: &str) -> Self {
+        let shm = Path::new("/dev/shm");
+        if shm.is_dir()
+            && let Some(scratch) = Self::try_at(shm, name, manifest)
+        {
+            return scratch;
+        }
+        Self::new(name, manifest)
+    }
+
+    /// Creates `dir` under `base` with `Blastfile` written, or `None` when
+    /// `base` is not writable (`/dev/shm` may be absent or read-only).
+    fn try_at(base: &Path, name: &str, manifest: &str) -> Option<Self> {
+        let dir = base.join(format!("blastit-php-embed-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("public")).expect("a fixture directory");
-        std::fs::write(dir.join("Blastfile"), manifest).expect("the manifest");
-        Self { dir }
+        std::fs::create_dir_all(dir.join("public")).ok()?;
+        std::fs::write(dir.join("Blastfile"), manifest).ok()?;
+        Some(Self {
+            dir,
+            outside: RefCell::new(Vec::new()),
+        })
+    }
+
+    /// Writes `contents` to a file **beside** [`Scratch::dir`], on the same
+    /// filesystem: the fixture an escape symlink points at. It is removed with
+    /// `dir` on drop.
+    fn outside_file(&self, name: &str, contents: &[u8]) -> PathBuf {
+        let self_name = self
+            .dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path = self
+            .dir
+            .parent()
+            .expect("a fixture directory has a parent")
+            .join(format!("{self_name}-outside-{name}"));
+        std::fs::write(&path, contents).expect("an outside fixture file");
+        self.outside.borrow_mut().push(path.clone());
+        path
     }
 
     /// Writes `contents` to `relative`, creating its parent.
@@ -1132,6 +1182,9 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
+        for path in self.outside.borrow().iter() {
+            let _ = std::fs::remove_file(path);
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -4286,7 +4339,10 @@ fn a_dev_boot_reloads_a_php_save_in_place_by_rename_and_through_an_include() {
         refused_without_a_host("live reload", "php-live-reload");
         return;
     };
-    let scratch = Scratch::new("php-live-reload", PHP_MANIFEST);
+    // On `/dev/shm`, not `/tmp`: inside the CI image `/tmp` is `overlayfs`, where
+    // an unprivileged `fanotify_mark` is `EPERM` and this boot would have no
+    // watcher at all (`MB.40.10`).
+    let scratch = Scratch::on_tmpfs("php-live-reload", PHP_MANIFEST);
     scratch.write("src/helper.php", &helper_page("h1"));
     let entry = scratch.write(ENTRY, &front_controller("v1"));
     let libphp = host.libphp.to_string_lossy().into_owned();
@@ -4371,10 +4427,9 @@ fn a_dev_boot_reloads_a_php_save_in_place_by_rename_and_through_an_include() {
 
     // (e) The refused twin: a symlink pointing out of the manifest directory is
     // never pinned, so the path keeps refusing and nothing outside the tree runs.
-    let outside =
-        std::env::temp_dir().join(format!("blastit-php-outside-{}-live", std::process::id()));
-    std::fs::write(&outside, b"<?php echo \"OUTSIDE-THE-ROOT-RAN\\n\";\n")
-        .expect("the outside file");
+    // The decoy is a sibling of the scratch tree, on the same `tmpfs`, and is
+    // removed with it on drop.
+    let outside = scratch.outside_file("live", b"<?php echo \"OUTSIDE-THE-ROOT-RAN\\n\";\n");
     std::fs::remove_file(&entry).expect("removing the entry");
     std::os::unix::fs::symlink(&outside, &entry).expect("planting the symlink");
     let warning = boot.wait_event(Duration::from_secs(20), |event| {
@@ -4398,7 +4453,6 @@ fn a_dev_boot_reloads_a_php_save_in_place_by_rename_and_through_an_include() {
         "a file outside the manifest directory ran: {refused}"
     );
     boot.stop();
-    let _ = std::fs::remove_file(&outside);
     println!(
         "one `blastit dev` boot served v1, then v2 (in place), v3 (atomic rename), v3-h4 (include) \
          with zero `5xx`, and refused a symlink out of the tree: {}",

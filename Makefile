@@ -1,7 +1,7 @@
 # Blastit root Makefile: unified quality gates for Rust crates, Python tooling, docs, and the plan tree.
 #
 #   make help             # list targets
-#   make fast-check       # fast per-slice check: guard + critical-guard + rs-fmt + rs-lint + rs-test + py-lint + plan-validate
+#   make fast-check       # fast per-slice check: guard + critical-guard + rs-fmt + rs-lint + rs-doc + rs-test + py-lint + plan-validate
 #   make check            # full unprivileged epic/release gate (fast-check + docs + wheel + standalone ELF + packaging gates)
 #   make clean            # format Rust and Python harness tools, then run lints
 #   make docs-check       # build Zensical documentation site with --strict (zero broken links/anchors)
@@ -597,7 +597,7 @@ mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign 
 print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 	@echo "$(MUTANTS_TMP)"
 
-fast-check: guard critical-guard rs-fmt rs-lint rs-test py-lint plan-validate ## Fast per-slice Rust + Python + plan check
+fast-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test py-lint plan-validate ## Fast per-slice Rust + Python + plan check
 
 check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python rs-no-default seam-check platform-matrix-check workflow-check packaging-gates-test zed-check plan-validate ## Full unprivileged epic/release gate
 

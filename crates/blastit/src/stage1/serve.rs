@@ -193,7 +193,6 @@ pub(super) fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             dev: serving.dev,
             learn: serving.learn,
             reload,
-            dev_reload: serving.dev_reload,
             reload_source: serving.reload_source,
             chan: serving.chan,
             policy: serving.policy,

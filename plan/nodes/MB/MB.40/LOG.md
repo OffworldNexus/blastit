@@ -31,3 +31,11 @@ status done -> ready: Re-opening for MB.40.9 PHP live reload repinning & dev log
 ## 2026-11-19T11:52 [conductor]
 
 status ready -> done
+
+## 2026-11-19T12:11 [conductor]
+
+status done -> ready: Re-opening for MB.40.10 CI fixes (rs-doc, php_entry_swap boot lexical, /dev/shm tmpfs in Docker)
+
+## 2026-11-19T12:19 [conductor]
+
+status ready -> done

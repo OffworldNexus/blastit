@@ -3746,3 +3746,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T11:25 [MB.40.9] (conductor) base 88646f21c5fd291bc6b23b0455f782684b30a6a3
 - 2026-11-19T11:52 [MB.40.9] (conductor) status active -> done
 - 2026-11-19T11:52 [MB.40] (conductor) status ready -> done
+- 2026-11-19T12:11 [MB.40] (conductor) status done -> ready: Re-opening for MB.40.10 CI fixes (rs-doc, php_entry_swap boot lexical, /dev/shm tmpfs in Docker)
+- 2026-11-19T12:11 [MB.40.10] (conductor) created (task) Fix MB.40.9 CI fallout: pinning.rs rustdoc, lexical boot_bindings + reload.is_some() gate, and /dev/shm tmpfs in PHP reload test
+- 2026-11-19T12:11 [MB.40.10] (conductor) status ready -> active
+- 2026-11-19T12:11 [MB.40.10] (conductor) attempt 1/3 started
+- 2026-11-19T12:11 [MB.40.10] (conductor) base 1a251a02bcd7bf7f9f35786af38ce547b1e47114
+- 2026-11-19T12:19 [MB.40.10] (conductor) status active -> done
+- 2026-11-19T12:19 [MB.40] (conductor) status ready -> done

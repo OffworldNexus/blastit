@@ -162,14 +162,14 @@ impl PhpBinding {
     /// `ADR-0010` §3 (`MB.40.9`).
     ///
     /// A `blastit dev` save replaces the file at the pinned path (in place, or
-    /// by an atomic `rename`), which is exactly what [`verify_entry`] refuses:
-    /// the record is the boot's, and only a boot may move it. A dev boot that
-    /// promises live reload is the one caller allowed to move it, and it does so
-    /// by re-running the **boot's own resolution** — [`resolve_entry`] under
-    /// `manifest_dir`, then [`pin_entry`] — so a save cannot widen the
-    /// confinement the boot decided: a `..` path, a missing file and a symlink
-    /// whose target is outside the root are all `Err`, and the caller keeps the
-    /// previous pin.
+    /// by an atomic `rename`), which is exactly what `verify_entry` refuses:
+    /// the record is the boot's, and only a boot may move it. A dev boot whose
+    /// watcher is live is the one caller allowed to move it, and it does so by
+    /// re-running the boot's declared join under `manifest_dir` with the
+    /// reload's own confinement — `resolve_entry`, then `pin_entry` — so a save
+    /// cannot widen what the boot decided: a `..` path, a missing file and a
+    /// symlink whose target is outside the root are all `Err`, and the caller
+    /// keeps the previous pin.
     ///
     /// # Errors
     ///
@@ -403,7 +403,7 @@ pub fn boot_bindings(
                 values.route, php.entry
             ));
         };
-        let entry = resolve_entry(document_root, &php.entry, &values.route)?;
+        let entry = boot_entry(document_root, &php.entry, &values.route)?;
         let (entry_pin, entry_fd) = pin_entry(&entry, &values.route, &php.entry)?;
         // The same private directory the fork makes the child's `chdir`,
         // `HOME` and `TMPDIR`, so `sys_temp_dir` cannot disagree with them.
@@ -487,17 +487,53 @@ fn open_pinned(
     Ok(fd)
 }
 
-/// Resolves the manifest's `entrypoint php` under `manifest_dir`, or the
-/// sentence the boot (and a live reload) refuses with.
+/// The boot's half of the entry resolution: the manifest's `entrypoint php`
+/// joined under the manifest directory, refused when that join leaves it
+/// **lexically**.
 ///
-/// One resolution for both callers, so a save can never pin something the boot
-/// would not have: the declared string is joined under the manifest directory
-/// (a `..` component is refused before anything is opened), the result must
-/// exist, and the **resolved** file — symlinks followed, the way `libphp`
-/// follows `SCRIPT_FILENAME` — must still be inside the resolved root. A deploy
-/// that reaches its front controller through a symlinked `current/` therefore
-/// keeps an ordinary entry; a symlink pointing out of the tree is refused, so
-/// the pin can never be moved onto a file `open_basedir` does not cover.
+/// The boot resolves **nothing**. A deploy reaches its front controller through
+/// a symlinked `public/` (or a symlinked `current/`), and `canonicalize` here
+/// would make a boot that cannot start the moment a directory is swapped aside.
+/// `e2e/rootless/php_entry_swap.py` restarts `blastit dev` while
+/// `public -> /tmp/entry-swap-decoy` is a symlink and asserts the boot **starts**
+/// and fails closed per request: PHP's `open_basedir` refuses the escaped script
+/// with zero decoy opens. The confinement a reload needs lives in
+/// [`resolve_entry`], which only a live watcher calls.
+///
+/// What the boot may not accept is a **declaration** that walks out of the root:
+/// an absolute string, or one carrying a `..` component. The manifest parser
+/// refuses both, and this is the same rule one layer lower, so a `Manifest`
+/// built another way cannot start a pin outside `open_basedir` either.
+///
+/// # Errors
+///
+/// A sentence naming the route, the declared entry and the root.
+fn boot_entry(manifest_dir: &Path, declared: &str, route: &str) -> Result<PathBuf, String> {
+    let declared_path = Path::new(declared);
+    let entry = manifest_dir.join(declared_path);
+    let leaves = declared_path.is_absolute()
+        || declared_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        || !entry.starts_with(manifest_dir);
+    if leaves {
+        return Err(format!(
+            "route {route:?}: entrypoint php {declared:?} leaves the application root {}; a \
+             script outside it would also be outside open_basedir",
+            manifest_dir.display()
+        ));
+    }
+    Ok(entry)
+}
+
+/// The **live reload's** half of the entry resolution: the boot's lexical join
+/// ([`boot_entry`]), plus the one confinement only a reload may add.
+///
+/// A boot resolves nothing; a reload *moves the pin*, so it may not move it onto
+/// a file outside the root: the resolved file — symlinks followed, the way
+/// `libphp` follows `SCRIPT_FILENAME` — must still be inside the resolved root.
+/// A symlink pointing out of the tree is refused, so a save can never widen what
+/// the boot confined.
 ///
 /// The returned path is the **declared** join, not the resolved one: it is
 /// `SCRIPT_FILENAME`, which the application reads and `open_basedir` is written
@@ -509,14 +545,7 @@ fn open_pinned(
 /// leaves the root, one that cannot be resolved now (a save caught mid-write,
 /// or a file that is gone), or a symlink whose target is outside it.
 fn resolve_entry(manifest_dir: &Path, declared: &str, route: &str) -> Result<PathBuf, String> {
-    let entry = manifest_dir.join(declared);
-    if !entry.starts_with(manifest_dir) {
-        return Err(format!(
-            "route {route:?}: entrypoint php {declared:?} leaves the application root {}; a \
-             script outside it would also be outside open_basedir",
-            manifest_dir.display()
-        ));
-    }
+    let entry = boot_entry(manifest_dir, declared, route)?;
     let outside = |resolved: &Path| {
         format!(
             "route {route:?}: entrypoint php {declared:?} resolves to {}, which is outside the \
@@ -1126,6 +1155,75 @@ view app \"/*\" {}
             "the symlink is not the recorded file, so every request still refuses it"
         );
         let _ = std::fs::remove_file(&outside);
+    }
+
+    /// `MB.40.10`: the two halves are different on purpose. The boot joins the
+    /// declaration **lexically** and resolves nothing, so a deploy that swaps a
+    /// directory aside for a symlink still boots and fails closed per request
+    /// (`open_basedir`); only the live reload, which moves the pin, canonicalizes
+    /// and refuses a target outside the root.
+    #[test]
+    fn a_boot_pins_a_symlinked_entry_and_a_reload_refuses_to_move_the_pin_onto_it() {
+        // The lexical refusal, before anything is opened: the manifest parser
+        // refuses the same two shapes, and the boot may not rely on that alone.
+        for declared in ["/etc/passwd", "../escape.php", "public/../../escape.php"] {
+            let message = boot_entry(Path::new("/app"), declared, "app")
+                .expect_err("a declaration that leaves the root is refused");
+            assert!(
+                message.contains("leaves the application root"),
+                "the refusal names the rule: {message}"
+            );
+        }
+        assert_eq!(
+            boot_entry(Path::new("/app"), "public/index.php", "app"),
+            Ok(PathBuf::from("/app/public/index.php")),
+            "an ordinary declaration is the declared join, never a resolved one"
+        );
+
+        let boot = Boot::new("symlinked-entry");
+        let outside =
+            std::env::temp_dir().join(format!("blastit-php-swapped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).expect("the decoy directory");
+        let decoy = outside.join("index.php");
+        std::fs::write(&decoy, b"<?php echo 'DECOY-RAN';\n").expect("the decoy");
+        std::fs::rename(boot.dir.join("public"), boot.dir.join("public.real"))
+            .expect("swapping public aside");
+        std::os::unix::fs::symlink(&outside, boot.dir.join("public"))
+            .expect("planting the symlink");
+
+        let mut bindings = boot
+            .bindings()
+            .expect("a symlinked `public/` must not refuse the boot");
+        let binding = bindings[0].as_mut().expect("the PHP slot has a binding");
+        assert_eq!(
+            binding.entry,
+            boot.dir.join("public/index.php"),
+            "the boot keeps the declared path, the one SCRIPT_FILENAME must be"
+        );
+        assert_eq!(
+            binding.entry_pin,
+            EntryPin::of(&std::fs::metadata(&decoy).expect("the decoy")),
+            "the record is the inode at that path — not a refusal"
+        );
+
+        // The reload's half refuses the same shape: the pin may not be moved
+        // onto a file outside the root, so the boot's record stays in force.
+        let pinned = binding.entry_pin;
+        let refusal = binding
+            .repin_entry(&boot.dir, "public/index.php")
+            .expect_err("a reload may not pin a file outside the root");
+        assert!(
+            refusal.contains("outside the application root")
+                && refusal.contains(&decoy.display().to_string()),
+            "the sentence names the target and the root: {refusal}"
+        );
+        assert_eq!(
+            binding.entry_pin, pinned,
+            "the boot's record stays in force"
+        );
+
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     /// The denied twin, per object: a file replaced between the record and the

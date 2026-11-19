@@ -437,12 +437,12 @@ pub struct Parts {
     /// boot with reload off. A `php`-only standalone build gets one too: a PHP
     /// worker needs no interpreter, so its saves are served by repinning the
     /// entry (`MB.40.9`).
+    ///
+    /// It is the live-reload gate **itself** (`MB.40.10`): a boot with no
+    /// watcher — `--no-reload`, or a `fanotify_mark` that could not run, which
+    /// Docker's `overlayfs` answers with `EPERM` — has nothing that will ever
+    /// report the save, so the boot's `EntryPin` has to stand.
     pub reload: Option<Reload>,
-    /// Whether this `dev` boot promised live reload (`--dev-reload=on`, the
-    /// default) — the gate for re-pinning an `entrypoint php` a save replaced
-    /// (`MB.40.9`). It stays true if the watcher later latches dead: the
-    /// promise the boot made is what decides, not the health of one watcher.
-    pub dev_reload: bool,
     /// What a reload **cycle** re-execs with (§4.6 step 6). `Some` only on a
     /// dev boot with reload on; the reload cycle has no other way to rebuild the
     /// pre-fork heap while keeping `:8080`.
@@ -508,13 +508,9 @@ pub struct Supervisor<'a> {
     ///
     /// Exactly one `Source` in the poll set, one armed deadline and no second
     /// event loop: a boot that never constructed it (production, `check`,
-    /// `--no-reload`) costs the poll loop nothing.
+    /// `--no-reload`) costs the poll loop nothing. It is also the live-reload
+    /// gate: while it is `None` no save may move a PHP `EntryPin` (`MB.40.10`).
     reload: Option<Reload>,
-    /// Whether this `dev` boot promised live reload (`MB.40.9`): the gate for
-    /// re-pinning a PHP entry a save replaced, before a worker is forked from it
-    /// or the views are reloaded.
-    #[cfg_attr(not(feature = "php"), allow(dead_code))]
-    dev_reload: bool,
     /// What a reload cycle re-execs with; `None` on every boot that cannot
     /// cycle (§4.6).
     reload_source: Option<ReloadSource>,
@@ -660,7 +656,6 @@ impl<'a> Supervisor<'a> {
             dev: parts.dev,
             learn: parts.learn,
             reload: parts.reload,
-            dev_reload: parts.dev_reload,
             reload_source: parts.reload_source,
             adoption,
             cycle: None,
@@ -888,14 +883,17 @@ impl<'a> Supervisor<'a> {
     /// Re-records every PHP slot's `entrypoint php` after a save (§4.6,
     /// `MB.40.9`).
     ///
-    /// `None` on every boot that did not promise reload, and on a slot with no
-    /// binding. A refusal — the file mid-save, or a symlink that now points out
-    /// of the manifest directory — is one `manifest.warning` and the previous
-    /// pin stays, so the worker keeps refusing that path instead of running
-    /// something the boot did not resolve.
+    /// Only a boot whose watcher is live gets here (`MB.40.10`): `--no-reload`
+    /// and a `fanotify_mark` that could not run (Docker's `overlayfs` answers
+    /// `EPERM`, so `boot_reload` publishes `dev.reload.unavailable` and hands
+    /// back `None`) are one thing — no live reload is running, so the boot's pin
+    /// stands. A slot with no binding is skipped, and a refusal — the file
+    /// mid-save, or a symlink that now points out of the manifest directory — is
+    /// one `manifest.warning`, with the previous pin kept, so the worker keeps
+    /// refusing that path instead of running something the boot did not resolve.
     #[cfg(feature = "php")]
     fn repin_php_bindings(&mut self) {
-        if self.dev.is_none() || !self.dev_reload {
+        if self.dev.is_none() || self.reload.is_none() {
             return;
         }
         let mut failures: Vec<String> = Vec::new();
@@ -1459,9 +1457,11 @@ impl<'a> Supervisor<'a> {
         // stale `EntryPin` answers every request with "changed since this boot
         // recorded it", so the entry is recorded again here — and a refusal (a
         // file mid-save, or a symlink out of the tree) is one warning, never a
-        // failed boot.
+        // failed boot. With no watcher (`MB.40.10`: `--no-reload`, or
+        // `fanotify_mark` refused on Docker's `overlayfs`) nothing will ever
+        // report the save, so the boot's pin stands and no repin runs.
         #[cfg(feature = "php")]
-        if self.dev.is_some() && self.dev_reload {
+        if self.dev.is_some() && self.reload.is_some() {
             let mut refusal: Option<String> = None;
             if let Some(binding) = self.php.get_mut(index).and_then(Option::as_mut)
                 && !binding.entry_is_current()
@@ -3145,7 +3145,6 @@ mod tests {
                 dev: None,
                 learn: None,
                 reload: None,
-                dev_reload: false,
                 reload_source: None,
                 chan: None,
                 policy: None,
@@ -3500,7 +3499,6 @@ view plain regex '/plain/.*' {}
                     dev: None,
                     learn: None,
                     reload: None,
-                    dev_reload: false,
                     reload_source: Some(ReloadSource {
                         config: Vec::new(),
                         program: Vec::new(),
@@ -3703,7 +3701,6 @@ view plain regex '/plain/.*' {}
                 dev: None,
                 learn: None,
                 reload: None,
-                dev_reload: false,
                 reload_source: Some(ReloadSource {
                     config: Vec::new(),
                     program: Vec::new(),
