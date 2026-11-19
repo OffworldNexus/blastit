@@ -17,7 +17,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -61,10 +61,8 @@ fn a_php_route_answers_two_requests_through_view_chan() {
     // process, so this harness runs the Fd form end to end (the `Path` form is
     // `blastit-php-sapi`'s harness) and must not start a second module.
     let pin = |path: &std::path::Path| {
-        OwnedFd::from(
-            std::fs::File::open(path)
-                .unwrap_or_else(|err| panic!("cannot open {}: {err}", path.display())),
-        )
+        blastit_sys::pin::SharedObject::open(path, None)
+            .unwrap_or_else(|err| panic!("cannot open {}: {err}", path.display()))
     };
     let libphp = pin(&libphp);
     let shim = pin(&shim);

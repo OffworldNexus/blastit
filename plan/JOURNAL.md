@@ -3804,3 +3804,32 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T16:42 [MB.42.1] (lead) status active -> review
 - 2026-11-19T16:46 [MB.42.1] (lead) REVIEW FIX (filtered): B1 glibc floor false (shims need 2.36-2.41, .deb says 2.28, gate unenforceable); B2 py3-none wheel has no builder/consumer contract (matu
 - 2026-11-19T17:17 [MB.42.1] (lead) status review -> done
+- 2026-11-19T17:17 [MB.42.1] (lead) commit 5b3ce8df52aed5b4954eefd7b5543e16e4bc6ec6; fast-check green, docs-check green, critical_guard clean, guard OK
+- 2026-11-19T17:17 [MB.42] (unknown) MB.42.1 done -> ADR-0017 Accepted + design/universal-distribution.md (141 lines). Next: MB.42.2 universal binary + handoff, then MB.42.5 PHP 8.6, then MB.42.3 p
+- 2026-11-19T17:17 [MB.42.2] (unknown) edited fields
+- 2026-11-19T17:17 [MB.42.2] (lead) status ready -> ready
+- 2026-11-19T17:18 [MB.42.2.1] (unknown) created (task) Shared fd pinning + blastit-py-sapi/-py-shim + Stage-0/1 dlopen + make py-sapi (one libpython-free binary)
+- 2026-11-19T17:18 [MB.42.2.2] (unknown) created (task) blastit-audit extraction + blastit --internal-json + pure-Python _blastit.py bridge; retire blastit-py/pyo3
+- 2026-11-19T17:18 [MB.42.2.3] (unknown) created (task) Safe local CLI handoff (cli/handoff.rs): zero-TOCTOU venv/vendor/node_modules execveat
+- 2026-11-19T17:18 [MB.42.2.4] (unknown) created (task) Integration glue: make install staging, test-critical staging, and one-binary four-runtime E2E
+- 2026-11-19T17:18 [MB.42.2.1] (lead) status ready -> active
+- 2026-11-19T17:18 [MB.42.2.1] (lead) attempt 1/3 started
+- 2026-11-19T17:18 [MB.42.2.1] (lead) base 5b3ce8df52aed5b4954eefd7b5543e16e4bc6ec6
+- 2026-11-19T17:20 [MB.42.2.1] (unknown) edited fields
+- 2026-11-19T17:20 [MB.42.2.1] (lead) status active -> ready
+- 2026-11-19T17:20 [MB.42.2.1] (lead) needs_split accepted: 59 pyo3 sites/9 files, supervise.rs ~3.7k LOC owns Py<PyAny> zygote, §1.2 fork/zygote ordering unpinned -> design addendum MB.42.2.0 + 4 i
+- 2026-11-19T17:20 [MB.42.2.0] (unknown) created (task) Pin fork/zygote/GIL ownership invariants in universal-distribution §1.2.1 (design addendum)
+- 2026-11-19T17:20 ESCALATION #17 -> architect for MB.42.2.0 by lead: fork/zygote/GIL ownership invariant for the pyo3-free supervisor cut-over is a core runtime architecture crossroads: who
+- 2026-11-19T17:20 [MB.42.2.0] (lead) status ready -> active
+- 2026-11-19T17:20 [MB.42.2.0] (lead) attempt 1/3 started
+- 2026-11-19T17:20 [MB.42.2.0] (lead) base 5b3ce8df52aed5b4954eefd7b5543e16e4bc6ec6
+- 2026-11-19T17:21 [MB.42.2.1.1] (planner) created (task) blastit_sys::pin + blastit-py-sapi (abi/discovery/loader), rewired blastit-view-php
+- 2026-11-19T17:21 [MB.42.2.1.2] (planner) created (task) blastit-py-shim cdylib (9 C exports) + make py-sapi for CPython 3.13/3.14
+- 2026-11-19T17:21 [MB.42.2.1.3] (planner) created (task) Stage-0 discovery call site + fd handoff + PyForkHooks (no stage-1 dlopen)
+- 2026-11-19T17:21 [MB.42.2.1.4] (planner) created (task) Stage-1 dlopen + PyRuntime supervisor cut-over + drop pyo3 (portable ELF)
+- 2026-11-19T17:21 [MB.42.2.1.1] (lead) status ready -> active
+- 2026-11-19T17:21 [MB.42.2.1.1] (lead) attempt 1/3 started
+- 2026-11-19T17:21 [MB.42.2.1.1] (lead) base 5b3ce8df52aed5b4954eefd7b5543e16e4bc6ec6
+- 2026-11-19T17:47 [MB.42.2.1.1] (lead) status active -> review
+- 2026-11-19T17:50 [MB.42.2.1.1] (lead) REVIEW FIX (filtered): MAJOR loader.rs duplicates blastit_sys::elf c_str/le_u32/le_u64 + 3rd .dynamic/.dynsym walk (extend elf with dynamic_strings/dynsym_names
+- 2026-11-19T18:01 [MB.42.2.1.1] (lead) status review -> done

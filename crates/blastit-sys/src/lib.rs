@@ -153,6 +153,7 @@ pub mod child;
 pub mod elf;
 pub mod fanotify;
 pub mod mem;
+pub mod pin;
 
 #[cfg(any(test, feature = "testutil"))]
 pub mod testutil;

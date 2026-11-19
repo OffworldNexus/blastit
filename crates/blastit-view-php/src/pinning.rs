@@ -41,6 +41,7 @@ use std::time::Instant;
 use blastit_manifest::Manifest;
 use blastit_php_sapi::{Egress, IniPolicy};
 use blastit_sys::child::{Filter, Privileges};
+use blastit_sys::pin::SharedObject;
 use rustix::fs::{Mode, OFlags};
 
 use crate::discovery::PhpRuntime;
@@ -64,9 +65,9 @@ use crate::discovery::PhpRuntime;
 #[derive(Debug)]
 pub struct PhpBinding {
     /// The host's NTS `libphp.so`, opened and identity-checked at boot.
-    pub libphp: OwnedFd,
+    pub libphp: SharedObject,
     /// The matching `libblastit_php8X.so` shim (`MB.3.12`).
-    pub shim: OwnedFd,
+    pub shim: SharedObject,
     /// Absolute `SCRIPT_FILENAME` (the `entrypoint php`), pinned at boot: the
     /// record is [`PhpBinding::entry_pin`] beside it, and every request
     /// re-checks the file at this path against that record.
@@ -426,14 +427,14 @@ pub fn boot_bindings(
             )
         })?;
         bindings[slot] = Some(PhpBinding {
-            libphp: open_pinned(
+            libphp: pin_object(
                 &record.libphp,
                 record.dev,
                 record.ino,
                 &values.route,
                 "libphp",
             )?,
-            shim: open_pinned(
+            shim: pin_object(
                 &record.shim,
                 record.shim_dev,
                 record.shim_ino,
@@ -459,32 +460,36 @@ pub fn boot_bindings(
     Ok(bindings)
 }
 
-/// Re-opens one inspected object and refuses a file that is not the one stage 0
-/// read (`ADR-0010` §3).
-fn open_pinned(
+/// Re-opens one inspected object through the shared owner
+/// ([`blastit_sys::pin::SharedObject`]) and renders its refusal in this boot's
+/// sentence — the route, which object, the file and the fix (`ADR-0010` §3).
+///
+/// The `(st_dev, st_ino)` record, the `O_RDONLY | O_CLOEXEC | O_NOFOLLOW` open
+/// and the `/proc/self/fd/<fd>` spelling live in `blastit-sys` because the
+/// Python `libpython` and shim pins are the same primitive (design
+/// `universal-distribution.md` §1.1). The entry pin above is deliberately
+/// **not** shared: PHP re-resolves `SCRIPT_FILENAME` by path on every request,
+/// so it needs `st_size`/`st_ctime` and an `O_PATH` reference, while a
+/// `libphp` descriptor is only ever `dlopen`ed.
+fn pin_object(
     path: &Path,
     dev: u64,
     ino: u64,
     route: &str,
     what: &str,
-) -> Result<OwnedFd, String> {
-    let fd = rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )
-    .map_err(|err| format!("route {route:?}: {what} {}: {err}", path.display()))?;
-    let stat = rustix::fs::fstat(&fd)
-        .map_err(|err| format!("route {route:?}: {what} {}: {err}", path.display()))?;
-    if stat.st_dev != dev || stat.st_ino != ino {
-        return Err(format!(
-            "route {route:?}: {what} {} is not the file stage 0 inspected (st_dev/st_ino \
-             moved), so the worker would load something nobody verified; restore the package \
-             and restart blastit",
-            path.display()
-        ));
-    }
-    Ok(fd)
+) -> Result<SharedObject, String> {
+    SharedObject::open(path, Some((dev, ino))).map_err(|err| {
+        if matches!(err, blastit_sys::pin::PinError::IdentityChanged { .. }) {
+            format!(
+                "route {route:?}: {what} {} is not the file stage 0 inspected (st_dev/st_ino \
+                 moved), so the worker would load something nobody verified; restore the package \
+                 and restart blastit",
+                path.display()
+            )
+        } else {
+            format!("route {route:?}: {what}: {err}")
+        }
+    })
 }
 
 /// The boot's half of the entry resolution: the manifest's `entrypoint php`
@@ -1367,8 +1372,8 @@ view app \"/*\" {}
         let (entry_pin, entry_fd) =
             pin_entry(&file, "app", "entry.php").expect("pinning the entry");
         let binding = PhpBinding {
-            libphp: std::fs::File::open(&file).expect("pin libphp").into(),
-            shim: std::fs::File::open(&file).expect("pin shim").into(),
+            libphp: SharedObject::open(&file, None).expect("pin libphp"),
+            shim: SharedObject::open(&file, None).expect("pin shim"),
             entry: file.clone(),
             declared_entry: "entry.php".to_string(),
             entry_pin,

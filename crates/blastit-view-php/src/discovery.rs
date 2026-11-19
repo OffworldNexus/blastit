@@ -49,7 +49,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use blastit_manifest::Manifest;
-use blastit_sys::elf::{Class, Elf, SHF_ALLOC, SHF_WRITE, SectionHeader};
+use blastit_sys::elf::{Elf, MAX_SECTION_BYTES, SHF_ALLOC, SHF_WRITE, STT_FUNC};
 
 /// The distro file names a host NTS `libphp` is looked for under, newest first
 /// (`ADR-0010` §3).
@@ -1146,11 +1146,6 @@ fn choose_version(
         })
 }
 
-/// The largest section this walk will read into memory: a `libphp`'s `.dynsym`
-/// is tens of kilobytes, and this is the bound that keeps a hostile file from
-/// being an allocation.
-const MAX_SECTION_BYTES: u64 = 64 * 1024 * 1024;
-
 /// `SHT_DYNSYM`: the dynamic symbol table.
 ///
 /// Spelled once, in [`blastit_sys::elf`], and re-exported here because the
@@ -1194,158 +1189,33 @@ struct ObjectFacts {
 /// `.dynsym`, or is truncated is an `Err` naming what was wrong.
 fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
     let mut elf = Elf::parse(file).map_err(|err| err.to_string())?;
-    let (dynsym, strtab_index) = find_dynsym(&mut elf)?;
-    let strtab = find_strtab(&mut elf, strtab_index)?;
     let symbols = elf
-        .section_bytes(&dynsym, MAX_SECTION_BYTES)
+        .dynsym_symbols(MAX_SECTION_BYTES)
         .map_err(|err| err.to_string())?;
-    let names = elf
-        .section_bytes(&strtab, MAX_SECTION_BYTES)
-        .map_err(|err| err.to_string())?;
-    let entsize = usize::try_from(dynsym.entsize)
-        .map_err(|_| "the .dynsym entry size does not fit this build".to_string())?;
-    let symbols = scan_symbols(elf.class(), &symbols, entsize, &names)?;
-    let abi = match (symbols.executor_globals, symbols.tsrm_startup) {
+    // `blastit_sys::elf` owns the walk and the `st_shndx` rule; what is left here
+    // is only "which Zend names matter". PHP's documented rule is presence of
+    // the name (`MB.3.61`) — a synthetic gate fixture may state it without a
+    // section index — so this filter deliberately does not consult `defined`;
+    // the Python loader's gate does.
+    let exported = |name: &str| symbols.iter().any(|symbol| symbol.name == name);
+    let abi = match (exported("executor_globals"), exported("tsrm_startup")) {
         (true, false) => ZendAbi::Nts,
         (false, false) => ZendAbi::NotLibphp,
         (_, true) => ZendAbi::Zts,
     };
-    let version = symbols
-        .php_version_body
-        .and_then(|symbol| php_version_string(&mut elf, symbol));
+    let body = symbols
+        .iter()
+        .find(|symbol| symbol.name == "php_version" && symbol.kind == STT_FUNC)
+        .map(|symbol| (symbol.value, symbol.size));
+    let version = body.and_then(|symbol| php_version_string(&mut elf, symbol));
     Ok(ObjectFacts {
         abi,
-        exports_php_version: symbols.exports_php_version,
+        exports_php_version: exported("php_version"),
         version,
     })
 }
 
-/// The `.dynsym` section and the index of its string table.
-///
-/// The walk is this module's — "which Zend symbols does this object export" —
-/// while the header, the section table and every bounds check are
-/// [`blastit_sys::elf`]'s.
-fn find_dynsym(elf: &mut Elf<impl Read + Seek>) -> Result<(SectionHeader, usize), String> {
-    for index in 0..elf.section_count() {
-        let section = elf.section(index).map_err(|err| err.to_string())?;
-        if section.kind != SHT_DYNSYM {
-            continue;
-        }
-        let link = usize::try_from(section.link)
-            .map_err(|_| "the .dynsym string-table index does not fit this build".to_string())?;
-        return Ok((section, link));
-    }
-    Err("it has no .dynsym section".to_string())
-}
-
-/// The string table `index` names, checked to be one.
-fn find_strtab(elf: &mut Elf<impl Read + Seek>, index: usize) -> Result<SectionHeader, String> {
-    if index >= elf.section_count() {
-        return Err("the .dynsym string-table index is past the section table".to_string());
-    }
-    let section = elf
-        .section(index)
-        .map_err(|_| "the .dynstr section header is truncated".to_string())?;
-    if section.kind != SHT_STRTAB {
-        return Err("the .dynsym string table is not a string table".to_string());
-    }
-    Ok(section)
-}
-
-/// The dynamic symbols the walk cares about (`ADR-0010` §3, `MB.3.59`).
-struct DynSymbols {
-    /// `executor_globals` is exported.
-    executor_globals: bool,
-    /// `tsrm_startup` is exported (a ZTS build).
-    tsrm_startup: bool,
-    /// The `.dynsym` exports the **name** `php_version`: the symbol the worker's
-    /// loader resolves before `php_module_startup`. Presence is the name alone,
-    /// whatever the symbol is typed or sized (`MB.3.61`).
-    exports_php_version: bool,
-    /// `php_version`'s `(st_value, st_size)` — its *body*, and a separate fact:
-    /// set only for a symbol typed `STT_FUNC` whose fields the walk could read.
-    php_version_body: Option<(u64, u64)>,
-}
-
-/// Which of the symbols above the dynamic table exports.
-fn scan_symbols(
-    class: Class,
-    dynsym: &[u8],
-    entsize: usize,
-    strtab: &[u8],
-) -> Result<DynSymbols, String> {
-    let minimum = match class {
-        Class::Elf64 => 24usize,
-        Class::Elf32 => 16usize,
-    };
-    if entsize < minimum {
-        return Err("a .dynsym entry is too small to be a symbol".to_string());
-    }
-    let mut symbols = DynSymbols {
-        executor_globals: false,
-        tsrm_startup: false,
-        exports_php_version: false,
-        php_version_body: None,
-    };
-    for index in 0..dynsym.len() / entsize {
-        let at = index.saturating_mul(entsize);
-        let Some(name) = le_u32(dynsym, at).and_then(|offset| {
-            usize::try_from(offset)
-                .ok()
-                .map(|offset| c_str(strtab, offset))
-        }) else {
-            continue;
-        };
-        match name {
-            b"executor_globals" => symbols.executor_globals = true,
-            b"tsrm_startup" => symbols.tsrm_startup = true,
-            b"php_version" => {
-                // Presence is the name alone (`MB.3.61`): an object that exports
-                // `php_version` as `STT_NOTYPE`, or with `st_size == 0`, still
-                // exports it, and saying otherwise is a false sentence. The body
-                // is a second fact, read only when it is the shape the version
-                // decode understands.
-                symbols.exports_php_version = true;
-                if symbol_is_function(class, dynsym, at)
-                    && let (Some(value), Some(size)) = (
-                        symbol_value(class, dynsym, at),
-                        symbol_size(class, dynsym, at),
-                    )
-                {
-                    symbols.php_version_body = Some((value, size));
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(symbols)
-}
-
-/// `st_info`'s type nibble: `STT_FUNC`, the only kind the worker can call.
-fn symbol_is_function(class: Class, dynsym: &[u8], at: usize) -> bool {
-    let info = match class {
-        Class::Elf64 => dynsym.get(at.saturating_add(4)).copied(),
-        Class::Elf32 => dynsym.get(at.saturating_add(12)).copied(),
-    };
-    info.is_some_and(|info| info & 0x0f == 2)
-}
-
-/// `st_value`: where the symbol's code or data lives.
-fn symbol_value(class: Class, dynsym: &[u8], at: usize) -> Option<u64> {
-    match class {
-        Class::Elf64 => le_u64(dynsym, at.checked_add(8)?),
-        Class::Elf32 => le_u32(dynsym, at.checked_add(4)?).map(u64::from),
-    }
-}
-
 /// `st_size`: how many bytes the symbol's body occupies.
-fn symbol_size(class: Class, dynsym: &[u8], at: usize) -> Option<u64> {
-    match class {
-        Class::Elf64 => le_u64(dynsym, at.checked_add(16)?),
-        Class::Elf32 => le_u32(dynsym, at.checked_add(8)?).map(u64::from),
-    }
-}
-
 /// The compile-time version `php_version()` returns, read statically
 /// (`MB.3.59`).
 ///
@@ -1481,30 +1351,6 @@ pub fn decode_aarch64(body: &[u8], at: u64) -> Option<u64> {
 fn sign_extend(value: i64, bits: u32) -> i64 {
     let shift = 64u32.saturating_sub(bits);
     (value << shift) >> shift
-}
-
-/// The NUL-terminated string at `offset`, or an empty slice.
-fn c_str(bytes: &[u8], offset: usize) -> &[u8] {
-    let Some(rest) = bytes.get(offset..) else {
-        return &[];
-    };
-    let end = rest
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(rest.len());
-    rest.get(..end).unwrap_or_default()
-}
-
-/// A little-endian `u32` at `offset`, or `None` past the end.
-fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let slice: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
-    Some(u32::from_le_bytes(slice))
-}
-
-/// A little-endian `u64` at `offset`, or `None` past the end.
-fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    let slice: [u8; 8] = bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
-    Some(u64::from_le_bytes(slice))
 }
 
 /// The PHP version a host `libphp` is, `major.minor` (`ADR-0010` §3).

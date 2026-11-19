@@ -64,6 +64,19 @@ pub const SHT_DYNAMIC: u32 = 6;
 /// `SHT_DYNSYM`: the dynamic symbol table.
 pub const SHT_DYNSYM: u32 = 11;
 
+/// `STT_FUNC`: a symbol whose value is code.
+pub const STT_FUNC: u8 = 2;
+
+/// `SHN_UNDEF`: the symbol is imported, not defined by this object.
+pub const SHN_UNDEF: u16 = 0;
+
+/// The largest section any walk in blastit reads into memory.
+///
+/// A `libphp`/`libpython` `.dynsym` is tens of kilobytes and a `SHT_DYNAMIC`
+/// array a few hundred bytes; this is the bound that keeps a hostile file from
+/// being an allocation.
+pub const MAX_SECTION_BYTES: u64 = 64 * 1024 * 1024;
+
 /// `SHF_WRITE`: the section is writable — never where a compile-time string is.
 pub const SHF_WRITE: u64 = 0x1;
 
@@ -102,6 +115,23 @@ impl Class {
         match self {
             Self::Elf32 => 40,
             Self::Elf64 => 64,
+        }
+    }
+
+    /// The size of one `Elf*_Sym` (`sh_entsize` of a `.dynsym`).
+    #[must_use]
+    pub const fn symbol_entry_size(self) -> usize {
+        match self {
+            Self::Elf32 => 16,
+            Self::Elf64 => 24,
+        }
+    }
+
+    /// The offset of `st_shndx` in one `Elf*_Sym`.
+    const fn symbol_shndx_offset(self) -> usize {
+        match self {
+            Self::Elf32 => 14,
+            Self::Elf64 => 6,
         }
     }
 }
@@ -177,6 +207,26 @@ pub enum ElfError {
     /// A section's length does not fit this build's `usize`.
     #[error("a section is larger than this build can address")]
     SectionTooLargeToAddress,
+
+    /// A `.dynsym` entry is smaller than this class's `Elf*_Sym`.
+    #[error("a .dynsym entry is too small to be a symbol")]
+    SymbolEntriesTooSmall,
+
+    /// The object has no `.dynsym` section.
+    #[error("it has no .dynsym section")]
+    NoDynsym,
+
+    /// The object has no `SHT_DYNAMIC` section.
+    #[error("it has no dynamic section")]
+    NoDynamic,
+
+    /// `.dynsym` or `SHT_DYNAMIC` does not link a string table.
+    #[error("its dynamic section does not link a string table")]
+    NoDynamicStringTable,
+
+    /// A `dyn_tag` value does not name a string this build can read.
+    #[error("a dynamic string entry is not a string this build can read")]
+    DynamicString,
 
     /// `seek`/`read` on the file the caller opened failed.
     #[error("the file could not be read ({0})")]
@@ -434,6 +484,176 @@ impl<F: Read + Seek> Elf<F> {
         }
         Ok(None)
     }
+
+    /// The first section of `kind`, or `None`.
+    fn section_by_kind(&mut self, kind: u32) -> Result<Option<SectionHeader>, ElfError> {
+        for index in 0..self.shnum {
+            let section = self.section(index)?;
+            if section.kind == kind {
+                return Ok(Some(section));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every dynamic entry whose `d_tag` is `tag`, rendered through `.dynstr`.
+    ///
+    /// This is the one owner of the `SHT_DYNAMIC` array: `DT_SONAME`,
+    /// `DT_RPATH` and `DT_RUNPATH` are the same walk with a different number.
+    /// `limit` is a byte budget applied to both sections.
+    ///
+    /// # Errors
+    ///
+    /// [`ElfError::NoDynamic`] for an object with no dynamic section,
+    /// [`ElfError::NoDynamicStringTable`] when its `sh_link` is not a string
+    /// table, [`ElfError::DynamicString`] when an entry's value is not a
+    /// NUL-terminated string inside `.dynstr`, and the section-read failures.
+    pub fn dynamic_strings(&mut self, tag: u64, limit: u64) -> Result<Vec<String>, ElfError> {
+        let Some(dynamic) = self.section_by_kind(SHT_DYNAMIC)? else {
+            return Err(ElfError::NoDynamic);
+        };
+        let strings = self.section(usize::try_from(dynamic.link).unwrap_or(usize::MAX))?;
+        if strings.kind != SHT_STRTAB {
+            return Err(ElfError::NoDynamicStringTable);
+        }
+        let names = self.section_bytes(&strings, limit)?;
+        let entries = self.section_bytes(&dynamic, limit)?;
+        let wide = self.class.is_64();
+        let minimum = if wide { 16 } else { 8 };
+        let entry = usize::try_from(dynamic.entsize).unwrap_or(0).max(minimum);
+        let mut found = Vec::new();
+        for chunk in entries.chunks_exact(entry) {
+            let entry_tag = if wide {
+                le_u64(chunk, 0)
+            } else {
+                le_u32(chunk, 0).map(u64::from)
+            };
+            // `DT_NULL` ends the array; everything after it is padding.
+            let Some(entry_tag) = entry_tag else { break };
+            if entry_tag == 0 {
+                break;
+            }
+            if entry_tag != tag {
+                continue;
+            }
+            let value = if wide {
+                le_u64(chunk, 8)
+            } else {
+                le_u32(chunk, 4).map(u64::from)
+            };
+            let Some(value) = value else { break };
+            let offset = usize::try_from(value).unwrap_or(usize::MAX);
+            let Some(text) = c_str(&names, offset) else {
+                return Err(ElfError::DynamicString);
+            };
+            found.push(String::from_utf8_lossy(text).into_owned());
+        }
+        Ok(found)
+    }
+
+    /// Every symbol in `.dynsym`, with `st_shndx` honoured: `defined` is false
+    /// for `SHN_UNDEF`, so an object that merely **imports** a name is never
+    /// reported as exporting it.
+    ///
+    /// `limit` is a byte budget applied to `.dynsym` and its linked `.dynstr`.
+    ///
+    /// # Errors
+    ///
+    /// [`ElfError::NoDynsym`], [`ElfError::SymbolEntriesTooSmall`] when
+    /// `sh_entsize` is below the class's `Elf*_Sym` minimum (24/16) — refused
+    /// rather than clamped, because a clamped stride reads garbage — and the
+    /// section-read failures.
+    pub fn dynsym_symbols(&mut self, limit: u64) -> Result<Vec<ElfSymbol>, ElfError> {
+        let Some(dynsym) = self.section_by_kind(SHT_DYNSYM)? else {
+            return Err(ElfError::NoDynsym);
+        };
+        let entry =
+            usize::try_from(dynsym.entsize).map_err(|_| ElfError::SectionTooLargeToAddress)?;
+        if entry < self.class.symbol_entry_size() {
+            return Err(ElfError::SymbolEntriesTooSmall);
+        }
+        let strings = self.section(usize::try_from(dynsym.link).unwrap_or(usize::MAX))?;
+        if strings.kind != SHT_STRTAB {
+            return Err(ElfError::NoDynamicStringTable);
+        }
+        let names = self.section_bytes(&strings, limit)?;
+        let table = self.section_bytes(&dynsym, limit)?;
+        let shndx_at = self.class.symbol_shndx_offset();
+        let mut symbols = Vec::new();
+        for symbol in table.chunks_exact(entry) {
+            let Some(offset) = le_u32(symbol, 0) else {
+                continue;
+            };
+            let Some(name) = c_str(&names, usize::try_from(offset).unwrap_or(usize::MAX)) else {
+                continue;
+            };
+            symbols.push(ElfSymbol {
+                name: String::from_utf8_lossy(name).into_owned(),
+                defined: le_u16(symbol, shndx_at).unwrap_or(SHN_UNDEF) != SHN_UNDEF,
+                kind: symbol.get(4).copied().unwrap_or(0) & 0x0f,
+                value: symbol_value(self.class, symbol),
+                size: symbol_size(self.class, symbol),
+            });
+        }
+        Ok(symbols)
+    }
+
+    /// [`Elf::dynsym_symbols`] without the body fields: the shape a gate that
+    /// only asks "is this name exported here?" needs.
+    ///
+    /// # Errors
+    ///
+    /// Everything [`Elf::dynsym_symbols`] reports.
+    pub fn dynsym_names(&mut self, limit: u64) -> Result<Vec<DynSymbol>, ElfError> {
+        Ok(self
+            .dynsym_symbols(limit)?
+            .into_iter()
+            .map(|symbol| DynSymbol {
+                name: symbol.name,
+                defined: symbol.defined,
+            })
+            .collect())
+    }
+}
+
+/// One `.dynsym` entry, with the identity fact a gate needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DynSymbol {
+    /// The symbol's name, from `.dynstr`.
+    pub name: String,
+    /// `st_shndx != SHN_UNDEF`: this object defines it rather than importing it.
+    pub defined: bool,
+}
+
+/// One `.dynsym` entry, including the body fields a decoder reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElfSymbol {
+    /// The symbol's name, from `.dynstr`.
+    pub name: String,
+    /// `st_shndx != SHN_UNDEF`.
+    pub defined: bool,
+    /// `st_info`'s type nibble (`STT_FUNC` is 2).
+    pub kind: u8,
+    /// `st_value`: the load address of the body.
+    pub value: u64,
+    /// `st_size`: the body's length in bytes.
+    pub size: u64,
+}
+
+/// `st_value` of one `Elf*_Sym`.
+fn symbol_value(class: Class, symbol: &[u8]) -> u64 {
+    match class {
+        Class::Elf64 => le_u64(symbol, 8).unwrap_or(0),
+        Class::Elf32 => le_u32(symbol, 4).map(u64::from).unwrap_or(0),
+    }
+}
+
+/// `st_size` of one `Elf*_Sym`.
+fn symbol_size(class: Class, symbol: &[u8]) -> u64 {
+    match class {
+        Class::Elf64 => le_u64(symbol, 16).unwrap_or(0),
+        Class::Elf32 => le_u32(symbol, 8).map(u64::from).unwrap_or(0),
+    }
 }
 
 impl SectionHeader {
@@ -470,7 +690,12 @@ impl SectionHeader {
 
 /// The NUL-terminated name at `offset`, or `None` when `offset` is past the
 /// table.
-fn c_str(bytes: &[u8], offset: usize) -> Option<&[u8]> {
+///
+/// Public because every caller that reads a `.dynstr`/`.shstrtab` (this crate's
+/// walkers, the PHP gate's body decode, the boot's provenance scan) must spell
+/// the same bounds check once.
+#[must_use]
+pub fn c_str(bytes: &[u8], offset: usize) -> Option<&[u8]> {
     let rest = bytes.get(offset..)?;
     let end = rest
         .iter()
@@ -480,19 +705,22 @@ fn c_str(bytes: &[u8], offset: usize) -> Option<&[u8]> {
 }
 
 /// A little-endian `u16` at `offset`, or `None` past the end.
-fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
+#[must_use]
+pub fn le_u16(bytes: &[u8], offset: usize) -> Option<u16> {
     let slice: [u8; 2] = bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
     Some(u16::from_le_bytes(slice))
 }
 
 /// A little-endian `u32` at `offset`, or `None` past the end.
-fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
+#[must_use]
+pub fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
     let slice: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
     Some(u32::from_le_bytes(slice))
 }
 
 /// A little-endian `u64` at `offset`, or `None` past the end.
-fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
+#[must_use]
+pub fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     let slice: [u8; 8] = bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
     Some(u64::from_le_bytes(slice))
 }
@@ -835,5 +1063,159 @@ mod tests {
             assert_eq!(dynsym.kind, SHT_DYNSYM);
             assert!(elf.section_bytes(&dynsym, LIMIT).is_ok());
         }
+    }
+
+    /// A little-endian ELF64 object with `.dynstr`, a two-entry `.dynsym`, a
+    /// `.shstrtab` and a `.dynamic` holding one `DT_SONAME`.
+    ///
+    /// Symbol 0 is **defined** (`st_shndx = 1`), symbol 1 is **imported**
+    /// (`st_shndx = 0`): the gate defect this fixture pins.
+    fn elf64_with_symbols_and_soname() -> Vec<u8> {
+        let shstrtab = b"\0.dynstr\0.dynsym\0.shstrtab\0.dynamic\0";
+        let dynstr = b"\0libpython3.14.so.1.0\0Py_InitializeEx\0PyGILState_Ensure\0";
+        let mut dynsym = [0_u8; 48];
+        dynsym[0..4].copy_from_slice(&22_u32.to_le_bytes());
+        dynsym[4] = (1 << 4) | STT_FUNC;
+        dynsym[6..8].copy_from_slice(&1_u16.to_le_bytes());
+        dynsym[24..28].copy_from_slice(&38_u32.to_le_bytes());
+        dynsym[24 + 6..24 + 8].copy_from_slice(&SHN_UNDEF.to_le_bytes());
+        let mut dynamic = [0_u8; 32];
+        dynamic[0..8].copy_from_slice(&14_u64.to_le_bytes());
+        dynamic[8..16].copy_from_slice(&1_u64.to_le_bytes());
+        // The third entry's tag is zero: the array ends there.
+
+        let shstrtab_off = 64usize;
+        let dynstr_off = shstrtab_off + shstrtab.len();
+        let dynsym_off = dynstr_off + dynstr.len();
+        let dynamic_off = dynsym_off + dynsym.len();
+        let shoff = dynamic_off + dynamic.len();
+        let mut file = vec![0_u8; shoff + 5 * 64];
+        file[..4].copy_from_slice(MAGIC);
+        file[4] = ELFCLASS64;
+        file[5] = ELFDATA2LSB;
+        file[6] = 1;
+        file[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
+        file[0x3a..0x3c].copy_from_slice(&64_u16.to_le_bytes());
+        file[0x3c..0x3e].copy_from_slice(&5_u16.to_le_bytes());
+        file[0x3e..0x40].copy_from_slice(&3_u16.to_le_bytes());
+        file[shstrtab_off..shstrtab_off + shstrtab.len()].copy_from_slice(shstrtab);
+        file[dynstr_off..dynstr_off + dynstr.len()].copy_from_slice(dynstr);
+        file[dynsym_off..dynsym_off + dynsym.len()].copy_from_slice(&dynsym);
+        file[dynamic_off..dynamic_off + dynamic.len()].copy_from_slice(&dynamic);
+        write_header(
+            &mut file,
+            shoff + 64,
+            &Header {
+                name: 1,
+                kind: SHT_STRTAB,
+                offset: dynstr_off,
+                size: dynstr.len(),
+                link: 0,
+                entsize: 0,
+            },
+        );
+        write_header(
+            &mut file,
+            shoff + 128,
+            &Header {
+                name: 9,
+                kind: SHT_DYNSYM,
+                offset: dynsym_off,
+                size: dynsym.len(),
+                link: 1,
+                entsize: 24,
+            },
+        );
+        write_header(
+            &mut file,
+            shoff + 192,
+            &Header {
+                name: 17,
+                kind: SHT_STRTAB,
+                offset: shstrtab_off,
+                size: shstrtab.len(),
+                link: 0,
+                entsize: 0,
+            },
+        );
+        write_header(
+            &mut file,
+            shoff + 256,
+            &Header {
+                name: 27,
+                kind: SHT_DYNAMIC,
+                offset: dynamic_off,
+                size: dynamic.len(),
+                link: 1,
+                entsize: 16,
+            },
+        );
+        file
+    }
+
+    #[test]
+    fn a_dynsym_walk_reports_imports_as_undefined_and_a_dynamic_walk_reads_the_soname() {
+        let mut elf = Elf::parse(Cursor::new(elf64_with_symbols_and_soname())).expect("an object");
+        let symbols = elf.dynsym_symbols(MAX_SECTION_BYTES).expect("the .dynsym");
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].name, "Py_InitializeEx");
+        assert!(symbols[0].defined, "st_shndx 1 is a definition");
+        assert_eq!(symbols[0].kind, STT_FUNC);
+        assert_eq!(symbols[1].name, "PyGILState_Ensure");
+        assert!(
+            !symbols[1].defined,
+            "SHN_UNDEF is an import, and must never be reported as an export"
+        );
+
+        let names = elf.dynsym_names(MAX_SECTION_BYTES).expect("the names");
+        assert_eq!(
+            names,
+            vec![
+                DynSymbol {
+                    name: "Py_InitializeEx".to_owned(),
+                    defined: true
+                },
+                DynSymbol {
+                    name: "PyGILState_Ensure".to_owned(),
+                    defined: false
+                },
+            ]
+        );
+
+        assert_eq!(
+            elf.dynamic_strings(14, MAX_SECTION_BYTES)
+                .expect("the dynamic array"),
+            vec!["libpython3.14.so.1.0".to_owned()]
+        );
+    }
+
+    #[test]
+    fn an_unwalkable_dynsym_is_a_typed_refusal_not_a_clamped_stride() {
+        let mut image = elf64_with_symbols_and_soname();
+        let shoff = u64::from_le_bytes(image[0x28..0x30].try_into().unwrap());
+        let dynsym_header = usize::try_from(shoff).unwrap() + 128;
+        // `sh_entsize = 8`: below `Elf64_Sym`'s 24.
+        image[dynsym_header + 0x38..dynsym_header + 0x40].copy_from_slice(&8_u64.to_le_bytes());
+        let mut elf = Elf::parse(Cursor::new(image)).expect("the header is well-formed");
+        let err = elf
+            .dynsym_symbols(MAX_SECTION_BYTES)
+            .expect_err("a short stride would read garbage");
+        assert!(matches!(err, ElfError::SymbolEntriesTooSmall), "{err}");
+    }
+
+    #[test]
+    fn a_dynamic_walk_without_the_section_is_a_typed_refusal() {
+        let mut elf = Elf::parse(Cursor::new(elf64_with_sections())).expect("an object");
+        let err = elf
+            .dynamic_strings(14, MAX_SECTION_BYTES)
+            .expect_err("no .dynamic");
+        assert!(matches!(err, ElfError::NoDynamic), "{err}");
+
+        // A null section table only: no `.dynsym` to walk.
+        let mut elf = Elf::parse(Cursor::new(elf64_file(64, 64, 1, 128))).expect("an object");
+        let err = elf
+            .dynsym_symbols(MAX_SECTION_BYTES)
+            .expect_err("no .dynsym");
+        assert!(matches!(err, ElfError::NoDynsym), "{err}");
     }
 }

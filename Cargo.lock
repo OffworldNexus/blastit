@@ -244,6 +244,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "blastit-py-sapi"
+version = "0.2.0"
+dependencies = [
+ "blastit-sys",
+]
+
+[[package]]
 name = "blastit-scheduler"
 version = "0.2.0"
 dependencies = [

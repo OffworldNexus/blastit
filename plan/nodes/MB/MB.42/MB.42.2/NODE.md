@@ -1,17 +1,16 @@
 ---
 id: MB.42.2
 title: "Implement universal libpython-free blastit binary (per-minor dlopen Python shims) & safe local CLI handoff"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 1
 depends_on: [MB.42.1]
-paths: [Cargo.toml, Cargo.lock, Makefile, "crates/**", "python/**", "scripts/**"]
+paths: [Cargo.toml, Cargo.lock, Makefile, "crates/**", "python/**", "scripts/**", "e2e/**"]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T14:30"
-updated: "2026-11-19T14:30"
+updated: "2026-11-19T17:17"
 ---
 
 # Goal
@@ -33,3 +32,9 @@ Implement the universal `libpython`-free `blastit` binary (loading Python via pe
 - `scripts/check-portable-elf.sh target/debug/blastit` (0 `libpython` in the full `blastit` binary!)
 - `make fast-check && make rs-test-php`
 - Test universal `blastit` binary serving Python 3.13 `.venv` AND Python 3.14 `.venv` AND PHP 8.4 AND Static, plus local CLI handoff tests!
+
+## Slices
+1. `MB.42.2.1` — Shared fd pinning + `blastit-py-sapi`/`blastit-py-shim` + Stage-0/1 `dlopen` + `make py-sapi` (one `libpython`-free binary).
+2. `MB.42.2.2` — `blastit-audit` extraction + `blastit --internal-json` + pure-Python `_blastit.py`; retire `blastit-py`/`pyo3`.
+3. `MB.42.2.3` — Safe local CLI handoff (`crates/blastit/src/cli/handoff.rs`), zero-TOCTOU.
+4. `MB.42.2.4` — Integration glue: `make install`/`test-critical` staging + one-binary four-runtime E2E.
