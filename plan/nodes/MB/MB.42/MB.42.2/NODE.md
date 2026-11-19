@@ -2,7 +2,7 @@
 id: MB.42.2
 title: "Implement universal libpython-free blastit binary (per-minor dlopen Python shims) & safe local CLI handoff"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.42.1]
 paths: [Cargo.toml, Cargo.lock, Makefile, "crates/**", "python/**", "scripts/**", "e2e/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T14:30"
-updated: "2026-11-19T17:17"
+updated: "2026-11-19T23:35"
 ---
 
 # Goal

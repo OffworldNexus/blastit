@@ -3911,3 +3911,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T23:26 [MB.42.9] (lead) attempt 1/3 started
 - 2026-11-19T23:26 [MB.42.9] (lead) base 876c37c01cded49f0371205925d185100dfc3c22
 - 2026-11-19T23:35 [MB.42.9] (lead) status active -> done
+- 2026-11-19T23:35 [MB.42.2] (lead) status ready -> done
+- 2026-11-19T23:35 [MB.42.2] (lead) epic closed on leaf evidence: no pyo3 in blastit (portable ELF on -p and --workspace), one binary serves CPython 3.13+3.14+PHP+static+handoff (e2e-universal 6/6
+- 2026-11-19T23:35 [MB.42.6] (lead) status ready -> active
+- 2026-11-19T23:35 [MB.42.6] (lead) attempt 1/3 started
+- 2026-11-19T23:35 [MB.42.6] (lead) base 9e64b7fac2723bb6e5dd5e70f0b49445d5dae692

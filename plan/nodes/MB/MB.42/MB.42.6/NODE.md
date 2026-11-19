@@ -2,16 +2,16 @@
 id: MB.42.6
 title: "Fix wrong remediation text for an unused proxy in blastit check human output (no 'proxy <name>' directive exists)"
 kind: task
-status: ready
+status: active
 owner: implementer
 priority: 2
 depends_on: [MB.42.2.2]
 paths: ["crates/blastit-audit/**", crates/blastit/tests/critical_check_engine.rs]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T20:21"
-updated: "2026-11-19T20:21"
+updated: "2026-11-19T23:35"
 ---
 
 # Goal
