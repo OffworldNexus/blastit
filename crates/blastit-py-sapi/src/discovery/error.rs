@@ -55,6 +55,8 @@ pub enum DiscoveryError {
     },
     /// The interpreter's installation prefix could not be resolved.
     Unresolvable {
+        /// The command the refusal names.
+        command: String,
         /// The interpreter file.
         path: PathBuf,
         /// What went wrong.
@@ -64,6 +66,8 @@ pub enum DiscoveryError {
     },
     /// The interpreter's CPython minor could not be read from anything.
     UnreadableMinor {
+        /// The command the refusal names.
+        command: String,
         /// The interpreter file.
         path: PathBuf,
         /// What was read and found wanting.
@@ -71,6 +75,8 @@ pub enum DiscoveryError {
     },
     /// The prefix holds no shared `libpython`.
     NoLibpython {
+        /// The command the refusal names.
+        command: String,
         /// The resolved prefix.
         python_home: PathBuf,
         /// The minor, dotted (`3.14`).
@@ -78,6 +84,8 @@ pub enum DiscoveryError {
     },
     /// No per-minor shim was found where this boot may look.
     NoShim {
+        /// The command the refusal names.
+        command: String,
         /// Whether this was a deployment (the two sentences differ).
         deployment: bool,
         /// The minor, dotted (`3.14`).
@@ -148,30 +156,40 @@ impl fmt::Display for DiscoveryError {
                     .join(", ")
             ),
             Self::Unresolvable {
+                command,
                 path,
                 detail,
                 minor,
             } => write!(
                 f,
-                "CPython at {} cannot be used: {detail}; reinstall it with uv python install \
-                 {minor}",
+                "blastit {command}: CPython at {} cannot be used: {detail}; reinstall it with uv \
+                 python install {minor}",
                 path.display()
             ),
-            Self::UnreadableMinor { path, detail } => write!(
+            Self::UnreadableMinor {
+                command,
+                path,
+                detail,
+            } => write!(
                 f,
-                "CPython at {} does not say which minor it is ({detail}); reinstall it with uv \
-                 python install {DEFAULT_MINOR}",
+                "blastit {command}: CPython at {} does not say which minor it is ({detail}); \
+                 reinstall it with uv python install {DEFAULT_MINOR}",
                 path.display()
             ),
-            Self::NoLibpython { python_home, minor } => write!(
+            Self::NoLibpython {
+                command,
+                python_home,
+                minor,
+            } => write!(
                 f,
-                "CPython {minor} is installed at {}, but this host has no shared libpython for \
-                 CPython {minor}; install it — Debian/Ubuntu: apt install libpython{minor}, \
-                 Alpine: apk add python3, Fedora/RHEL: dnf install python3-libs — or provision \
-                 one with uv python install {minor}",
+                "blastit {command}: CPython {minor} is installed at {}, but this host has no \
+                 shared libpython for CPython {minor}; install it — Debian/Ubuntu: apt install \
+                 libpython{minor}, Alpine: apk add python3, Fedora/RHEL: dnf install \
+                 python3-libs — or provision one with uv python install {minor}",
                 python_home.display()
             ),
             Self::NoShim {
+                command,
                 deployment,
                 minor,
                 name,
@@ -180,15 +198,16 @@ impl fmt::Display for DiscoveryError {
                 if *deployment {
                     write!(
                         f,
-                        "CPython {minor} is ready, but no {name} shim sits beside this blastit; \
-                         install the blastit build that ships the CPython {minor} shim"
+                        "blastit {command}: CPython {minor} is ready, but no {name} shim sits \
+                         beside this blastit; install the blastit build that ships the CPython \
+                         {minor} shim"
                     )
                 } else {
                     write!(
                         f,
-                        "CPython {minor} is ready, but no {name} shim was found (looked in {}); \
-                         build one with make py-sapi, or point BLASTIT_PY_SHIM_DIR at a directory \
-                         that holds it",
+                        "blastit {command}: CPython {minor} is ready, but no {name} shim was \
+                         found (looked in {}); build one with make py-sapi, or point \
+                         BLASTIT_PY_SHIM_DIR at a directory that holds it",
                         searched
                             .iter()
                             .map(|path| path.display().to_string())

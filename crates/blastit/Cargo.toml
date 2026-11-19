@@ -28,7 +28,7 @@ default = ["php", "static"]
 # which carries no `libpython` and refuses a manifest that needs an interpreter
 # (ADR-0010 §4, `MB.3.11`). The WSGI worker itself is `blastit-view-python`, a
 # crate of its own: the feature pulls it (and `pyo3`) in, and nothing else can.
-python = ["dep:pyo3", "dep:blastit-view-python"]
+python = ["dep:pyo3", "dep:blastit-view-python", "dep:blastit-py-sapi"]
 # Embedded PHP routes (`entrypoint php`, ADR-0010). `libphp` is never linked: a
 # view `dlopen`s the host's NTS library and the per-minor shim, and the loader
 # that does it is `blastit-php-sapi`'s, reached through `blastit-view-php`. The
@@ -61,6 +61,10 @@ blastit-http = { version = "0.2.0", path = "../blastit-http" }
 blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
 blastit-lsp = { version = "0.2.0", path = "../blastit-lsp" }
 blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+# The per-minor CPython shim's ABI, discovery and loader (`MB.42`): stage 0
+# resolves the interpreter and pins `libpython` + the shim, and stage 1 adopts
+# the two descriptors. Optional, so a build without `python` carries none of it.
+blastit-py-sapi = { version = "0.2.0", path = "../blastit-py-sapi", optional = true }
 # The PHP half of a view (`MB.36.5`): the embedded worker, the boot's discovery
 # gate, the `(st_dev, st_ino)` pins and the probe child. Optional, so a build
 # without `php` links neither this nor `blastit-php-sapi` (`R13`).

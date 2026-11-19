@@ -14,9 +14,14 @@
 //!   initialising one (§4) — so there is nothing to stop or restart;
 //! * a **wheel install** runs inside the interpreter the console script started,
 //!   and stage 0 (dbproxy) and stage 1 (http, scheduler) fork *while it is
-//!   live*. Those forks go through [`fork`] with `interpreter = true`;
+//!   live*. Those forks arrive here with `Some(hooks)`;
 //! * a build with `python` off (`MB.3.11`, ADR-0010 §4) has no interpreter in
-//!   any role: the three hooks are compiled out here and [`fork`] is `fork(2)`.
+//!   any role: the three hooks are a phantom and [`fork`] is `fork(2)`.
+//!
+//! This module names no interpreter API: the three entry points are function
+//! pointers the composition root injects ([`crate::py::runtime_hooks`] today,
+//! a shim's vtable once one is loaded), so a fork is the same call whether the
+//! interpreter is embedded or hosted.
 //!
 //! The fork itself is still [`blastit_sys::fork`], which refuses to run in an
 //! image with more than one thread: the protocol makes a *Python* process safe
@@ -28,17 +33,18 @@ use std::io;
 use blastit_sys::Fork;
 use blastit_view::spawn::ForkProtocol;
 
+use crate::py::PyForkHooks;
+
 /// Forks for a view crate, refusing a protocol that disagrees with this image
 /// (`view-crates-architecture` §4.4 D1, S4).
 ///
 /// A view crate cannot call [`fork`] itself — it does not own the protocol, and
-/// it cannot name `pyo3` — so the composition root hands it a `Forker` that
-/// ends here. `protocol` is what the caller's image needs and
-/// `interpreter_live` is what *this* image actually has; a pair that disagrees
-/// is an error, because the alternative is a silent bare `fork(2)` under a live
-/// interpreter (CPython's locks and thread bookkeeping would then describe a
-/// process that no longer exists) or a `PyOS_BeforeFork` with no interpreter
-/// behind it.
+/// it cannot name an interpreter — so the composition root hands it a `Forker`
+/// that ends here. `protocol` is what the caller's image needs and the hooks
+/// are what *this* image actually has; a pair that disagrees is an error,
+/// because the alternative is a silent bare `fork(2)` under a live interpreter
+/// (CPython's locks and thread bookkeeping would then describe a process that no
+/// longer exists) or a `PyOS_BeforeFork` with no interpreter behind it.
 ///
 /// # Errors
 ///
@@ -48,7 +54,16 @@ use blastit_view::spawn::ForkProtocol;
 /// A build without `python` forks no view at all, so its one caller (the WSGI
 /// arm of the supervisor) is compiled out and the function has no user there.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
-pub fn fork_for(protocol: ForkProtocol, interpreter_live: bool) -> io::Result<Fork> {
+pub fn fork_for(protocol: ForkProtocol, hooks: Option<PyForkHooks<'_>>) -> io::Result<Fork> {
+    agrees(protocol, hooks.is_some())?;
+    fork(hooks)
+}
+
+/// Whether a caller's protocol is the one this image can honour.
+///
+/// The pure half of [`fork_for`], so both refusals are unit-tested without a
+/// fork (a case that forks would leave a child that never returns).
+fn agrees(protocol: ForkProtocol, interpreter_live: bool) -> io::Result<()> {
     match protocol {
         ForkProtocol::InterpreterLive => {
             // A build without `python` links no interpreter, so no caller can
@@ -76,15 +91,15 @@ pub fn fork_for(protocol: ForkProtocol, interpreter_live: bool) -> io::Result<Fo
             }
         }
     }
-    fork(interpreter_live)
+    Ok(())
 }
 
-/// Forks, holding the GIL and stopping the world when a live interpreter is in
-/// this image (§9.3).
+/// Forks, stopping the world when this image has a live interpreter (§9.3).
 ///
-/// `interpreter` is `true` when CPython is initialised and the caller holds the
-/// GIL — a wheel install, where the console script's interpreter is the one
-/// every stage runs in.
+/// `hooks` is `Some` exactly when CPython is initialised in this image and the
+/// caller holds the GIL — a wheel install, or a stage 1 that has loaded the
+/// project's runtime. `None` is a PHP/static image (and every standalone stage 0
+/// fork), which is a bare `fork(2)`.
 ///
 /// # Errors
 ///
@@ -92,44 +107,30 @@ pub fn fork_for(protocol: ForkProtocol, interpreter_live: bool) -> io::Result<Fo
 /// [`blastit_sys::Error::NotSingleThreaded`]: the protocol is what makes the
 /// fork consistent for the interpreter, not a licence to fork a process with
 /// threads blastit knows nothing about.
-pub fn fork(interpreter: bool) -> io::Result<Fork> {
-    // One call site for the whole GIL protocol, and the only one in the crate:
-    // a build with no interpreter cannot be in the "live interpreter" case at
-    // all, so the three hooks are compiled out whole and the fork below is the
-    // bare `fork(2)`.
+pub fn fork(hooks: Option<PyForkHooks<'_>>) -> io::Result<Fork> {
+    // One call site for the whole GIL protocol, and the only one in the crate.
+    // A build with `python` off has a phantom hooks type and every caller passes
+    // `None`, so the three calls are compiled out with it.
     #[cfg(feature = "python")]
-    if interpreter {
-        // SAFETY: the caller holds the GIL, which is what `PyOS_BeforeFork`
-        // requires: it stops the world from this thread.
-        unsafe { pyo3::ffi::PyOS_BeforeFork() };
+    if let Some(hooks) = &hooks {
+        (hooks.before_fork)();
     }
-    // No interpreter in this image: `interpreter` is `false` on every path
-    // (stage 0 and the standalone stage 1 fork before CPython exists, and a
-    // `python`-less build has none to fork under), so there is nothing to stop.
     #[cfg(not(feature = "python"))]
-    let _ = interpreter;
+    let _ = &hooks;
     let outcome = blastit_sys::fork();
     // Exactly one of the two `AfterFork` calls matches the `BeforeFork` above,
     // whichever side of the fork we are on — including the side that has no
-    // child to talk about, which is the parent's. Both are under the same
-    // `cfg` as the `BeforeFork`, so a `python` build can never take one half
-    // without the other.
+    // child to talk about, which is the parent's.
+    #[cfg(feature = "python")]
     match outcome {
         Ok(Fork::Child) => {
-            #[cfg(feature = "python")]
-            if interpreter {
-                // SAFETY: we are in the child of the fork above and the GIL is
-                // held; this call runs before anything else in this process
-                // touches the interpreter.
-                unsafe { pyo3::ffi::PyOS_AfterFork_Child() };
+            if let Some(hooks) = &hooks {
+                (hooks.after_fork_child)();
             }
         }
         _ => {
-            #[cfg(feature = "python")]
-            if interpreter {
-                // SAFETY: we are in the parent of the fork above (or it did not
-                // happen) and the GIL is held.
-                unsafe { pyo3::ffi::PyOS_AfterFork_Parent() };
+            if let Some(hooks) = &hooks {
+                (hooks.after_fork_parent)();
             }
         }
     }
@@ -149,11 +150,11 @@ mod tests {
     #[test]
     fn a_fork_whose_protocol_disagrees_with_the_image_is_refused() {
         // An interpreter-live fork where the image says there is none.
-        let err = fork_for(ForkProtocol::InterpreterLive, false).unwrap_err();
+        let err = agrees(ForkProtocol::InterpreterLive, false).unwrap_err();
         assert!(err.to_string().contains("fork protocol mismatch"), "{err}");
 
         // And the other way round: a bare fork while an interpreter is live.
-        let err = fork_for(ForkProtocol::NoInterpreter, true).unwrap_err();
+        let err = agrees(ForkProtocol::NoInterpreter, true).unwrap_err();
         assert!(err.to_string().contains("fork protocol mismatch"), "{err}");
         assert!(err.to_string().contains("PyOS_BeforeFork"), "{err}");
     }
@@ -164,7 +165,7 @@ mod tests {
     #[cfg(not(feature = "python"))]
     #[test]
     fn a_build_without_the_python_feature_refuses_an_interpreter_live_fork() {
-        let err = fork_for(ForkProtocol::InterpreterLive, true).unwrap_err();
+        let err = agrees(ForkProtocol::InterpreterLive, true).unwrap_err();
         assert!(
             err.to_string().contains("without the `python` feature"),
             "{err}"

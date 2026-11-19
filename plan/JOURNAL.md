@@ -3843,3 +3843,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T18:25 [MB.42.2.1.2] (lead) status review -> done
 - 2026-11-19T18:25 [MB.42.2.1.2] (lead) commit dcb870f1601fd30d05673025412985fa4783fa47; fast-check green, critical_guard clean, guard OK; py-sapi asserts T blastit_py_abi_version/py_minor/abi_v1 via 
 - 2026-11-19T18:45 [MB.42.2.0] (lead) status review -> done
+- 2026-11-19T18:45 [MB.42.2.1.3] (lead) status ready -> active
+- 2026-11-19T18:45 [MB.42.2.1.3] (lead) attempt 1/3 started
+- 2026-11-19T18:45 [MB.42.2.1.3] (lead) base d3e87e3171e8bbac52b88c0d9762f3cc03fd2c7e
+- 2026-11-19T19:03 [MB.42.2.1.3] (lead) status active -> review
+- 2026-11-19T19:08 [MB.42.2.1.3] (lead) REVIEW FIX (filtered): BLOCKER PYTHONHOME now names the DISCOVERED prefix while stage 1 still Py_Initialize's the LINKED interpreter and the minor-agreement gua
+- 2026-11-19T19:20 [MB.42.2.1.3] (lead) flake observed (pre-existing, not this slice): blastit-view-php worker::tests::a_runtime_that_retires_ends_the_loop_after_its_done failed once under parallel ma
+- 2026-11-19T19:21 [MB.42.2.1.3] (lead) status review -> done

@@ -258,6 +258,14 @@ fn the_json_document_round_trips() {
         capabilities: vec!["cap_chown".to_string(), "cap_setuid".to_string()],
         bounding_set_dropped: true,
     });
+    // Design §2.4: the Python handoff rides the document, descriptors and all.
+    config.python = Some(PythonHandoff {
+        py_minor: 314,
+        python_home: PathBuf::from("/opt/python/3.14"),
+        sys_path: vec![b"/app/.venv/lib/python3.14/site-packages".to_vec()],
+        lib: (7, 64, 1234),
+        shim: (9, 64, 1235),
+    });
     config.validate().unwrap();
 
     let json = config.to_json();
@@ -271,9 +279,48 @@ fn the_json_document_round_trips() {
         json["client_ip_header"],
         serde_json::json!("do-connecting-ip")
     );
+    assert_eq!(json["python"]["lib_fd"], serde_json::json!(7));
+    assert_eq!(json["python"]["shim_ino"], serde_json::json!(1235));
+    let python = json["python"]
+        .as_object()
+        .expect("the handoff is an object");
+    let mut python_keys: Vec<&str> = python.keys().map(String::as_str).collect();
+    python_keys.sort_unstable();
+    assert_eq!(
+        python_keys,
+        [
+            "lib_dev",
+            "lib_fd",
+            "lib_ino",
+            "py_minor",
+            "python_home",
+            "shim_dev",
+            "shim_fd",
+            "shim_ino",
+            "sys_path"
+        ],
+        "every member stage 1 re-verifies is in the document"
+    );
     let back = Config::from_json(&json).unwrap();
     assert_eq!(back, config);
     assert_eq!(back.fair_config().client_ip, config.client_ip());
+}
+
+#[test]
+fn an_unknown_python_member_is_refused_like_the_top_level() {
+    let mut config = Config::default();
+    config.python = Some(PythonHandoff {
+        py_minor: 314,
+        python_home: PathBuf::from("/opt/python/3.14"),
+        sys_path: Vec::new(),
+        lib: (7, 64, 1234),
+        shim: (9, 64, 1235),
+    });
+    let mut json = config.to_json();
+    json["python"]["extra"] = serde_json::json!(1);
+    let err = Config::from_json(&json).unwrap_err();
+    assert!(err.to_string().contains("python"), "{err}");
+    assert!(err.to_string().contains("unknown"), "{err}");
 }
 
 #[test]
@@ -1606,6 +1653,7 @@ fn the_document_key_set_is_the_stage_0_contract() {
         "bounding_set",
         "sys_path",
         "cwd",
+        "python",
         "preset",
     ];
     // `php` is written by a build that has the feature, and stage 1 of the same

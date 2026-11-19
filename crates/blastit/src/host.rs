@@ -46,7 +46,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use blastit_sys::elf::{Elf, ElfError, SHT_DYNAMIC, SHT_STRTAB};
+use blastit_sys::elf::{Elf, ElfError};
 use blastit_sys::exe_path;
 
 /// The environment variable that names a standalone install's capability-free
@@ -685,11 +685,6 @@ const MAX_DYNAMIC_STRTAB: u64 = 4 * 1024 * 1024;
 /// offset and length against the file's own length and refuses a truncated or
 /// hostile object instead of panicking.
 ///
-/// That layer is shared with the PHP gate's `.dynsym` walk
-/// (`blastit_view_php::discovery`); the walk below stays here, because "which
-/// directories does the loader search" is a provenance question and this public
-/// module is what the protected suite can reach.
-///
 /// # Errors
 ///
 /// A sentence naming what could not be read: a file that is not a
@@ -700,59 +695,16 @@ pub fn dynamic_search_paths(path: &Path) -> Result<Vec<String>, String> {
     let mut file = std::fs::File::open(path)
         .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
     let mut elf = Elf::parse(&mut file).map_err(|err| object_error(path, &err))?;
-    let wide = elf.class().is_64();
+    let entries = match elf.dynamic_strings_any(&[DT_RPATH, DT_RUNPATH], MAX_DYNAMIC_STRTAB) {
+        Ok(entries) => entries,
+        // An object with no dynamic section has no search path at all; a
+        // dynamic entry that is not a string is a refusal, never "nothing".
+        Err(ElfError::NoDynamic) => return Ok(Vec::new()),
+        Err(err) => return Err(object_error(path, &err)),
+    };
     let mut paths = Vec::new();
-    for index in 0..elf.section_count() {
-        let section = elf.section(index).map_err(|err| object_error(path, &err))?;
-        if section.kind != SHT_DYNAMIC {
-            continue;
-        }
-        let entries = elf
-            .section_bytes(&section, MAX_DYNAMIC_STRTAB)
-            .map_err(|err| match err {
-                ElfError::Io(err) => format!("{}: it cannot be read ({err})", path.display()),
-                _ => format!("{}: its dynamic section is unusable", path.display()),
-            })?;
-        let strtab = dynamic_strtab(&mut elf, section.link)
-            .map_err(|reason| format!("{}: {reason}", path.display()))?;
-        let entsize = usize::try_from(section.entsize).unwrap_or(0);
-        let minimum = if wide { 16 } else { 8 };
-        let entry_size = if entsize >= minimum { entsize } else { minimum };
-        for entry in 0..entries.len() / entry_size {
-            let at = entry.saturating_mul(entry_size);
-            let Some(tag) = dynamic_tag(wide, &entries, at) else {
-                break;
-            };
-            // `DT_NULL` ends the array; everything after it is padding.
-            if tag == 0 {
-                break;
-            }
-            if tag != i64::try_from(DT_RPATH).unwrap_or(i64::MAX)
-                && tag != i64::try_from(DT_RUNPATH).unwrap_or(i64::MAX)
-            {
-                continue;
-            }
-            let Some(value) = (if wide {
-                le_u64(&entries, at.saturating_add(8))
-            } else {
-                le_u32(&entries, at.saturating_add(4)).map(u64::from)
-            }) else {
-                break;
-            };
-            let offset = usize::try_from(value).map_err(|_| {
-                format!(
-                    "{}: a search-path offset does not fit this build",
-                    path.display()
-                )
-            })?;
-            let text = c_str(&strtab, offset).ok_or_else(|| {
-                format!(
-                    "{}: a DT_RPATH/DT_RUNPATH entry is not a string this build can read",
-                    path.display()
-                )
-            })?;
-            paths.extend(text.split(':').map(ToOwned::to_owned));
-        }
+    for entry in entries {
+        paths.extend(entry.split(':').map(ToOwned::to_owned));
     }
     Ok(paths)
 }
@@ -779,70 +731,12 @@ fn object_error(path: &Path, err: &ElfError) -> String {
         }
         ElfError::SectionTableTooLarge => "its section header table is too large",
         ElfError::SectionTablePastEnd => "its section header table is past the end of the file",
+        ElfError::DynamicString => {
+            "a DT_RPATH/DT_RUNPATH entry is not a string this build can read"
+        }
         other => return format!("{}: {other}", path.display()),
     };
     format!("{}: {detail}", path.display())
-}
-
-/// The dynamic string table `SHT_DYNAMIC`'s `sh_link` names, read into memory.
-fn dynamic_strtab(elf: &mut Elf<impl io::Read + io::Seek>, link: u32) -> Result<Vec<u8>, String> {
-    let index = usize::try_from(link)
-        .map_err(|_| "its dynamic string-table index does not fit this build".to_string())?;
-    if index >= elf.section_count() {
-        return Err("its dynamic string-table index is past the section table".to_string());
-    }
-    let section = elf
-        .section(index)
-        .map_err(|_| "its dynamic string table's section header is truncated".to_string())?;
-    if section.kind != SHT_STRTAB {
-        return Err("its dynamic section does not link a string table".to_string());
-    }
-    elf.section_bytes(&section, MAX_DYNAMIC_STRTAB)
-        .map_err(|err| match err {
-            ElfError::SectionTooLarge { size } => {
-                format!("a {size}-byte dynamic string table is larger than this build will inspect")
-            }
-            ElfError::SectionPastEnd => {
-                "its dynamic string table runs past the end of the file".to_string()
-            }
-            ElfError::SectionTooLargeToAddress => {
-                "its dynamic string table is larger than this build can address".to_string()
-            }
-            ElfError::Io(err) => format!("it cannot be read ({err})"),
-            other => format!("it cannot be read ({other})"),
-        })
-}
-
-/// The `d_tag` of one dynamic array entry.
-fn dynamic_tag(wide: bool, entries: &[u8], at: usize) -> Option<i64> {
-    if wide {
-        let bytes: [u8; 8] = entries.get(at..at.checked_add(8)?)?.try_into().ok()?;
-        Some(i64::from_le_bytes(bytes))
-    } else {
-        let bytes: [u8; 4] = entries.get(at..at.checked_add(4)?)?.try_into().ok()?;
-        Some(i64::from(i32::from_le_bytes(bytes)))
-    }
-}
-
-/// The NUL-terminated UTF-8 string at `offset`, or `None`.
-fn c_str(bytes: &[u8], offset: usize) -> Option<String> {
-    let rest = bytes.get(offset..)?;
-    let end = rest.iter().position(|byte| *byte == 0)?;
-    std::str::from_utf8(rest.get(..end)?)
-        .ok()
-        .map(ToOwned::to_owned)
-}
-
-/// A little-endian `u32` at `offset`, or `None` past the end.
-fn le_u32(bytes: &[u8], offset: usize) -> Option<u32> {
-    let slice: [u8; 4] = bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
-    Some(u32::from_le_bytes(slice))
-}
-
-/// A little-endian `u64` at `offset`, or `None` past the end.
-fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
-    let slice: [u8; 8] = bytes.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
-    Some(u64::from_le_bytes(slice))
 }
 
 /// One path a deployment boot authorises before a worker is given it
@@ -1079,6 +973,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+    use blastit_sys::elf::{SHT_DYNAMIC, SHT_STRTAB};
 
     /// Serialises the tests that read or write `BLASTIT_EXEC`.
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());

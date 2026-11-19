@@ -125,6 +125,7 @@ dependencies = [
  "blastit-ingress",
  "blastit-lsp",
  "blastit-manifest",
+ "blastit-py-sapi",
  "blastit-scheduler",
  "blastit-sqlpolicy",
  "blastit-sys",

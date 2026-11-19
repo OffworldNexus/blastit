@@ -29,7 +29,7 @@ use self::read::*;
 use super::document;
 use super::preset::PresetChoice;
 use super::settings::Config;
-use super::types::{ConfigError, Privilege};
+use super::types::{ConfigError, Privilege, PythonHandoff};
 
 /// The document [`Config::to_json`] writes, read back with `serde`.
 ///
@@ -53,6 +53,8 @@ struct WireConfig {
     #[cfg(feature = "php")]
     #[serde(default)]
     php: PhpMember,
+    #[serde(default)]
+    python: PythonMember,
     script_name: OptText<ScriptNameField>,
     log_format: LogFmt<LogFormatField>,
     log_level: LevelText<LogLevelField>,
@@ -149,6 +151,10 @@ impl WireConfig {
                 Some(php) => Some(php.into_runtime()?),
             };
         }
+        config.python = match self.python.0 {
+            None => None,
+            Some(python) => Some(python.into_handoff()?),
+        };
         config.script_name = self.script_name.0;
         config.log_format = self.log_format.0;
         config.log_level = self.log_level.0;
@@ -347,6 +353,59 @@ impl PhpWire {
             shim: PathBuf::from(self.shim.0),
             shim_dev: self.shim_dev.0,
             shim_ino: self.shim_ino.0,
+        })
+    }
+}
+
+/// The `python` member: absent, `null`, or the handoff stage 0 recorded.
+///
+/// A member of its own rather than an `Option`, so a document that carries
+/// something else there is refused in this module's words — never with `serde`'s
+/// idea of the Rust type behind the member.
+#[derive(Default)]
+struct PythonMember(Option<PythonWire>);
+
+impl<'de> Deserialize<'de> for PythonMember {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        if value.is_null() {
+            return Ok(Self(None));
+        }
+        if !value.is_object() {
+            return Err(D::Error::custom("python: must be an object or null"));
+        }
+        PythonWire::deserialize(&value)
+            .map(|python| Self(Some(python)))
+            .map_err(|error| D::Error::custom(error.to_string()))
+    }
+}
+
+/// The pinned `libpython`/shim pair stage 0 handed stage 1 (design §2.4).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PythonWire {
+    py_minor: WireU32<PyMinorField>,
+    python_home: Text<PythonHomeField>,
+    sys_path: Bytes<PythonSysPathField>,
+    lib_fd: WireI32<PythonLibFdField>,
+    lib_dev: WireU64<PythonLibDevField>,
+    lib_ino: WireU64<PythonLibInoField>,
+    shim_fd: WireI32<PythonShimFdField>,
+    shim_dev: WireU64<PythonShimDevField>,
+    shim_ino: WireU64<PythonShimInoField>,
+}
+
+impl PythonWire {
+    fn into_handoff(self) -> Result<PythonHandoff, ConfigError> {
+        Ok(PythonHandoff {
+            py_minor: self.py_minor.0,
+            python_home: PathBuf::from(self.python_home.0),
+            sys_path: self.sys_path.0,
+            lib: (self.lib_fd.0, self.lib_dev.0, self.lib_ino.0),
+            shim: (self.shim_fd.0, self.shim_dev.0, self.shim_ino.0),
         })
     }
 }

@@ -1,6 +1,7 @@
 //! The value types of §8.2, and the spellings the environment, the stage-1
 //! document and the `boot` event all agree on.
 
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 
 use blastit_events::Lifecycle;
@@ -8,6 +9,36 @@ use thiserror::Error;
 
 use super::document;
 use super::manifest_io::display_path;
+
+/// The Python handoff stage 0 hands stage 1 (design §2.4).
+///
+/// Stage 0 opens `libpython` and the per-minor shim once, verifies them, and
+/// records their `(fd, st_dev, st_ino)` here instead of passing paths: the
+/// descriptors are already open, `execve` keeps them open, and stage 1 only has
+/// to re-`fstat` them before the load. It travels in the configuration document,
+/// never the environment: `blastit-env` strips every `BLASTIT_*` variable across
+/// the barrier (`docs/knowledge/LESSONS.md`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PythonHandoff {
+    /// The shim's CPython minor (`313`/`314`), as `blastit_py_abi_v1` reports it.
+    pub py_minor: u32,
+    /// The installation prefix stage 0 discovered: stage 1's `PYTHONHOME`.
+    pub python_home: PathBuf,
+    /// The venv's `site-packages` entries, as `os.fsencode` bytes.
+    pub sys_path: Vec<Vec<u8>>,
+    /// `(descriptor, st_dev, st_ino)` of the pinned `libpython`.
+    pub lib: (RawFd, u64, u64),
+    /// The same for the `libblastit_py3{13,14}-<arch>-<libc>.so` shim.
+    pub shim: (RawFd, u64, u64),
+}
+
+impl PythonHandoff {
+    /// The descriptor numbers stage 1 re-verifies, in the order it is handed.
+    #[must_use]
+    pub fn fds(&self) -> (RawFd, RawFd) {
+        (self.lib.0, self.shim.0)
+    }
+}
 
 /// Where init prints its event stream (§8.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

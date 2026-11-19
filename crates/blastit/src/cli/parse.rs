@@ -388,6 +388,16 @@ pub(super) fn parse(arguments: &[String]) -> Result<Args, Refusal> {
                     ))
                 })?);
             }
+            // Design §2.4: the pinned pair crosses the barrier as numbers. Like
+            // the rest of the re-exec grammar these are never typed by a person
+            // and are hidden from `--help`. A build without the linked
+            // interpreter has no handoff to accept.
+            #[cfg(feature = "python")]
+            "--py-lib-fd" => args.py_lib_fd = Some(descriptor(value, key).map_err(Refusal::usage)?),
+            #[cfg(feature = "python")]
+            "--py-shim-fd" => {
+                args.py_shim_fd = Some(descriptor(value, key).map_err(Refusal::usage)?)
+            }
             other => {
                 return Err(Refusal::usage(format!(
                     "unknown argument `{other}` — run 'blastit --help'"
@@ -424,6 +434,21 @@ pub(super) fn parse(arguments: &[String]) -> Result<Args, Refusal> {
     }
     if any_dev && args.dev_root.is_none() {
         return Err(refuse("`--dev-*` arguments need `--dev-root`".to_string()));
+    }
+    // Design §2.4: the pinned Python pair is stage-1 grammar, and a boot that
+    // names one descriptor without the other has nothing to verify.
+    #[cfg(feature = "python")]
+    {
+        if (args.py_lib_fd.is_some() || args.py_shim_fd.is_some()) && args.stage != Some(1) {
+            return Err(refuse(
+                "`--py-lib-fd`/`--py-shim-fd` are only for `--stage=1`".to_string(),
+            ));
+        }
+        if args.py_lib_fd.is_some() != args.py_shim_fd.is_some() {
+            return Err(refuse(
+                "`--py-lib-fd` and `--py-shim-fd` must be given together".to_string(),
+            ));
+        }
     }
     Ok(args)
 }

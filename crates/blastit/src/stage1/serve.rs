@@ -186,6 +186,11 @@ pub(super) fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             egress: serving.egress,
             plans: serving.plans,
             app,
+            // `serve` runs after `Python::initialize()` in the `Embed` arm and
+            // inside the host's interpreter in the `Hosted` one: CPython is live
+            // in both by the time a view forks.
+            hooks: crate::py::runtime_hooks(true),
+            py_fds: serving.py_fds,
             ctl: serving.ctl,
             signals: serving.signals,
             mask: serving.mask,

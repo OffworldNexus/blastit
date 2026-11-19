@@ -17,7 +17,7 @@ use blastit_view_php::discovery::PhpRuntime;
 
 use super::env::proxy_key;
 use super::preset::PresetChoice;
-use super::types::{Immortalize, LogFormat, Privilege, SpawnMode, Warning};
+use super::types::{Immortalize, LogFormat, Privilege, PythonHandoff, SpawnMode, Warning};
 use super::{ConfigError, invalid};
 
 /// §8.2's default for `BLASTIT_TRUSTED_PROXIES`.
@@ -235,6 +235,15 @@ pub struct Config {
     /// (`R13`).
     #[cfg(feature = "php")]
     pub php: Option<PhpRuntime>,
+    /// What stage 0 resolved for a Python WSGI view: the pinned `libpython` and
+    /// shim descriptors, the minor, and the prefix/`site-packages` stage 1
+    /// needs (design §2.4).
+    ///
+    /// Another field that comes from no environment variable: stage 0's
+    /// discovery fills it in, and stage 1 re-verifies the two descriptors
+    /// against it before anything is loaded. `None` for a PHP-only or
+    /// static-only boot, which never searches for an interpreter (§2.1).
+    pub python: Option<PythonHandoff>,
     /// D6: the privilege mode init detected, and the capabilities it holds.
     ///
     /// Another field that comes from no environment variable: stage 0 reads
@@ -321,6 +330,7 @@ impl Default for Config {
             php_shim_dir: None,
             #[cfg(feature = "php")]
             php: None,
+            python: None,
             privilege: None,
             preset: None,
         }

@@ -115,6 +115,12 @@ pub struct Options {
     /// for the one-shot `Policy::reconcile` after this image's boot report
     /// (§4.6 step 7).
     pub dev_reload_since: Option<u128>,
+    /// `--py-lib-fd`: the pinned `libpython` stage 0 opened (design §2.4).
+    #[cfg(feature = "python")]
+    pub py_lib_fd: Option<std::os::fd::RawFd>,
+    /// `--py-shim-fd`: the pinned per-minor shim, beside `--py-lib-fd`.
+    #[cfg(feature = "python")]
+    pub py_shim_fd: Option<std::os::fd::RawFd>,
 }
 
 /// Everything a view needs of its scratch directory, in Python (§5.3).

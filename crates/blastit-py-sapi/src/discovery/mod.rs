@@ -106,6 +106,10 @@ pub struct DiscoveredPython {
     pub py_minor: u32,
     /// The installation prefix the embedded interpreter gets as `PYTHONHOME`.
     pub python_home: PathBuf,
+    /// The venv root the interpreter belongs to, when it is inside one.
+    pub venv_root: Option<PathBuf>,
+    /// The full release `pyvenv.cfg` names (`3.14.10`), when it names one.
+    pub release: Option<String>,
     /// The venv's `site-packages`, as `os.fsencode` bytes.
     pub sys_path: Vec<Vec<u8>>,
     /// `libpython3.<m>.so[.1.0]`, opened and pinned by the caller.
@@ -139,12 +143,13 @@ pub fn discover(
     let interpreter = interpreter(env, command, manifest_dir)?;
     let venv = venv_root(&interpreter);
     let config = venv.as_deref().and_then(read_pyvenv);
-    let python_home = python_home(&interpreter, config.as_ref())?;
+    let python_home = python_home(&interpreter, config.as_ref(), command)?;
     let (minor, free_threaded) = minor_of(
         &interpreter,
         venv.as_deref(),
         &python_home,
         config.as_ref().and_then(|config| config.minor),
+        command,
     )?;
     if free_threaded {
         return Err(DiscoveryError::FreeThreaded {
@@ -161,14 +166,16 @@ pub fn discover(
         });
     }
     let sys_path = sys_path(venv.as_deref(), minor);
-    let libpython = libpython(&python_home, minor)?;
+    let libpython = libpython(&python_home, minor, command)?;
     Ok(DiscoveredPython {
         interpreter,
         py_minor: encode_py_minor(3, minor),
         python_home,
+        venv_root: venv,
+        release: config.and_then(|config| config.release),
         sys_path,
         libpython,
-        shim: shim(env, minor)?,
+        shim: shim(env, minor, command)?,
     })
 }
 
@@ -338,7 +345,7 @@ fn sys_path(venv: Option<&Path>, minor: u32) -> Vec<Vec<u8>> {
 }
 
 /// §2.3's `libpython` search: `.so.1.0` then `.so`, across the prefix first.
-fn libpython(home: &Path, minor: u32) -> Result<PathBuf, DiscoveryError> {
+fn libpython(home: &Path, minor: u32, command: &str) -> Result<PathBuf, DiscoveryError> {
     let triplet = lib_triplet();
     let directories = [
         home.join("lib").join(&triplet),
@@ -361,13 +368,14 @@ fn libpython(home: &Path, minor: u32) -> Result<PathBuf, DiscoveryError> {
         }
     }
     Err(DiscoveryError::NoLibpython {
+        command: command.to_owned(),
         python_home: home.to_path_buf(),
         minor: format!("3.{minor}"),
     })
 }
 
 /// §2.3's shim search: a deployment looks beside the executable only.
-fn shim(env: &DiscoveryEnv, minor: u32) -> Result<PathBuf, DiscoveryError> {
+fn shim(env: &DiscoveryEnv, minor: u32, command: &str) -> Result<PathBuf, DiscoveryError> {
     let name = shim_file(minor);
     let (deployment, directories) = match env {
         DiscoveryEnv::Dev(dev) => {
@@ -390,6 +398,7 @@ fn shim(env: &DiscoveryEnv, minor: u32) -> Result<PathBuf, DiscoveryError> {
         }
     }
     Err(DiscoveryError::NoShim {
+        command: command.to_owned(),
         deployment,
         minor: format!("3.{minor}"),
         name,
@@ -682,6 +691,7 @@ mod tests {
     #[test]
     fn the_missing_libpython_sentence_names_the_minor_and_every_remedy() {
         let message = DiscoveryError::NoLibpython {
+            command: "dev".to_owned(),
             python_home: PathBuf::from("/opt/python"),
             minor: "3.14".to_owned(),
         }
@@ -738,7 +748,7 @@ mod tests {
         assert_eq!(
             error.to_string(),
             format!(
-                "CPython 3.14 is ready, but no {} shim sits beside this blastit; install the \
+                "blastit serve: CPython 3.14 is ready, but no {} shim sits beside this blastit; install the \
                  blastit build that ships the CPython 3.14 shim",
                 shim_file(14)
             )
@@ -762,8 +772,9 @@ mod tests {
         assert_eq!(
             message,
             format!(
-                "CPython 3.14 is ready, but no {} shim was found (looked in {}, {}); build one \
-                 with make py-sapi, or point BLASTIT_PY_SHIM_DIR at a directory that holds it",
+                "blastit check: CPython 3.14 is ready, but no {} shim was found (looked in {}, {}); \
+                 build one with make py-sapi, or point BLASTIT_PY_SHIM_DIR at a directory that \
+                 holds it",
                 shim_file(14),
                 fixture.dir.join("dev-shims").display(),
                 fixture.dir.join("bin").display()

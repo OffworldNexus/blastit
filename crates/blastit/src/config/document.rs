@@ -73,6 +73,39 @@ impl Config {
                 },
             );
         }
+        // §2.4: the Python handoff stage 1 re-verifies. `null` for a PHP-only or
+        // static-only boot, which never searched for an interpreter.
+        object.insert(
+            "python".into(),
+            match &self.python {
+                None => Value::Null,
+                Some(python) => {
+                    let mut handoff = Map::new();
+                    handoff.insert("py_minor".into(), Value::from(python.py_minor));
+                    handoff.insert(
+                        "python_home".into(),
+                        Value::from(python.python_home.to_string_lossy().into_owned()),
+                    );
+                    handoff.insert(
+                        "sys_path".into(),
+                        Value::Array(
+                            python
+                                .sys_path
+                                .iter()
+                                .map(|entry| Value::from(latin1(entry)))
+                                .collect(),
+                        ),
+                    );
+                    handoff.insert("lib_fd".into(), Value::from(python.lib.0));
+                    handoff.insert("lib_dev".into(), Value::from(python.lib.1));
+                    handoff.insert("lib_ino".into(), Value::from(python.lib.2));
+                    handoff.insert("shim_fd".into(), Value::from(python.shim.0));
+                    handoff.insert("shim_dev".into(), Value::from(python.shim.1));
+                    handoff.insert("shim_ino".into(), Value::from(python.shim.2));
+                    Value::Object(handoff)
+                }
+            },
+        );
         object.insert(
             "script_name".into(),
             self.script_name.clone().map_or(Value::Null, Value::from),

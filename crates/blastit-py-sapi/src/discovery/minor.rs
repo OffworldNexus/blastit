@@ -9,26 +9,33 @@ use std::path::{Path, PathBuf};
 
 use super::{DEFAULT_MINOR, DiscoveryError};
 
-/// What `pyvenv.cfg` states: the interpreter's `home` and the venv's minor.
+/// What `pyvenv.cfg` states: the interpreter's `home`, the venv's minor and
+/// the release it names.
 pub(super) struct PyvenvCfg {
     /// `home = <dir>`'s parent: the install prefix (`PYTHONHOME`).
     pub(super) home: PathBuf,
     /// `version`/`version_info`'s `major.minor`, when it is a CPython 3.
     pub(super) minor: Option<u32>,
+    /// The full `major.minor.patch` the same line states (`3.14.10`).
+    pub(super) release: Option<String>,
 }
 
-/// Reads `pyvenv.cfg`'s `home` and `version`/`version_info` (`MB.40.8`, §2.3).
+/// Reads `pyvenv.cfg`'s `home`, `version`/`version_info` (`MB.40.8`, §2.3).
 pub(super) fn read_pyvenv(root: &Path) -> Option<PyvenvCfg> {
     let text = std::fs::read_to_string(root.join("pyvenv.cfg")).ok()?;
     let mut home = None;
     let mut minor = None;
+    let mut release = None;
     for line in text.lines() {
         let Some((name, value)) = line.split_once('=') else {
             continue;
         };
         match name.trim() {
             "home" => home = Some(PathBuf::from(value.trim())),
-            "version" | "version_info" => minor = parse_cfg_minor(value.trim()).or(minor),
+            "version" | "version_info" => {
+                minor = parse_cfg_minor(value.trim()).or(minor);
+                release = parse_cfg_release(value.trim()).or(release);
+            }
             _ => {}
         }
     }
@@ -36,7 +43,21 @@ pub(super) fn read_pyvenv(root: &Path) -> Option<PyvenvCfg> {
     Some(PyvenvCfg {
         home: home.parent().unwrap_or(&home).to_path_buf(),
         minor,
+        release,
     })
+}
+
+/// `3.14.10` / `3.14.10.final.0` -> `"3.14.10"`.
+pub(super) fn parse_cfg_release(text: &str) -> Option<String> {
+    let mut parts = text.split('.');
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    let patch: String = parts
+        .next()?
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    (major == 3 && !patch.is_empty()).then(|| format!("{major}.{minor}.{patch}"))
 }
 
 /// `3.14.10` / `3.14.10.final.0` -> `14`.
@@ -51,11 +72,13 @@ pub(super) fn parse_cfg_minor(text: &str) -> Option<u32> {
 pub(super) fn python_home(
     interpreter: &Path,
     config: Option<&PyvenvCfg>,
+    command: &str,
 ) -> Result<PathBuf, DiscoveryError> {
     if let Some(config) = config {
         return Ok(config.home.clone());
     }
     let unresolvable = |detail: String| DiscoveryError::Unresolvable {
+        command: command.to_owned(),
         path: interpreter.to_path_buf(),
         detail,
         minor: DEFAULT_MINOR.to_owned(),
@@ -78,6 +101,7 @@ pub(super) fn minor_of(
     venv: Option<&Path>,
     home: &Path,
     recorded: Option<u32>,
+    command: &str,
 ) -> Result<(u32, bool), DiscoveryError> {
     if let Some(name) = interpreter.file_name()
         && let Some(found) = parse_minor(&name.to_string_lossy())
@@ -100,6 +124,7 @@ pub(super) fn minor_of(
         }
     }
     Err(DiscoveryError::UnreadableMinor {
+        command: command.to_owned(),
         path: interpreter.to_path_buf(),
         detail: "its name and pyvenv.cfg both state no version".to_owned(),
     })

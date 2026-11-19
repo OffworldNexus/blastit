@@ -133,6 +133,33 @@ fn a_module_that_exists_only_in_the_project_venv_is_served() {
         // this target.
         return;
     };
+    // Design §2.1: a `dev` boot now resolves and pins the interpreter, the
+    // shared `libpython` and the per-minor shim before it serves. This leg needs
+    // the same three things `make py-sapi` builds; without them the refusal is
+    // the discovery's own sentence, not this test's subject.
+    let Some(interpreter) = std::env::var_os("PYO3_PYTHON").map(std::path::PathBuf::from) else {
+        eprintln!(
+            "SKIPPED a_module_that_exists_only_in_the_project_venv_is_served: PYO3_PYTHON is \
+             unset, so no project interpreter can be linked; run it through make (RUST_ENV)"
+        );
+        return;
+    };
+    let interpreter = std::fs::canonicalize(&interpreter).expect("the PYO3_PYTHON interpreter");
+    let shims = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/py-sapi")
+        .canonicalize()
+        .ok()
+        .filter(|dir| dir.is_dir());
+    let Some(_shims) = shims else {
+        eprintln!(
+            "SKIPPED a_module_that_exists_only_in_the_project_venv_is_served: target/py-sapi has \
+             no shim; run make py-sapi"
+        );
+        return;
+    };
+    let home = interpreter
+        .parent()
+        .expect("the interpreter's bin directory");
     let project = Project::new("only-in-venv");
     let site = format!(".venv/lib/python{mm}/site-packages");
     project.write(
@@ -145,8 +172,13 @@ fn a_module_that_exists_only_in_the_project_venv_is_served() {
     );
     project.write(
         ".venv/pyvenv.cfg",
-        format!("home = /usr/bin\nversion = {mm}.0\n").as_bytes(),
+        format!("home = {}\nversion = {mm}.0\n", home.display()).as_bytes(),
     );
+    // The interpreter inside the project's venv: discovery resolves the minor
+    // from this name and the prefix from `pyvenv.cfg`'s `home`.
+    std::fs::create_dir_all(project.path.join(".venv/bin")).expect("the venv bin directory");
+    std::os::unix::fs::symlink(&interpreter, project.path.join(".venv/bin/python3"))
+        .expect("the venv interpreter link");
     project.write(
         &format!("{site}/venv_only_mod.py"),
         b"VALUE = b\"hello from the venv site-packages\\n\"\n",

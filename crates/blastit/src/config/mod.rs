@@ -51,7 +51,9 @@ pub use preset::{
     PRESETS, Preset, PresetChoice, PresetPolicy, preset_help, preset_list, preset_unknown,
 };
 pub use settings::{Config, MIN_DEBT_TTL, TRUSTED_PROXIES_DEFAULT};
-pub use types::{ConfigError, Immortalize, LogFormat, Mode, Privilege, SpawnMode, Warning};
+pub use types::{
+    ConfigError, Immortalize, LogFormat, Mode, Privilege, PythonHandoff, SpawnMode, Warning,
+};
 
 /// A one-line error naming the variable.
 pub(super) fn invalid(variable: &str, reason: String) -> ConfigError {

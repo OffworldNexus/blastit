@@ -117,7 +117,7 @@ pub(super) fn fork_dbproxy_dev(
         working_dir: None,
     };
 
-    let forked = match crate::forking::fork(interpreter) {
+    let forked = match crate::forking::fork(crate::py::runtime_hooks(interpreter)) {
         Ok(fork) => fork,
         Err(err) => fail_with_root(emitter, boot.root, &format!("fork: {err}")),
     };
@@ -292,6 +292,15 @@ pub(super) fn exec_stage1_dev(request: DevExec<'_>) -> ! {
         ));
         keep.push(obs.as_raw_fd());
     }
+    // Design §2.4: the two pinned descriptors cross as numbers, and only these
+    // two lose `FD_CLOEXEC` for this `execve` — stage 1 re-sets it at once.
+    if let Some(python) = &boot.config.python {
+        let (lib, shim) = python.fds();
+        argv.push(cstring_dev(boot.root, format!("--py-lib-fd={lib}")));
+        argv.push(cstring_dev(boot.root, format!("--py-shim-fd={shim}")));
+        keep.push(lib);
+        keep.push(shim);
+    }
     // The dev policy channel's stage-1 end (`MB.23.5.3`): the supervisor writes
     // the document a `Blastfile` save produced and waits for the one-byte ack,
     // and carries this descriptor into the reload adoption document.
@@ -317,19 +326,24 @@ pub(super) fn exec_stage1_dev(request: DevExec<'_>) -> ! {
         }
     }
 
-    let env = stage1_env(app_env, boot.host.install());
+    let env = stage1_env(app_env, boot.config, boot.host.install());
     let err = exec(&cstring_dev(boot.root, &stage1.program), &argv, &env);
     fail_dev_root(boot.root, &format!("exec stage 1: {err}"))
 }
 
 /// The environment the stage-1 `execve` hands its program.
 ///
-/// The application's secret-free environment plus the one variable a standalone
-/// install must add: the `PYTHONHOME` of the interpreter it embeds (`MB.40.8`).
-/// Stage 1 owns no `PYTHONPATH` and no working directory (§4), and under
-/// `env -i` nothing else tells CPython where its stdlib is. An operator's own
-/// `PYTHONHOME` always wins: it names an interpreter this build did not choose.
-fn stage1_env(app_env: &BTreeMap<String, String>, install: Install) -> Vec<(String, String)> {
+/// The application's secret-free environment plus the one variable a Python
+/// boot must add: the `PYTHONHOME` stage 0 discovered, unless the app already
+/// names one. Stage 1 owns no `PYTHONPATH` and no working directory (§4), and
+/// under `env -i` nothing else tells CPython where its stdlib is. The value
+/// comes from [`Config::python`] — the document — never from the environment:
+/// `blastit-env` strips every `BLASTIT_*` variable across this barrier.
+fn stage1_env(
+    app_env: &BTreeMap<String, String>,
+    config: &Config,
+    install: Install,
+) -> Vec<(String, String)> {
     // Only a `python` build ever pushes the home, so the binding is not
     // mutated in the standalone archive's build.
     #[allow(unused_mut)]
@@ -342,7 +356,9 @@ fn stage1_env(app_env: &BTreeMap<String, String>, install: Install) -> Vec<(Stri
         env.push(("PYTHONHOME".to_string(), home));
     }
     #[cfg(not(feature = "python"))]
-    let _ = install;
+    let _ = (config, install);
+    #[cfg(feature = "python")]
+    let _ = config;
     env
 }
 /// Forks dbproxy, hands it the secrets and waits for its ready byte (§4).
@@ -372,7 +388,7 @@ pub(super) fn fork_dbproxy(
     match crate::visibility::unexecutable(
         std::slice::from_ref(&placement.dbproxy),
         layout.dbproxy(),
-        interpreter,
+        crate::py::runtime_hooks(interpreter),
         &crate::visibility::DroppedTo::of(layout, 0),
     ) {
         Ok(Some(blocker)) => fail(emitter, &blocker.message()),
@@ -687,6 +703,15 @@ pub(super) fn exec_stage1(
         format!("--config-fd={}", config_read.as_raw_fd()),
     ));
     let mut keep = vec![config_read.as_raw_fd()];
+    // Design §2.4: the two pinned descriptors cross as numbers, and only these
+    // two lose `FD_CLOEXEC` for this `execve` — stage 1 re-sets it at once.
+    if let Some(python) = &config.python {
+        let (lib, shim) = python.fds();
+        argv.push(cstring(emitter, format!("--py-lib-fd={lib}")));
+        argv.push(cstring(emitter, format!("--py-shim-fd={shim}")));
+        keep.push(lib);
+        keep.push(shim);
+    }
     if let Some(dbproxy) = &dbproxy {
         argv.push(cstring(
             emitter,
@@ -710,7 +735,7 @@ pub(super) fn exec_stage1(
         }
     }
 
-    let env = stage1_env(app_env, host.install());
+    let env = stage1_env(app_env, config, host.install());
     let err = exec(&program(emitter, &stage1), &argv, &env);
     fail(emitter, &format!("exec stage 1: {err}"))
 }
@@ -760,7 +785,7 @@ pub(super) fn pipe_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
 /// ([`crate::forking`]): a wheel's stage 0 forks dbproxy from inside the
 /// console script's interpreter, and §9.3 applies to it as much as to a view.
 pub(super) fn fork_ok(emitter: &Emitter, interpreter: bool) -> Fork {
-    match crate::forking::fork(interpreter) {
+    match crate::forking::fork(crate::py::runtime_hooks(interpreter)) {
         Ok(fork) => fork,
         Err(err) => fail(emitter, &format!("fork: {err}")),
     }

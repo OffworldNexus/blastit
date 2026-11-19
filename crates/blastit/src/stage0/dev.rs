@@ -57,6 +57,19 @@ pub(super) fn dev_fail(message: &str) -> ! {
     unsafe { libc::_exit(1) }
 }
 
+/// Fails a `blastit dev` boot with a sentence that already names it.
+///
+/// The discovery's refusals start with `blastit {cmd}: `; a printer that added
+/// its own head produced `blastit dev: blastit dev: …`. This one writes the
+/// sentence verbatim on descriptor 2 and exits `1`.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(super) fn dev_refuse(message: &str) -> ! {
+    eprintln!("{message}");
+    crate::coverage::flush();
+    // SAFETY: the boot is aborting; `_exit` runs no handler.
+    unsafe { libc::_exit(1) }
+}
+
 /// Removes `root` (`R20`) and aborts via [`dev_fail`].
 pub(super) fn fail_dev_root(root: &DevRoot, message: &str) -> ! {
     root.cleanup();
@@ -253,21 +266,24 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
         .map(|(name, names)| (name.as_str().to_string(), names.clone()))
         .collect();
     config.sys_path = host.sys_path().to_vec();
-    // `MB.40.8`: a standalone `entrypoint python` boot imports the application
-    // from the project's venv. A venv built for another CPython minor than the
-    // interpreter this binary embeds is refused here, before anything is
-    // forked, naming both versions and both fixes.
-    let venv = match super::project_python::project_venv(&config, host, true) {
-        Ok(venv) => venv,
-        Err(message) => dev_fail(&message),
-    };
-    if let Some(venv) = &venv
-        && !config
-            .sys_path
-            .iter()
-            .any(|entry| entry == &venv.site_packages)
-    {
-        config.sys_path.insert(0, venv.site_packages.clone());
+    // `MB.40.8`, design §2.1/§2.4: a `dev` Python boot resolves its
+    // interpreter, `libpython` and shim the same way a deployment does, but may
+    // honour `$VIRTUAL_ENV`, `PATH` and `BLASTIT_PY_SHIM_DIR`. A PHP-only or
+    // static-only boot returns before any search.
+    #[cfg(feature = "python")]
+    let python =
+        match super::project_python::boot(&config, &manifest, super::project_python::Boot::Dev) {
+            Ok(python) => python,
+            Err(message) => dev_refuse(&message),
+        };
+    #[cfg(feature = "python")]
+    if let Some(python) = &python {
+        config.python = Some(python.handoff.clone());
+        for entry in python.handoff.sys_path.iter().rev() {
+            if !config.sys_path.iter().any(|known| known == entry) {
+                config.sys_path.insert(0, entry.clone());
+            }
+        }
     }
     config.cwd = std::env::current_dir()
         .ok()
@@ -380,7 +396,13 @@ pub fn run_dev(host: &Host, options: &DevOptions, interpreter: bool, colour: Col
     // §8.1: one `runtime` line saying what this boot will run, now that the boot
     // is known-good (the banner and `boot` are already on stdout). PHP's line
     // comes from the probe below the fork; the other two are decided here.
-    emit_runtime(&emitter, &config, interpreter, venv.as_ref());
+    #[cfg(feature = "python")]
+    let runtime_line = python
+        .as_ref()
+        .map(super::project_python::PythonBoot::runtime);
+    #[cfg(not(feature = "python"))]
+    let runtime_line = None;
+    emit_runtime(&emitter, &config, interpreter, runtime_line);
     // A boot above the documented default is the operator's call once they
     // raised the knob, and it is also the state in which a view's first spawn
     // may have to wait for memory: say so once, with the reading and the cache

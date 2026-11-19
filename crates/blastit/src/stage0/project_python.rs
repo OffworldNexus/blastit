@@ -1,469 +1,460 @@
-//! The project's interpreter, as stage 0 finds it (`MB.40.8`).
+//! The Python half of a stage-0 boot: the call site, not the discovery.
 //!
-//! A standalone `blastit` links a `libpython` and carries no project's
-//! `site-packages`: it embeds CPython in stage 1 and reads the application's
-//! modules from the directory it was started in. A developer's project is a
-//! virtualenv, though, and `blastit dev` has to import the application from it —
-//! so stage 0 reads two facts here and hands both across the `execve`:
+//! Every search, every refusal sentence and every ELF gate lives in
+//! `blastit_py_sapi::discovery`/`loader` (design §2). What is left here is the
+//! part only the composition root can do:
 //!
-//! * the interpreter prefix the build recorded (`BLASTIT_PYTHON_HOME`), as the
-//!   `PYTHONHOME` an embedded stage 1 needs to find `encodings` under `env -i`
-//!   and after the binary is copied out of its build tree;
-//! * the project venv — `$VIRTUAL_ENV` when activated and the boot is `dev` or
-//!   `check`, else `<manifest_dir>/.venv` — whose `site-packages` goes onto the
-//!   configuration's `sys_path`, matched against the CPython minor the binary
-//!   embeds (`BLASTIT_PYTHON_MM`) so a venv built for another minor is refused
-//!   by name instead of failing at the first import.
+//! * the **activation gate** (§2.1): a PHP-only or static-only boot returns
+//!   before any search, `open`, or `dlopen`, structurally;
+//! * the process environment, read once and handed in as a [`DiscoveryEnv`];
+//! * `blastit_sys::pin` on the `libpython` and the shim, with the `.dynsym`
+//!   gate, so the `(st_dev, st_ino)` pair can travel in the configuration;
+//! * the deployment-only `Provenance` check ([`Boot::Serve`], never `Dev`), as a
+//!   variant rather than a string a typo could miss;
+//! * the minor-agreement refusal: a venv built for another CPython than the one
+//!   this image links is named before stage 1 can fail inside `Py_Initialize`.
 //!
-//! **A production boot never reads `$VIRTUAL_ENV`.** The variable belongs to an
-//! operator's shell, not to the deployment whose tree stage 0 is serving, and a
-//! server that picked up an unrelated environment's `site-packages` would import
-//! code nobody deployed. Only `<manifest_dir>/.venv` is accepted there, and
-//! stage 1's `check_view_paths` authorises every entry it adds.
-//!
-//! Everything here is unprivileged and filesystem-only: no interpreter runs in
-//! this process, so nothing here can be made to execute project code.
+//! Stage 0 never executes Python and never `dlopen`s anything: the two pinned
+//! descriptors are opened, verified, and handed across the barrier.
 
-#[cfg(feature = "python")]
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
-use crate::host::{Host, Install};
+use blastit_manifest::Manifest;
+use blastit_py_sapi::abi::dotted_py_minor;
+use blastit_py_sapi::discovery::{self, DevEnv, DiscoveredPython, DiscoveryEnv, ProductionEnv};
+use blastit_py_sapi::loader::gate_libpython;
+use blastit_sys::pin::SharedObject;
 
-/// The `PYTHONHOME` a standalone install hands stage 1 (`MB.40.8`).
+use crate::config::{Config, PythonHandoff};
+use crate::host::{Claim, Install, Provenance};
+
+/// Which stage-0 boot is asking.
 ///
-/// `env` is the stage-1 environment stage 0 is about to `execve`: an operator's
-/// own `PYTHONHOME` always wins, because it names an interpreter this build did
-/// not choose. Compiled out of a build that links no `libpython` (the build
-/// script emits no home either), so a standalone archive carries no build-host
-/// path.
-#[cfg(feature = "python")]
-pub(super) fn python_home(install: Install, env: &BTreeMap<String, String>) -> Option<String> {
-    if install != Install::Binary || env.contains_key("PYTHONHOME") {
-        return None;
-    }
-    let home = option_env!("BLASTIT_PYTHON_HOME")?;
-    if !Path::new(home).is_dir() {
-        return None;
-    }
-    Some(home.to_string())
+/// A deployment runs the `R7`/`B2-R5` `Provenance` gate and has no shell to
+/// read; a `dev`/`check` boot may use the activated venv and `PATH`. The
+/// distinction is a variant, not a `&str`: a typo in the old comparison would
+/// have turned the deployment gate off silently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Boot {
+    /// `blastit dev` and `blastit check`.
+    Dev,
+    /// A deployment (`serve`).
+    Serve,
 }
 
-/// A project virtualenv stage 0 found, and the CPython release it holds.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Venv {
-    /// The venv root, as the `runtime` line names it.
-    pub(super) root: PathBuf,
-    /// The venv's CPython `major.minor`, from `lib/pythonX.Y/site-packages`.
-    pub(super) version: String,
-    /// `major.minor.patch` when `pyvenv.cfg` records one, else [`Self::version`].
-    ///
-    /// `uv venv` writes `version = 3.14.10` and `python -m venv` writes
-    /// `version_info = 3.14.10.final.0`; the `runtime` line names the release a
-    /// developer asked for, not just the ABI it matches.
-    pub(super) release: String,
-    /// That `site-packages`, as `os.fsencode` bytes (§4).
-    pub(super) site_packages: Vec<u8>,
+impl Boot {
+    /// The verb a refusal names (`blastit {verb}:`).
+    const fn verb(self) -> &'static str {
+        match self {
+            Self::Dev => "dev",
+            Self::Serve => "serve",
+        }
+    }
+
+    /// Whether this boot authorises a deployment's objects and trees.
+    const fn is_deployment(self) -> bool {
+        matches!(self, Self::Serve)
+    }
 }
 
-/// The venv a standalone `entrypoint python` boot serves from (`MB.40.8`).
+/// What stage 0 resolved, kept alive until the `execve` that hands it on.
 ///
-/// `Ok(None)` for every other boot: a wheel install's interpreter already has
-/// the project's `site-packages`, and an all-static or PHP file has no WSGI
-/// callable to import.
+/// The two [`SharedObject`]s own the descriptors: dropping them would close the
+/// very fds the configuration records, so they live as long as the boot that
+/// pinned them.
+pub(super) struct PythonBoot {
+    /// The record stage 1 re-verifies and loads.
+    pub(super) handoff: PythonHandoff,
+    /// The pinned `libpython`; held open, never loaded here.
+    _lib: SharedObject,
+    /// The pinned shim; held open, never loaded here.
+    _shim: SharedObject,
+    /// The `runtime` line's version (`3.14.10`, else `3.14`).
+    version: String,
+    /// The `runtime` line's environment (the venv root, else the prefix).
+    environment: String,
+}
+
+impl PythonBoot {
+    /// The `(version, environment)` pair of §8.1's `runtime` line.
+    pub(super) fn runtime(&self) -> (&str, &str) {
+        (&self.version, &self.environment)
+    }
+}
+
+/// The activation gate of §2.1, as the composition root decides it.
 ///
-/// `allow_env_var` is `true` for `dev` and `check` — the two unprivileged modes a
-/// developer runs from their own shell — and `false` for the production boot,
-/// which may only use the `.venv` that sits beside the manifest it is serving.
+/// Evaluated **after** `static_app_refusal`: a manifest whose every request is
+/// answered by its own executors, and which declares no Python app, never
+/// reaches the discovery — no search, no `open`, no `dlopen`.
+pub(super) fn plan(config: &Config, manifest: &Manifest) -> bool {
+    discovery::activates(manifest.can_boot_without_app(), config.app.is_some())
+}
+
+/// Resolves, pins and records the project's Python, or `None` when inactive.
 ///
 /// # Errors
 ///
-/// The one-line refusal naming both CPython versions when the project's venv
-/// was built for a different minor than the interpreter this binary embeds.
-pub(super) fn project_venv(
+/// One of §2.3's/§2.4's sentences — including "no interpreter was found", which
+/// is a refusal in every build that can serve WSGI — the minor-agreement
+/// sentence, a refused ELF, or a deployment whose paths are not protected.
+pub(super) fn boot(
     config: &Config,
-    host: &Host,
-    allow_env_var: bool,
-) -> Result<Option<Venv>, String> {
-    if host.install() != Install::Binary || config.app.is_none() {
+    manifest: &Manifest,
+    boot: Boot,
+) -> Result<Option<PythonBoot>, String> {
+    if !plan(config, manifest) {
         return Ok(None);
     }
-    // The variable is read here, in the composition root, and passed down: the
-    // discovery is then a pure function of its arguments, which is what a unit
-    // test can exercise without touching the process environment.
-    let activated = virtual_env(allow_env_var, std::env::var_os("VIRTUAL_ENV"));
-    discover(
-        &config.manifest_dir,
-        activated.as_deref(),
-        option_env!("BLASTIT_PYTHON_MM"),
-    )
+    let env = discovery_env(boot);
+    let found = discovery::discover(&env, boot.verb(), &config.manifest_dir)
+        .map_err(|error| error.to_string())?;
+    agree_minor(boot, &found)?;
+    discover(&found, config, boot).map(Some)
 }
 
-/// The `$VIRTUAL_ENV` a boot is allowed to honour (`MB.40.8`).
+/// Refuses a venv built for another CPython than the one this image links.
 ///
-/// A production boot gets `None`: an operator's shell variable must not decide
-/// which code a server imports. The value is a parameter, so the decision is a
-/// pure function with no process environment of its own.
-fn virtual_env(allow_env_var: bool, value: Option<OsString>) -> Option<OsString> {
-    if !allow_env_var {
+/// `MB.40.8`'s check, restored after the discovery moved: `PYTHONHOME` for the
+/// linked interpreter is the build's own (transitional), and stage 1's
+/// `Py_Initialize` cannot read another minor's `site-packages`. The refusal
+/// names both versions and one command.
+#[cfg(feature = "python")]
+fn agree_minor(boot: Boot, found: &DiscoveredPython) -> Result<(), String> {
+    let Some(linked) = option_env!("BLASTIT_PYTHON_MM") else {
+        return Ok(());
+    };
+    // Only a project venv is this image's business: a host interpreter a wheel
+    // will `dlopen` (`.1.4`) is the shim's own minor, checked by the shim.
+    if found.venv_root.is_none() {
+        return Ok(());
+    }
+    let found_mm = dotted_py_minor(found.py_minor);
+    if found_mm == linked {
+        return Ok(());
+    }
+    Err(format!(
+        "blastit {}: the project's virtualenv is CPython {found_mm}, but this blastit embeds \
+         CPython {linked}; use a {linked} virtualenv (uv venv --python {linked})",
+        boot.verb()
+    ))
+}
+
+/// A build with no linked interpreter has no minor to agree with.
+#[cfg(not(feature = "python"))]
+fn agree_minor(_boot: Boot, _found: &DiscoveredPython) -> Result<(), String> {
+    Ok(())
+}
+
+/// The process environment, in the shape this boot may read it.
+///
+/// A deployment has no `$VIRTUAL_ENV`, no `PATH` and no development shim
+/// directory to pass: the type says so, so the rule is not a guard.
+fn discovery_env(boot: Boot) -> DiscoveryEnv {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let blastit_python = std::env::var_os("BLASTIT_PYTHON")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    // `// transitional (MB.42.2.1.4)`: a linked build's own interpreter is the
+    // *last* dev candidate (§2.2 puts `<manifest>/.venv` first), so a project
+    // venv still wins and an `env -i` shell still finds one.
+    let wheel_python = std::env::var_os("BLASTIT_WHEEL_PYTHON")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dev_linked_python(boot));
+    match boot {
+        Boot::Serve => DiscoveryEnv::production(ProductionEnv {
+            blastit_python,
+            wheel_python: std::env::var_os("BLASTIT_WHEEL_PYTHON").map(PathBuf::from),
+            exe_dir,
+        }),
+        Boot::Dev => DiscoveryEnv::dev(DevEnv {
+            blastit_python,
+            virtual_env: std::env::var_os("VIRTUAL_ENV")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            wheel_python,
+            path: std::env::var_os("PATH"),
+            shim_dir: std::env::var_os("BLASTIT_PY_SHIM_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            cargo_target_ancestor: cargo_target(&exe_dir),
+            exe_dir,
+        }),
+    }
+}
+
+/// The interpreter this image was built against, for a `dev` shell that names
+/// none.
+///
+/// `// transitional (MB.42.2.1.4)`: a `python`-feature build still links the
+/// interpreter `PYO3_PYTHON` named, and `make` exports its `PYTHONHOME` to every
+/// test binary. Until stage 1 loads the shim, that prefix *is* the interpreter
+/// this image serves with, so a development shell with no `BLASTIT_PYTHON`,
+/// venv or `PATH` entry is not a refusal — and the sentence stays reachable
+/// because any candidate the shell *does* name is still checked. Delete with
+/// the linked supervisor.
+#[cfg(feature = "python")]
+fn dev_linked_python(boot: Boot) -> Option<PathBuf> {
+    if boot.is_deployment() {
         return None;
     }
-    value.filter(|value| !value.is_empty())
+    let home = option_env!("BLASTIT_PYTHON_HOME")?;
+    // `make` exports the same prefix as `PYTHONHOME`; a child boot that did not
+    // get it (a wheel, a stripped environment) simply searches what it can.
+    let minor = option_env!("BLASTIT_PYTHON_MM")?;
+    ["python3", &format!("python{minor}")]
+        .into_iter()
+        .map(|name| Path::new(home).join("bin").join(name))
+        .find(|candidate| candidate.is_file())
 }
 
-/// [`project_venv`] without the configuration: which venv, and whether its
-/// CPython is the embedded one.
-///
-/// `embedded` is the `major.minor` the build recorded, when it recorded one. A
-/// venv that only holds `site-packages` for another minor is refused rather
-/// than added to `sys.path`: the extension modules there would either be
-/// ignored or crash on import, and a one-line boot refusal is the developer's
-/// fix.
-pub(super) fn discover(
-    manifest_dir: &Path,
-    virtual_env: Option<&OsStr>,
-    embedded: Option<&str>,
-) -> Result<Option<Venv>, String> {
-    let Some(root) = venv_root(manifest_dir, virtual_env) else {
-        return Ok(None);
-    };
-    let available = versions(&root);
-    let Some(version) = choose(&available, embedded) else {
-        return Ok(None);
-    };
-    if let Some(embedded) = embedded
-        && version != embedded
-    {
-        return Err(format!(
-            "the virtualenv {} was built for CPython {version}, but this blastit embeds \
-             CPython {embedded}\n  \
-             rebuild it:  uv venv --clear --python {embedded}\n  \
-             or run from the project venv:  uv add blastit && uv run blastit dev",
-            root.display()
-        ));
-    }
-    let Some(directory) = site_packages(&root, &version) else {
-        return Ok(None);
-    };
-    Ok(Some(Venv {
-        release: release(&root, &version),
-        root,
-        version,
-        site_packages: directory.as_os_str().as_bytes().to_vec(),
-    }))
-}
-
-/// The venv root a project boot serves from: the activated one, else `.venv`.
-///
-/// `pyvenv.cfg` is what makes a directory a venv rather than a coincidence of
-/// names (`python -m venv`, `uv venv` and `virtualenv` all write it), so a
-/// stray `.venv/` beside the `Blastfile` is never mistaken for one.
-fn venv_root(manifest_dir: &Path, virtual_env: Option<&OsStr>) -> Option<PathBuf> {
-    if let Some(value) = virtual_env {
-        let path = PathBuf::from(value);
-        if is_venv(&path) {
-            return Some(path);
-        }
-    }
-    let local = manifest_dir.join(".venv");
-    is_venv(&local).then_some(local)
-}
-
-/// Whether `path` is a virtualenv directory.
-fn is_venv(path: &Path) -> bool {
-    path.is_dir() && path.join("pyvenv.cfg").is_file()
-}
-
-/// The CPython minors under `<venv>/lib` or `<venv>/lib64` that hold a
-/// `site-packages` directory.
-fn versions(root: &Path) -> BTreeSet<String> {
-    let mut found = BTreeSet::new();
-    for lib in ["lib", "lib64"] {
-        let Ok(entries) = std::fs::read_dir(root.join(lib)) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(version) = name.strip_prefix("python") else {
-                continue;
-            };
-            if !is_major_minor(version) {
-                continue;
-            }
-            if entry.path().join("site-packages").is_dir() {
-                found.insert(version.to_string());
-            }
-        }
-    }
-    found
-}
-
-/// Which version this boot serves: the embedded one when the venv has it, the
-/// venv's own otherwise (so the caller can refuse it with both numbers).
-fn choose(available: &BTreeSet<String>, embedded: Option<&str>) -> Option<String> {
-    if let Some(embedded) = embedded
-        && available.contains(embedded)
-    {
-        return Some(embedded.to_string());
-    }
-    available.iter().next().cloned()
-}
-
-/// `<venv>/<lib>/python<version>/site-packages`, in `lib` before `lib64`.
-fn site_packages(root: &Path, version: &str) -> Option<PathBuf> {
-    for lib in ["lib", "lib64"] {
-        let candidate = root
-            .join(lib)
-            .join(format!("python{version}"))
-            .join("site-packages");
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
+#[cfg(not(feature = "python"))]
+fn dev_linked_python(_boot: Boot) -> Option<PathBuf> {
     None
 }
 
-/// The full `major.minor.patch` a `pyvenv.cfg` records, or `version`.
-///
-/// Only a value whose `major.minor` is the directory this boot matched is read,
-/// so a stale file cannot name a release the `site-packages` beside it was not
-/// built for.
-fn release(root: &Path, version: &str) -> String {
-    let Ok(text) = std::fs::read_to_string(root.join("pyvenv.cfg")) else {
-        return version.to_string();
-    };
-    for line in text.lines() {
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        if !matches!(name.trim(), "version_info" | "version") {
-            continue;
-        }
-        let mut parts = value.trim().split('.');
-        let (Some(major), Some(minor), Some(rest)) = (parts.next(), parts.next(), parts.next())
-        else {
-            continue;
-        };
-        let patch: String = rest.chars().take_while(char::is_ascii_digit).collect();
-        if patch.is_empty() {
-            continue;
-        }
-        if format!("{major}.{minor}") == version {
-            return format!("{version}.{patch}");
-        }
-    }
-    version.to_string()
+/// The `target/` ancestor of a `cargo` build, for `<target>/py-sapi` (§2.3).
+fn cargo_target(exe_dir: &Path) -> Option<PathBuf> {
+    exe_dir
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "target"))
+        .map(Path::to_path_buf)
 }
 
-/// Whether `text` is exactly `digits "." digits` (`3.14`, never `3` or `3.14t`).
-fn is_major_minor(text: &str) -> bool {
-    let mut parts = text.split('.');
-    let (Some(major), Some(minor), None) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
+/// [`boot`]'s pinning and recording half, once the discovery found an object.
+fn discover(found: &DiscoveredPython, config: &Config, boot: Boot) -> Result<PythonBoot, String> {
+    let lib = SharedObject::open(&found.libpython, None).map_err(|err| err.to_string())?;
+    gate_libpython(&lib, found.py_minor, boot.verb(), &found.interpreter)
+        .map_err(|err| err.to_string())?;
+    let shim = SharedObject::open(&found.shim, None).map_err(|err| err.to_string())?;
+    if boot.is_deployment() {
+        check_provenance(config, found)?;
+    }
+    let identity = |object: &SharedObject| {
+        object
+            .identity()
+            .map_err(|err| format!("{}: {err}", object.source().display()))
     };
-    !major.is_empty()
-        && !minor.is_empty()
-        && major.bytes().all(|byte| byte.is_ascii_digit())
-        && minor.bytes().all(|byte| byte.is_ascii_digit())
+    let (lib_dev, lib_ino) = identity(&lib)?;
+    let (shim_dev, shim_ino) = identity(&shim)?;
+    let environment = found
+        .venv_root
+        .as_deref()
+        .unwrap_or(&found.python_home)
+        .display()
+        .to_string();
+    Ok(PythonBoot {
+        handoff: PythonHandoff {
+            py_minor: found.py_minor,
+            python_home: found.python_home.clone(),
+            sys_path: found.sys_path.clone(),
+            lib: (lib.as_raw_fd(), lib_dev, lib_ino),
+            shim: (shim.as_raw_fd(), shim_dev, shim_ino),
+        },
+        _lib: lib,
+        _shim: shim,
+        version: found
+            .release
+            .clone()
+            .unwrap_or_else(|| dotted_py_minor(found.py_minor)),
+        environment,
+    })
+}
+
+/// `serve`'s `R7`/`B2-R5` half: the two objects and the trees a view reads.
+fn check_provenance(config: &Config, found: &DiscoveredPython) -> Result<(), String> {
+    let mut trees = vec![Claim::new("the Python installation", &found.python_home)];
+    if let Some(venv) = &found.venv_root {
+        trees.push(Claim::new("the project virtualenv", venv));
+    }
+    trees.push(Claim::new("the manifest directory", &config.manifest_dir));
+    let provenance = Provenance {
+        init_uid: rustix::process::geteuid().as_raw(),
+        objects: vec![
+            Claim::new("the shared libpython", &found.libpython),
+            Claim::new("the CPython shim", &found.shim),
+        ],
+        trees,
+    };
+    provenance.check_objects()?;
+    provenance.check_trees()
+}
+
+/// The `PYTHONHOME` a standalone image hands stage 1.
+///
+/// `// transitional (MB.42.2.1.4)`: this is the **linked** interpreter's own
+/// prefix — the one `Py_Initialize` in this image reads — recorded by the build
+/// script, and only for [`Install::Binary`]. A wheel's stage 1 already runs on
+/// its interpreter and gets no `PYTHONHOME` from us. The discovered prefix
+/// stays in [`Config::python`] for the shim's `init_paths` in `.1.4`.
+///
+/// An operator's own `PYTHONHOME` always wins: it names an interpreter this
+/// build did not choose.
+pub(super) fn python_home(
+    install: Install,
+    app_env: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if install != Install::Binary || app_env.contains_key("PYTHONHOME") {
+        return None;
+    }
+    let home = option_env!("BLASTIT_PYTHON_HOME")?;
+    Path::new(home).is_dir().then(|| home.to_string())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt;
+    use std::collections::BTreeMap;
 
     use super::*;
 
-    /// A directory with a name of its own, removed when dropped.
-    struct TempDir {
-        path: PathBuf,
+    /// A manifest source whose every request one of its own executors answers.
+    fn static_only() -> Manifest {
+        Manifest::parse_blastfile("static \"/\" { root \"public\" }\n", 20_000)
+            .expect("a static-only file")
+            .0
     }
 
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let path =
-                std::env::temp_dir().join(format!("blastit-venv-{}-{tag}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-
-        /// Makes `path` a venv holding `site-packages` for `version`.
-        fn venv(&self, path: &Path, version: &str) -> PathBuf {
-            self.venv_with(path, version, "")
-        }
-
-        /// The same, with `extra` lines appended to `pyvenv.cfg`.
-        fn venv_with(&self, path: &Path, version: &str, extra: &str) -> PathBuf {
-            std::fs::create_dir_all(path.join("bin")).unwrap();
-            std::fs::write(path.join("pyvenv.cfg"), format!("home = /usr/bin\n{extra}")).unwrap();
-            let site = path
-                .join("lib")
-                .join(format!("python{version}"))
-                .join("site-packages");
-            std::fs::create_dir_all(&site).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            site
-        }
+    /// A manifest that runs its own `entrypoint php` front controller.
+    fn php_only() -> Manifest {
+        Manifest::parse_blastfile(
+            "entrypoint php \"public/index.php\"\nview app regex '.*' {}\n",
+            20_000,
+        )
+        .expect("a PHP file")
+        .0
     }
 
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-
-    #[test]
-    fn a_matching_venv_contributes_its_site_packages() {
-        let dir = TempDir::new("match");
-        let project = dir.path.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        let site = dir.venv(&project.join(".venv"), "3.14");
-
-        assert!(
-            discover(&project, None, Some("3.14"))
-                .unwrap()
-                .is_some_and(|venv| venv.version == "3.14"),
-            "a .venv built for the embedded minor is served"
-        );
-        let venv = discover(&project, None, Some("3.14")).unwrap().unwrap();
-        assert_eq!(venv.root, project.join(".venv"));
-        assert_eq!(
-            venv.site_packages,
-            site.as_os_str().as_bytes(),
-            "the path crosses the execve as os.fsencode bytes"
-        );
-        assert_eq!(venv.release, "3.14", "no pyvenv version line, no patch");
-    }
-
-    #[test]
-    fn a_venv_for_another_minor_is_refused_by_name() {
-        let dir = TempDir::new("mismatch");
-        let project = dir.path.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        dir.venv(&project.join(".venv"), "3.12");
-
-        let error = discover(&project, None, Some("3.14")).unwrap_err();
-        assert!(error.contains("3.12"), "{error}");
-        assert!(error.contains("3.14"), "{error}");
-        assert!(error.contains("uv venv --clear --python 3.14"), "{error}");
-        assert!(
-            error.contains("uv add blastit && uv run blastit dev"),
-            "{error}"
-        );
-        assert!(
-            error.contains("\n  rebuild it:"),
-            "the stage-0 advice is one sentence then indented fixes: {error}"
-        );
-    }
-
-    #[test]
-    fn the_release_is_read_from_pyvenv_cfg() {
-        for (extra, expected) in [
-            ("version = 3.14.10\n", "3.14.10"),
-            ("version_info = 3.14.10.final.0\n", "3.14.10"),
-            ("version = 3.12.4\n", "3.14"),
-        ] {
-            let dir = TempDir::new("release");
-            let project = dir.path.join("project");
-            std::fs::create_dir_all(&project).unwrap();
-            dir.venv_with(&project.join(".venv"), "3.14", extra);
-            let venv = discover(&project, None, Some("3.14"))
-                .unwrap()
-                .expect("the venv");
-            assert_eq!(venv.release, expected, "{extra:?}");
-        }
-    }
-
-    #[test]
-    fn an_activated_venv_wins_over_the_local_one_in_dev() {
-        let dir = TempDir::new("activated");
-        let project = dir.path.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        dir.venv(&project.join(".venv"), "3.12");
-        let active = dir.path.join("active");
-        dir.venv(&active, "3.14");
-
-        let venv = discover(&project, Some(active.as_os_str()), Some("3.14"))
-            .unwrap()
-            .expect("the activated venv");
-        assert_eq!(venv.root, active);
-        assert_eq!(venv.version, "3.14");
-    }
-
-    #[test]
-    fn a_production_boot_never_reads_the_activated_venv() {
-        // `dev` and `check` honour the shell variable; a production boot only
-        // ever accepts the `.venv` beside the manifest it serves.
-        assert_eq!(
-            virtual_env(true, Some(OsString::from("/somewhere/activated"))),
-            Some(OsString::from("/somewhere/activated"))
-        );
-        assert_eq!(
-            virtual_env(false, Some(OsString::from("/somewhere/activated"))),
-            None
-        );
-        assert_eq!(virtual_env(true, Some(OsString::new())), None);
-    }
-
-    #[test]
-    fn lib64_is_read_when_lib_has_no_site_packages() {
-        let dir = TempDir::new("lib64");
-        let project = dir.path.join("project");
-        let venv_root = project.join(".venv");
-        std::fs::create_dir_all(venv_root.join("bin")).unwrap();
-        std::fs::write(venv_root.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
-        let site = venv_root
-            .join("lib64")
-            .join("python3.14")
-            .join("site-packages");
-        std::fs::create_dir_all(&site).unwrap();
-
-        let venv = discover(&project, None, Some("3.14"))
-            .unwrap()
-            .expect("lib64 holds the venv");
-        assert_eq!(venv.site_packages, site.as_os_str().as_bytes());
-    }
-
-    #[test]
-    fn a_project_without_a_venv_contributes_nothing() {
-        let dir = TempDir::new("none");
-        let project = dir.path.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        // Denied twin: a directory called `.venv` is not a venv, and an empty
-        // one has nothing to import.
-        std::fs::create_dir_all(project.join(".venv")).unwrap();
-        assert!(discover(&project, None, Some("3.14")).unwrap().is_none());
-    }
-
-    #[test]
-    fn a_build_with_no_recorded_minor_takes_the_venvs_own() {
-        let dir = TempDir::new("unrecorded");
-        let project = dir.path.join("project");
-        std::fs::create_dir_all(&project).unwrap();
-        dir.venv(&project.join(".venv"), "3.13");
-        let venv = discover(&project, None, None).unwrap().expect("the venv");
-        assert_eq!(venv.version, "3.13");
-    }
-
-    #[test]
-    fn a_static_boot_discovers_no_project_venv() {
-        let dir = TempDir::new("static");
-        let config = Config {
-            manifest_dir: dir.path.clone(),
+    /// A config with no Python app and nothing discovered yet.
+    fn config(dir: &Path) -> Config {
+        Config {
+            manifest_dir: dir.to_path_buf(),
             ..Config::default()
-        };
-        dir.venv(&dir.path.join(".venv"), "3.14");
-        // No callable: a static mount answers every request, so no interpreter
-        // is ever asked for this file's modules.
+        }
+    }
+
+    #[test]
+    fn a_php_only_or_static_boot_never_plans_a_search() {
+        let dir = std::env::temp_dir();
+        let config = config(&dir);
         assert!(
-            project_venv(&config, &Host::binary(), true)
-                .unwrap()
-                .is_none()
+            !plan(&config, &static_only()),
+            "a static-only file is answered by its mount"
         );
+        assert!(
+            !plan(&config, &php_only()),
+            "an entrypoint php file runs its own executor"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_blastit_python_is_the_discoverys_refusal() {
+        let env = DiscoveryEnv::dev(DevEnv {
+            blastit_python: Some(PathBuf::from("/definitely/not/a/python")),
+            ..DevEnv::default()
+        });
+        let refusal = discovery::discover(&env, "dev", &std::env::temp_dir())
+            .expect_err("the missing interpreter is a refusal");
+        assert!(
+            matches!(
+                refusal,
+                discovery::DiscoveryError::BlastitPythonNotExecutable { .. }
+            ),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn python_home_comes_from_the_linked_install_and_only_for_a_binary() {
+        let empty = BTreeMap::new();
+        let binary = python_home(Install::Binary, &empty);
+        assert_eq!(
+            binary.is_some(),
+            option_env!("BLASTIT_PYTHON_HOME").is_some(),
+            "a build script that recorded a home is what the boot hands over"
+        );
+        assert_eq!(
+            python_home(Install::Wheel, &empty),
+            None,
+            "a wheel's stage 1 already runs on its interpreter"
+        );
+        let operator = BTreeMap::from([("PYTHONHOME".to_string(), "/elsewhere".to_string())]);
+        assert_eq!(python_home(Install::Binary, &operator), None);
+    }
+
+    #[test]
+    fn a_production_boot_has_no_shell_to_read() {
+        // `ProductionEnv` has no `virtual_env`/`path`/`shim_dir` field at all:
+        // the guarantee is the type. This drives the discovery with it: only the
+        // `<manifest_dir>/.venv` it was given can be chosen, never a shell.
+        let Some(python) = option_env!("BLASTIT_PYTHON_MM")
+            .and_then(|minor| std::env::var_os(format!("PYO3_PYTHON_{minor}")))
+            .or_else(|| std::env::var_os("PYO3_PYTHON"))
+        else {
+            return;
+        };
+        let python = std::fs::canonicalize(python).expect("the build interpreter");
+        let dir = std::env::temp_dir().join(format!("blastit-prod-python-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let venv = dir.join(".venv");
+        std::fs::create_dir_all(venv.join("bin")).expect("the venv");
+        std::os::unix::fs::symlink(&python, venv.join("bin/python3")).expect("the interpreter");
+        let minor = option_env!("BLASTIT_PYTHON_MM").unwrap_or("3.14");
+        std::fs::write(
+            venv.join("pyvenv.cfg"),
+            format!(
+                "home = {}\nversion = {minor}.0\n",
+                python.parent().expect("bin").display()
+            ),
+        )
+        .expect("pyvenv.cfg");
+        let env = DiscoveryEnv::production(ProductionEnv {
+            exe_dir: dir.join("bin"),
+            ..ProductionEnv::default()
+        });
+        // A deployment looks for the shim beside its own executable only.
+        std::fs::create_dir_all(dir.join("bin")).expect("the executable directory");
+        std::fs::write(dir.join("bin").join(discovery::shim_file(14)), b"a shim")
+            .expect("the shim");
+        let found = discovery::discover(&env, "serve", &dir).expect("the local .venv");
+        assert_eq!(found.interpreter, venv.join("bin/python3"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_venv_for_another_minor_is_refused_naming_both() {
+        let Some(linked) = option_env!("BLASTIT_PYTHON_MM") else {
+            return;
+        };
+        let found = DiscoveredPython {
+            interpreter: PathBuf::from("/tmp/venv/bin/python3"),
+            py_minor: if linked == "3.13" { 314 } else { 313 },
+            python_home: PathBuf::from("/opt/python"),
+            venv_root: Some(PathBuf::from("/tmp/venv")),
+            release: None,
+            sys_path: Vec::new(),
+            libpython: PathBuf::from("/opt/python/lib/libpython3.14.so.1.0"),
+            shim: PathBuf::from("/opt/blastit/libblastit_py314-x86_64-gnu.so"),
+        };
+        let refusal = agree_minor(Boot::Dev, &found).expect_err("a different minor");
+        assert!(
+            refusal.contains("the project's virtualenv is CPython"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(linked),
+            "the linked minor is named: {refusal}"
+        );
+        assert!(refusal.contains("uv venv --python"), "{refusal}");
+        // No venv: a host interpreter the shim will load is not this check's.
+        let host = DiscoveredPython {
+            venv_root: None,
+            ..found
+        };
+        assert!(agree_minor(Boot::Dev, &host).is_ok());
     }
 }

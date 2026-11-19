@@ -42,6 +42,7 @@ use blastit_view_php::discovery::{PhpBoot, PhpShimScope};
 mod dev;
 mod fork_exec;
 mod gates;
+#[cfg(feature = "python")]
 mod project_python;
 
 #[cfg(test)]
@@ -534,19 +535,28 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
             EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
         ));
     }
-    // `MB.40.8`: a standalone `entrypoint python` boot serves from the project's
-    // venv, matched against the CPython minor this binary embeds. Refused here,
-    // before any listener binds, with both versions named. A production boot
-    // reads only `<manifest_dir>/.venv`: `$VIRTUAL_ENV` belongs to an operator's
-    // shell, not to the tree being served.
-    let venv = match project_python::project_venv(&config, host, false) {
-        Ok(venv) => venv,
-        Err(message) => fail(&emitter, &message),
+    // `MB.40.8`, design §2.1/§2.4: a Python WSGI boot resolves its interpreter,
+    // `libpython` and shim here and pins both descriptors; a PHP-only or
+    // static-only boot returns before any search (`plan`). The three refusal
+    // families are `blastit-py-sapi`'s sentences, printed here, before any
+    // listener binds.
+    #[cfg(feature = "python")]
+    let python = match project_python::boot(&config, &manifest, project_python::Boot::Serve) {
+        Ok(python) => python,
+        Err(message) => crate::logs::fail_sentence(&emitter, &message),
     };
+    #[cfg(feature = "python")]
+    let runtime_line = python.as_ref().map(project_python::PythonBoot::runtime);
+    #[cfg(not(feature = "python"))]
+    let runtime_line = None;
+    #[cfg(feature = "python")]
+    if let Some(python) = &python {
+        config.python = Some(python.handoff.clone());
+    }
     // §8.1: one `runtime` line saying what this boot will run. PHP's is the
     // probe's (below the fork, after `php_module_startup`); the other two are
     // decided here.
-    emit_runtime(&emitter, &config, interpreter, venv.as_ref());
+    emit_runtime(&emitter, &config, interpreter, runtime_line);
 
     let prepared = match blastit_env::build_from_process(&manifest, config.env_strip.as_deref()) {
         Ok(prepared) => prepared,
@@ -592,13 +602,13 @@ pub fn run(host: &Host, interpreter: bool, preset: Option<&str>, colour: Colour)
     // working directory. Empty for the standalone binary — whose project's
     // `site-packages` stage 0 discovered above (`MB.40.8`).
     config.sys_path = host.sys_path().to_vec();
-    if let Some(venv) = &venv
-        && !config
-            .sys_path
-            .iter()
-            .any(|entry| entry == &venv.site_packages)
-    {
-        config.sys_path.insert(0, venv.site_packages.clone());
+    #[cfg(feature = "python")]
+    if let Some(python) = &python {
+        for entry in python.handoff.sys_path.iter().rev() {
+            if !config.sys_path.iter().any(|known| known == entry) {
+                config.sys_path.insert(0, entry.clone());
+            }
+        }
     }
     // §5.3: and so does the directory blastit was started in, which stage 1 puts
     // first on `sys.path` — the directory gunicorn, uwsgi and granian all make

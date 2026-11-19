@@ -95,6 +95,18 @@ json_fields! {
     PhpShimInoField = "shim_ino",
 }
 
+json_fields! {
+    PyMinorField = "py_minor",
+    PythonHomeField = "python_home",
+    PythonSysPathField = "sys_path",
+    PythonLibFdField = "lib_fd",
+    PythonLibDevField = "lib_dev",
+    PythonLibInoField = "lib_ino",
+    PythonShimFdField = "shim_fd",
+    PythonShimDevField = "shim_dev",
+    PythonShimInoField = "shim_ino",
+}
+
 /// Every JSON key the document carries, for the [`super::ConfigError::Document`]
 /// a `serde` failure is reported with.
 ///
@@ -169,4 +181,11 @@ pub(super) const DOCUMENT_FIELDS: &[&str] = &[
     "shim",
     "shim_dev",
     "shim_ino",
+    "python",
+    "py_minor",
+    "python_home",
+    "lib_fd",
+    "lib_dev",
+    "lib_ino",
+    "shim_fd",
 ];

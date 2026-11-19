@@ -59,6 +59,7 @@ use crate::config::Config;
 use crate::dev_reload::{self, Class, Effect, Reload};
 use crate::dev_reload::{ReloadConfig, SystemClock};
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
+use crate::py::PyForkHooks;
 use crate::py::Python;
 use crate::stage1::ViewChildPlans;
 #[cfg(feature = "php")]
@@ -265,24 +266,6 @@ impl From<blastit_view_php::ForkedPhpView> for Forked {
     }
 }
 
-/// Whether CPython is live in this image and the caller holds the GIL — the
-/// `interpreter_live` [`crate::forking::fork`] documents.
-///
-/// init holds the GIL for its whole loop (`Supervisor::run`), and a build with
-/// `python` off has no interpreter in any role, so this is exactly the
-/// installation question: a wheel install forks under CPython's protocol and
-/// the standalone binary has nothing to stop (§9.3).
-#[cfg(all(feature = "php", feature = "python"))]
-fn interpreter_live(_py: Python<'_>) -> bool {
-    true
-}
-
-/// The token of a build that carries no interpreter: there is nothing to stop.
-#[cfg(all(feature = "php", not(feature = "python")))]
-fn interpreter_live(_py: Python<'_>) -> bool {
-    false
-}
-
 /// Where the shutdown is.
 #[derive(Clone, Copy, Debug)]
 enum Shutdown {
@@ -357,14 +340,19 @@ struct ComponentFds {
 /// Built once, at boot, from the components this image forked: their pids, the
 /// read ends of their log pipes, the scheduler's end of `http.chan` (kept open
 /// for the whole run so `http`'s peer never sees end-of-file), the `--learn`
-/// channels and the dev policy socket end. `None` on every boot that cannot
-/// cycle (production, `check`, `--no-reload`).
+/// channels, the dev policy socket end and the Python handoff descriptors.
+/// `None` on every boot that cannot cycle (production, `check`, `--no-reload`).
 struct Adoption {
     http: ComponentFds,
     dbproxy: Option<ComponentFds>,
     chan: OwnedFd,
     learn: Option<(RawFd, Option<RawFd>)>,
     policy: Option<OwnedFd>,
+    /// The `(libpython, shim)` descriptors this image inherited from stage 0,
+    /// kept open (with `FD_CLOEXEC` set) until `exec_cycle` clears it for the
+    /// next `execve` (design §1.2.1 item 6). The single `OwnedFd` owner on this
+    /// side of the barrier: `stage1::Adoption` carries the raw numbers only.
+    py_fds: Option<(OwnedFd, OwnedFd)>,
 }
 
 /// Where one reload cycle is (§4.6 steps 3–6).
@@ -420,6 +408,16 @@ pub struct Parts {
     /// one, and only a WSGI view can be forked from it (`MB.3.11`).
     #[cfg(feature = "python")]
     pub app: Py<PyAny>,
+    /// The live interpreter's `PyOS_*Fork` hooks, injected by stage 1 (§1.2.1).
+    ///
+    /// `None` for a PHP/static image and for a stage 1 that has not loaded the
+    /// project's runtime yet; a fork with `None` is the bare `fork(2)` the
+    /// protocol calls for in exactly those images.
+    pub hooks: Option<PyForkHooks<'static>>,
+    /// The `(libpython, shim)` descriptors this image inherited from stage 0,
+    /// when it may reload: `exec_cycle` hands them to the replacement instead of
+    /// re-opening the objects by path (§1.2.1 item 6).
+    pub py_fds: Option<(OwnedFd, OwnedFd)>,
     /// init's end of `ctl.chan`.
     pub ctl: OwnedFd,
     /// The signalfd init listens on.
@@ -484,6 +482,9 @@ pub struct Supervisor<'a> {
     /// The imported WSGI callable, in a build that has an interpreter.
     #[cfg(feature = "python")]
     app: Py<PyAny>,
+    /// The live interpreter's fork protocol, injected by stage 1 (§1.2.1);
+    /// `None` for a PHP/static image.
+    hooks: Option<PyForkHooks<'static>>,
     emitter: &'a Emitter,
     ctl: Option<OwnedFd>,
     decoder: Decoder,
@@ -592,6 +593,7 @@ impl<'a> Supervisor<'a> {
                         }
                         None => None,
                     },
+                    py_fds: parts.py_fds.take(),
                 })
             }
             _ => None,
@@ -642,6 +644,7 @@ impl<'a> Supervisor<'a> {
             plans: parts.plans,
             #[cfg(feature = "python")]
             app: parts.app,
+            hooks: parts.hooks,
             emitter,
             ctl: Some(parts.ctl),
             decoder: Decoder::new(parts.limits),
@@ -1262,6 +1265,10 @@ impl<'a> Supervisor<'a> {
         if let Some(policy) = &adoption.policy {
             keep.push(policy.as_raw_fd());
         }
+        if let Some((lib, shim)) = &adoption.py_fds {
+            keep.push(lib.as_raw_fd());
+            keep.push(shim.as_raw_fd());
+        }
         for fd in keep {
             // SAFETY: every number came from a descriptor this process owns.
             let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
@@ -1590,7 +1597,7 @@ impl<'a> Supervisor<'a> {
             // values. The identity and the filter are the binding's — the two
             // stage 1 decided when it built this slot (`PhpSlot`) — so a fork
             // cannot be given a pair the boot did not verify.
-            let forker = |protocol| crate::forking::fork_for(protocol, interpreter_live(py));
+            let forker = |protocol| crate::forking::fork_for(protocol, self.hooks);
             return blastit_view_php::fork_php_view(
                 blastit_view_php::PhpViewSpawn {
                     ctx: SpawnContext {
@@ -1616,7 +1623,7 @@ impl<'a> Supervisor<'a> {
                         mask: self.mask,
                     },
                     binding,
-                    protocol: if interpreter_live(py) {
+                    protocol: if self.hooks.is_some() {
                         ForkProtocol::InterpreterLive
                     } else {
                         ForkProtocol::NoInterpreter
@@ -1675,7 +1682,7 @@ impl<'a> Supervisor<'a> {
             // The one CPython fork protocol is this crate's (`fork_for`): the
             // view crate asks for the protocol its image needs and never calls
             // `fork(2)` itself (§9.3, `view-crates-architecture` §4.4 D1).
-            let forker = |protocol| crate::forking::fork_for(protocol, interpreter_live(py));
+            let forker = |protocol| crate::forking::fork_for(protocol, self.hooks);
             zygote::fork_view(
                 py,
                 zygote::ViewSpawn {
@@ -2115,6 +2122,12 @@ fn adoption_document(adoption: &Adoption) -> Result<Vec<u8>, String> {
     }
     if let Some(policy) = &adoption.policy {
         document["policy"] = serde_json::json!(policy.as_raw_fd());
+    }
+    // §1.2.1 item 6: the Python handoff crosses the same barrier, so the next
+    // image re-verifies the objects instead of re-opening them by path.
+    if let Some((lib, shim)) = &adoption.py_fds {
+        document["py_lib"] = serde_json::json!(lib.as_raw_fd());
+        document["py_shim"] = serde_json::json!(shim.as_raw_fd());
     }
     serde_json::to_vec(&document).map_err(|err| format!("reload: the adoption document: {err}"))
 }
@@ -2995,6 +3008,7 @@ mod tests {
             read.into_raw_fd()
         };
         let (stdout, stderr, events, chan) = (fresh(), fresh(), fresh(), fresh());
+        let (py_lib, py_shim) = (fresh(), fresh());
         let adoption = Adoption {
             http: ComponentFds {
                 pid: 77,
@@ -3007,6 +3021,14 @@ mod tests {
             chan: unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(chan) },
             learn: None,
             policy: None,
+            // SAFETY: the two pipe ends this test created; the `OwnedFd`s keep
+            // them open for the whole test and `Adoption::read` only numbers them.
+            py_fds: Some(unsafe {
+                (
+                    <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(py_lib),
+                    <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(py_shim),
+                )
+            }),
         };
         let document = adoption_document(&adoption).expect("the document serialises");
         assert!(
@@ -3025,6 +3047,11 @@ mod tests {
         assert_eq!(parsed.http.events, events);
         assert_eq!(parsed.chan, chan);
         assert!(parsed.dbproxy.is_none());
+        assert_eq!(
+            parsed.py_fds,
+            Some((py_lib, py_shim)),
+            "the pinned pair survives the re-exec document unchanged"
+        );
     }
 
     /// A cycle that could not drain abandons: one sentence naming the route,
@@ -3149,6 +3176,8 @@ mod tests {
                 chan: None,
                 policy: None,
                 boot_pairs: BTreeSet::new(),
+                hooks: None,
+                py_fds: None,
                 learn_fds: None,
             },
             &emitter,
@@ -3508,6 +3537,8 @@ view plain regex '/plain/.*' {}
                     chan: Some(OwnedFd::from(chan)),
                     policy: Some(OwnedFd::from(policy)),
                     boot_pairs: policy_pairs(&manifest).into_iter().collect(),
+                    hooks: None,
+                    py_fds: None,
                     learn_fds: None,
                 },
                 &emitter,
@@ -3710,6 +3741,8 @@ view plain regex '/plain/.*' {}
                 chan: Some(OwnedFd::from(chan)),
                 policy: Some(OwnedFd::from(policy)),
                 boot_pairs: policy_pairs(&manifest).into_iter().collect(),
+                hooks: None,
+                py_fds: None,
                 learn_fds: None,
             },
             &emitter,

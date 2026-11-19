@@ -2,16 +2,16 @@
 id: MB.42.2.1.3
 title: "Stage-0 discovery call site + fd handoff + PyForkHooks (no stage-1 dlopen)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2.1.2, MB.42.2.0]
 paths: [Cargo.toml, Cargo.lock, "crates/blastit/**", "crates/blastit-py-sapi/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T17:21"
-updated: "2026-11-19T17:21"
+updated: "2026-11-19T19:21"
 ---
 
 # Goal

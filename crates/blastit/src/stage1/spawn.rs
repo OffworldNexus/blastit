@@ -172,7 +172,7 @@ pub(super) fn fork_http(request: HttpFork) -> std::io::Result<Pid> {
         seccomp,
         hosted,
     } = request;
-    match crate::forking::fork(hosted)? {
+    match crate::forking::fork(crate::py::runtime_hooks(hosted))? {
         Fork::Parent(pid) => Ok(pid),
         Fork::Child => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Http, seccomp) {
@@ -218,7 +218,7 @@ pub(super) fn fork_scheduler(request: SchedulerFork) -> std::io::Result<Pid> {
         seccomp,
         hosted,
     } = request;
-    match crate::forking::fork(hosted)? {
+    match crate::forking::fork(crate::py::runtime_hooks(hosted))? {
         Fork::Parent(pid) => Ok(pid),
         Fork::Child => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Scheduler, seccomp) {
@@ -306,7 +306,7 @@ pub(super) fn check_view_paths(
     // A live interpreter is in this image — stage 1 is past the point where
     // CPython is up in both installations — and this thread holds the GIL, which
     // is what the fork protocol needs (§9.3).
-    match crate::visibility::unreadable(&paths, &dropped, true) {
+    match crate::visibility::unreadable(&paths, &dropped, crate::py::runtime_hooks(true)) {
         Ok(Some(blocker)) => fail(emitter, None, &blocker.message()),
         Ok(None) => {}
         Err(timed_out) => fail(emitter, None, &timed_out.message()),
@@ -335,7 +335,11 @@ pub(super) fn check_view_paths(
                         entries.insert(0, cwd);
                     }
                 }
-                match crate::visibility::writable(&entries, &dropped, true) {
+                match crate::visibility::writable(
+                    &entries,
+                    &dropped,
+                    crate::py::runtime_hooks(true),
+                ) {
                     Ok(Some(writable)) => fail(emitter, None, &writable.message()),
                     Ok(None) => {}
                     Err(timed_out) => fail(emitter, None, &timed_out.message()),

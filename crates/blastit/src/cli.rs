@@ -166,6 +166,14 @@ struct Args {
     /// `--dev-reload-since=NANOS`: the instant the cycle that started this
     /// image began, for its one-shot post-boot reconcile.
     dev_reload_since: Option<u128>,
+    /// `--py-lib-fd=N`: the pinned `libpython` stage 0 opened (design §2.4).
+    /// Internal: never typed by an operator, and never accepted without
+    /// `--stage=1`.
+    #[cfg(feature = "python")]
+    py_lib_fd: Option<RawFd>,
+    /// `--py-shim-fd=N`: the pinned per-minor shim, beside `--py-lib-fd`.
+    #[cfg(feature = "python")]
+    py_shim_fd: Option<RawFd>,
 }
 
 /// Runs the role the command line names, in the installation `host` describes.
@@ -409,6 +417,10 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>, colour: Colour) -> 
                     dev_adopt_fd: args.dev_adopt_fd,
                     dev_policy_fd: args.dev_policy_fd,
                     dev_reload_since: args.dev_reload_since,
+                    #[cfg(feature = "python")]
+                    py_lib_fd: args.py_lib_fd,
+                    #[cfg(feature = "python")]
+                    py_shim_fd: args.py_shim_fd,
                 },
                 interpreter,
                 colour,

@@ -600,6 +600,26 @@ pub fn fail(emitter: &Emitter, message: &str) -> ! {
     unsafe { libc::_exit(1) }
 }
 
+/// A fatal refusal whose sentence already carries its `blastit {cmd}: ` head.
+///
+/// The error type is the one owner of that head (the discovery's `Display`),
+/// so this printer emits the sentence **verbatim**: prose on stderr without a
+/// second `blastit: `, and the same one JSON event per line. A boot that mixed
+/// both heads printed `blastit: blastit serve: …` on one lane and
+/// `blastit serve: …` on the other.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn fail_sentence(emitter: &Emitter, message: &str) -> ! {
+    if emitter.refuses_in_text() {
+        for line in message.lines() {
+            eprintln!("{line}");
+        }
+        crate::coverage::flush();
+        // SAFETY: `_exit` never returns and runs no handler.
+        unsafe { libc::_exit(1) }
+    }
+    fail(emitter, message)
+}
+
 /// A fatal refusal as prose on stderr, for a boot a person is watching
 /// (`§1.1`): the first line carries blastit's name, and every continuation line
 /// is printed as it was written (the advice's own indentation).

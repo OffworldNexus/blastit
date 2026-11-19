@@ -170,6 +170,31 @@ impl<'a> PyForkHooks<'a> {
     }
 }
 
+impl PyForkHooks<'static> {
+    /// The hooks of an interpreter that is **already live** in this image.
+    ///
+    /// A wheel install runs stage 1 inside the interpreter the console script
+    /// started, so its three `PyOS_*Fork` entry points are reachable before any
+    /// shim is loaded. The composition root (`crates/blastit/src/py.rs`) is the
+    /// only caller: it wraps the interpreter's own `pyo3::ffi` entry points and
+    /// hands the result down as the same `Option<PyForkHooks<'_>>` every fork
+    /// takes. Once the shim loader owns every hook (design §1.2.1), this
+    /// constructor and its caller are deleted.
+    #[must_use]
+    pub fn hosted(
+        before_fork: extern "C" fn(),
+        after_fork_parent: extern "C" fn(),
+        after_fork_child: extern "C" fn(),
+    ) -> Self {
+        Self {
+            before_fork,
+            after_fork_parent,
+            after_fork_child,
+            _owner: PhantomData,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use core::mem::{align_of, offset_of, size_of};

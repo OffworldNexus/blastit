@@ -20,6 +20,8 @@ use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::routes_from_manifest;
 use blastit_sys::{Pid, Signal, SignalFd, SignalMask, bind_tcp};
 
+#[cfg(feature = "python")]
+use super::adopt::adopt_py_fds;
 use super::adopt::test_swap_pause;
 use super::adopt::{BootConfig, read_config};
 #[cfg(feature = "python")]
@@ -202,6 +204,29 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
     // early, this process cannot be early — instead of by how fast the runner
     // happens to be. Unset (and, in a release build, absent) it does nothing.
     test_swap_pause(&emitter, dev.as_ref(), test_swap_point.as_deref());
+    // Design §1.2.1 item 6: right after the swap point, before TCP bind, the
+    // forks or any load, the pinned pair is re-`fstat`ed against the record and
+    // `FD_CLOEXEC` is put back. Both the initial handoff (`--py-*`) and a
+    // replacement image's `Adoption.py_fds` arrive here.
+    let py_fds = {
+        #[cfg(feature = "python")]
+        {
+            match adopt_py_fds(
+                &config,
+                adopted.as_ref(),
+                options.py_lib_fd,
+                options.py_shim_fd,
+            ) {
+                Ok(pair) => pair,
+                Err(message) => fail(&emitter, dev.as_ref(), &message),
+            }
+        }
+        #[cfg(not(feature = "python"))]
+        {
+            let _ = (&config, &adopted);
+            None
+        }
+    };
     // `ADR-0010` §3: stage 1 re-opens the NTS `libphp` and the shim stage 0
     // inspected, asserts `(st_dev, st_ino)` against that record, renders the INI
     // lockdown once and holds the descriptors every PHP worker is forked with.
@@ -286,7 +311,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
                 blastit_view::spawn::ForkProtocol::NoInterpreter
             },
         },
-        &|protocol| crate::forking::fork_for(protocol, hosted),
+        &|protocol| crate::forking::fork_for(protocol, crate::py::runtime_hooks(hosted)),
     ) {
         Ok(report) => emit_php_runtime(&emitter, &config, report),
         Err(message) => fail(&emitter, dev.as_ref(), &message),
@@ -597,6 +622,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
         components,
         #[cfg(feature = "python")]
         hosted: interpreter.is_hosted(),
+        py_fds,
         dev,
         learn,
         dev_reload: options.dev_reload,
@@ -682,6 +708,8 @@ pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> 
             signals: serving.signals,
             mask: serving.mask,
             components: serving.components,
+            hooks: None,
+            py_fds: serving.py_fds,
             dev: serving.dev,
             learn: serving.learn,
             reload,
@@ -735,6 +763,10 @@ pub(super) struct Serving {
     /// here. Only a build with one can ask the question.
     #[cfg(feature = "python")]
     pub(super) hosted: bool,
+    /// The `(libpython, shim)` descriptors this image adopted and verified
+    /// (design §1.2.1 item 6). Held until the supervisor either takes them for
+    /// a reload or the boot ends.
+    pub(super) py_fds: Option<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)>,
     /// The `blastit dev` runtime root, when this is a dev boot (`R20`).
     pub(super) dev: Option<crate::dev_learn::Dev>,
     /// The `dev --learn` observation and attribution channels (`R29`).

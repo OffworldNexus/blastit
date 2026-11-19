@@ -43,3 +43,62 @@ pub(crate) type Python<'py> = std::marker::PhantomData<&'py ()>;
 pub(crate) fn no_interpreter<'py>() -> Python<'py> {
     std::marker::PhantomData
 }
+
+/// The three fork hooks of a live interpreter (design §1.2, "zero-global fork
+/// wiring").
+///
+/// A build with `python` on carries [`blastit_py_sapi::PyForkHooks`]: a `Copy`
+/// value every fork takes as `Option<PyForkHooks<'_>>`. A build with `python`
+/// off has no interpreter to hand over, so the token is a phantom and every
+/// caller passes `None` — the same shape, one fork that never runs a hook.
+#[cfg(feature = "python")]
+pub(crate) use blastit_py_sapi::PyForkHooks;
+
+/// The token of a build with no interpreter (see [`PyForkHooks`]).
+#[cfg(not(feature = "python"))]
+#[derive(Clone, Copy)]
+pub(crate) struct PyForkHooks<'a>(std::marker::PhantomData<&'a ()>);
+
+/// The hooks a live interpreter in this image offers, or `None`.
+///
+/// `live` is the installation fact every caller already has: `true` when CPython
+/// is running in this process (a wheel install) and the caller holds the GIL.
+/// The three functions are the interpreter's own `PyOS_*Fork` entry points; this
+/// is the one place in the crate that names them, so `forking`, `visibility` and
+/// the supervisor only ever see the opaque `Option<PyForkHooks>` value.
+#[cfg(feature = "python")]
+pub(crate) fn runtime_hooks(live: bool) -> Option<PyForkHooks<'static>> {
+    live.then(|| PyForkHooks::hosted(before_fork, after_fork_parent, after_fork_child))
+}
+
+/// A build with no interpreter has nothing to stop or restart.
+#[cfg(not(feature = "python"))]
+pub(crate) fn runtime_hooks(_live: bool) -> Option<PyForkHooks<'static>> {
+    None
+}
+
+/// `PyOS_BeforeFork`, through the interpreter this image runs on.
+///
+/// # Safety (of the interpreter's contract)
+///
+/// The caller holds the GIL, which is what the hook requires.
+#[cfg(feature = "python")]
+extern "C" fn before_fork() {
+    // SAFETY: `forking` calls this only with the GIL held.
+    unsafe { pyo3::ffi::PyOS_BeforeFork() }
+}
+
+/// `PyOS_AfterFork_Parent`, through the interpreter this image runs on.
+#[cfg(feature = "python")]
+extern "C" fn after_fork_parent() {
+    // SAFETY: called in the parent of a fork this process made with the GIL held.
+    unsafe { pyo3::ffi::PyOS_AfterFork_Parent() }
+}
+
+/// `PyOS_AfterFork_Child`, through the interpreter this image runs on.
+#[cfg(feature = "python")]
+extern "C" fn after_fork_child() {
+    // SAFETY: called in the child of a fork, before anything else touches the
+    // interpreter, with the GIL held.
+    unsafe { pyo3::ffi::PyOS_AfterFork_Child() }
+}

@@ -412,10 +412,9 @@ pub enum Spoken {
 /// answers can be named, and it reports the mode, owner and group of the path
 /// the answer is about, so the parent never has to `stat` at all.
 ///
-/// `interpreter` says whether CPython is live in this image and the caller holds
-/// the GIL, exactly as [`crate::forking::fork`] does: a wheel install forks under
-/// the interpreter's fork protocol (§9.3), and the standalone binary's stage 0
-/// has no interpreter at all.
+/// `hooks` is the live interpreter's fork protocol, exactly as
+/// [`crate::forking::fork`] takes it: a wheel install forks under it (§9.3), and
+/// the standalone binary's stage 0 has no interpreter at all (`None`).
 ///
 /// # Errors
 ///
@@ -427,7 +426,7 @@ pub fn probe(
     targets: &[Target],
     uid: u32,
     ask: Probe,
-    interpreter: bool,
+    hooks: Option<crate::py::PyForkHooks<'_>>,
     dropped: &DroppedTo,
 ) -> Result<Spoken, TimedOut> {
     if targets.is_empty() {
@@ -438,7 +437,7 @@ pub fn probe(
         Err(_) => return Ok(Spoken::NoProbe),
     };
     let deadline = Instant::now() + PROBE_TIMEOUT;
-    let forked = crate::forking::fork(interpreter);
+    let forked = crate::forking::fork(hooks);
     match forked {
         Ok(Fork::Child) => {
             drop(read_end);
@@ -862,13 +861,13 @@ fn targets_above(entries: &[PathBuf]) -> Vec<Target> {
 pub fn unreadable(
     paths: &[PathBuf],
     dropped: &DroppedTo,
-    interpreter: bool,
+    hooks: Option<crate::py::PyForkHooks<'_>>,
 ) -> Result<Option<Blocker>, TimedOut> {
     by_probe_or_mode(
         &targets_of(paths),
         dropped.probe,
         Probe::Read,
-        interpreter,
+        hooks,
         false,
         dropped,
     )
@@ -889,14 +888,14 @@ pub fn unreadable(
 pub fn unexecutable(
     paths: &[PathBuf],
     uid: u32,
-    interpreter: bool,
+    hooks: Option<crate::py::PyForkHooks<'_>>,
     dropped: &DroppedTo,
 ) -> Result<Option<Blocker>, TimedOut> {
     by_probe_or_mode(
         &targets_of(paths),
         uid,
         Probe::Execute,
-        interpreter,
+        hooks,
         true,
         dropped,
     )
@@ -934,7 +933,7 @@ pub fn unexecutable(
 pub fn writable(
     paths: &[PathBuf],
     dropped: &DroppedTo,
-    interpreter: bool,
+    hooks: Option<crate::py::PyForkHooks<'_>>,
 ) -> Result<Option<Writable>, TimedOut> {
     let targets = targets_above(paths);
     if targets.is_empty() {
@@ -945,7 +944,7 @@ pub fn writable(
     let mut found: Vec<(usize, u32, Verdict)> = Vec::new();
     let mut unasked: Vec<u32> = Vec::new();
     for uid in &dropped.uids {
-        match probe(&targets, *uid, Probe::Write, interpreter, dropped)? {
+        match probe(&targets, *uid, Probe::Write, hooks, dropped)? {
             Spoken::Found(verdict) => found.push((verdict.index, *uid, verdict)),
             Spoken::Fine => {}
             Spoken::NoProbe => unasked.push(*uid),
@@ -1038,11 +1037,11 @@ fn by_probe_or_mode(
     targets: &[Target],
     uid: u32,
     ask: Probe,
-    interpreter: bool,
+    hooks: Option<crate::py::PyForkHooks<'_>>,
     executable: bool,
     dropped: &DroppedTo,
 ) -> Result<Option<Blocker>, TimedOut> {
-    match probe(targets, uid, ask, interpreter, dropped)? {
+    match probe(targets, uid, ask, hooks, dropped)? {
         Spoken::Found(verdict) => {
             let Some(target) = targets.get(verdict.index) else {
                 return Ok(None);
@@ -1179,26 +1178,21 @@ mod tests {
     /// [`unreadable`], [`unexecutable`] and [`writable`] with the timeout turned into a
     /// test failure: nothing these tests ask about hangs, and a `TimedOut` is a bug
     /// in the test rather than a case it is about (the timeout has its own test).
-    fn unreadable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Blocker> {
-        super::unreadable(paths, dropped, interpreter).expect("no timeout")
+    fn unreadable(paths: &[PathBuf], dropped: &DroppedTo, _live: bool) -> Option<Blocker> {
+        super::unreadable(paths, dropped, None).expect("no timeout")
     }
 
-    fn unexecutable(paths: &[PathBuf], uid: u32, interpreter: bool) -> Option<Blocker> {
-        super::unexecutable(paths, uid, interpreter, &dropped()).expect("no timeout")
+    fn unexecutable(paths: &[PathBuf], uid: u32, _live: bool) -> Option<Blocker> {
+        super::unexecutable(paths, uid, None, &dropped()).expect("no timeout")
     }
 
-    fn writable(paths: &[PathBuf], dropped: &DroppedTo, interpreter: bool) -> Option<Writable> {
-        super::writable(paths, dropped, interpreter).expect("no timeout")
+    fn writable(paths: &[PathBuf], dropped: &DroppedTo, _live: bool) -> Option<Writable> {
+        super::writable(paths, dropped, None).expect("no timeout")
     }
 
     /// The same for [`probe`], whose targets these tests build from paths.
-    fn probe(
-        paths: &[PathBuf],
-        uid: u32,
-        ask: Probe,
-        interpreter: bool,
-    ) -> Result<Spoken, TimedOut> {
-        super::probe(&targets_of(paths), uid, ask, interpreter, &dropped())
+    fn probe(paths: &[PathBuf], uid: u32, ask: Probe, _live: bool) -> Result<Spoken, TimedOut> {
+        super::probe(&targets_of(paths), uid, ask, None, &dropped())
     }
 
     /// Whether this process can drop to another uid, which is what a probe has
@@ -1786,7 +1780,7 @@ mod tests {
         let uid = *dropped().uids.iter().next().expect("a uid");
         let code = in_a_child(|| {
             let targets = targets_of(&[PathBuf::from("/")]);
-            let _ = super::probe(&targets, uid, Probe::Read, false, &dropped());
+            let _ = super::probe(&targets, uid, Probe::Read, None, &dropped());
             let mut status = 0;
             // SAFETY: `waitpid` writes one status word into `status`.
             let left = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };

@@ -546,7 +546,64 @@ impl<F: Read + Seek> Elf<F> {
             let Some(text) = c_str(&names, offset) else {
                 return Err(ElfError::DynamicString);
             };
-            found.push(String::from_utf8_lossy(text).into_owned());
+            let text = std::str::from_utf8(text).map_err(|_| ElfError::DynamicString)?;
+            found.push(text.to_owned());
+        }
+        Ok(found)
+    }
+
+    /// Every dynamic entry whose `d_tag` is one of `tags`, in file order.
+    ///
+    /// The interleaved walk a provenance scan needs: `DT_RPATH` and
+    /// `DT_RUNPATH` are read in the order the linker wrote them, not grouped by
+    /// tag, so a refusal names the first entry the loader would read.
+    ///
+    /// # Errors
+    ///
+    /// The same failures [`Elf::dynamic_strings`] reports.
+    pub fn dynamic_strings_any(
+        &mut self,
+        tags: &[u64],
+        limit: u64,
+    ) -> Result<Vec<String>, ElfError> {
+        let Some(dynamic) = self.section_by_kind(SHT_DYNAMIC)? else {
+            return Err(ElfError::NoDynamic);
+        };
+        let strings = self.section(usize::try_from(dynamic.link).unwrap_or(usize::MAX))?;
+        if strings.kind != SHT_STRTAB {
+            return Err(ElfError::NoDynamicStringTable);
+        }
+        let names = self.section_bytes(&strings, limit)?;
+        let entries = self.section_bytes(&dynamic, limit)?;
+        let wide = self.class.is_64();
+        let minimum = if wide { 16 } else { 8 };
+        let entry = usize::try_from(dynamic.entsize).unwrap_or(0).max(minimum);
+        let mut found = Vec::new();
+        for chunk in entries.chunks_exact(entry) {
+            let entry_tag = if wide {
+                le_u64(chunk, 0)
+            } else {
+                le_u32(chunk, 0).map(u64::from)
+            };
+            let Some(entry_tag) = entry_tag else { break };
+            if entry_tag == 0 {
+                break;
+            }
+            if !tags.contains(&entry_tag) {
+                continue;
+            }
+            let value = if wide {
+                le_u64(chunk, 8)
+            } else {
+                le_u32(chunk, 4).map(u64::from)
+            };
+            let Some(value) = value else { break };
+            let offset = usize::try_from(value).unwrap_or(usize::MAX);
+            let Some(text) = c_str(&names, offset) else {
+                return Err(ElfError::DynamicString);
+            };
+            let text = std::str::from_utf8(text).map_err(|_| ElfError::DynamicString)?;
+            found.push(text.to_owned());
         }
         Ok(found)
     }

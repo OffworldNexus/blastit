@@ -1,6 +1,8 @@
-#![cfg_attr(not(feature = "python"), allow(unused_imports))]
+#![cfg_attr(not(feature = "python"), allow(dead_code))]
 
 use std::io::Read;
+#[cfg(feature = "python")]
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -138,6 +140,10 @@ pub(crate) struct Adoption {
     pub(crate) chan: RawFd,
     pub(crate) learn: Option<(RawFd, Option<RawFd>)>,
     pub(crate) policy: Option<RawFd>,
+    /// The `(libpython, shim)` descriptors the previous image held across
+    /// `exec_cycle` (design §1.2.1 item 6). Numbers only: the `OwnedFd`s are
+    /// `supervise::Adoption`'s on the other side of the write.
+    pub(crate) py_fds: Option<(RawFd, RawFd)>,
 }
 
 impl Adoption {
@@ -169,7 +175,7 @@ impl Adoption {
         for key in object.keys() {
             if !matches!(
                 key.as_str(),
-                "version" | "http" | "dbproxy" | "chan" | "learn" | "policy"
+                "version" | "http" | "dbproxy" | "chan" | "learn" | "policy" | "py_lib" | "py_shim"
             ) {
                 return Err(format!("adoption document: unknown key `{key}`"));
             }
@@ -227,14 +233,116 @@ impl Adoption {
             }
             None => None,
         };
+        let py_fds = match (object.get("py_lib"), object.get("py_shim")) {
+            (None, None) => None,
+            (Some(lib), Some(shim)) => {
+                let lib = number(lib, "py_lib")?;
+                let shim = number(shim, "py_shim")?;
+                open(lib).map_err(|err| format!("adoption document: `py_lib`: {err}"))?;
+                open(shim).map_err(|err| format!("adoption document: `py_shim`: {err}"))?;
+                Some((lib, shim))
+            }
+            _ => {
+                return Err("adoption document: `py_lib` and `py_shim` come together".to_string());
+            }
+        };
         Ok(Self {
             http,
             dbproxy,
             chan,
             learn,
             policy,
+            py_fds,
         })
     }
+}
+
+/// The `(libpython, shim)` descriptors this image adopts, re-verified.
+///
+/// Design §1.2.1 item 6: both the initial handoff (`--py-lib-fd`/
+/// `--py-shim-fd`) and a replacement boot (`Adoption.py_fds`) are `OwnedFd`s
+/// here, `fstat`ed against [`Config::python`] and given `FD_CLOEXEC` back
+/// **immediately**, before TCP bind, the forks or any load. The single owner is
+/// the pair this returns: `stage1::Adoption` keeps numbers only, and
+/// `supervise::Adoption` takes these `OwnedFd`s when a cycle may re-exec.
+///
+/// A mismatched `(st_dev, st_ino)` is a hard refusal with the prose sentence a
+/// replaced object has always printed.
+#[cfg(feature = "python")]
+pub(super) fn adopt_py_fds(
+    config: &Config,
+    adopted: Option<&Adoption>,
+    lib: Option<RawFd>,
+    shim: Option<RawFd>,
+) -> Result<Option<(OwnedFd, OwnedFd)>, String> {
+    let pair = match (adopted.and_then(|adoption| adoption.py_fds), lib, shim) {
+        (Some(pair), _, _) => pair,
+        (None, Some(lib), Some(shim)) => (lib, shim),
+        (None, None, None) => {
+            // Fail closed: a document that pins a runtime without a descriptor
+            // would otherwise serve with nothing verified.
+            if config.python.is_some() {
+                return Err(
+                    "the configuration pins a Python runtime but no descriptor came with it; \
+                     restart blastit"
+                        .to_string(),
+                );
+            }
+            return Ok(None);
+        }
+        (None, ..) => {
+            return Err("`--py-lib-fd` and `--py-shim-fd` must be given together".to_string());
+        }
+    };
+    let Some(record) = &config.python else {
+        return Err(
+            "this boot was handed a pinned Python descriptor, but has no record to verify it \
+             against; restart blastit"
+                .to_string(),
+        );
+    };
+    let lib = verify_py_fd(pair.0, record.lib, "libpython")?;
+    let shim = verify_py_fd(pair.1, record.shim, "CPython shim")?;
+    Ok(Some((lib, shim)))
+}
+
+/// One descriptor: the number stage 0 recorded, still open, same inode, and
+/// `FD_CLOEXEC` again.
+#[cfg(feature = "python")]
+fn verify_py_fd(fd: RawFd, expected: (RawFd, u64, u64), what: &str) -> Result<OwnedFd, String> {
+    if fd != expected.0 {
+        return Err(format!(
+            "the pinned {what} descriptor does not match the one this boot recorded (expected \
+             {}, found {fd}); restart blastit",
+            expected.0
+        ));
+    }
+    // SAFETY: `fd` is a number this image inherited from its stage-0 `execve`;
+    // the borrow is short and only reads the descriptor's flags.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    open(fd)
+        .map_err(|_| format!("the pinned {what} descriptor is no longer open; restart blastit"))?;
+    let stat = rustix::fs::fstat(borrowed)
+        .map_err(|err| format!("the pinned {what} descriptor: {err}; restart blastit"))?;
+    if stat.st_dev != expected.1 || stat.st_ino != expected.2 {
+        let path = std::fs::read_link(format!("/proc/self/fd/{fd}"))
+            .unwrap_or_else(|_| PathBuf::from(format!("the {what}")));
+        return Err(format!(
+            "{} was replaced after blastit inspected it (inode {} is now {}); restore the file \
+             and restart blastit",
+            path.display(),
+            expected.2,
+            stat.st_ino
+        ));
+    }
+    if let Err(err) = blastit_sys::set_cloexec(borrowed, true) {
+        return Err(format!(
+            "the pinned {what} descriptor: {err}; restart blastit"
+        ));
+    }
+    // SAFETY: the descriptor is open, this image owns it, and this is the one
+    // `OwnedFd` that will close it.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// One integer member of a component object.
@@ -481,4 +589,162 @@ pub(super) fn import_callable(py: Python<'_>, spec: &str) -> PyResult<Py<PyAny>>
     };
     let module = py.import(module)?;
     Ok(module.getattr(attribute)?.unbind())
+}
+
+#[cfg(all(test, feature = "python"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::unix::fs::MetadataExt;
+
+    use super::*;
+
+    /// A directory under the workspace's `target/tmp`, removed when dropped.
+    struct Fixture {
+        dir: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(tag: &str) -> Self {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/adopt-py");
+            let dir = root.join(format!("{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("the fixture directory");
+            Self { dir }
+        }
+
+        /// A file opened for reading, with the identity stage 0 would record.
+        fn pinned(&self, name: &str) -> (std::fs::File, (u64, u64)) {
+            let path = self.dir.join(name);
+            std::fs::write(&path, b"a pinned shared object").expect("the object");
+            let file = std::fs::File::open(&path).expect("the opened object");
+            let metadata = file.metadata().expect("its metadata");
+            let identity = (metadata.dev(), metadata.ino());
+            (file, identity)
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A config whose `python` record names `lib` and `shim`.
+    fn config_with(lib: (RawFd, u64, u64), shim: (RawFd, u64, u64)) -> Config {
+        Config {
+            python: Some(crate::config::PythonHandoff {
+                py_minor: 314,
+                python_home: PathBuf::from("/opt/python/3.14"),
+                sys_path: Vec::new(),
+                lib,
+                shim,
+            }),
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn a_replaced_libpython_descriptor_is_refused_by_identity() {
+        let fixture = Fixture::new("swap");
+        // The object stage 0 inspected, and a real second object (a rename over
+        // the first, reopened) whose inode is what the descriptor now names.
+        let (inspected, (dev, ino)) = fixture.pinned("libpython3.14.so.1.0");
+        let side = fixture.dir.join("replacement");
+        std::fs::write(&side, b"something else").expect("the replacement");
+        std::fs::rename(&side, fixture.dir.join("libpython3.14.so.1.0"))
+            .expect("renaming the replacement over the object");
+        let replaced = std::fs::File::open(fixture.dir.join("libpython3.14.so.1.0"))
+            .expect("the replacement is open");
+        let fd = replaced.as_raw_fd();
+        drop(inspected);
+
+        let refusal =
+            verify_py_fd(fd, (fd, dev, ino), "libpython").expect_err("a moved inode is refused");
+        assert!(
+            refusal.contains("was replaced after blastit inspected it"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("restore the file and restart blastit"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains(&format!("inode {ino} is now")),
+            "the sentence names both identities: {refusal}"
+        );
+        assert!(!refusal.contains("stage 0"), "{refusal}");
+    }
+
+    #[test]
+    fn an_adoption_pair_is_reverified_and_cloexec_is_restored() {
+        let fixture = Fixture::new("adoption");
+        let (lib, (lib_dev, lib_ino)) = fixture.pinned("libpython3.14.so.1.0");
+        let (shim, (shim_dev, shim_ino)) = fixture.pinned("libblastit_py314-x86_64-gnu.so");
+        // `into_raw_fd` hands ownership to `adopt_py_fds`; a `File` left alive
+        // beside it would close the same descriptor twice.
+        let (lib_fd, shim_fd) = (lib.into_raw_fd(), shim.into_raw_fd());
+        let config = config_with((lib_fd, lib_dev, lib_ino), (shim_fd, shim_dev, shim_ino));
+        let adoption = Adoption {
+            http: AdoptedComponent {
+                pid: 0,
+                stdout: -1,
+                stderr: -1,
+                events: -1,
+            },
+            dbproxy: None,
+            chan: -1,
+            learn: None,
+            policy: None,
+            py_fds: Some((lib_fd, shim_fd)),
+        };
+
+        let adopted = adopt_py_fds(&config, Some(&adoption), None, None)
+            .expect("the recorded pair is accepted")
+            .expect("the pair is present");
+        assert_eq!(adopted.0.as_raw_fd(), lib_fd);
+        assert_eq!(adopted.1.as_raw_fd(), shim_fd);
+        for fd in [lib_fd, shim_fd] {
+            // SAFETY: `F_GETFD` reads the descriptor flags and takes no pointer.
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "descriptor {fd} must not survive another execve"
+            );
+        }
+        drop(adopted);
+    }
+
+    #[test]
+    fn a_pinned_pair_without_a_record_is_refused() {
+        let fixture = Fixture::new("record");
+        let (file, _identity) = fixture.pinned("libpython3.14.so.1.0");
+        let fd = file.into_raw_fd();
+        let refusal = adopt_py_fds(&Config::default(), None, Some(fd), Some(fd))
+            .expect_err("a pair with no record cannot be verified");
+        assert_eq!(
+            refusal,
+            "this boot was handed a pinned Python descriptor, but has no record to verify it \
+             against; restart blastit"
+        );
+    }
+
+    #[test]
+    fn a_record_without_a_descriptor_is_refused() {
+        let fixture = Fixture::new("missing");
+        let (lib, (lib_dev, lib_ino)) = fixture.pinned("libpython3.14.so.1.0");
+        let (shim, (shim_dev, shim_ino)) = fixture.pinned("libblastit_py314-x86_64-gnu.so");
+        let config = config_with(
+            (lib.as_raw_fd(), lib_dev, lib_ino),
+            (shim.as_raw_fd(), shim_dev, shim_ino),
+        );
+        let refusal = adopt_py_fds(&config, None, None, None)
+            .expect_err("a pinned runtime needs its descriptors");
+        assert_eq!(
+            refusal,
+            "the configuration pins a Python runtime but no descriptor came with it; restart \
+             blastit"
+        );
+    }
 }
