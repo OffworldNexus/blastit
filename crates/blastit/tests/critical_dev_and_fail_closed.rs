@@ -5,8 +5,8 @@
 //! per-role seccomp `egress` decision, and `dev --learn`'s atomic write.
 //!
 //! Every case starts the real `blastit` binary as the calling user: no root, no
-//! Docker, no `BLASTIT_TEST_PG_URL`. `MockPgServer` (in `common/mock_pg.rs`)
-//! stands in for PostgreSQL on `127.0.0.1:0`.
+//! Docker, no `BLASTIT_TEST_PG_URL`. `PgUpstream` (in `common/pg_upstream.rs`)
+//! is the real loopback PostgreSQL peer the dbproxy dials, on `127.0.0.1:0`.
 //!
 //! The negative twins are the ones the requirements name: unprivileged
 //! production must exit `1` with no single-UID fallback, an ungranted route must
@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use common::mock_pg::MockPgServer;
+use common::pg_upstream::PgUpstream;
 
 /// How long a case waits for the server to report `ready`.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -1058,8 +1058,9 @@ fn view_block<'a>(learned: &'a str, name: &str) -> &'a str {
 }
 
 /// The `DATABASE_URL` a case hands the child: a real-looking credential for a
-/// `MockPgServer` that never sees it, with TLS off because the mock is local.
-fn database_url(server: &MockPgServer) -> String {
+/// `PgUpstream` that answers trust authentication, with TLS off because the
+/// upstream is loopback.
+fn database_url(server: &PgUpstream) -> String {
     format!(
         "postgresql://real-user:real-secret@127.0.0.1:{}/shop?sslmode=disable",
         server.port()
@@ -1193,7 +1194,7 @@ fn the_dev_client_only_answers_with_the_response_it_can_prove() {
 
 #[test]
 fn dev_boots_five_unprivileged_roles_and_strips_secrets() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let views = "\
 view json POST \"/json\" {
@@ -1272,7 +1273,7 @@ view home regex '/.*' {
         "BLASTIT_ENV_STRIP itself reached a view: {env}"
     );
 
-    // The granted route's SQL goes through dbproxy to the mock upstream.
+    // The granted route's SQL goes through dbproxy to the upstream.
     let sql = dev.get_json("/sql");
     assert_eq!(sql["ok"], true, "{sql}\n{}", dev.stdout_text());
     assert!(
@@ -1326,7 +1327,7 @@ view home regex '/.*' {
 
 #[test]
 fn one_route_banner_singularises() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view home regex '/.*' {}
@@ -1349,7 +1350,7 @@ view home regex '/.*' {}
 
 #[test]
 fn a_non_loopback_host_needs_the_acknowledgement() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "view home regex '/.*' {}\n";
     let manifest = manifest(routes);
@@ -1414,7 +1415,7 @@ fn a_non_loopback_host_needs_the_acknowledgement() {
 
 #[test]
 fn a_memory_watermark_above_the_reading_serves_and_above_the_host_refuses_by_name() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "view home regex '/.*' {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n";
 
@@ -1608,7 +1609,7 @@ fn memory_tree(tag: &str, total_gib: u64, current_gib: u64, stat: Option<&str>) 
 
 #[test]
 fn a_host_whose_page_cache_is_above_the_default_still_boots_and_serves() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "view home regex '/.*' {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n";
 
@@ -1643,7 +1644,7 @@ fn a_host_whose_page_cache_is_above_the_default_still_boots_and_serves() {
 
 #[test]
 fn the_dev_memory_advisory_is_one_line_and_only_above_the_default() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "view home regex '/.*' {\n    postgres {\n        query 'SELECT 1'\n    }\n}\n";
 
@@ -1689,7 +1690,7 @@ fn the_dev_memory_advisory_is_one_line_and_only_above_the_default() {
 
 #[test]
 fn unprivileged_production_has_no_single_uid_fallback() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "view home regex '/.*' {}\n";
     let dir = fixture("production", &manifest(routes));
@@ -1730,7 +1731,7 @@ fn unprivileged_production_has_no_single_uid_fallback() {
 
 #[test]
 fn only_a_granted_route_gets_a_pg_socket() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view granted regex '/granted/.*' {
@@ -1782,7 +1783,7 @@ view ungranted regex '/ungranted/.*' {}
 
 #[test]
 fn an_empty_grant_gets_a_denying_listener() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view locked regex '/locked/.*' {
@@ -1836,7 +1837,7 @@ view open regex '/open/.*' {
 
 #[test]
 fn an_egress_false_view_cannot_open_inet() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view closed regex '/closed/.*' {}
@@ -1907,7 +1908,7 @@ fn assert_no_port_key(value: &serde_json::Value, raw_line: &str) {
 
 #[test]
 fn fatal_startup_removes_the_ephemeral_dev_root() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view home regex '/.*' {
@@ -2004,7 +2005,7 @@ view home regex '/.*' {
 
 #[test]
 fn json_mode_emits_privilege_and_never_a_port_key() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view home regex '/.*' {
@@ -2074,7 +2075,7 @@ view home regex '/.*' {
 
 #[test]
 fn learn_writes_routes_and_queries_on_sigterm() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view home \"/\" {
@@ -2187,7 +2188,7 @@ view sql \"/sql\" {}
 
 #[test]
 fn learn_refuses_a_literal_on_a_live_request() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view home \"/\" {
@@ -2266,7 +2267,7 @@ view literal \"/literal\" {}
 fn learn_attributes_queries_per_route_across_concurrent_live_views() {
     use blastit_manifest::{Grant, Manifest, ProxyName};
 
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view a regex '/a/.*' {}
@@ -2362,7 +2363,7 @@ view b \"/b\" {}
 fn first_declared_route_keeps_all_queries_when_unrouted_requests_exist() {
     use blastit_manifest::{Grant, Manifest, ProxyName};
 
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "\
 view a regex '/a/.*' {}
@@ -2510,7 +2511,7 @@ fn only_a_lost_bind_is_classified_as_a_lost_port() {
 
 #[test]
 fn a_launch_that_loses_its_port_retries_with_a_fresh_one() {
-    let server = MockPgServer::start();
+    let server = PgUpstream::start();
     let url = database_url(&server);
     let routes = "view home regex '/.*' {}\n";
 

@@ -4,4 +4,4 @@
 //! is the policy's business, and every helper here is a real loopback server or
 //! a fixture directory.
 
-pub mod mock_pg;
+pub mod pg_upstream;

@@ -1,7 +1,7 @@
 //! Critical: `dbproxy --learn`, dynamic-check and literal redaction
 //! (R24, R26, R31; §7.2 row `R26 (db), R31`; ADR-0003, ADR-0004).
 //!
-//! Everything here runs unprivileged and offline against [`MockPgServer`] on
+//! Everything here runs unprivileged and offline against [`PgUpstream`] on
 //! `127.0.0.1:0`: no root, no Docker, no `BLASTIT_TEST_PG_URL`.
 //!
 //! The positive twins prove one pass of a suite is enough:
@@ -24,7 +24,6 @@
 //!   and closed, and a stalled one is cut off by the 5 s deadline.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::HashMap;
 use std::os::fd::IntoRawFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
@@ -40,238 +39,17 @@ use blastit_dbproxy::{
 use blastit_events::{Event, EventKind, PgRefuseReason, encode_json};
 use blastit_sqlpolicy::TableGrants;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+
+mod common;
+
+use common::pg_upstream::{PgUpstream, StartupRequest, frame};
 
 /// A value no log line, event or observation may ever carry.
 const SENTINEL: &str = "s3cr3t";
 
-/// PostgreSQL protocol version 3.0.
+/// The protocol word the raw client sends in its startup packet.
 const PROTOCOL_VERSION: u32 = 196_608;
-
-//
-// MockPgServer: a PostgreSQL good enough for pregresql's upstream client.
-//
-
-/// What one upstream connection's startup packet asked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StartupRequest {
-    /// `user` parameter.
-    user: String,
-    /// `database` parameter.
-    database: String,
-}
-
-/// A PostgreSQL server on `127.0.0.1:0`.
-///
-/// It speaks exactly the wire pregresql's upstream client needs — trust
-/// authentication, three `ParameterStatus` frames, a backend key, and then the
-/// simple and extended protocol acknowledgements — and records what it was
-/// asked, so a test can prove a statement reached (or never reached) the
-/// database.
-struct MockPgServer {
-    port: u16,
-    startups: Arc<Mutex<Vec<StartupRequest>>>,
-    statements: Arc<Mutex<Vec<String>>>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl MockPgServer {
-    /// Binds `127.0.0.1:0` and serves in the background.
-    async fn start() -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("the mock server binds a loopback port");
-        let port = listener
-            .local_addr()
-            .expect("the mock server has an address")
-            .port();
-        let startups = Arc::new(Mutex::new(Vec::new()));
-        let statements = Arc::new(Mutex::new(Vec::new()));
-        let task = tokio::spawn({
-            let startups = Arc::clone(&startups);
-            let statements = Arc::clone(&statements);
-            async move {
-                loop {
-                    let Ok((stream, _peer)) = listener.accept().await else {
-                        return;
-                    };
-                    let startups = Arc::clone(&startups);
-                    let statements = Arc::clone(&statements);
-                    tokio::spawn(async move {
-                        let _ = serve_upstream(stream, startups, statements).await;
-                    });
-                }
-            }
-        });
-        Self {
-            port,
-            startups,
-            statements,
-            task,
-        }
-    }
-
-    /// Every startup packet the server received, in order.
-    fn startups(&self) -> Vec<StartupRequest> {
-        self.startups.lock().expect("the startup log").clone()
-    }
-
-    /// Every statement the server was sent, in order.
-    fn statements(&self) -> Vec<String> {
-        self.statements.lock().expect("the statement log").clone()
-    }
-}
-
-impl Drop for MockPgServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-/// Serves one upstream connection.
-async fn serve_upstream(
-    mut stream: tokio::net::TcpStream,
-    startups: Arc<Mutex<Vec<StartupRequest>>>,
-    statements: Arc<Mutex<Vec<String>>>,
-) -> std::io::Result<()> {
-    // A reachability probe connects and closes without a word: nothing to do.
-    let mut length = [0u8; 4];
-    let mut read = 0usize;
-    while read < length.len() {
-        match stream.read(&mut length[read..]).await? {
-            0 if read == 0 => return Ok(()),
-            0 => return Ok(()),
-            n => read += n,
-        }
-    }
-    let length = u32::from_be_bytes(length) as usize;
-    if !(4..=16 * 1024).contains(&length) {
-        return Ok(());
-    }
-    let mut payload = vec![0u8; length - 4];
-    stream.read_exact(&mut payload).await?;
-    let protocol = u32::from_be_bytes(
-        payload[..4]
-            .try_into()
-            .expect("the startup packet has a protocol version"),
-    );
-    if protocol != PROTOCOL_VERSION {
-        return Ok(());
-    }
-    let mut parameters: HashMap<String, String> = HashMap::new();
-    let mut fields = payload[4..].split(|byte| *byte == 0);
-    while let Some(key) = fields.next() {
-        if key.is_empty() {
-            break;
-        }
-        let Some(value) = fields.next() else {
-            break;
-        };
-        parameters.insert(
-            String::from_utf8_lossy(key).into_owned(),
-            String::from_utf8_lossy(value).into_owned(),
-        );
-    }
-    startups
-        .lock()
-        .expect("the startup log")
-        .push(StartupRequest {
-            user: parameters.get("user").cloned().unwrap_or_default(),
-            database: parameters.get("database").cloned().unwrap_or_default(),
-        });
-
-    // Trust authentication: a view proves its identity with its socket, and the
-    // upstream is dbproxy's own session.
-    stream.write_all(&frame(b'R', &0i32.to_be_bytes())).await?;
-    for (name, value) in [
-        ("client_encoding", "UTF8"),
-        ("standard_conforming_strings", "on"),
-        ("server_version", "16.15"),
-    ] {
-        let mut body = Vec::new();
-        body.extend_from_slice(name.as_bytes());
-        body.push(0);
-        body.extend_from_slice(value.as_bytes());
-        body.push(0);
-        stream.write_all(&frame(b'S', &body)).await?;
-    }
-    let mut key = Vec::new();
-    key.extend_from_slice(&1i32.to_be_bytes());
-    key.extend_from_slice(&2i32.to_be_bytes());
-    stream.write_all(&frame(b'K', &key)).await?;
-    stream.write_all(&frame(b'Z', b"I")).await?;
-
-    loop {
-        let mut header = [0u8; 5];
-        if stream.read_exact(&mut header).await.is_err() {
-            return Ok(());
-        }
-        let tag = header[0];
-        let length = u32::from_be_bytes(
-            header[1..]
-                .try_into()
-                .expect("a message header carries four length bytes"),
-        ) as usize;
-        if !(4..=1_000_000).contains(&length) {
-            return Ok(());
-        }
-        let mut body = vec![0u8; length - 4];
-        stream.read_exact(&mut body).await?;
-        match tag {
-            b'Q' => {
-                let sql = String::from_utf8_lossy(trim_nul(&body)).into_owned();
-                statements.lock().expect("the statement log").push(sql);
-                stream.write_all(&frame(b'C', b"SELECT 0\0")).await?;
-                stream.write_all(&frame(b'Z', b"I")).await?;
-            }
-            // Parse carries the statement text; Bind, Describe and Execute are
-            // acknowledgements of a statement the Parse already reported.
-            b'P' => {
-                let sql = parse_text(&body);
-                statements.lock().expect("the statement log").push(sql);
-                stream.write_all(&frame(b'1', &[])).await?;
-            }
-            b'B' => stream.write_all(&frame(b'2', &[])).await?,
-            b'D' => stream.write_all(&frame(b'n', &[])).await?,
-            b'E' => stream.write_all(&frame(b'C', b"SELECT 0\0")).await?,
-            b'C' => stream.write_all(&frame(b'3', &[])).await?,
-            b'S' => stream.write_all(&frame(b'Z', b"I")).await?,
-            b'H' => {}
-            b'X' => return Ok(()),
-            _ => {}
-        }
-    }
-}
-
-/// The text of a `Parse` message: `name\0sql\0types`.
-fn parse_text(body: &[u8]) -> String {
-    let mut parts = body.split(|byte| *byte == 0);
-    let _name = parts.next();
-    let sql = parts.next().unwrap_or_default();
-    String::from_utf8_lossy(sql).into_owned()
-}
-
-/// `body` without its trailing NUL.
-fn trim_nul(body: &[u8]) -> &[u8] {
-    match body.last() {
-        Some(0) => &body[..body.len() - 1],
-        _ => body,
-    }
-}
-
-/// One protocol frame.
-fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(body.len() + 5);
-    out.push(tag);
-    out.extend_from_slice(
-        &u32::try_from(body.len() + 4)
-            .expect("a frame body fits in u32")
-            .to_be_bytes(),
-    );
-    out.extend_from_slice(body);
-    out
-}
 
 //
 // A raw client, so the test sees protocol frames rather than a driver's
@@ -559,12 +337,12 @@ impl Drop for Running {
     }
 }
 
-/// A proxy specification pointing at the mock server.
-fn proxy_spec(server: &MockPgServer, database: &str) -> ProxySpec {
+/// A proxy specification pointing at the upstream.
+fn proxy_spec(server: &PgUpstream, database: &str) -> ProxySpec {
     ProxySpec {
         name: "db".to_string(),
         host: "127.0.0.1".to_string(),
-        port: server.port,
+        port: server.port(),
         user: "real-user".to_string(),
         password: "real-password".to_string().into(),
         database: database.to_string(),
@@ -663,7 +441,7 @@ async fn start_as(name: &str, mut config: DbproxyConfig, route: &str, uid: u32) 
 
 /// The dynamic-check configuration: one wildcard listener per proxy, and the
 /// route grants `Manifest::effective_grants` would have produced.
-fn dynamic_check(server: &MockPgServer, policies: Vec<RoutePolicySpec>) -> DbproxyConfig {
+fn dynamic_check(server: &PgUpstream, policies: Vec<RoutePolicySpec>) -> DbproxyConfig {
     DbproxyConfig {
         proxies: vec![proxy_spec(server, "app")],
         mode: ListenerMode::DynamicCheck,
@@ -688,7 +466,7 @@ fn policy(route: &str, query: &str) -> RoutePolicySpec {
 
 #[tokio::test]
 async fn learning_ignores_fixture_sql_and_replays_setup_once_on_the_first_route() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let mut proxy = start(
         "learn",
         dynamic_check(&server, vec![policy("product-detail", "SELECT 1")]),
@@ -721,7 +499,7 @@ async fn learning_ignores_fixture_sql_and_replays_setup_once_on_the_first_route(
     assert_eq!(
         server.statements().len(),
         3,
-        "every statement ran: the mock saw them"
+        "every statement ran: the upstream saw them"
     );
 
     // The first routed request: the held setup is replayed against it, before
@@ -826,7 +604,7 @@ async fn learning_ignores_fixture_sql_and_replays_setup_once_on_the_first_route(
 
 #[tokio::test]
 async fn an_unrouted_request_carries_its_own_target() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let mut proxy = start("unrouted", dynamic_check(&server, Vec::new()), "*").await;
     let mut client = RawClient::connect(&proxy.directory, proxy.port).await;
 
@@ -851,7 +629,7 @@ async fn an_unrouted_request_carries_its_own_target() {
 
 #[tokio::test]
 async fn set_db_switches_the_database_the_next_session_requests() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let mut proxy = start("set-db", dynamic_check(&server, Vec::new()), "*").await;
 
     let mut first = RawClient::connect(&proxy.directory, proxy.port).await;
@@ -904,7 +682,7 @@ async fn set_db_switches_the_database_the_next_session_requests() {
 
 #[tokio::test]
 async fn enforce_still_answers_42501_and_redacts_every_literal() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let directory = scratch("enforce");
     let port = 5432;
     let listener = bind(&directory, port);
@@ -988,7 +766,7 @@ async fn enforce_still_answers_42501_and_redacts_every_literal() {
 
 #[tokio::test]
 async fn a_listener_for_another_uid_refuses_the_client_before_the_upstream() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let mut stranger = start_as(
         "uid-mismatch",
         dynamic_check(&server, Vec::new()),
@@ -1034,7 +812,7 @@ async fn a_listener_for_another_uid_refuses_the_client_before_the_upstream() {
     assert_eq!(
         server.startups(),
         Vec::<StartupRequest>::new(),
-        "the mock upstream was never even sent a startup packet"
+        "the upstream was never even sent a startup packet"
     );
     assert_eq!(
         server.statements(),
@@ -1099,7 +877,7 @@ async fn a_listener_for_another_uid_refuses_the_client_before_the_upstream() {
 
 #[tokio::test]
 async fn a_root_listener_without_the_opt_in_is_rejected() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let directory = scratch("root-listener");
     let listener = bind(&directory, 5432);
     let fd = listener.into_raw_fd();
@@ -1129,7 +907,7 @@ async fn a_root_listener_without_the_opt_in_is_rejected() {
 
 #[tokio::test]
 async fn a_malformed_control_line_is_answered_and_closed() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let mut proxy = start("ctl-malformed", dynamic_check(&server, Vec::new()), "*").await;
     proxy
         .ctl
@@ -1151,7 +929,7 @@ async fn a_malformed_control_line_is_answered_and_closed() {
 
 #[tokio::test]
 async fn an_oversized_control_line_is_refused_without_buffering_it() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let mut proxy = start("ctl-oversized", dynamic_check(&server, Vec::new()), "*").await;
     let oversized = vec![b'x'; 8 * 1024];
     proxy
@@ -1175,7 +953,7 @@ async fn an_oversized_control_line_is_refused_without_buffering_it() {
 
 #[tokio::test]
 async fn a_stalled_control_line_times_out_instead_of_hanging() {
-    let server = MockPgServer::start().await;
+    let server = PgUpstream::start();
     let mut proxy = start("ctl-stalled", dynamic_check(&server, Vec::new()), "*").await;
     proxy
         .ctl

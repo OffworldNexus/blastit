@@ -2,7 +2,7 @@
 id: MB.40.3.3
 title: "Delete tests/common/mock_pg.rs: real TCP PostgreSQL-upstream harness for both critical suites"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 3
 depends_on: [MB.40.3.2]
@@ -12,11 +12,11 @@ paths:
   - "crates/blastit-dbproxy/tests/common/**"
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T01:45"
-updated: "2026-11-19T01:45"
+updated: "2026-11-19T02:29"
 ---
 
 # Goal
