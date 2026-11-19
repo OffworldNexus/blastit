@@ -22,14 +22,15 @@ static "/" {
 }
 ```
 
-`uvx blastit dev` serves it on `127.0.0.1:8080`; `uvx` is `npx` for Python tools, fetching blastit
-into a throwaway cache with no project and no venv.
+`blastit dev` serves it on `127.0.0.1:8080`. A static site needs no language runtime, so the release
+archive is the whole install: unpack `blastit-x86_64-unknown-linux-gnu.tar.gz` and put that
+directory on `PATH` ([getting started](../getting-started.md#1-install)).
 
 ```console
-$ uvx blastit dev
+$ blastit dev
   blastit dev · single-uid simulation · http://127.0.0.1:8080
   Not a sandbox. Production `blastit` refuses to run like this.
-  http · scheduler · dbproxy · 1 route
+  http · scheduler · dbproxy · 0 routes
 ```
 
 ## The four directives
@@ -72,18 +73,23 @@ Content-Type: text/html; charset=utf-8
 Cache-Control: no-cache
 ```
 
-Everything else is revalidated. A path outside `root` is refused, never masked by the app or by
-`index.html`.
+## What a mount refuses
+
+`root` is a boundary, not a prefix: `..` (plain or percent-encoded), a NUL byte, an absolute or a
+backslash path are refused with `400`; a symlink that leaves `root` and a dotfile such as `.env` or
+`.git` are `404`. A refusal is final — never the app, never `index.html` — and `/.well-known/` is
+the one dotfile exception.
 
 ## Check the roots
 
 ```console
-$ uvx blastit check
-$ uvx blastit check --json
+$ blastit check
+$ blastit check --json
 ```
 
 `blastit check` audits every `root` for existence and readability, exits `0`, or `2` naming a root
-it cannot read. `--json` prints the same document on success; exit `2` leaves stdout empty.
+it cannot read. `--json` prints the same document on success; exit `2` leaves stdout empty. A mount
+is not a route, so the banner and the document both count none.
 
 ## Deploy it
 
@@ -93,3 +99,8 @@ $ blastit --preset compose-traefik
 
 `blastit --preset compose-traefik` on the deploy host starts this file with the Compose preset's
 defaults; [deployments](../deploy/index.md) own the stack.
+
+## Where next
+
+* [Frameworks](index.md) — the Python and PHP interfaces beside this one.
+* [The Blastfile](../blastfile.md) — every directive a mount reads.

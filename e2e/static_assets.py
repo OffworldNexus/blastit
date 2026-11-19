@@ -10,19 +10,19 @@ page, extracts every `$ ` command from its ```` ```console ```` fences, and
 replays the ones a running static site can answer against the container's own
 `blastit dev`:
 
-* the banner fence (`uvx blastit dev`) matches the process's first three lines;
+* the banner fence (`blastit dev`) matches the process's first three lines;
 * each `curl -i` fence is sent at the page's own path and must return the page's
   own status line and every header line it shows;
 * the `spa = true` deep URL's body is `public/index.html`, not a rewritten file;
 * the hashed asset's body is the file, under the year-long immutable cache;
-* `uvx blastit check` exits `0` with no output, and `--json` is one document;
+* `blastit check` exits `0` with no output, and `--json` is one document;
 * the refusals the page's threat list names answer their documented status:
   `..`, percent-encoded `..`, NUL and backslash are `400`; a dotfile and a symlink
   that leaves `root` are `404`; none of them ever carries file bytes.
 
 Commands that need Node or a production host (`npx vite build`,
 `blastit --preset compose-traefik`) are listed as skipped with the reason; the last
-one is owned by `e2e/rootless` (E1). The page's `uvx` prefix is not executed: the
+one is owned by `e2e/rootless` (E1). The page's `blastit dev` line is not executed: the
 driver compares the page's banner with the container's own `blastit dev` and runs
 its own `blastit check`. An unknown `$ `
 command is a failure: a page edit cannot silently stop being replayed.
@@ -124,8 +124,8 @@ _CONSOLE = re.compile(
 )
 
 #: The banner's last line: the processes that run, then how many views answer.
-#: A `static` mount is not a route (§9.5), so this file counts zero of them while
-#: the page still documents the one-route count it was written with.
+#: A `static` mount is not a route (§9.5), so the page and this file both count
+#: zero of them.
 _BANNER_SUMMARY = re.compile(
     r"^(?P<fixed>  [^·]+ · [^·]+ · [^·]+ · )(?P<count>\d+) routes?$"
 )
@@ -136,11 +136,11 @@ def banner_line(page_line: str, live_line: str) -> bool:
 
     Every line is exact but the summary: its fixed words must appear verbatim,
     and its count is the live one. A `static` mount is not a route (§9.5), so
-    the file counts zero of them while the page still documents the one-route
-    count it was written with. [`replay`](replay) therefore asserts both halves
-    itself: the page's own count is pinned to the documented `1 route`, and the
-    live count is pinned to `0` — so the page edit that changes the first is a
-    deliberate diff rather than an unnoticed one.
+    the page and this file both count zero of them. [`replay`](replay)
+    nonetheless asserts both halves itself: the page's own count is pinned to
+    the documented `0 routes`, and the live count is pinned to `0` — so the page
+    edit that changes the first is a deliberate diff rather than an unnoticed
+    one.
     """
     if page_line == live_line:
         return True
@@ -197,7 +197,11 @@ def command_kind(command: str) -> str | None:
         return "curl"
     if command in ("uvx blastit dev", "uv run blastit dev", "blastit dev"):
         return "dev"
-    if command in ("uvx blastit check --json", "uv run blastit check --json"):
+    if command in (
+        "uvx blastit check --json",
+        "uv run blastit check --json",
+        "blastit check --json",
+    ):
         return "check-json"
     if command in ("uvx blastit check", "uv run blastit check", "blastit check"):
         return "check"
@@ -359,17 +363,15 @@ def replay(
             checks.that(
                 window is not None, f"`{command}` prints the page's banner verbatim"
             )
-            # The page's own count is the fixture it was written for (one route,
-            # which is what a retired `[[route]]` with a `[route.static]` block
-            # counted). The file has a mount now, and a mount is not a route, so
-            # the live banner says `0 routes`; updating this line is the page
-            # edit (`MB.21.5.1`), and this check makes it deliberate.
+            # The page's own count is `0 routes`: a `static` mount is not a
+            # route, and the live banner agrees. Pinning the line makes a later
+            # edit to it a deliberate diff rather than an unnoticed one.
             page_summary = next(
                 (line for line in shown if _BANNER_SUMMARY.match(line)), ""
             )
             checks.that(
-                page_summary.endswith(" 1 route"),
-                "the page documents the one-route banner it was written for "
+                page_summary.endswith(" 0 routes"),
+                "the page documents the banner with no routes "
                 f"({page_summary!r}), so changing it is its own diff",
             )
             checks.that(

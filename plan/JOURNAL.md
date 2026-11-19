@@ -3765,3 +3765,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T12:53 [MB.41.1] (lead) lead-verified green: make docs-check platform-matrix-check zed-check EXIT=0 on current bytes; pages 126/128/129/127/129/127 lines; 11 linked tab groups each of 
 - 2026-11-19T12:56 [MB.41.1] (lead) REVIEW FIX (filtered by lead): PHP install tab missing archive download; static tabs use uvx while page says no runtime (unify on standalone archive, uv only fo
 - 2026-11-19T13:00 [MB.41.1] (lead) status review -> done
+- 2026-11-19T13:00 [MB.41.1] (lead) commit 48f2952a47cc4fb90543b18a5c7d0115ef607563
+- 2026-11-19T13:00 [MB.41.2] (lead) status ready -> active
+- 2026-11-19T13:00 [MB.41.2] (lead) attempt 1/3 started
+- 2026-11-19T13:00 [MB.41.2] (lead) base 48f2952a47cc4fb90543b18a5c7d0115ef607563
+- 2026-11-19T13:07 [MB.41.2] (unknown) edited fields
+- 2026-11-19T13:07 [MB.41.2] (lead) path widened (lead): e2e/static_assets.py + python/tests/runnable_docs/inventory.toml — static page now documents bare 'blastit dev/check', required so the repl
+- 2026-11-19T13:07 [MB.41.2] (lead) status active -> review
+- 2026-11-19T13:07 [MB.41.2] (lead) lead gate: docs-check green (No issues found), platform-matrix ok, zed-check OK(59)+44 tests, e2e/static_assets.py --self-test 17/17 PASS, 14 synchronized tab g
+- 2026-11-19T13:11 [MB.41.2] (lead) REVIEW FIX (filtered): deploy Dockerfile tabs must be complete runnable images per runtime (anything-else stubs lack COPY/CMD/apt-get update; shared --health-cm
+- 2026-11-19T13:14 [MB.41.2] (lead) status review -> done

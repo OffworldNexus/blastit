@@ -31,3 +31,7 @@ REVIEW FIX (filtered by lead): PHP install tab missing archive download; static 
 ## 2026-11-19T13:00 [lead]
 
 status review -> done
+
+## 2026-11-19T13:00 [lead]
+
+commit 48f2952a47cc4fb90543b18a5c7d0115ef607563

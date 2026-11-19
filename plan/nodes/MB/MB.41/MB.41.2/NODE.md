@@ -2,7 +2,7 @@
 id: MB.41.2
 title: "Align Deployments, Frameworks, Reference, How-it-works, Security & Troubleshooting with multi-language golden paths & cloud app-server framing"
 kind: task
-status: ready
+status: done
 owner: writer
 priority: 1
 depends_on: [MB.41.1]
@@ -13,11 +13,13 @@ paths:
   - "docs/how-it-works.md"
   - docs/security.md
   - docs/troubleshooting.md
-attempts: 0
+  - e2e/static_assets.py
+  - python/tests/runnable_docs/inventory.toml
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T12:44"
-updated: "2026-11-19T12:44"
+updated: "2026-11-19T13:14"
 ---
 
 # Goal

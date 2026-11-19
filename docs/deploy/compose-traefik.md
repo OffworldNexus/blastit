@@ -1,15 +1,14 @@
 # Docker Compose behind Traefik
 
-Compose gives the rootless path: a dedicated uid with file capabilities, PgBouncer
-on the bridge network, Traefik at the edge.
+Compose gives the rootless path: a dedicated uid with file capabilities, PgBouncer on the bridge
+network, Traefik at the edge.
 
 ```console
 $ blastit --preset compose-traefik
 ```
 
-That is the boot, not a print: without root or the capabilities it exits `1`,
-naming the missing `cap_*` and pointing at `blastit dev`. The stack sets
-`BLASTIT_PRESET` instead.
+That is the boot, not a print: without root or the capabilities it exits `1`, naming the missing
+`cap_*` and pointing at `blastit dev`. The stack sets `BLASTIT_PRESET` instead.
 
 ## What the preset sets
 
@@ -88,15 +87,13 @@ http:
 ```
 
 Mount this as `dynamic.yml` and name it in the provider:
-`--providers.file.filename=/etc/traefik/dynamic.yml`. (`traefik.yml` is the static
-file; Traefik exits if a dynamic document is there.) `shop.example.com` is your
-host: change it in both rules here; `REPLACE_WITH_REGISTRY` is yours, here and in
-every `image:` line.
+`--providers.file.filename=/etc/traefik/dynamic.yml`. (`traefik.yml` is the static file; Traefik
+exits if a dynamic document is there.) `shop.example.com` is your host — change it in both rules —
+and `REPLACE_WITH_REGISTRY` is yours in every `image:` line.
 
 ### 2. Values
 
-Create `.env` and git-ignore it before the first build; every `${...:?}` is in
-it:
+Create `.env` and git-ignore it before the first build; every `${...:?}` is in it:
 
 ```dotenv title=".env"
 DB_OWNER_PASSWORD=REPLACE_WITH_OWNER_PASSWORD
@@ -105,10 +102,9 @@ DJANGO_SECRET_KEY=REPLACE_WITH_50_CHAR_SECRET
 TAG=REPLACE_WITH_GIT_SHA
 ```
 
-`openssl rand -hex 16` twice fills the passwords and `openssl rand -base64 50`
-the key; `TAG` is `git rev-parse --short HEAD`. Compose reads `./.env` itself, so
-nothing needs sourcing — export `TAG` only so the build tags the image the stack
-pulls. Never commit the file.
+`openssl rand -hex 16` twice fills the passwords and `openssl rand -base64 50` the key; `TAG` is
+`git rev-parse --short HEAD`. Compose reads `./.env` itself, so export `TAG` only so the build tags
+the image the stack pulls. Never commit the file.
 
 ### 3. Grants
 
@@ -126,52 +122,101 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app;
 -- Tables a later migration adds:
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app;
--- Narrow it to one GRANT per table and verb once the routes are known.
 ```
 
 ### 4. The image { #rootless }
 
-Docker's `cap_add` only sets the container's *bounding* set: a non-root `user:`
-process gets **no** capabilities from it. The image therefore puts file
-capabilities on a dedicated copy of the interpreter.
+Docker's `cap_add` only sets the container's *bounding* set: a non-root `user:` process gets **no**
+capabilities from it, so each image puts file capabilities on a dedicated copy of what init starts
+from. One complete image per runtime:
 
-```dockerfile title="Dockerfile"
-FROM python:3.13-slim
+=== "Python (WSGI)"
+    ```dockerfile title="Dockerfile"
+    FROM python:3.13-slim
 
-WORKDIR /app
-COPY requirements.txt .
-RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
-    && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir -r requirements.txt blastit
-COPY . .
+    WORKDIR /app
+    COPY requirements.txt .
+    RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
+        && rm -rf /var/lib/apt/lists/*
+    RUN pip install --no-cache-dir -r requirements.txt blastit
+    COPY . .
 
-ENV PYTHONUNBUFFERED=1
+    ENV PYTHONUNBUFFERED=1
 
-# `chown` clears a file capability, so nothing re-owns the file after `setcap`.
-ARG BLASTIT_UID=10000
-RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
-    && interpreter="$(readlink -f /usr/local/bin/python3.13)" \
-    && cp "$interpreter" "${interpreter%/*}/python3.13-init" \
-    && chown "$BLASTIT_UID:$BLASTIT_UID" "${interpreter%/*}/python3.13-init" \
-    && chmod 0500 "${interpreter%/*}/python3.13-init" \
-    && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-         "${interpreter%/*}/python3.13-init"
+    # `chown` clears a file capability, so nothing re-owns the file after `setcap`.
+    ARG BLASTIT_UID=10000
+    RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
+        && interpreter="$(readlink -f /usr/local/bin/python3.13)" \
+        && cp "$interpreter" "${interpreter%/*}/python3.13-init" \
+        && chown "$BLASTIT_UID:$BLASTIT_UID" "${interpreter%/*}/python3.13-init" \
+        && chmod 0500 "${interpreter%/*}/python3.13-init" \
+        && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+             "${interpreter%/*}/python3.13-init"
 
-EXPOSE 8080
-```
+    EXPOSE 8080
+    ```
 
-A file with capabilities turns any process of that uid into init: Blastit refuses
-a deployment where a *shared* interpreter carries them
-([security model](../security.md#the-mechanisms)).
+=== "PHP"
+    ```dockerfile title="Dockerfile"
+    FROM debian:trixie-slim
+
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates curl libcap2-bin libphp-embed php-pgsql \
+        && rm -rf /var/lib/apt/lists/*
+    WORKDIR /app
+    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
+        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
+        && rm blastit-*.tar.gz
+
+    # The copy sits beside the shims, which is where a boot finds them.
+    ARG BLASTIT_UID=10000
+    RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
+        && cp /usr/local/share/blastit/lib/blastit /usr/local/share/blastit/lib/blastit-init \
+        && chown "$BLASTIT_UID:$BLASTIT_UID" /usr/local/share/blastit/lib/blastit-init \
+        && chmod 0500 /usr/local/share/blastit/lib/blastit-init \
+        && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+             /usr/local/share/blastit/lib/blastit-init
+
+    COPY . .
+    EXPOSE 8080
+    ```
+
+=== "Static & SPA"
+    ```dockerfile title="Dockerfile"
+    FROM debian:trixie-slim
+
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates curl libcap2-bin \
+        && rm -rf /var/lib/apt/lists/*
+    WORKDIR /app
+    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
+        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
+        && rm blastit-*.tar.gz
+
+    ARG BLASTIT_UID=10000
+    RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
+        && cp /usr/local/share/blastit/lib/blastit /usr/local/share/blastit/lib/blastit-init \
+        && chown "$BLASTIT_UID:$BLASTIT_UID" /usr/local/share/blastit/lib/blastit-init \
+        && chmod 0500 /usr/local/share/blastit/lib/blastit-init \
+        && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+             /usr/local/share/blastit/lib/blastit-init
+
+    COPY . .
+    EXPOSE 8080
+    ```
+
+A file with capabilities turns any process of that uid into init: Blastit refuses a deployment
+where a *shared* interpreter carries them ([security model](../security.md#the-mechanisms)). The
+non-Python tabs copy the archive's `blastit` to `blastit-init` in the directory that holds its
+shims, so the copy is the only capable file and `entrypoint php` still finds them.
 
 ### 5. Compose
 
-Start from the [Django guide](../frameworks/python/django.md#manifest)'s `Blastfile`
-(`postgres $DATABASE_URL`, or a split `postgres { url …; ca_cert $DATABASE_CA_CERT }`
-block when connecting to a TLS-verified network database) with every view's
-grants filled in — an empty `postgres {}` denies every statement. Deploy only a
-file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)). `settings.py`
-must read the host: `ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]`.
+Start from the [Django guide](../frameworks/python/django.md#manifest)'s `Blastfile`, with every
+view's grants filled in — an empty `postgres {}` denies every statement. A split store (with
+`ca_cert`) is for a TLS-verified network database. Deploy only a file `blastit check` passes
+([CI/CD](../ci.md#what-it-fails-on)), and have `settings.py` read the host:
+`ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]`.
 
 ```yaml title="compose.yaml"
 name: shop
@@ -196,7 +241,6 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
 
-  # The pool. App -> here; migrations -> db.
   pgbouncer:
     image: edoburu/pgbouncer:v1.26.1-p0
     environment:
@@ -216,7 +260,6 @@ services:
     depends_on:
       db: { condition: service_healthy }
 
-  # The schema owner: migrations only, never the web service's URL.
   migrate:
     image: registry.example.com/shop:${TAG:?}
     # Not init's uid: a migration bug cannot run the capable copy.
@@ -271,9 +314,10 @@ volumes:
   pgdata:
 ```
 
-`user:` is the dedicated uid that can run the capable copy. The app's
-`DATABASE_URL` names `pgbouncer`; `migrate` and `grant` name `db` — never swap
-the two.
+`user:` is the dedicated uid that can run the capable copy, and `command:` names that copy:
+`["/usr/local/bin/python3.13-init", "-m", "blastit"]` for the Python image,
+`["/usr/local/share/blastit/lib/blastit-init"]` for the PHP and static ones. The app's
+`DATABASE_URL` names `pgbouncer`; `migrate` and `grant` name `db` — never swap the two.
 
 ### 6. Build and start
 
@@ -285,24 +329,17 @@ $ docker compose logs app | head -1
 {"event":"boot","stage":"stage0","seccomp":true,"privilege":"capabilities","bounding_set":"dropped"}
 ```
 
-The boot line is trimmed (`ts`, `level`, `component` and `preset` elided). If
-nothing appears, run `docker compose logs grant`: a grant job that aborts stops
-`app` from starting.
+The boot line is trimmed (`ts`, `level`, `component` and `preset` elided). If nothing appears, run
+`docker compose logs grant`: a grant job that aborts stops `app` from starting.
 
-## What this platform does not do for you
+## Before the first deploy
 
-1. **Keep untrusted peers off the port.** The preset trusts every peer (`*`):
-   publish no port for the app and keep foreign containers off that network
-   ([client address](anything-else.md#client-ip-header)).
-2. **Make the numbers yours.** `BLASTIT_MAX_WORKERS` × instances must fit the
-   pool's client limit, and the app's role must not own the tables it reads
-   ([the pooler](anything-else.md#pooler)).
-3. **Read the ingress decision once it is live.** A header name is a guess until
-   one real request has been through Traefik
-   ([measure it](index.md#measure-your-ingress)).
+Publish no port for the app and keep foreign containers off its network: the preset trusts every
+peer (`*`), so Traefik must be the only way in ([client address](anything-else.md#client-ip-header)).
+`BLASTIT_MAX_WORKERS` × instances must fit the pool's client limit, and the app's role must not own
+the tables it reads. Then [measure the client address](index.md#measure-your-ingress) through Traefik.
 
 ## Where next
 
-Verify it: [measure the client address](index.md#measure-your-ingress) on the
-first real request, then [fair queuing](fair-queuing.md) for the knobs. Splitting
-the same app across platforms? [DigitalOcean App Platform](digitalocean-paas.md).
+Verify it with [the client-address check](index.md#measure-your-ingress), then read
+[fair queuing](fair-queuing.md). Splitting the same app? [DigitalOcean](digitalocean-paas.md).

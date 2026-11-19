@@ -1,6 +1,7 @@
 # How it works
 
-One Rust program plays five roles. The specification is
+Blastit is a Linux application server behind your cloud ingress: one Rust program that plays five
+roles, and one sandbox per route. The specification is
 [`ARCHITECTURE.md`](https://github.com/OffworldNexus/blastit/blob/develop/ARCHITECTURE.md).
 
 ## One program, five roles
@@ -15,7 +16,7 @@ One Rust program plays five roles. The specification is
 
 ```mermaid
 flowchart TB
-    lb(["load balancer"])
+    lb(["cloud ingress · TLS"])
     pg[("PostgreSQL")]
 
     subgraph container["container"]
@@ -43,10 +44,10 @@ Solid arrows are data, dotted ones parenthood; `B` is `BLASTIT_UID_BASE`.
 Internal traffic never uses TCP: only the PostgreSQL sockets are named, because
 drivers need a path.
 
-A route serves as many requests at once as the shared `BLASTIT_MAX_WORKERS`
-budget allows. Python threads each request inside its view process; PHP runs each
-concurrent request in its own view process, because NTS `libphp` runs one request
-per process ([settings](reference/settings.md#admission-and-threads)).
+A route serves as many requests at once as the shared `BLASTIT_MAX_WORKERS` budget allows. A WSGI
+view threads each request inside its own process; a PHP view runs each concurrent request in its own
+process, because the host's NTS `libphp` runs one request per process
+([settings](reference/settings.md#admission-and-threads)).
 
 ## A request
 
@@ -67,7 +68,7 @@ sequenceDiagram
         S->>S: SPAWN via init
     end
     S->>V: REQ_HEAD
-    V->>V: new thread, WSGI environ, app(environ, start_response)
+    V->>V: one worker turn — WSGI environ, or the PHP front controller
     V->>D: connect to its own socket
     D->>D: which listener, which uid → its allowlist
     loop every statement
@@ -83,9 +84,8 @@ sequenceDiagram
     V->>S: DONE — the worker slot is released
 ```
 
-Three things are the whole design: routing happens before Python; the listener a
-connection arrived on authorises it; and a denial is a PostgreSQL error the app
-sees, plus one log line.
+Three things are the whole design: routing happens before your code runs; the listener a connection
+arrived on authorises it; and a denial is a PostgreSQL error the app sees, plus one log line.
 
 A `static` mount answers without a view. The scheduler decodes the path
 once at the head and either refuses it there (`400` malformed, `404` hidden) or
@@ -129,10 +129,10 @@ uid, and installs its seccomp filter.
 
 ## The heap
 
-Python and the app are imported once, before any fork; every process shares that
-memory copy-on-write:
+The app — and CPython, for a WSGI view — is imported once, before any fork; every process shares
+that memory copy-on-write:
 
-* **immortalisation** — init writes CPython's immortal marker over the reference
+* **immortalisation** — for a Python view, init writes CPython's immortal marker over the reference
   count of every reachable object, so an incref never dirties a chunk;
 * **lazy spawning** and a cap on live view processes, derived from memory at boot
   and re-derived from what one costs on your app.

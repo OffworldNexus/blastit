@@ -13,6 +13,10 @@
 `dev`, `check`, `fmt` and `blastit` read `./Blastfile` here; `BLASTIT_MANIFEST`
 names another file, the only way to move it. There is no upward search.
 
+Every example below writes `blastit`, because the release archive and `make install` put that name
+on `PATH`. In a Python project it is `uv run blastit` — the same binary from the wheel, reading the
+same file — and that is the one form PHP and static sites do not have.
+
 ## `blastit dev`
 
 ```console

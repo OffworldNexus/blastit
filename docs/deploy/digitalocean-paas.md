@@ -1,15 +1,14 @@
 # DigitalOcean App Platform
 
-App Platform starts your container as root, an edge overwrites the client
+App Platform starts your container as root, its edge terminates TLS and overwrites the client
 address, and PostgreSQL is a managed cluster with its own pool.
 
 ```console
 $ blastit --preset digitalocean-paas
 ```
 
-That is the boot, not a print: without root or the capabilities it exits `1`,
-naming the missing `cap_*` and pointing at `blastit dev`. Your deploy file sets
-`BLASTIT_PRESET` instead.
+That is the boot, not a print: without root or the capabilities it exits `1`, naming the missing
+`cap_*` and pointing at `blastit dev`. Your deploy file sets `BLASTIT_PRESET` instead.
 
 ## What the preset sets
 
@@ -43,8 +42,6 @@ flowchart TB
     migrate -. "direct, no pool" .-> db
 ```
 
-Everything inside the box is the [model](index.md#the-topology) unchanged.
-
 ## Preset defaults
 
 | Thing | Value | Why |
@@ -61,9 +58,8 @@ Everything inside the box is the [model](index.md#the-topology) unchanged.
 
 ### 1. Image and manifest
 
-Start from the [Django guide](../frameworks/python/django.md#manifest)'s `Blastfile` and
-change two things: the store, and the grants — the guide's `postgres {}` denies every
-statement. Only the split store carries a CA, and the platform hands out the pool as
+Start from the [Django guide](../frameworks/python/django.md#manifest)'s `Blastfile` and change the
+store and its grants. Only the split store carries a CA, and the platform hands out the pool as
 separate bindables, so name each slot the spec fills:
 
 ```text title="Blastfile: the store block"
@@ -78,22 +74,49 @@ postgres {
 }
 ```
 
-A block gives the app `DATABASE_HOST` (its socket directory), `DATABASE_PORT`,
-`DATABASE_USERNAME` and `DATABASE_DATABASE` — never the password — and no `DATABASE_URL`,
-so `settings.py` builds `DATABASES` from those four (`sslmode` is `disable` there) and the
-`migrate` job keeps reading its own `DATABASE_URL`. `settings.py` reads the host the spec
-passes down: `ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]` — Django does not read
-`ALLOWED_HOST` on its own.
+A block gives the app `DATABASE_HOST` (its socket directory), `DATABASE_PORT`, `DATABASE_USERNAME`
+and `DATABASE_DATABASE` — never the password — and no `DATABASE_URL`, so `settings.py` builds
+`DATABASES` from those four (`sslmode` is `disable` there) while the `migrate` job keeps its own
+`DATABASE_URL`. `settings.py` also reads the host: `ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]`.
 
-Deploy only a file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)).
+Deploy only a file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)); one image per runtime:
 
-```dockerfile title="Dockerfile"
-FROM python:3.13-slim
-WORKDIR /app
-COPY . .
-RUN pip install --no-cache-dir -r requirements.txt blastit
-CMD ["blastit"]
-```
+=== "Python (WSGI)"
+    ```dockerfile title="Dockerfile"
+    FROM python:3.13-slim
+    WORKDIR /app
+    COPY . .
+    RUN pip install --no-cache-dir -r requirements.txt blastit
+    CMD ["blastit"]
+    ```
+
+=== "PHP"
+    ```dockerfile title="Dockerfile"
+    FROM debian:trixie-slim
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates curl libphp-embed php-pgsql \
+        && rm -rf /var/lib/apt/lists/*
+    WORKDIR /app
+    COPY . .
+    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
+        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
+        && rm blastit-*.tar.gz
+    CMD ["blastit"]
+    ```
+
+=== "Static & SPA"
+    ```dockerfile title="Dockerfile"
+    FROM debian:trixie-slim
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates curl \
+        && rm -rf /var/lib/apt/lists/*
+    WORKDIR /app
+    COPY . .
+    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
+        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
+        && rm blastit-*.tar.gz
+    CMD ["blastit"]
+    ```
 
 ```console
 $ doctl registry login   # once: doctl auth init, doctl registry create <name>
@@ -108,15 +131,12 @@ $ doctl databases create myshop-db --engine pg --region ams3 --size db-s-1vcpu-1
 $ export CLUSTER_ID=REPLACE_WITH_CLUSTER_ID   # the id the command above printed
 ```
 
-Console: **Databases → Create → PostgreSQL**. Steps 3 and 4 take `"$CLUSTER_ID"`.
-
 ### 3. Roles and grants
 
-`migrator` runs DDL so `app` never owns what it reads. `app` is a user **the
-platform manages** (**Users & Databases → Add user**, or the first command below):
-DigitalOcean generates its password and the pool carries it. `OWNER_URL` is
-`doadmin`'s, copied from **Connection Details**; `MIGRATOR_PASSWORD` is yours,
-hex because it is pasted into a URL.
+`migrator` runs DDL so `app` never owns what it reads. `app` is a user **the platform manages**
+(**Users & Databases → Add user**, or the first command below): DigitalOcean generates its password
+and the pool carries it. `OWNER_URL` is `doadmin`'s, copied from **Connection Details**;
+`MIGRATOR_PASSWORD` is yours, hex because it is pasted into a URL.
 
 ```console
 $ doctl databases user create "$CLUSTER_ID" app
@@ -131,8 +151,6 @@ CREATE ROLE migrator LOGIN PASSWORD :'ddl' NOSUPERUSER NOCREATEDB NOCREATEROLE;
 GRANT CONNECT ON DATABASE defaultdb TO migrator, app;
 GRANT migrator TO CURRENT_USER;
 ALTER SCHEMA public OWNER TO migrator;
--- Already the default on DigitalOcean; pinned so a later role edit cannot drift.
--- As the owner: `migrator` below may not alter another role.
 ALTER ROLE app SET timezone = 'UTC';
 SET ROLE migrator;
 GRANT USAGE ON SCHEMA public TO app;
@@ -144,14 +162,12 @@ RESET ROLE;
 
 ### 4. The pool
 
-Transaction mode drops the session after each transaction: migrations and any
-`SET` stay on the direct port, and an app that needs prepared statements, advisory
-locks or `LISTEN` wants **Session** mode, fixed at creation. Django sets
-`prepare_threshold=None`.
+Transaction mode drops the session after each transaction: migrations and any `SET` stay on the
+direct port, and prepared statements, advisory locks or `LISTEN` want **Session** mode, fixed at
+creation. Django sets `prepare_threshold=None`.
 
-**Databases → myshop-db → Connection Pools → Create pool**: name `shop-pool` (every
-`${db.shop-pool.*}` in the spec is this name), user `app`, db `defaultdb`,
-size `18`, mode **Transaction**.
+**Databases → myshop-db → Connection Pools → Create pool**: `shop-pool` (every `${db.shop-pool.*}`
+in the spec is this name), user `app`, db `defaultdb`, size `18`, mode **Transaction**.
 
 ```console
 $ doctl databases pool create "$CLUSTER_ID" shop-pool --db defaultdb --size 18 --user app --mode transaction
@@ -159,14 +175,12 @@ $ doctl databases pool create "$CLUSTER_ID" shop-pool --db defaultdb --size 18 -
 
 ### 5. The spec
 
-The web service's host, port, user, password and database are the pool's bindables (25061),
-so it logs in as `app` through the pool; `DATABASE_SSLMODE` is the literal `verify-full` and
-`DATABASE_CA_CERT` is the cluster's `${db.CA_CERT}` — the only value read from the cluster
-itself. `migrate.DATABASE_URL` is the cluster's direct port (25060), as `migrator`.
-`REPLACE_WITH_YOUR_TAG` below is this `$GIT_SHA`; `REPLACE_WITH_MIGRATOR_PASSWORD`
-is the hex from step 3, pasted literally (YAML does not expand it);
-`REPLACE_WITH_DB_HOST` is the private host on **Connection Details**; the two keys
-are `openssl rand -base64 50`. Keep `app.yaml` out of git.
+The web service's host, port, user, password and database are the pool's bindables (25061), so it
+logs in as `app` through the pool; `DATABASE_SSLMODE` is the literal `verify-full` and
+`DATABASE_CA_CERT` is the cluster's `${db.CA_CERT}`. `migrate.DATABASE_URL` is the cluster's direct
+port (25060), as `migrator`. `REPLACE_WITH_YOUR_TAG` is this `$GIT_SHA`;
+`REPLACE_WITH_MIGRATOR_PASSWORD` is the hex from step 3, pasted literally (YAML does not expand it);
+the two keys are `openssl rand -base64 50`. Keep `app.yaml` out of git.
 
 ```yaml title="app.yaml"
 name: myshop
@@ -216,19 +230,14 @@ $ doctl apps create --spec app.yaml
 
 `doctl apps list` prints the id for later updates.
 
-## What this platform does not do for you
+!!! warning "Before the first deploy"
 
-1. **Keep `*` honest.** A service is reachable only through DigitalOcean's edge,
-   which is why `*` is safe here: expose it another way and every peer is trusted.
-2. **Make the numbers yours.** `BLASTIT_MAX_WORKERS` × instances must fit the
-   pool's client limit, and the app's role must not own the tables it reads
-   ([the pooler](anything-else.md#pooler)).
-3. **Read the ingress decision once it is live.** A header name is a guess until
-   one real request has been through the edge
-   ([measure it](index.md#measure-your-ingress)).
+    Keep `*` honest: a service is reachable only through DigitalOcean's edge, so expose no other
+    path. `BLASTIT_MAX_WORKERS` × instances must fit the pool's client limit, and the app's role
+    must not own the tables it reads. Then [measure the client address](index.md#measure-your-ingress).
 
 ## Where next
 
-Verify it: [measure the client address](index.md#measure-your-ingress) on the
-first real request, then [fair queuing](fair-queuing.md) for the knobs. Splitting
-the same app across platforms? [Docker Compose](compose-traefik.md).
+Verify it with [the client-address check](index.md#measure-your-ingress), then read
+[fair queuing](fair-queuing.md) for the knobs. Splitting the same app across platforms?
+[Docker Compose](compose-traefik.md).

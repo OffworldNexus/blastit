@@ -1,7 +1,7 @@
 # Security model
 
-What blastit claims, and what it does not. Prove the view boundary on your
-machine first; the argument follows.
+What blastit claims, and the argument behind each claim. Prove the view boundary on your machine
+first; the rest follows.
 
 ## Prove it
 
@@ -41,13 +41,12 @@ another view's socket.
 deserialisation bug, a vulnerable dependency reachable from a view. The question
 is what the attacker is holding when that happens.
 
-**Out of scope, deliberately:** code the app runs **at import time** (stage 1, as
-init, before any view exists); **other secrets** in the environment, which every
-view can read (`BLASTIT_ENV_STRIP` hides what you name; `postgres` is the only
-store proxy in 0.2.0); TLS, HTTP/2, WebSockets and `Upgrade` (a load balancer
-terminates TLS; blastit answers `501`); per-uid **egress filtering** (`egress any`
-is the whole network); **parameter values** (a grant says which statement, not
-which row); an attacker with root in the container, and the app's own behaviour.
+**Out of scope, deliberately:** code the app runs **at import time** (stage 1, as init, before any
+view exists); **other secrets** in the environment, which every view can read (`BLASTIT_ENV_STRIP`
+hides what you name); TLS and HTTP/2, which your cloud ingress terminates and forwards as plain
+HTTP/1.1; per-uid **egress filtering** (`egress any` is the whole network); **parameter values** (a
+grant says which statement, not which row); an attacker with root in the container, and the app's
+own behaviour.
 
 ## What a compromise gets
 
@@ -95,11 +94,10 @@ allowlist does not fit.
   `TMPDIR`; `RLIMIT_NPROC` counts threads and backs up the scheduler's budget,
   with `RLIMIT_NOFILE` and `RLIMIT_CORE=0`, and `PR_SET_PDEATHSIG(SIGKILL)`
   means no process outlives init.
-* **Ingress bodies.** `json` and `form` decode and re-encode a body before the app
-  sees it, `none` rejects one, `raw` passes the bytes through. A body to a view
-  with no `body` is a `413`; `check` reports it, and `raw` needs `unvalidated`
-  **and** a gate — the production boot refuses it, `dev` warns and serves. 0.2.0
-  has no multipart, media or PDF codec: an upload is `raw`.
+* **Ingress bodies.** `json` and `form` decode and re-encode a body before the app sees it, `none`
+  rejects one, and `raw` passes the bytes through. A body to a view with no `body` is a `413`;
+  `check` reports it, and `raw` needs `unvalidated` **and** a gate — the production boot refuses
+  it, `dev` warns and serves. A file upload travels as `raw`.
 
 ## Static files
 
@@ -160,3 +158,9 @@ The end-to-end tests drive a Django app over HTTP, run the same raw SQL from vie
 with different grants, and assert the denials name the right view and the password
 appears nowhere in the log — `uv run e2e/run.py` in Docker as root,
 `uv run e2e/rootless/run.py --local` for the rootless path that checks `/proc` too.
+
+## Where next
+
+* [How it works](how-it-works.md) — the same machine, role by role.
+* [Deployments](deploy/index.md) — real uids, capabilities and the trust boundary in production.
+* [Troubleshooting](troubleshooting.md) — the symptom each refusal prints.

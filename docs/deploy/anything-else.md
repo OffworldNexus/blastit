@@ -1,8 +1,8 @@
 # Anywhere else
 
-Kubernetes, a plain VM, Docker without Traefik: the same [model](index.md) with
-your own values. The two presets are default sets, not modes. This page is the
-table of levers, then the sections that need more than a row, then three recipes.
+Kubernetes, a plain VM, Docker without Traefik: the same [model](index.md) with your own values. The
+two presets are default sets, not modes. This page is the table of levers, the sections that need
+more than a row, then three recipes.
 
 ## The levers
 
@@ -38,11 +38,10 @@ table of levers, then the sections that need more than a row, then three recipes
 The mode is detected, not configured: the first `boot` event says which one is in
 force, and production refuses to start when it can get neither.
 
-Pick `root` when your platform gives the container root: one less moving part.
-Pick `capabilities` when a root process is not allowed. Docker's `--cap-add`
-gives a non-root `user:` process **nothing**, and a platform that sets
-`no_new_privs` ignores file capabilities, so the way there is a launcher that
-drops the uid itself:
+Pick `root` when your platform gives the container root: one less moving part. Pick `capabilities`
+when a root process is not allowed: Docker's `--cap-add` gives a non-root `user:` process
+**nothing**, and `no_new_privs` ignores file capabilities, so the way there is a launcher that drops
+the uid itself:
 
 ```console
 $ setpriv --reuid=1000 --regid=1000 --init-groups \
@@ -56,10 +55,9 @@ the `boot` event says `"bounding_set": "kept"` and warns.
 
 ## The client address { #client-ip-header }
 
-Blastit believes `BLASTIT_CLIENT_IP_HEADER` only from a peer in
-`BLASTIT_TRUSTED_PROXIES`. For a chain header, `*` takes the **rightmost** entry —
-what the closest hop added. Narrowing the list to a network is tempting and
-worse: if every entry is in it, Blastit falls back to the leftmost one, which the
+Blastit believes `BLASTIT_CLIENT_IP_HEADER` only from a peer in `BLASTIT_TRUSTED_PROXIES`. For a
+chain header, `*` takes the **rightmost** entry — what the closest hop added. Narrowing the list to
+a network is worse: if every entry is in it, Blastit falls back to the leftmost one, which the
 client invented ([client address](../reference/settings.md#client-address)).
 
 A header name is a guess until one request has been through the real ingress.
@@ -83,13 +81,11 @@ edge **sets**, and `BLASTIT_TRUSTED_PROXIES` the address it connects from.
 
 ## The pooler { #pooler }
 
-A pool is a connection multiplier, not a tuning knob, and it is a deployment
-concern: no `Blastfile` directive declares one.
-`BLASTIT_MAX_WORKERS` × instances is the client count it must accept, and
-`DEFAULT_POOL_SIZE` (PgBouncer) is the server connections it keeps. A managed
-pool's `size` is its **minimum**, and its maximum follows the cluster's RAM —
-about 25 connections per GB, 3 reserved — so raise the plan when `size`
-approaches that ([behind a connection pooler](../reference/settings.md#behind-a-connection-pooler)).
+A pool is a connection multiplier, not a tuning knob, and a deployment concern: no `Blastfile`
+directive declares one. `BLASTIT_MAX_WORKERS` × instances is the client count it must accept, and
+`DEFAULT_POOL_SIZE` (PgBouncer) the server connections it keeps. A managed pool's `size` is its
+**minimum**, and its maximum follows the cluster's RAM — about 25 connections per GB, 3 reserved
+([behind a connection pooler](../reference/settings.md#behind-a-connection-pooler)).
 
 Only the app's URL names the pool. DDL and session state do not survive
 transaction pooling, so migrations and grants connect to the database's direct
@@ -116,65 +112,98 @@ connect-time `SET` is not yours to rely on:
 ```console
 $ psql 'postgresql://app:REPLACE_WITH_APP_PASSWORD@REPLACE_WITH_DB_HOST:5432/REPLACE_WITH_DB' -A -t -c 'SHOW TimeZone'
 ```
-- **Changed a live role? Restart the pooler.** Open backends keep the zone they
-  logged in with, so the change is invisible until they recycle (an hour by
-  default). Restarting drops in-flight transactions — and on App Platform the pool
-  is created after the role, so the order matters.
+- **Changed a live role? Restart the pooler.** Open backends keep the zone they logged in with
+  until they recycle (an hour by default). On App Platform the pool is created after the role, so
+  the order matters.
 - **A `UTC` database makes the trait grant a `dead_grant`.** Django then sends no
-  `set_config('TimeZone', …)`, so the `connection` trait's grant for it is unused:
-  remove it where `check` runs against such a database, and keep it where the
-  database says otherwise ([what `check` fails on](../ci.md#what-it-fails-on)).
+  `set_config('TimeZone', …)`: remove that grant where `check` runs against such a database, and
+  keep it where the database says otherwise ([what `check` fails on](../ci.md#what-it-fails-on)).
 
 ## Migrations { #migrations }
 
-Schema changes run outside Blastit, with the real credentials, as their own role
-on the database's direct URL — a job before the first container, a task in your
-pipeline. Grants cover what a request needs: a route that could also run
-`ALTER TABLE` could rewrite its own permission model. Both recipes grant broadly
-and default-grant for tables a later migration adds; narrow that to one `GRANT`
-per table and verb as routes grow.
+Schema changes run outside Blastit, with the real credentials, as their own role on the database's
+direct URL — a job before the first container, a task in your pipeline. Grants cover what a request
+needs: a route that could also run `ALTER TABLE` could rewrite its own permission model. Both
+recipes default-grant for tables a later migration adds; narrow that as routes grow.
 
 ## Egress { #egress }
 
-A view opens no TCP connection unless its route says `egress any`, and then it
-reaches **any** IPv4/IPv6 address and port, cloud metadata included: there is no
-allowlist yet. `postgresql` reaches the network through `dbproxy` instead, which
-holds the credential and enforces the grants.
+A view opens no TCP connection unless its route says `egress any`, and then it reaches **any**
+IPv4/IPv6 address and port, cloud metadata included. `postgresql` reaches the network through
+`dbproxy` instead, which holds the credential and enforces the grants.
 
 ## The edge and TLS { #edge-and-tls }
 
-Blastit serves HTTP/1.1 and nothing else: no TLS, no HTTP/2, and `Upgrade` is
-`501`. Your edge terminates TLS, sets `X-Forwarded-Proto` (trusted from a trusted
-peer only, so `wsgi.url_scheme` is right), and answers WebSockets itself. Point
-every health check at `BLASTIT_HEALTH_PATH`: the scheduler answers it before
-routing, from no view.
+Your cloud ingress terminates TLS and HTTP/2 and forwards plain HTTP/1.1 to Blastit. It sets
+`X-Forwarded-Proto`, which Blastit reads from a trusted peer only, so `wsgi.url_scheme` is right.
+Every health check goes to `BLASTIT_HEALTH_PATH`: the scheduler answers it, from no view.
 
 ## Memory and process caps { #memory-and-process-caps }
 
-- **Give the container a memory limit.** `total` is the smaller of `MemTotal` and
-  the cgroup limit; `BLASTIT_MEM_HIGH_WATERMARK` is a percentage of it, and
-  `BLASTIT_VIEW_MEM_ESTIMATE` divides it into a process cap. On Kubernetes that
-  is `resources.limits.memory`.
-- **Retiring never fails a request.** Idle views go after
-  `BLASTIT_VIEW_IDLE_TIMEOUT` (`600s`); `BLASTIT_VIEW_MAX_REQUESTS` (`0`, off)
-  retires one after that many; when nothing is evictable, the request waits.
-- **Size the body ceiling for the worst case**, not the average: the largest
-  upload × how many are in flight has to fit.
+- **Give the container a memory limit.** `total` is the smaller of `MemTotal` and the cgroup limit;
+  `BLASTIT_MEM_HIGH_WATERMARK` is a percentage of it, and `BLASTIT_VIEW_MEM_ESTIMATE` divides it
+  into a process cap. On Kubernetes that is `resources.limits.memory`.
+- **Retiring never fails a request.** Idle views go after `BLASTIT_VIEW_IDLE_TIMEOUT` (`600s`);
+  `BLASTIT_VIEW_MAX_REQUESTS` (`0`, off) retires one after that many.
+- **Size the body ceiling for the worst case**, not the average: the largest upload × how many
+  are in flight has to fit.
 
 ## Plain Docker
+
+One image per runtime, each with its own `HEALTHCHECK`; the `docker run` below is the same for all
+three:
+
+=== "Python (WSGI)"
+    ```dockerfile
+    FROM python:3.13-slim
+    WORKDIR /app
+    COPY . .
+    RUN pip install --no-cache-dir -r requirements.txt blastit
+    HEALTHCHECK CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/_blastit/health')"
+    CMD ["blastit"]
+    ```
+
+=== "PHP"
+    ```dockerfile
+    FROM debian:trixie-slim
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates curl libphp-embed php-pgsql \
+        && rm -rf /var/lib/apt/lists/*
+    WORKDIR /app
+    COPY . .
+    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
+        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
+        && rm blastit-*.tar.gz
+    HEALTHCHECK CMD curl -fsS http://127.0.0.1:8080/_blastit/health
+    CMD ["blastit"]
+    ```
+
+=== "Static & SPA"
+    ```dockerfile
+    FROM debian:trixie-slim
+    RUN apt-get update && apt-get install -y --no-install-recommends \
+            ca-certificates curl \
+        && rm -rf /var/lib/apt/lists/*
+    WORKDIR /app
+    COPY . .
+    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
+        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
+        && rm blastit-*.tar.gz
+    HEALTHCHECK CMD curl -fsS http://127.0.0.1:8080/_blastit/health
+    CMD ["blastit"]
+    ```
 
 ```console
 $ docker run -d --name shop --env-file .env \
     -p 127.0.0.1:8080:8080 --memory 1g \
-    --health-cmd 'python -c "import urllib.request;urllib.request.urlopen(\"http://127.0.0.1:8080/_blastit/health\")"' \
     registry.example.com/shop:1.2.3
 ```
 
-No `--user`: Docker's default set is what root mode needs. `.env` holds
-`DATABASE_URL` and `BLASTIT_TRUSTED_PROXIES=172.18.0.2` (the address your ingress
-connects from), so neither is in your shell history; the health check uses
-`python` because the slim image has no `curl`. `-p 127.0.0.1:` keeps the *only*
-listener on loopback, behind your ingress.
+No `--health-cmd`: each image carries its own `HEALTHCHECK`, so the runtime it probes never matters
+to the command line. No `--user` either: Docker's default set is what root mode needs. `.env` holds
+`DATABASE_URL` and `BLASTIT_TRUSTED_PROXIES=172.18.0.2` (the address your ingress connects from), so
+neither is in your shell history. `-p 127.0.0.1:` keeps the *only* listener on loopback, behind your
+ingress.
 
 ## systemd
 
@@ -197,7 +226,6 @@ AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE 
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL CAP_SETPCAP
 NoNewPrivileges=true
 
-# /run/blastit, owned by User=, which a rootless init cannot make itself.
 RuntimeDirectory=blastit
 RuntimeDirectoryMode=0700
 ReadWritePaths=/run/blastit
@@ -240,8 +268,6 @@ spec:
           env:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: shop-db, key: url } }
-            # Only the ingress may reach this port; the NetworkPolicy below
-            # enforces it, so every peer that does arrive is trusted.
             - name: BLASTIT_TRUSTED_PROXIES
               value: "*"
           readinessProbe:
@@ -279,5 +305,4 @@ view. `resources.limits.memory` becomes `total` for the derived cap; under the
 
 ## Where next
 
-[Back to the model](index.md) · [the pooler settings](../reference/settings.md#behind-a-connection-pooler) ·
-[fair queuing](fair-queuing.md).
+[Back to the model](index.md) · [the pooler settings](../reference/settings.md#behind-a-connection-pooler) · [fair queuing](fair-queuing.md).

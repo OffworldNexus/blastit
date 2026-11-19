@@ -1,8 +1,10 @@
 # Settings
 
-Everything is environment variables, plus the `Blastfile`. A set `BLASTIT_*`
-variable wins over the `Blastfile` and over a preset, even when empty, and `PORT`
-counts the same. `--preset` is a flag; `--port` belongs to `blastit dev`.
+Everything is environment variables, plus the `Blastfile`. A set `BLASTIT_*` variable wins over the
+`Blastfile` and over a preset, even when empty, and `PORT` counts the same. `--preset` is a flag;
+`--port` belongs to `blastit dev`. The same variables reach both invocations: `uv run blastit` in a
+Python project, and the standalone `blastit` that the release archive or `make install` puts on
+`PATH` for PHP and static sites.
 
 ## The app and the file
 

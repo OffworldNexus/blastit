@@ -4,13 +4,12 @@
 `./Blastfile`; `BLASTIT_MANIFEST` names another path, and there is no upward
 search. No header, no version, no `=`.
 
-## In 0.2.0
+## The whole file
 
-`postgres` is the only store keyword, and a `Blastfile` declares one application
-backend: a Python WSGI callable, a PHP front controller, or static files.
-`static` mounts may sit beside the backend, or stand alone. Other store protocols
-and an outgoing HTTP proxy arrive in later milestones, and the four `body` codecs
-are the whole set.
+`postgres` is the store keyword, and a `Blastfile` declares one application backend: a Python WSGI
+callable, a PHP front controller, or static files. `static` mounts may sit beside the backend, or
+stand alone. A view's `body` is one of `json`, `form`, `none` or `raw unvalidated`, and that is the
+whole set of codecs.
 
 ## Layout and tokens
 
@@ -617,7 +616,8 @@ view cart {
 | `blastit fmt --check` | change nothing; name every file that is not canonical and exit non-zero |
 | `blastit fmt --check PATH` | the same for one file |
 
-From a `uv add` install, prefix every command with `uv run`.
+From a `uv add` install, prefix every command with `uv run`; from the release archive or
+`make install`, the same command is plain `blastit`.
 
 Canonical layout is one directive per line, four spaces per level, and one blank
 line between sections:
