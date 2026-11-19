@@ -16,13 +16,13 @@
 //! can be a credential).
 //!
 //! One module per concern, because the file this grew in was four thousand
-//! lines of it: [`types`] holds the value types and the spellings they share,
-//! [`settings`] the [`Config`] struct and its documented defaults, [`env`] the
-//! one place the process environment is read, [`parse`] the `BLASTIT_*` value
-//! parsers, [`preset`] the preset tables and their precedence, [`validate`] the
-//! combinations only meaningful together, [`manifest_io`] the manifest's
-//! discovery and its one sentence per refusal, [`document`] the writer of the
-//! stage-1 document, and [`wire`] the `serde` structs that read it back.
+//! lines of it: `types` holds the value types and the spellings they share,
+//! `settings` the [`Config`] struct and its documented defaults, [`env`] the
+//! one place the process environment is read, `parse` the `BLASTIT_*` value
+//! parsers, `preset` the preset tables and their precedence, `validate` the
+//! combinations only meaningful together, `manifest_io` the manifest's
+//! discovery and its one sentence per refusal, `document` the writer of the
+//! stage-1 document, and `wire` the `serde` structs that read it back.
 
 mod document;
 mod env;

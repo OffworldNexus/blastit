@@ -176,9 +176,22 @@ https://github.com/OffworldNexus/blastit` and `zed: install dev extension` on
 [`blastit-lsp`](reference/cli.md#blastit-lsp) by itself (settings → `PATH` →
 release binary), colours SQL inside a `query '…'`, and offers Quick Fix
 **Parameterize SQL for Blastfile ($?)** at the `line:col` `blastit check` prints.
-Merge `{ "languages": { "Blastfile": { "format_on_save": "on" } } }` into
-`.zed/settings.json` to format on save, and spawn `blastit-lsp` with nothing on
-the command line from any other editor.
+
+### Format on save
+
+Merge this into `.zed/settings.json` — it is the copy committed in this repo:
+
+```json
+{
+  "languages": {
+    "Blastfile": {
+      "format_on_save": "on"
+    }
+  }
+}
+```
+
+From any other editor, spawn `blastit-lsp` with nothing on the command line.
 
 ## Before you deploy
 

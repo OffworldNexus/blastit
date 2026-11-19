@@ -126,7 +126,7 @@ impl AnalysisCache {
 /// column, plus the functions it calls — or why it cannot be analysed.
 ///
 /// This is the manifest-only convenience: it uses the process-wide memo
-/// ([`AnalysisCache::shared`]). A policy check goes through
+/// (`AnalysisCache::shared`). A policy check goes through
 /// [`crate::Allowlist::check`], which analyses against the cache its allowlist
 /// owns.
 ///
@@ -145,7 +145,7 @@ pub fn analyze(sql: &str) -> Result<Analysis, AnalysisError> {
 
 /// How many analyses the process is currently holding.
 ///
-/// This is the size of the process-wide cache ([`AnalysisCache::shared`]), not
+/// This is the size of the process-wide cache (`AnalysisCache::shared`), not
 /// of one route's, and it exists so that a test can see the bound hold.
 pub fn cached_analyses() -> usize {
     AnalysisCache::shared().len()

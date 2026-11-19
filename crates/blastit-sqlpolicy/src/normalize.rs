@@ -194,7 +194,7 @@ pub fn normalize(sql: &str) -> String {
 ///   or after a row of `VALUES` — becomes one more element or one more row, so
 ///   the text still parses and the analysis sees the same tables and columns;
 /// * comments and quoted regions are copied verbatim, through the one
-///   [`crate::lexer`], so a `$?` inside a comment, a string, a quoted identifier
+///   `crate::lexer`, so a `$?` inside a comment, a string, a quoted identifier
 ///   or a dollar quote is data and is never rewritten.
 ///
 /// The result is only for analysis: it is never compared with a grant (an exact

@@ -47,7 +47,7 @@
 //! [`blastit_sys::mem::Sample`] exposes. This module owns the *refined* reading
 //! blastit acts on — that sample plus the `memory.stat` bytes the kernel can
 //! reclaim — and adds no second parser of those files. [`sample`] is the whole
-//! layering: one `Reader::sample`, then [`reclaimable`].
+//! layering: one `Reader::sample`, then `reclaimable`.
 
 use std::fs;
 use std::path::Path;

@@ -73,7 +73,7 @@ const PAGES: [(&str, Counts); 13] = [
     ("README.md", Counts::new(1, 6)),
     ("docs/index.md", Counts::new(1, 2)),
     ("docs/getting-started.md", Counts::new(1, 5)),
-    ("docs/local.md", Counts::new(1, 8)),
+    ("docs/local.md", Counts::new(1, 9)),
     ("docs/frameworks/index.md", Counts::new(0, 1)),
     ("docs/frameworks/python/index.md", Counts::new(1, 1)),
     ("docs/frameworks/python/django.md", Counts::new(1, 3)),
@@ -88,7 +88,7 @@ const PAGES: [(&str, Counts); 13] = [
 /// The whole pinned set: one `text title="Blastfile"` document on each of the
 /// twelve pages that carry one (the chooser carries none), and every
 /// illustration on those thirteen pages.
-const TOTAL: Counts = Counts::new(12, 45);
+const TOTAL: Counts = Counts::new(12, 46);
 
 /// Pages whose plain `text` fences are statement lists: syntax, not documents
 /// and not illustrations (§16.1). `docs/reference/blastfile.md` is deliberately

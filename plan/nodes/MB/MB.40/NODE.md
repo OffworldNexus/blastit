@@ -2,7 +2,7 @@
 id: MB.40
 title: "GEPA G4 harness overhaul, P0 bugfixes, deduplication, god-file split, CLI craft & visual docs"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths: ["**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T00:16"
+updated: "2026-11-19T05:55"
 ---
 
 # Goal

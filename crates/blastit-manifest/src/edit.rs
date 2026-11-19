@@ -3,7 +3,7 @@
 //!
 //! [`crate::blastfile::apply_edits`] is the `Blastfile` editor (§14.5): it
 //! splices into the CST of §14.1 and proves the result with
-//! [`crate::Manifest::equivalent`]. The crate-private [`BlastfileEditor`] keeps
+//! [`crate::Manifest::equivalent`]. The crate-private `BlastfileEditor` keeps
 //! the splicing in the `blastfile` writer, so every caller (`dev_learn`, `check`,
 //! `fold`) reaches it through one function.
 //!

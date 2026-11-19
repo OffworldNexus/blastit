@@ -20,7 +20,7 @@ const NAME_COLUMN: usize = 23;
 /// newline.
 ///
 /// The shape is `HH:MM:SS.mmm LEVEL event  summary`, with the event name
-/// padded to [`NAME_COLUMN`] columns, as in the §8.1 example. `color` wraps the
+/// padded to `NAME_COLUMN` columns, as in the §8.1 example. `color` wraps the
 /// level word — and a `request`'s HTTP status — in ANSI colours (a handful of
 /// escape codes, no crate); the padding is applied to the text, so coloured and
 /// plain lines line up.
@@ -36,7 +36,7 @@ pub fn encode_pretty(event: &Event, color: bool) -> String {
     out.push(' ');
     let name = event.kind.name();
     out.push_str(name);
-    // [`NAME_COLUMN`] columns, and always at least one space before the summary
+    // NAME_COLUMN columns, and always at least one space before the summary
     // so a name wider than the column stays readable.
     let width = NAME_COLUMN.max(name.chars().count() + 1);
     for _ in name.chars().count()..width {

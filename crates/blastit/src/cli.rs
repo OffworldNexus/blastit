@@ -20,10 +20,10 @@
 //!
 //! # The four modules
 //!
-//! * [`help`] — every word a person reads, and the one shape a refusal takes.
-//! * [`parse`] — the grammar of the four subcommands and the re-exec lines.
-//! * [`preset`] — the one resolver for `--preset` and `BLASTIT_PRESET`.
-//! * [`run`] — where a validated command line is handed to the stage that runs
+//! * `help` — every word a person reads, and the one shape a refusal takes.
+//! * `parse` — the grammar of the four subcommands and the re-exec lines.
+//! * `preset` — the one resolver for `--preset` and `BLASTIT_PRESET`.
+//! * `run` — where a validated command line is handed to the stage that runs
 //!   it.
 //!
 //! # Library and binary
