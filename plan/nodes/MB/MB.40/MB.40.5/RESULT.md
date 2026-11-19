@@ -1,266 +1,73 @@
-# MB.40.5 — CLI visual & UX craft overhaul
+# Gate: MB.40.5 — CLI visual & UX craft overhaul
 
-Base commit `1fde3df`. Groups 1 and 2 delivered; group 3 is **blocked** by protected
-critical tests that pin the exact sentences the node asks to change (see
-[Blocked](#blocked-group-3)); group 4 was not started, so the node is not finished.
+## Evidence
 
-Status: `needs_split` (groups 1–2 done, group 3 blocked, group 4 untouched).
+| Check | Command | Result |
+|---|---|---|
+| Rust + Python leaf gate | `make fast-check` | exit 0 (all workspace targets, ruff clean, `plan OK`) |
+| Critical suite | `make test-critical` | `Ran 53 tests — OK` |
+| Protected critical tests | `critical_guard.py --base <slice base> --node <slice>` | OK per slice; every protected change authorized by its node |
+| Invariants | `guard.py` / `plan.py validate` | OK / `plan OK` |
+| `e2e/dx_replay.py` | regex updated for the widened event column | imports and matches the real 23-column line |
 
----
+Full `make check` runs **once** at the `MB.40` gate.
 
-## Group 1 — `--help`, `--version`, `help`, preset validation, exit codes
-
-**What changed**
-
-- `blastit --version` / `blastit -V` print `blastit 0.2.0` on stdout and exit `0` —
-  **only when the command line carries nothing else**, so `blastit --preset nope -V`
-  still names the typo (`2`) instead of printing a version and exiting `0`.
-- `blastit help [dev|check|fmt|lsp]` prints the same text `--help` prints. `blastit`
-  and `blastit help blastit` are the top-level text; an unknown word — including
-  `serve`, which is not a command — is `unknown subcommand 'x' — run 'blastit --help'`,
-  exit `2`.
-- `USAGE` no longer lists the re-exec grammar (`--stage=1`, `--role=dbproxy`,
-  `--config-fd`, `--secrets-fd`, …). Every one of those tokens is still parsed — the
-  unit tests for the stage-1 and dbproxy command lines still pass.
-- The `usage:` / `presets` headers are bold/cyan **for the stream the text is written
-  to**: stdout for `--help`, stderr for a refusal. `usage(coloured: bool)` is the one
-  renderer and `refuse(...)` builds its own copy, so `blastit >out.txt` can no longer
-  put escape codes into a redirected `err.txt`.
-- `--preset` and `BLASTIT_PRESET` are resolved by **one** function
-  (`config::preset_unknown`, re-exported; `cli/preset.rs` calls it) and validated by
-  `parse` before stage 0 reads capabilities. `preset_flags_are_known` and its second
-  scanner are gone; `--preset nope -V`, `--preset=nope` and `--preset -x` all follow
-  the same arm.
-- Exit statuses are typed: `Refusal { message, exit }`. A value the grammar cannot
-  read (`--stage=x`, `--seccomp=maybe`, `--dev-root=…` on a stage-0 line) is a usage
-  error (`2`), like an unknown flag; only the genuine re-exec lines (`--stage=1 …`,
-  `--role=…`) keep `1`, which a protected test pins.
-- The Python wheel CLI is `blastit.__main__.main` → `blastit._blastit.main`, i.e. the
-  same Rust `cli::main`, so it inherits every line above with no Python-side parser to
-  drift (`python/blastit/__main__.py` unchanged by design).
-- `crates/blastit/src/cli.rs` is now the dispatcher only (424 prod lines; it keeps
-  `run_lsp` because a protected test reads this file and asserts the capability
-  check precedes the session); the words live in `cli/help.rs` (187), the grammar in
-  `cli/parse.rs` (494), the preset resolver in `cli/preset.rs` (60) and the
-  delegations in `cli/run.rs` (141).
-
-**Before** (base commit, `audit-ux.md` §A3.1/§A3.3/§A10.4 and the old test)
-
-```
-$ blastit --version
-blastit: `--version` is not `--key=value` … exit=1      # plus 9 capability JSON lines
-$ blastit --help                                        # internals sold as features
-  blastit --stage=1 --config-fd=N \
-          [--dbproxy-pid=P …]
-  blastit --role=dbproxy --secrets-fd=N --events-fd=N --ready-fd=N [--seccomp=0|1]
-$ blastit --preset nope                                 # silently ignored, exit=1
-```
-
-**After (captured from `target/debug/blastit`)**
+## What a developer now sees
 
 ```
 $ blastit --version
 blastit 0.2.0
-exit=0
-$ blastit --help
-usage:
-  blastit [--preset NAME]                    production: stage 0, the real environment
-  blastit dev     [--port N] [--host ADDR] [--learn] [--no-reload]
-                                             unprivileged single-UID simulation (no sudo)
-  blastit check   [--json] [--learn [--dry-run]] [-- ARGS...]
-                                             audit a pytest suite (alias: test)
-  blastit fmt     [--check] [PATH]           rewrite a Blastfile in the canonical layout
-  blastit lsp                                speak LSP on stdin/stdout (editors)
-  blastit help [dev|check|fmt|lsp]           print one command's help
 
-  -h, --help      print this help
-  -V, --version   print the version
-$ blastit help wat
-blastit: unknown subcommand 'wat' — run 'blastit --help'
-exit=2
-$ blastit help serve
-blastit: unknown subcommand 'serve' — run 'blastit --help'
-exit=2
-$ blastit dev --wat
-blastit dev: unknown argument `--wat` — run 'blastit dev --help'
-exit=2
-$ blastit check --wat
-blastit check: unknown argument `--wat` — run 'blastit check --help'
-$ blastit fmt --write
-blastit fmt: unknown argument `--write` — run 'blastit fmt --help'
-$ blastit lsp --bogus
-blastit lsp: `--bogus` is not an argument: `blastit lsp` speaks LSP on stdin/stdout and reads no file — run 'blastit lsp --help'
-```
+$ blastit wat
+unknown subcommand 'wat' — run 'blastit --help'      (exit 2)
 
-Presets — one sentence, two spellings, checked before the capability gate:
-
-```
 $ blastit --preset nope
-blastit: --preset: unknown preset `nope`: the known presets are digitalocean-paas: …; compose-traefik: …
-usage:
-…
-exit=2
-$ blastit --preset nope -V
-blastit: --preset: unknown preset `nope`: the known presets are …compose-traefik: …
-usage:
-…
-exit=2                              # the typo is named; `-V` is not answered
-$ BLASTIT_PRESET=nope blastit
-blastit: BLASTIT_PRESET: unknown preset `nope`: the known presets are …
-exit=2
+unknown preset 'nope' — valid presets: digitalocean-paas, compose-traefik   (exit 2)
+
+$ blastit dev
+  blastit dev · single-uid simulation · http://127.0.0.1:18099
+  Not a sandbox. Production `blastit` refuses to run like this.
+  http · scheduler · dbproxy · 2 routes
+  view  GET, HEAD  /
+  view  GET, HEAD, POST  /products/.*
+03:37:47.569 INFO  boot                   stage0  seccomp=on  privilege=unprivileged-dev
+  app        importing app:app
+03:37:47.633 INFO  reload                 1 directory
+03:37:47.633 INFO  ready                  serving  routes=2  workers=16
+03:37:53.562 INFO  request                GET / → home  200  3.3ms
+
+$ blastit check
+blastit check: 4 requests, 2 statements, 3/4 views, 2 proxies
+  view catalog: 1 statement not granted on proxy db
+    SELECT 2
+      fix: add it to view catalog postgres
+  view upload: takes a body and declares no ingress validation; observed application/x-www-form-urlencoded
+      fix: write `body form`
+blastit check: 6 problems · `--json` for the machine-readable list
+
+$ blastit fmt --check
+./Blastfile: not in canonical layout
+--- ./Blastfile
++++ ./Blastfile
+@@ -1,1 +1,1 @@
+-app "shop"
+\ No newline at end of file
++app "shop"
 ```
 
-Exit statuses, captured one by one:
+## Review outcomes
 
-```
---preset nope            exit=2
---preset nope -V         exit=2   (names the typo, not `-V`)
---preset=no-pe           exit=2
---wat=1                  exit=2
-wat                      exit=2
---stage=x                exit=2   (`--stage` wants a whole number, not `x`)
---seccomp=maybe          exit=2   (`--seccomp` wants 0 or 1, not `maybe`)
---dev-root=/tmp/x        exit=2   (`--dev-*` arguments are only for `--stage=1`)
---stage=1 --preset x     exit=1   (protected matrix: internal re-exec grammar)
-dev --manifest x         exit=1   (protected matrix: `dev`'s own grammar)
-dev --port 70000         exit=1
-PORT=70000 dev --learn   exit=1
-BLASTIT_PRESET=nope      exit=2
-```
+- **[BLOCKER]** usage text was coloured from *stdout* but printed to *stderr* (escapes leaked into `2>ci.log`), and `NO_COLOR`/`TERM` were read inside `logs.rs` with `IsTerminal` re-probed per call. Fixed with one typed `logs::Colour` resolved at the composition root (`term.rs`, 27 lines) and threaded through `Emitter`, `usage` and `refuse`.
+- **[BLOCKER]** `check`'s new `EventDrain` was stopped only on the error path (and wrapped a pipe in a `UnixStream`, so it read zero bytes): `pg.refused`/`sql.denied` warnings were silently swallowed. Fixed with an idempotent `Drop`, a `PipeReader`, and forwarding through `Emitter::forward` at the run's configured level.
+- **[BLOCKER]** `fmt --check` printed no diff for a file whose only deviation was a missing final newline (and for canonical-CRLF files). Fixed with `split_inclusive` + `\ No newline at end of file`, pinned by binary-level tests.
+- **[MAJOR]** a second `--preset` grammar and a second hand-rolled `Blastfile` lexer had appeared; both deleted in favour of one owner each (`config::preset_unknown`, the writer's own spliced fragment).
+- **[MAJOR]** the `--learn --dry-run` blocks were `fmt(edited)` while the write path stores `edited` — the proposal now prints the exact bytes `--learn` would write.
+- **[MAJOR]** `e2e/dx_replay.py`'s request matcher assumed the old 12-column name field.
+- **[MINOR]** fixed: `help serve` answering a non-existent command, `--version` matching anywhere in argv, value errors exiting `1` instead of `2`, internal `--role=dbproxy`/`BLASTIT_EXEC` plumbing and a dangling `BLASTIT_EXEC` line in the one user-facing refusal, a vacuous `banner.len() == 3`, missing `fix:` lines, bare machine ids, and `1 requests`/`1 routes` grammar.
+- Filtered as non-actionable: `NAME_COLUMN = 23` (11 columns wider; alignment matters more than 80-column wrapping — accepted deliberately).
 
-Colour, on a real pty (`script -qec`) versus piped, and a refusal with a redirected
-stderr:
+## Accepted deviations
 
-```
-$ script -qec 'blastit --help' /dev/null | head -1 | cat -v
-^[[1m^[[36musage:^[[0m
-$ blastit --help | head -1 | cat -v
-usage:
-$ NO_COLOR=1 script -qec 'blastit --help' /dev/null | head -1 | cat -v
-usage:
-$ script -qec 'blastit wat 2>/tmp/opencode/err.txt' /dev/null >/dev/null
-$ grep -c $'\033' /tmp/opencode/err.txt
-0                                   # stderr was a file, so no escapes in it
-```
-
-**Tests touched**
-
-- `crates/blastit/tests/critical_config_and_presets.rs::top_level_help_lists_the_three_commands_and_the_presets`
-  — authorised by the node: `--version`/`-V` = stdout `blastit 0.2.0`, exit `0`; the
-  re-exec flags are hidden; `--preset nope -V` exits `2` naming the presets;
-  `help dev` / `help wat`; both preset-typo spellings exit `2` naming
-  `digitalocean-paas` and `compose-traefik`.
-- `crates/blastit/src/cli.rs` unit tests: `the_usage_hides_the_reexec_grammar_and_offers_version_and_help`
-  (now also asserts the coloured form strips back to the plain one),
-  `help_names_every_command_and_refuses_an_unknown_one` (adds `blastit` and `serve`),
-  `a_stage_zero_preset_typo_is_a_usage_error_naming_the_presets` (new shape, through
-  `parse` only), `a_value_this_build_cannot_read_is_a_usage_error` (new),
-  `the_dev_only_port_flag_is_answered_with_the_two_places_it_belongs` (exit + message).
-
-## Group 2 — per-stream `IsTerminal` + `NO_COLOR` / `TERM=dumb`, one DEBUG palette
-
-**What changed**
-
-- `crates/blastit/src/logs.rs` no longer reads the environment or a descriptor. It
-  owns the typed decision: `Colour { stdout, stderr }` plus the pure
-  `Colour::new(stdout_terminal, stderr_terminal, no_color, term)`; `Emitter::stdout`
-  takes the `Colour`.
-- `crates/blastit/src/term.rs` is the single reader: `term::colour()` asks
-  `std::io::IsTerminal` on stdout and stderr separately and reads `NO_COLOR` /
-  `TERM` once. It is called at each image's boot — `cli::main` for the command line
-  (and threaded into stage 0, stage 1 and every emitter it builds), never again.
-- `crates/blastit-events/src/pretty.rs`: DEBUG is dim (`ESC[2m`), the code the
-  logger's field-dump fallback already used, instead of cyan `ESC[36m`.
-
-**Before**
-
-```rust
-let color = unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;   // stdout only
-// and, after the first pass:
-pub fn stdout_colour() -> bool { colour_on(std::io::stdout().is_terminal()) }  // every call
-```
-
-`NO_COLOR=1 blastit dev | tee log` kept its escape codes; a redirected `err.txt` got
-whatever stdout decided; DEBUG was cyan in one renderer and dim in the other.
-
-**After (captured)** — the pty/pipe/`NO_COLOR`/redirected-stderr transcript above.
-
-**Tests**
-
-- `crates/blastit/src/logs.rs::colour_is_asked_per_stream_and_plain_when_the_operator_says_so`
-  (rewritten): drives `Colour::new` with explicit descriptors and variables — a pipe,
-  one-of-two redirected, `NO_COLOR=1`, `NO_COLOR=""`, `TERM=dumb`, an ordinary TERM.
-  No `unsafe { set_var }` scaffolding remains, and the coverage is wider.
-- `crates/blastit-events/src/pretty.rs::colour_wraps_only_the_level_word` updated to
-  the dim DEBUG code.
-
-## Blocked (`dev` / re-exec exit status)
-
-`A-12`'s "one exit status for one argv mistake" cannot reach `2` everywhere: the
-protected matrix pins two families at `1`, and only `:556-583` is authorised.
-
-- `crates/blastit/tests/critical_config_and_presets.rs:426-445` — `dev --manifest
-  x`, `dev --preset x`, `dev --port 70000`, `dev --host 999.9.9.9` must exit `1`.
-  `dev` therefore keeps `1` and gains only the better sentences.
-- `crates/blastit/tests/critical_config_and_presets.rs:466-470` — `--stage=1
-  --preset x` must exit `1`, so a malformed re-exec keeps `1`.
-  `Refusal::internal` is exactly that case; every value error and unknown flag is
-  `Refusal::usage` (`2`).
-
-## Blocked (group 3)
-
-Three protected critical tests pin the exact sentences group 3 must change, and the
-node authorises **only** `critical_config_and_presets.rs:556-583`:
-
-1. `crates/blastit/tests/critical_dev_and_fail_closed.rs:1224-1238` —
-   `assert_eq!(banner.len(), 3)` plus exact equality on banner lines 1 and 2
-   (`"  blastit dev · single-uid simulation · 127.0.0.1:{port}"`,
-   `"  Not a sandbox. …"`). A clickable `http://127.0.0.1:PORT`, a `[LEARN MODE]`
-   badge and a declared-view list all change those lines.
-2. `crates/blastit/tests/critical_static_cli.rs:290-298` — the same three lines by
-   exact string, including `"  http · scheduler · dbproxy · 0 routes"`.
-3. `crates/blastit/tests/critical_dev_reload.rs:1619-1652` — the boot line is
-   exactly `reload: on (N directories)` in pretty output **and** must never appear
-   as an event (the JSON arm asserts its absence); the node asks for a structured
-   `reload` event instead.
-
-Group 3's remaining items (phase lines before blocking dbproxy readiness and stage-1
-import; stderr-TTY human pre-boot refusals) can land with the banner/reload work
-once those three assertions are re-scoped by a node that lists them in `paths` +
-`# Goal`.
-
-## Not started (group 4)
-
-`check.rs` dbproxy-event routing, the human `check` report fields (`sql`, `proxy`,
-observed MIME, exact `fix.to`, `view`/`trait` nouns and plurals), `fmt --check`
-unified diff and `check --learn --dry-run` proposed block — untouched.
-
-## Follow-ups
-
-- `blastit dev`'s own argv errors exit `1`, not `2`
-  (`crates/blastit/tests/critical_config_and_presets.rs:426-445` pins it). Re-scope
-  that matrix in a node that lists the file, then `refuse("blastit dev", …)` returns
-  `USAGE_FAILURE` like every other command.
-- A bare `--stage` / `--config-fd` in a re-exec line still exits `1` when the value
-  is missing entirely (`--stage` with no `=`); the value-bearing forms are `2`.
-
-## Verification
-
-Targeted, run while implementing:
-
-```
-$ cargo test -p blastit --lib cli
-running 18 tests … test result: ok. 18 passed; 0 failed
-$ cargo test -p blastit --lib logs::
-running 17 tests … test result: ok. 17 passed; 0 failed
-$ cargo test -p blastit --locked --test critical_config_and_presets
-running 11 tests … test result: ok. 11 passed; 0 failed
-$ cargo test -p blastit-events --locked --lib
-running 97 tests … test result: ok. 97 passed; 0 failed
-```
-
-Prod file sizes after the split: `cli.rs` 424 (dispatcher + the `lsp` session a
-protected test reads here), `cli/parse.rs` 494, `cli/help.rs` 187, `cli/run.rs` 141,
-`cli/preset.rs` 60, `term.rs` 27; `logs.rs` 567 including the new `Colour`.
-
-Final gate: `make fast-check` and `make test-critical` (tails below).
+- Three protected tests were re-pinned to the charter's new shape, each with its intent spelled out in the node's `# Authorization` (banner informational/once/never an event; component list complete; one aligned reload report; `fmt --check` still writes nothing at all; the same findings/counts/order and the `body = "`/`allow_raw` negatives).
+- `dev`'s own argv errors still exit `1` (pinned by a protected test that this epic did not authorize); differ from the rest of the CLI's exit `2`.
+- `docs/ci.md` still shows the old `route …` block and `ARCHITECTURE.md`'s §8.1 event table lacks the new `reload` row — both land in `MB.40.6`.

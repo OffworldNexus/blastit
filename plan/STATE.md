@@ -17,8 +17,8 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.40.5 CLI visual & UX craft overhaul: --version, clean --help, NO_COLOR/IsTerminal, http:// banner, actionable check & fmt diffs
 - execute: MB.4.1 Decide Node integration topology: napi-rs/neon embedding vs sidecar fd handoff, and the fair-queue CPU model (ADR)
+- execute: MB.40.6 Visual documentation hierarchy pass: Python+PHP+static README, Mermaid diagrams, admonitions, command-first guides & runnable-docs check
 
 ## Stuck / attention
 
@@ -26,7 +26,6 @@
 
 ## Recent journal
 
-- 2026-11-19T04:34 [MB.40.5.1] (lead) attempt 1 hit its step limit mid-edit (tree uncompiled, ~5 compile errors left); re-dispatching as attempt 2 to finish + verify
 - 2026-11-19T04:42 [MB.40.5.1] (lead) status active -> review
 - 2026-11-19T04:44 [MB.40.5.1] (unknown) edited fields
 - 2026-11-19T04:44 [MB.40.5.1] (lead) REVIEW FIX: (a) EventDrain never stopped on the success path -> pg.refused/sql.denied warn+ events swallowed; stop it after proxy.stop() or give it Drop, and fo
@@ -41,3 +40,4 @@
 - 2026-11-19T05:05 [MB.40.5.2] (lead) authorization addendum: check header plural + view noun (critical_check_engine.rs:1008, python/tests/critical/test_check_contract.py:953)
 - 2026-11-19T05:10 [MB.40.5.2] (implementer) edited fields
 - 2026-11-19T05:13 [MB.40.5.2] (lead) status active -> done
+- 2026-11-19T05:13 [MB.40.5] (lead) status ready -> done

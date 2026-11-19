@@ -2,7 +2,7 @@
 id: MB.40.5
 title: "CLI visual & UX craft overhaul: --version, clean --help, NO_COLOR/IsTerminal, http:// banner, actionable check & fmt diffs"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.40.4]
 paths: ["crates/blastit/**", "crates/blastit-events/**", "python/**", Cargo.toml, Cargo.lock]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T04:27"
+updated: "2026-11-19T05:13"
 ---
 
 # Goal

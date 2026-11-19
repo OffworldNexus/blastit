@@ -3709,3 +3709,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T05:05 [MB.40.5.2] (lead) authorization addendum: check header plural + view noun (critical_check_engine.rs:1008, python/tests/critical/test_check_contract.py:953)
 - 2026-11-19T05:10 [MB.40.5.2] (implementer) edited fields
 - 2026-11-19T05:13 [MB.40.5.2] (lead) status active -> done
+- 2026-11-19T05:13 [MB.40.5] (lead) status ready -> done
