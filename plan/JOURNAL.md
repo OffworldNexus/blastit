@@ -3724,3 +3724,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T05:36 [MB.40.6] (lead) ratified path: crates/blastit-manifest/tests/docs_fences.rs (the fence census table must follow the added diagrams/pins)
 - 2026-11-19T05:39 [MB.40.6] (lead) status review -> done
 - 2026-11-19T05:55 [MB.40] (lead) status ready -> done
+- 2026-11-19T05:56 AUTOPILOT off by conductor awaiting human merge of updated release PR v0.2.0 (includes MB.40 GEPA G4 & 6 slices)
