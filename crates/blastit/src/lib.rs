@@ -82,6 +82,10 @@ mod stage0;
 mod stage1;
 mod supervise;
 mod term;
+// The one unified diff `blastit fmt --check` prints (`AGENTS.md` §4): a
+// developer who is told the file is not canonical is also told *what* would
+// change, in the form every editor and `patch` reads.
+mod unified;
 mod visibility;
 
 // The worker transport (`view.chan` framing and flow control) is part of this

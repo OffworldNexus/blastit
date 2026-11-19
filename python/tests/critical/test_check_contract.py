@@ -950,7 +950,7 @@ class TestTheContract(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr.decode())
         lines = run.stdout.decode().splitlines()
         self.assertEqual(
-            lines[-1], "blastit check: 1 requests, 1 statements, 1/1 routes, clean"
+            lines[-1], "blastit check: 1 request, 1 statement, 1/1 view, clean"
         )
         self.assertIn("noise", run.stdout.decode(), "pytest output stays on stdout")
 

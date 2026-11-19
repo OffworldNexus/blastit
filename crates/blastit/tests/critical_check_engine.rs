@@ -876,21 +876,34 @@ fn every_finding_kind_and_its_interaction_counts() {
                 && fix.unsafe_ == Some(true)
     )));
 
-    // §1.3, byte for byte.
+    // §1.3: every finding names the facts `--json` carries for it.
     let expected = "\
-blastit check: 6 requests, 5 statements, 5/6 routes, 2 proxies
-  route catalog: 3 statements not granted
+blastit check: 6 requests, 5 statements, 5/6 views, 2 proxies
+  view catalog: 3 statements not granted on proxy db
     DELETE FROM \"p\" WHERE \"p\".\"id\" = $?
+      fix: add it to view catalog postgres
     SAVEPOINT
+      fix: none — add the grant by hand once you know the statement
     SELECT \"p\".\"id\" FROM \"p\" WHERE \"p\".\"name\" = …
-  route catalog: 1 grant never used
-  group session: 1 grant never used
-  route about: never exercised
-  route upload: takes a body and declares no ingress validation
-  route form: declared body json does not match observed application/x-www-form-urlencoded
-  route raw: declares body raw without `unvalidated` — write `body raw unvalidated`, or the codec it takes
-  request GET /robots.txt: no route
+      fix: none — add the grant by hand once you know the statement
+  view catalog: 1 grant never used on proxy db
+    SELECT count(*) FROM \"p\"
+      fix: remove it from view catalog postgres
+  trait session: 1 grant never used on proxy db
+    SELECT 1
+      fix: remove it from trait session
+  view about: never exercised
+      fix: add a test that reaches it
+  view upload: takes a body and declares no ingress validation; observed multipart/form-data
+      fix: write `body raw unvalidated`
+  view form: declared body json does not match observed application/x-www-form-urlencoded
+      fix: write `body form`
+  view raw: declares body raw without `unvalidated`
+      fix: write `body raw unvalidated` on view raw body
+  request GET /robots.txt: no view matches
+      fix: add a `view` whose pattern matches this request
   proxy analytics: declared, 0 statements observed
+      fix: remove `proxy analytics` or add the call that uses it
 blastit check: 11 problems · `--json` for the machine-readable list
 ";
     let human = audit_v1::human(&report);
@@ -917,11 +930,15 @@ fn an_empty_suite_is_no_observations_and_suppresses_unexercised_routes() {
     assert_eq!(report.statements, 0);
     assert_eq!(report.routes.exercised, 0);
     let expected = "\
-blastit check: 0 requests, 0 statements, 0/6 routes, 2 proxies
-  route raw: declares body raw without `unvalidated` — write `body raw unvalidated`, or the codec it takes
-  suite exercised 0 routes or 0 proxy statements
+blastit check: 0 requests, 0 statements, 0/6 views, 2 proxies
+  view raw: declares body raw without `unvalidated`
+      fix: write `body raw unvalidated` on view raw body
+  suite exercised 0 views or 0 proxy statements
+      fix: run the suite against this app (does DATABASE_URL point at blastit?)
   proxy analytics: declared, 0 statements observed
+      fix: remove `proxy analytics` or add the call that uses it
   proxy db: declared, 0 statements observed
+      fix: remove `proxy db` or add the call that uses it
 blastit check: 4 problems · `--json` for the machine-readable list
 ";
     assert_eq!(audit_v1::human(&report), expected);
@@ -992,7 +1009,7 @@ view notes regex '/notes/.*' {
     assert!(report.ok);
     assert_eq!(
         audit_v1::human(&report),
-        "blastit check: 1 requests, 1 statements, 1/1 routes, clean\n"
+        "blastit check: 1 request, 1 statement, 1/1 view, clean\n"
     );
     // One proxy never gets the `, <P> proxies` suffix.
     assert_eq!(report.proxies.len(), 1);

@@ -40,8 +40,9 @@ pub(super) fn run_check(host: &Host, options: &CheckOptions, colour: Colour) -> 
 /// argument wins over both, because it is the caller naming the file to format.
 ///
 /// `--check` reads, formats in memory and writes nothing at all — not even a
-/// temporary file — and prints `<path>: not in canonical layout` on stdout when
-/// the file would change. Without `--check` the rewrite goes through
+/// temporary file — and prints `<path>: not in canonical layout` followed by a
+/// unified diff of what would change (`--- <path>`, `+++ <path>`, `@@` hunks)
+/// on stdout. Without `--check` the rewrite goes through
 /// [`blastit_manifest::edit::write_atomic`], so the file keeps its mode and a
 /// failed write leaves the original in place.
 pub(super) fn run_fmt(options: &FmtOptions) -> u8 {
@@ -79,10 +80,12 @@ pub(super) fn run_fmt(options: &FmtOptions) -> u8 {
         return SUCCESS;
     }
     if options.check {
-        println!(
-            "{}: not in canonical layout",
-            crate::config::display_path(&path)
-        );
+        // `AGENTS.md` §4: a developer who is told the file is not canonical is
+        // shown the change, not just the verdict — the same text an editor or
+        // `patch` reads. Nothing is written, not even a temporary file.
+        let shown = crate::config::display_path(&path);
+        println!("{shown}: not in canonical layout");
+        print!("{}", crate::unified::unified(&shown, &text, &formatted));
         return FMT_NOT_CANONICAL;
     }
     match blastit_manifest::edit::write_atomic(&path, &formatted) {

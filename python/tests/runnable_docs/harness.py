@@ -1902,7 +1902,7 @@ def _free_port() -> int:
 _NUMBER = re.compile(r"\d+")
 _ABSOLUTE_PATH = re.compile(r"(?<![\w.])/(?:[^\s`'\"]+/)+[^\s`'\"]+")
 _CLEAN = re.compile(
-    r"^blastit check: (\d+) requests, (\d+) statements, (\d+)/(\d+) routes"
+    r"^blastit check: (\d+) requests?, (\d+) statements?, (\d+)/(\d+) (?:routes|views)"
     r"(?:, \d+ proxies)?, clean$"
 )
 
@@ -1917,11 +1917,11 @@ def _require_nonzero(line: str) -> None:
         raise Failure(
             "a clean audit must observe something, and this one reports "
             f"{requests} requests, {statements} statements, {exercised}/{total} "
-            f"routes: `0` means the suite reached nothing, not a complete "
+            f"views: `0` means the suite reached nothing, not a complete "
             f"manifest: {line}"
         )
     if exercised > total:
-        raise Failure(f"more routes exercised than declared: {line}")
+        raise Failure(f"more views exercised than declared: {line}")
 
 
 def _normalise(line: str) -> str:

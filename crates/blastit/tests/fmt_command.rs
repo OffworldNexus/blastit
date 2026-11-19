@@ -110,9 +110,21 @@ fn check_reports_a_non_canonical_file_and_exits_one() {
     dir.write("Blastfile", MESSY);
     let output = dir.run(&[], &["fmt", "--check"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "./Blastfile: not in canonical layout\n"
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with(
+            "./Blastfile: not in canonical layout\n--- ./Blastfile\n+++ ./Blastfile\n@@ "
+        ),
+        "the header and the diff: {stdout}"
+    );
+    assert!(stdout.contains("@@ -1,2 +1,6 @@\n"), "{stdout}");
+    assert!(
+        stdout.contains("\n-view products GET \"/products\" { body json ; prefork }\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\n+    body json\n+    prefork\n"),
+        "{stdout}"
     );
     assert!(output.stderr.is_empty(), "{output:?}");
     assert_eq!(dir.read("Blastfile"), MESSY, "--check wrote the file");
@@ -127,6 +139,48 @@ fn check_on_a_canonical_file_exits_zero() {
     assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+/// A canonical file saved with CRLF still differs — `fmt` writes LF — and the
+/// diff has to show the carriage returns it would drop, hunk and all.
+#[test]
+fn a_crlf_canonical_file_shows_the_carriage_returns_it_would_drop() {
+    let dir = Dir::new("check-crlf");
+    dir.write("Blastfile", &CANONICAL.replace('\n', "\r\n"));
+    let output = dir.run(&[], &["fmt", "--check"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("@@ -"), "a real hunk: {stdout}");
+    assert!(
+        stdout.contains("-app \"shop\"\r\n"),
+        "the removed line keeps its \\r: {stdout:?}"
+    );
+    assert!(stdout.contains("+app \"shop\"\n"), "{stdout:?}");
+    assert_eq!(
+        dir.read("Blastfile"),
+        CANONICAL.replace('\n', "\r\n"),
+        "--check wrote the file"
+    );
+}
+
+/// A file whose only deviation is a missing final newline is a real diff too:
+/// the line itself is unchanged, the terminator is not.
+#[test]
+fn a_missing_final_newline_still_shows_a_diff() {
+    let dir = Dir::new("check-no-final-newline");
+    dir.write("Blastfile", CANONICAL.trim_end_matches('\n'));
+    let output = dir.run(&[], &["fmt", "--check"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("@@ "), "a real hunk: {stdout}");
+    assert!(
+        stdout.contains("\\ No newline at end of file"),
+        "the marker diff writes: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("\n-}\n"),
+        "the line that loses the marker: {stdout:?}"
+    );
 }
 
 /// A file that does not parse exits `2` with the ordinary `file:line:col` on

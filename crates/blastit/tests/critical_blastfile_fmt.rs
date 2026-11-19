@@ -122,9 +122,22 @@ fn check_writes_nothing_at_all() {
 
     let output = dir.run(&[], &["fmt", "--check"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "./Blastfile: not in canonical layout\n"
+    // `AGENTS.md` §4: the verdict *and* what would change, as a unified diff.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with(
+            "./Blastfile: not in canonical layout\n--- ./Blastfile\n+++ ./Blastfile\n@@ "
+        ),
+        "the header and the diff: {stdout}"
+    );
+    assert!(stdout.contains("@@ -1,2 +1,6 @@\n"), "{stdout}");
+    assert!(
+        stdout.contains("\n-view products GET \"/products\" { body json ; prefork }\n"),
+        "the line that would go: {stdout}"
+    );
+    assert!(
+        stdout.contains("\n+    body json\n+    prefork\n"),
+        "the lines that would arrive: {stdout}"
     );
     assert!(output.stderr.is_empty(), "{output:?}");
     assert_eq!(identity(&file), before, "--check touched the file");

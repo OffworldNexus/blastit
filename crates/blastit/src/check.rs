@@ -1123,8 +1123,19 @@ fn learn(
 
     let mut wrote = false;
     let mut failure = None;
+    // `--dry-run` writes nothing, so the proposal is the output: the very
+    // string the write below hands to `write_atomic` (one editor, no second
+    // renderer), and the same refusal sentence a real run reports
+    // (`docs/ci.md`: "print the proposal, write nothing").
+    let mut proposal = None;
+    if options.dry_run && plan.would_write(false) {
+        match plan.proposal(source) {
+            Ok(text) => proposal = Some(text),
+            Err(error) => failure = Some(format!("{}: {error}", config.manifest.display())),
+        }
+    }
     if plan.would_write(options.dry_run) {
-        match blastit_manifest::blastfile::apply_edits(source, &plan.edits) {
+        match plan.proposal(source) {
             Ok(edited) if edited != source => {
                 match blastit_manifest::edit::write_atomic(&config.manifest, &edited) {
                     Ok(()) => wrote = true,
@@ -1152,6 +1163,13 @@ fn learn(
         }
     } else {
         println!("{}", learn_line(&plan, &config.manifest, options.dry_run));
+        if let Some(text) = proposal {
+            println!("learn: proposed Blastfile (nothing written):");
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+        }
     }
     if let Some(message) = failure {
         eprintln!("learn: {message}");
@@ -1160,20 +1178,27 @@ fn learn(
 }
 
 /// The §1.3 `learn:` line, with the absolute manifest path.
+///
+/// The two counts are written in their own number — `1 route`, `2 routes`,
+/// `1 query`, `3 queries` — because this is a sentence a developer reads. The
+/// `--json` document keeps `{"proposed": {"routes": N, "queries": M}}`: a
+/// machine key never pluralises.
 fn learn_line(plan: &audit_v1::LearnPlan, manifest: &Path, dry_run: bool) -> String {
     let path = std::path::absolute(manifest)
         .unwrap_or_else(|_| manifest.to_path_buf())
         .display()
         .to_string();
+    let routes = audit_v1::plural(plan.routes(), "route");
+    let queries = audit_v1::plural(plan.queries(), "query");
     if dry_run {
         format!(
-            "learn: {} routes, {} queries proposed (dry-run) → {path}",
+            "learn: {} {routes}, {} {queries} proposed (dry-run) → {path}",
             plan.routes(),
             plan.queries()
         )
     } else {
         format!(
-            "learn: {} routes, {} queries added → {path}",
+            "learn: {} {routes}, {} {queries} added → {path}",
             plan.routes(),
             plan.queries()
         )
@@ -1305,6 +1330,7 @@ fn stdio_stderr() -> Result<Stdio, String> {
 mod tests {
     use super::*;
     use crate::audit_v1::{HttpObsLine, SCHEMA_VERSION};
+    use blastit_ingress::BodySample;
 
     const MANIFEST: &str = r#"
 postgres $DATABASE_URL
@@ -1497,15 +1523,232 @@ view fallback regex '.*' {}
                 tables: Default::default(),
                 functions: Default::default(),
             });
+        // One of each: the sentence says `1 route`, never `1 routes`.
         let line = learn_line(&plan, Path::new("./Blastfile"), false);
         assert!(
-            line.starts_with("learn: 1 routes, 1 queries added → /"),
+            line.starts_with("learn: 1 route, 1 query added → /"),
             "{line}"
         );
         assert!(!line.contains("dry-run"), "{line}");
         let dry = learn_line(&plan, Path::new("./Blastfile"), true);
-        assert!(dry.contains("proposed (dry-run)"), "{dry}");
+        assert!(
+            dry.starts_with("learn: 1 route, 1 query proposed (dry-run) → /"),
+            "{dry}"
+        );
         assert!(!dry.contains("added"), "a dry run adds nothing: {dry}");
+
+        // Many of each: each noun is pluralised on its own count. `--json` is
+        // untouched — `{"proposed": {"routes": N, "queries": M}}` stays a key.
+        let mut many = audit_v1::LearnPlan::default();
+        for name in ["orders", "items"] {
+            many.edits
+                .views
+                .push(blastit_manifest::blastfile::ProposedView {
+                    name: name.to_string(),
+                    methods: Vec::new(),
+                    patterns: vec![format!("/{name}/")],
+                });
+        }
+        many.edits
+            .grants
+            .push(blastit_manifest::blastfile::ProposedGrant {
+                view: "orders".to_string(),
+                store: None,
+                queries: vec![
+                    "SELECT 1".to_string(),
+                    "SELECT 2".to_string(),
+                    "SELECT 3".to_string(),
+                ],
+                tables: Default::default(),
+                functions: Default::default(),
+            });
+        let many_line = learn_line(&many, Path::new("./Blastfile"), true);
+        assert!(
+            many_line.starts_with("learn: 2 routes, 3 queries proposed (dry-run) → /"),
+            "{many_line}"
+        );
+        assert!(
+            plan.json(true).contains("\"routes\""),
+            "{}",
+            plan.json(true)
+        );
+        assert!(
+            !plan.json(true).contains("\"route\""),
+            "a machine key never pluralises: {}",
+            plan.json(true)
+        );
+    }
+
+    /// A `Blastfile` with a dead grant, a missing grant and the two body
+    /// findings, so both renderings have every actionable field to carry.
+    const PARITY_MANIFEST: &str = r#"
+postgres $DATABASE_URL
+
+postgres analytics $ANALYTICS_URL
+
+view catalog regex '/catalog/.*' {
+    postgres {
+        query 'SELECT 1'
+        query 'SELECT 2'
+    }
+}
+
+view form regex '/form/.*' {
+    body json
+}
+
+view upload regex '/upload/.*' {}
+"#;
+
+    fn http_line(
+        method: &str,
+        path: &str,
+        content_type: Option<&str>,
+        body_len: u64,
+        sample: Option<BodySample>,
+    ) -> HttpObsLine {
+        HttpObsLine {
+            method: method.to_string(),
+            path: path.to_string(),
+            content_type: content_type.map(str::to_string),
+            body_len,
+            sample,
+        }
+    }
+
+    #[test]
+    fn every_fact_the_json_document_carries_is_in_the_human_report() {
+        // One fixture rendered both ways: the human form and the `--json`
+        // document of the same report. A field the human path throws away fails
+        // here instead of in a developer's terminal.
+        let manifest = audit_v1::parse_manifest(PARITY_MANIFEST).expect("manifest");
+        let observed = CheckObsV1::new(
+            SCHEMA_VERSION,
+            vec![
+                http_line("GET", "/catalog/1", None, 0, None),
+                http_line(
+                    "POST",
+                    "/form/1",
+                    Some("application/x-www-form-urlencoded"),
+                    10,
+                    Some(BodySample {
+                        mime: "application/x-www-form-urlencoded".to_string(),
+                        truncated: false,
+                        valid_json: false,
+                        valid_form: true,
+                    }),
+                ),
+                http_line(
+                    "POST",
+                    "/upload/1",
+                    Some("multipart/form-data; boundary=x"),
+                    20,
+                    Some(BodySample {
+                        mime: "multipart/form-data".to_string(),
+                        truncated: false,
+                        valid_json: false,
+                        valid_form: false,
+                    }),
+                ),
+            ],
+            vec![
+                statement(
+                    ObsTarget::Routed {
+                        route: "catalog".to_string(),
+                    },
+                    "SELECT 3",
+                ),
+                statement(
+                    ObsTarget::Routed {
+                        route: "catalog".to_string(),
+                    },
+                    "SELECT 2",
+                ),
+            ],
+        )
+        .expect("observations");
+        let report = audit_v1::evaluate(&manifest, &observed).expect("audit");
+        let human = audit_v1::human(&report);
+        let document: serde_json::Value =
+            serde_json::from_str(&report.to_json().expect("json")).expect("the document parses");
+
+        let mut facts = 0;
+        for finding in document["findings"].as_array().expect("findings") {
+            for field in ["sql", "proxy"] {
+                if let Some(value) = finding.get(field).and_then(serde_json::Value::as_str) {
+                    assert!(
+                        human.contains(value),
+                        "the human report drops {field} `{value}`:\n{human}"
+                    );
+                    facts += 1;
+                }
+            }
+            if let Some(to) = finding["fix"]["to"].as_str() {
+                assert!(
+                    human.contains(to),
+                    "the human report drops fix.to `{to}`:\n{human}"
+                );
+                facts += 1;
+            }
+            for mime in finding["observed"].as_array().into_iter().flatten() {
+                let mime = mime.as_str().expect("a MIME string");
+                assert!(
+                    human.contains(mime),
+                    "the human report drops observed `{mime}`:\n{human}"
+                );
+                facts += 1;
+            }
+        }
+        assert_eq!(report.findings.len(), 5, "{:?}", report.findings);
+        assert!(
+            facts >= 9,
+            "the fixture must exercise the actionable fields: {facts}"
+        );
+        // One `fix:` line per finding, `proxy_unused` and `no_observations`
+        // included: the field-by-field loop above can only assert a `fix.to`
+        // that exists, so the count is what catches a finding with no fix line
+        // at all (the gap that hid `proxy_unused`).
+        assert_eq!(
+            human.matches("\n      fix: ").count(),
+            report.findings.len(),
+            "one fix line per finding:\n{human}"
+        );
+        // The file's own nouns: a retired `route`/`group` id names nothing a
+        // `Blastfile` writes.
+        assert!(!human.contains("route "), "{human}");
+        assert!(!human.contains("group "), "{human}");
+    }
+
+    #[test]
+    fn a_dry_run_proposes_the_bytes_learn_would_write() {
+        // The dry run's output is the writer's own splice — the same string
+        // `learn()` hands to `write_atomic` — so a paste and a `--learn` run
+        // cannot disagree: no second renderer, no `fmt` of the whole document.
+        let manifest = audit_v1::parse_manifest(MANIFEST).expect("manifest");
+        let observed = observations(vec![statement(
+            ObsTarget::Unrouted {
+                method: "POST".to_string(),
+                path: "/cart/".to_string(),
+            },
+            "SELECT 1",
+        )]);
+        let plan = audit_v1::plan_learn(&manifest, &observed).expect("plan");
+        let view = plan.edits.views.first().expect("a view").name.clone();
+        let proposed = plan.proposal(MANIFEST).expect("the plan proposes a file");
+        let written =
+            blastit_manifest::blastfile::apply_edits(MANIFEST, &plan.edits).expect("the edit");
+        assert_eq!(
+            proposed, written,
+            "the dry run must print exactly what --learn writes"
+        );
+        assert!(proposed.contains(&format!("view {view} ")), "{proposed}");
+        assert!(proposed.contains("query 'SELECT 1'"), "{proposed}");
+        assert_ne!(proposed, MANIFEST, "the proposal adds something");
+        // Denied twin: an editor that refuses is reported, never swallowed into
+        // a dry run that prints nothing (a real run prints `learn: <error>`).
+        let broken = "view cart \"/cart/\" {\n    body xml\n}\n";
+        let refused = plan.proposal(broken).expect_err("the editor refuses");
+        assert!(!refused.is_empty(), "{refused}");
     }
 
     #[test]

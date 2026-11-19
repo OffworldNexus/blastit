@@ -13,7 +13,9 @@
 //! `error` in `0.1.1`, `ok` is true exactly when no error-severity finding
 //! exists, and `statements` is by construction the sum of
 //! `proxies[*].statements` (`R38`). [`human`] renders the same report in the
-//! byte-exact `§1.3` form.
+//! human `§1.3` form, naming for every finding the facts `--json` carries for
+//! it: the statement a grant finding is about, the proxy it ran on, the MIME
+//! types a body finding observed, and the `Blastfile` node its `fix` edits.
 //!
 //! Two rules protect the machine contract:
 //!
@@ -1176,11 +1178,18 @@ fn distinct_mimes(samples: &[BodySample]) -> Vec<String> {
         .collect()
 }
 
-/// Renders the report as the byte-exact `§1.3` human block.
+/// Renders the report as the human `§1.3` block.
 ///
 /// A clean report is the one-line form with `, clean`; a report with findings is
-/// the header, one line per finding (with the missing statements indented under
-/// their route), and the `--json` footer.
+/// the header, one line per finding (with the statements a grant is about
+/// indented under it), and the `--json` footer.
+///
+/// Every finding names the facts `--json` carries for it, so the human and the
+/// machine form cannot drift: the statement a `missing_grant`/`dead_grant` is
+/// about, the proxy it ran on, the MIME essences a body finding observed, and
+/// the `Blastfile` node its `fix` edits (`view catalog postgres`,
+/// `trait session`) — the file's own nouns, never a retired `route`/`group`
+/// id (§13.3). Counts are singular or plural as written.
 pub fn human(report: &Report) -> String {
     let mut out = header(report);
     if report.findings.is_empty() {
@@ -1191,101 +1200,127 @@ pub fn human(report: &Report) -> String {
     let mut at = 0;
     while at < report.findings.len() {
         match &report.findings[at] {
-            Finding::MissingGrant { route, .. } => {
-                let mut statements = Vec::new();
+            Finding::MissingGrant { route, proxy, .. } => {
+                let mut shown: Vec<(String, Fix)> = Vec::new();
                 while let Some(Finding::MissingGrant {
-                    route: same, sql, ..
-                }) = report.findings.get(at)
-                {
-                    if same != route {
-                        break;
-                    }
-                    statements.push(sql.clone());
-                    at += 1;
-                }
-                out.push_str(&format!(
-                    "  route {route}: {} {} not granted\n",
-                    statements.len(),
-                    plural(statements.len(), "statement")
-                ));
-                for sql in statements {
-                    out.push_str(&format!("    {sql}\n"));
-                }
-            }
-            Finding::DeadGrant { route, group, .. } => {
-                let mut count = 0;
-                while let Some(Finding::DeadGrant {
-                    route: same_route,
-                    group: same_group,
+                    route: same,
+                    proxy: same_proxy,
+                    sql,
+                    fix,
                     ..
                 }) = report.findings.get(at)
                 {
-                    if same_route != route || same_group != group {
+                    if same != route || same_proxy != proxy {
                         break;
                     }
-                    count += 1;
+                    shown.push((sql.clone(), fix.clone()));
                     at += 1;
                 }
-                let noun = plural(count, "grant");
-                match group {
-                    Some(group) => {
-                        out.push_str(&format!("  group {group}: {count} {noun} never used\n"));
-                    }
-                    None => {
-                        out.push_str(&format!("  route {route}: {count} {noun} never used\n"));
-                    }
+                out.push_str(&format!(
+                    "  view {route}: {} {} not granted on proxy {proxy}\n",
+                    shown.len(),
+                    plural(shown.len(), "statement")
+                ));
+                for (sql, fix) in shown {
+                    statement(&mut out, &sql, &fix);
                 }
             }
-            Finding::UnexercisedRoute { route, .. } => {
-                out.push_str(&format!("  route {route}: never exercised\n"));
+            Finding::DeadGrant {
+                route,
+                group,
+                proxy,
+                ..
+            } => {
+                let mut shown: Vec<(String, Fix)> = Vec::new();
+                while let Some(Finding::DeadGrant {
+                    route: same,
+                    group: same_group,
+                    proxy: same_proxy,
+                    sql,
+                    fix,
+                    ..
+                }) = report.findings.get(at)
+                {
+                    if same != route || same_group != group || same_proxy != proxy {
+                        break;
+                    }
+                    shown.push((sql.clone(), fix.clone()));
+                    at += 1;
+                }
+                let owner = match group {
+                    Some(group) => format!("trait {group}"),
+                    None => format!("view {route}"),
+                };
+                out.push_str(&format!(
+                    "  {owner}: {} {} never used on proxy {proxy}\n",
+                    shown.len(),
+                    plural(shown.len(), "grant")
+                ));
+                for (sql, fix) in shown {
+                    statement(&mut out, &sql, &fix);
+                }
+            }
+            Finding::UnexercisedRoute { route, fix, .. } => {
+                out.push_str(&format!("  view {route}: never exercised\n"));
+                out.push_str(&format!("      {}\n", fix_line(fix)));
                 at += 1;
             }
-            Finding::MissingIngress { route, .. } => {
+            Finding::MissingIngress {
+                route,
+                observed,
+                fix,
+                ..
+            } => {
                 out.push_str(&format!(
-                    "  route {route}: takes a body and declares no ingress validation\n"
+                    "  view {route}: takes a body and declares no ingress validation; observed {}\n",
+                    mimes(observed)
                 ));
+                out.push_str(&format!("      {}\n", fix_line(fix)));
                 at += 1;
             }
             Finding::IngressMismatch {
                 route,
                 declared,
                 observed,
+                fix,
                 ..
             } => {
-                let first = observed.first().map(String::as_str).unwrap_or("nothing");
-                let declared = match declared {
-                    BodyCodec::Json => "json",
-                    BodyCodec::Form => "form",
-                    BodyCodec::None => "none",
-                    BodyCodec::Raw => "raw",
-                };
                 out.push_str(&format!(
-                    "  route {route}: declared body {declared} does not match observed {first}\n"
+                    "  view {route}: declared body {} does not match observed {}\n",
+                    codec_word(*declared),
+                    mimes(observed)
                 ));
+                out.push_str(&format!("      {}\n", fix_line(fix)));
                 at += 1;
             }
-            Finding::RawIngress { route, .. } => {
-                // The design's two spellings: the codec after the keyword, and the
-                // acknowledgement by name. An assignment is not Blastfile syntax,
-                // so a fix that quoted one could not be typed into the file the
-                // sentence is about (§10.1, §10.2).
+            Finding::RawIngress { route, fix, .. } => {
                 out.push_str(&format!(
-                    "  route {route}: declares body raw without `unvalidated` — write \
-                     `body raw unvalidated`, or the codec it takes\n"
+                    "  view {route}: declares body raw without `unvalidated`\n"
                 ));
+                out.push_str(&format!("      {}\n", fix_line(fix)));
                 at += 1;
             }
-            Finding::UnroutedRequest { method, path, .. } => {
-                out.push_str(&format!("  request {method} {path}: no route\n"));
+            Finding::UnroutedRequest {
+                method, path, fix, ..
+            } => {
+                out.push_str(&format!("  request {method} {path}: no view matches\n"));
+                out.push_str(&format!("      {}\n", fix_line(fix)));
                 at += 1;
             }
             Finding::NoObservations { .. } => {
-                out.push_str("  suite exercised 0 routes or 0 proxy statements\n");
+                out.push_str("  suite exercised 0 views or 0 proxy statements\n");
+                out.push_str(
+                    "      fix: run the suite against this app (does DATABASE_URL point at \
+                     blastit?)\n",
+                );
                 at += 1;
             }
             Finding::ProxyUnused { proxy, .. } => {
                 out.push_str(&format!(
                     "  proxy {proxy}: declared, 0 statements observed\n"
+                ));
+                out.push_str(&format!(
+                    "      fix: remove `proxy {proxy}` or add the call that uses it\n"
                 ));
                 at += 1;
             }
@@ -1299,11 +1334,121 @@ pub fn human(report: &Report) -> String {
     out
 }
 
+/// One statement line and the fix line beneath it.
+///
+/// The statement is what the developer has to recognise, and the fix line is the
+/// `Blastfile` node and action that answer it — the two facts `--json` carries
+/// as `sql` and `fix`.
+fn statement(out: &mut String, sql: &str, fix: &Fix) {
+    out.push_str(&format!("    {sql}\n"));
+    out.push_str(&format!("      {}\n", fix_line(fix)));
+}
+
+/// The `fix:` line of one finding, in `Blastfile` nouns.
+///
+/// `to` is the node the action edits (§13.3) and is printed verbatim, so the
+/// line names exactly what `--json`'s `fix.to` names; an action that edits no
+/// node says what to write instead of where. No action is ever printed as a
+/// machine id alone.
+fn fix_line(fix: &Fix) -> String {
+    match (fix.action, fix.to.as_deref()) {
+        ("add_query" | "add_group", Some(to)) => format!("fix: add it to {to}"),
+        ("remove_query", Some(to)) => format!("fix: remove it from {to}"),
+        ("add_route", _) => "fix: add a `view` whose pattern matches this request".to_string(),
+        ("add_test", _) => "fix: add a test that reaches it".to_string(),
+        // `body raw` is the one codec a view has to acknowledge by name, so the
+        // node-only form (`fix_raw_ingress`) names both the codec and the node.
+        ("declare_ingress" | "fix_ingress", Some(to)) if fix.codecs.is_none() => {
+            format!("fix: write `body raw unvalidated` on {to}")
+        }
+        ("declare_ingress" | "fix_ingress", _) => {
+            let codecs = codecs_text(fix);
+            if codecs.is_empty() {
+                "fix: declare the codec the body needs".to_string()
+            } else {
+                format!("fix: write {codecs}")
+            }
+        }
+        // `observe` is the one action that proposes nothing: the statement is
+        // redacted or outside what `--learn` may grant, so the author decides.
+        ("observe", _) => {
+            "fix: none — add the grant by hand once you know the statement".to_string()
+        }
+        // Unreachable today (every action above is named): stay a sentence
+        // rather than printing a machine id at a developer.
+        _ => "fix: none — see this finding's action in `--json`".to_string(),
+    }
+}
+
+/// The codecs a `declare_ingress`/`fix_ingress` fix proposes, as the file
+/// writes them: `body json`, `body raw unvalidated`, or `body json or body
+/// form` when the observed bodies need different codecs.
+fn codecs_text(fix: &Fix) -> String {
+    let Some(codecs) = fix.codecs.as_ref() else {
+        return String::new();
+    };
+    let unvalidated = fix.allow_raw == Some(true);
+    let mut words: Vec<String> = codecs
+        .iter()
+        .map(|codec| format!("`{}`", body_text(*codec, unvalidated)))
+        .collect();
+    match words.len() {
+        0 => String::new(),
+        1 => words.remove(0),
+        _ => {
+            let last = words.pop().unwrap_or_default();
+            format!("{} or {last}", words.join(", "))
+        }
+    }
+}
+
+/// How a `body` directive writes one codec (§10.1); `raw` is the only one that
+/// takes `unvalidated`.
+fn body_text(codec: BodyCodec, unvalidated: bool) -> &'static str {
+    match codec {
+        BodyCodec::Json => "body json",
+        BodyCodec::Form => "body form",
+        BodyCodec::None => "body none",
+        BodyCodec::Raw if unvalidated => "body raw unvalidated",
+        BodyCodec::Raw => "body raw",
+    }
+}
+
+/// The bare codec word, for `declared body <word>`.
+fn codec_word(codec: BodyCodec) -> &'static str {
+    match codec {
+        BodyCodec::Json => "json",
+        BodyCodec::Form => "form",
+        BodyCodec::None => "none",
+        BodyCodec::Raw => "raw",
+    }
+}
+
+/// The MIME essences one body finding observed, in the order `--json` prints
+/// them.
+fn mimes(observed: &[String]) -> String {
+    if observed.is_empty() {
+        return "nothing".to_string();
+    }
+    observed.join(", ")
+}
+
 /// The `blastit check: …` header line, without `, clean`.
+///
+/// Every count is written in its own number (`1 request`, `2 requests`, `1
+/// statement`, `1/1 view`, `3/4 views`) and the third noun is `view`, the noun a
+/// `Blastfile` writes and every finding line below uses. `--json` keeps
+/// `routes` as its machine key: a document never pluralises.
 fn header(report: &Report) -> String {
     let mut line = format!(
-        "blastit check: {} requests, {} statements, {}/{} routes",
-        report.requests, report.statements, report.routes.exercised, report.routes.total
+        "blastit check: {} {}, {} {}, {}/{} {}",
+        report.requests,
+        plural(report.requests as usize, "request"),
+        report.statements,
+        plural(report.statements as usize, "statement"),
+        report.routes.exercised,
+        report.routes.total,
+        plural(report.routes.total as usize, "view"),
     );
     if report.proxies.len() > 1 {
         line.push_str(&format!(", {} proxies", report.proxies.len()));
@@ -1311,10 +1456,26 @@ fn header(report: &Report) -> String {
     line
 }
 
-/// `singular` or its plural, for the exact `§1.3` suffixes.
-fn plural(count: usize, singular: &str) -> String {
+/// `singular` or its plural, for every count the human forms write.
+///
+/// `--json` never goes through this: a machine key is a key, and `"1 problems"`
+/// is not a thing a document has. This is for the sentences a developer reads
+/// (`1 grant`, `2 grants`, `1 query`, `3 queries`).
+pub(crate) fn plural(count: usize, singular: &str) -> String {
     if count == 1 {
-        singular.to_string()
+        return singular.to_string();
+    }
+    // A `-y` after a consonant takes `-ies` (`query` → `queries`); every other
+    // noun this module writes just takes `s`.
+    let consonant_y = singular.ends_with('y')
+        && !singular
+            .chars()
+            .rev()
+            .nth(1)
+            .is_some_and(|character| "aeiou".contains(character));
+    if consonant_y {
+        let stem = singular.get(..singular.len() - 1).unwrap_or(singular);
+        format!("{stem}ies")
     } else {
         format!("{singular}s")
     }
@@ -1393,6 +1554,30 @@ impl LearnPlan {
         for hint in &self.transaction_control {
             eprintln!("learn: {hint}");
         }
+    }
+}
+
+impl LearnPlan {
+    /// The document this plan would write, for `--dry-run`.
+    ///
+    /// These are the writer's own bytes: [`apply_edits`] splices the edits into
+    /// `source` at the tree's own offsets, and the write path (`check::learn`)
+    /// hands that same string to [`write_atomic`] — so a dry run prints exactly
+    /// what would land on disk, and the two cannot drift. No second renderer,
+    /// no second lexer, and deliberately no `fmt`: `--learn` is a surgical
+    /// edit, so canonicalising the whole document here would print a file the
+    /// write path (and `dev --learn`) never produces.
+    ///
+    /// # Errors
+    ///
+    /// The editor's one-line refusal, so a dry run reports the same sentence a
+    /// real run reports instead of silently printing nothing.
+    ///
+    /// [`apply_edits`]: blastit_manifest::blastfile::apply_edits
+    /// [`write_atomic`]: blastit_manifest::edit::write_atomic
+    pub fn proposal(&self, source: &str) -> Result<String, String> {
+        blastit_manifest::blastfile::apply_edits(source, &self.edits)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -1926,6 +2111,26 @@ view items regex '/items/.*' {
             let plan = plan_learn(&manifest, &observations).expect("the plan is built");
             assert_eq!(plan.routes(), 0, "learned a view for {path}");
             assert_eq!(plan.queries(), 0, "granted a query for {path}");
+        }
+    }
+
+    #[test]
+    fn every_count_is_written_in_its_own_number() {
+        // One and many, for each noun the human form writes — including the
+        // `-y` → `-ies` one, so `1 query`/`3 queries` and never `querys`.
+        for (count, singular, expected) in [
+            (1, "route", "route"),
+            (2, "route", "routes"),
+            (1, "query", "query"),
+            (3, "query", "queries"),
+            (1, "statement", "statement"),
+            (2, "statement", "statements"),
+            (1, "grant", "grant"),
+            (2, "grant", "grants"),
+            (1, "problem", "problem"),
+            (3, "problem", "problems"),
+        ] {
+            assert_eq!(plural(count, singular), expected, "{count} {singular}");
         }
     }
 
