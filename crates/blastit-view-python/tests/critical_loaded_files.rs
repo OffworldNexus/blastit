@@ -335,31 +335,42 @@ fn the_loaded_file_report_is_exact() {
     let _ = fs::remove_dir_all(&root);
 }
 
-/// The dev boot's ordering, read from `stage1::load`'s own source text.
+/// The dev boot's ordering, read from the **shim's** `preload` source text.
 ///
-/// What it witnesses, and only that: the one `LoadedTracker::install` site is
-/// lexically inside the `if dev.is_some()` then-branch, before the first
-/// `import_callable(py, spec)` and before the `for module in &config.preload`
-/// loop (so the `preload` phase's modules and opens are seen), and the one
-/// `loaded.harvest(py)` site is after `config.warmup.as_deref()` and before
-/// `CLOSE_AND_COLLECT` (so the cold `sys.modules` scan is paid once, in the
-/// immortal parent every view is forked from).
+/// The owner moved with `MB.42.2.1.4`: `crates/blastit` holds no interpreter any
+/// more, so the tracker is armed inside `blastit_py_abi_v1`'s `preload`
+/// (`crates/blastit-py-shim/src/boot.rs`) — the tibia every view is forked
+/// from — rather than in stage 1's `load`. What this witnesses, and only that:
+///
+/// * exactly **one** `LoadedTracker::install` site, and it is inside
+///   `install_tracker`, after the shim's dev-only gate — the report descriptor
+///   (`req.report_fd >= 0`) and the let-else that returns no tracker when there
+///   is none. That gate is the shim's equivalent of stage 1's old
+///   `if dev.is_some()`: a production boot hands no report fd, so it installs
+///   nothing (design §1.2.1 item 3: installed iff `report_fd >= 0`);
+/// * `boot` calls `install_tracker` **before** the first application import
+///   (`import_callable(py, spec)`) and before the `for module in &req.preload`
+///   loop, so the preload phase's modules and opens are seen;
+/// * exactly **one** `tracker.harvest(py)`, inside `report_boot`, and `boot`
+///   calls `report_boot` after `req.warmup.as_deref()` and before
+///   `py.run(CLOSE_AND_COLLECT, None, None)` — so the cold `sys.modules` scan is
+///   paid once, in the immortal parent every view is forked from.
 ///
 /// This is **a token-and-order witness, not behavioural proof**: it cannot see
-/// control flow, so it would still pass if the install were moved inside a
-/// dead branch, and it deliberately does not pin what `MB.23.5`'s `--no-reload`
-/// switch adds to the gate. It does pin the two edits that are cheap to make by
-/// accident — a second install site outside the gate, and an install moved
-/// after the first import. Neither order is observable from a view's own
-/// process (by the time a view runs, both have happened), which is why the
-/// source is read at all; the runtime half is the boot batch in
-/// `the_loaded_file_report_is_exact`.
+/// control flow, so it would still pass if the install were moved inside a dead
+/// branch, and it deliberately does not pin what `--no-reload` adds to the gate.
+/// It does pin the two edits that are cheap to make by accident — a second
+/// install site outside the gate, and an install moved after the first import.
+/// Neither order is observable from a view's own process (by the time a view
+/// runs, both have happened), which is why the source is read at all; the
+/// runtime half is the boot batch in `the_loaded_file_report_is_exact`.
 #[test]
 fn the_dev_boot_installs_the_tracker_before_the_first_import_and_harvests_after_warmup() {
-    let src = include_str!("../../blastit/src/stage1.rs");
+    // `MB.42.2.1.4`: the owner is the shim's `preload`, not stage 1.
+    let src = include_str!("../../blastit-py-shim/src/boot.rs");
     let at = |needle: &str| {
         src.find(needle)
-            .unwrap_or_else(|| panic!("stage1.rs no longer contains {needle:?}"))
+            .unwrap_or_else(|| panic!("the shim's boot.rs no longer contains {needle:?}"))
     };
 
     // One install site: a second copy could otherwise sit outside the gate and
@@ -367,44 +378,63 @@ fn the_dev_boot_installs_the_tracker_before_the_first_import_and_harvests_after_
     assert_eq!(
         src.matches("LoadedTracker::install").count(),
         1,
-        "exactly one tracker install site, inside the dev-only gate"
+        "exactly one tracker install site, inside the shim's dev-only gate"
     );
     let install = at("LoadedTracker::install");
-    let gate = at("let loaded = if dev.is_some() {");
+    // The single site lives in `install_tracker`, between its own delimiters.
+    let inside = at("fn install_tracker");
+    let after_inside = at("fn report_boot");
     assert!(
-        gate < install,
-        "the install is inside the `if dev.is_some()` gate, not before it"
+        inside < install && install < after_inside,
+        "the one install site is `install_tracker`'s body, not a helper beside it"
     );
-    let gated = &src[gate..install];
+    // The dev-only gate: the report descriptor decides whether there is a
+    // tracker at all, and the let-else returns without one when it does not.
+    let gate = at("let socket = (req.report_fd >= 0).then(|| {");
+    let no_socket = at("return Ok((None, None))");
     assert!(
-        !gated.contains("else"),
-        "the install is in the gate's then-branch, not its else-branch"
+        gate < no_socket && no_socket < install,
+        "the install is inside the `report_fd >= 0` then-path, after the \
+         no-descriptor return — a production boot installs nothing"
+    );
+    let gated = &src[no_socket..install];
+    assert!(
+        !gated.contains("if false"),
+        "no dead branch pretends to be the dev gate"
     );
     assert!(
         !src.contains("if false"),
         "no dead branch pretends to be the dev gate"
     );
+    // `boot` arms it before either import, or the preload closure is missed.
+    let armed = at("install_tracker(py, req)");
     assert!(
-        install < at("import_callable(py, spec)"),
+        armed < at("import_callable(py, spec)"),
         "the tracker is installed before the application is imported, or the preload closure is missed"
     );
     assert!(
-        install < at("for module in &config.preload"),
+        armed < at("for module in &req.preload"),
         "the tracker is installed before the `preload` list is imported, or a preloaded module is missed"
     );
-    let harvest = at("loaded.harvest(py)");
+    // One baseline harvest, after the warm-up and before the collection.
+    let harvest = at("tracker.harvest(py)");
     assert_eq!(
-        src.matches("loaded.harvest(py)").count(),
+        src.matches("tracker.harvest(py)").count(),
         1,
         "one baseline harvest, so the cost is paid once"
     );
+    let reported = at("report_boot(py, tracker.as_ref(), socket)");
     assert!(
-        at("config.warmup.as_deref()") < harvest,
+        at("req.warmup.as_deref()") < reported,
         "the harvest runs after `BLASTIT_WARMUP`, so the warmed closure is in the boot batch"
     );
     assert!(
-        harvest < at("py.run(CLOSE_AND_COLLECT, None, None)"),
+        reported < at("py.run(CLOSE_AND_COLLECT, None, None)"),
         "the harvest runs before the heap is immortalised"
+    );
+    assert!(
+        at("fn report_boot") < harvest,
+        "the one harvest is the boot batch's own, not a second scan"
     );
 }
 

@@ -48,8 +48,11 @@ pub(crate) fn serve_view(zygote: &Zygote, req: &Serve) -> Result<(), String> {
         let config = WsgiConfig {
             route_name: req.route.clone(),
             script_name: req.script_name.clone(),
+            frame_limits: req
+                .max_frame
+                .and_then(|max_frame| blastit_frame::Limits::new(max_frame).ok())
+                .unwrap_or_default(),
             max_threads: req.max_threads,
-            ..WsgiConfig::default()
         };
         serve_reporting(py, chan, zygote.app.clone_ref(py), config, loaded)
             .map_err(|err| format!("view {}: {err}", req.route))

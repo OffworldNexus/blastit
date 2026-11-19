@@ -2,7 +2,7 @@
 id: MB.42.2.1.4
 title: "Stage-1 dlopen + PyRuntime supervisor cut-over + drop pyo3 (portable ELF)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2.1.3]
@@ -13,15 +13,18 @@ paths:
   - "crates/blastit/**"
   - "crates/blastit-py-shim/**"
   - "crates/blastit-py-sapi/**"
-attempts: 0
+  - "crates/blastit-view-python/tests/critical_loaded_files.rs"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T17:21"
-updated: "2026-11-19T17:21"
+updated: "2026-11-19T20:06"
 ---
 
 # Goal
 Cut the binary over: Stage 1 `dlopen`s the pinned `libpython` and the pinned shim in the documented order, the supervisor drops its `Py<PyAny>` for the opaque zygote handle, reload syntax checks go through the vtable, and `blastit` stops depending on `pyo3`/`blastit-view-python` — so both `cargo build -p blastit` **and** `cargo build --workspace` yield a single binary with zero `libpython`, zero `libphp` and zero `RUNPATH` that still serves Python WSGI under CPython 3.13 and 3.14. Per `docs/design/universal-distribution.md` §1.1 (feature wiring, `build.rs` strip), §1.2 (vtable calls), §1.2.1 (ordering + `PyRuntime` handle), §7 R1–R5.
+
+**Authorized protected-test edit (lead, 2026-11-19):** `crates/blastit-view-python/tests/critical_loaded_files.rs` may be **retargeted** in this node. Its `the_dev_boot_installs_the_tracker_before_the_first_import_and_harvests_after_warmup` witness `include_str!`s `crates/blastit/src/stage1.rs` and counts `LoadedTracker::install` / `loaded.harvest(py)` / `CLOSE_AND_COLLECT` tokens that ADR-0017 §1.2.1 item 3 legitimately moved into the shim's `preload`. Retarget the `include_str!` and the token offsets at the new owner (`crates/blastit-py-shim/src/boot.rs`) and **keep the identical invariant**: exactly one install site, inside the dev-only gate, before the first application import and before the preload list; exactly one harvest after warmup and before the close-and-collect/freeze. Do **not** delete the test, `#[ignore]` it, weaken an assertion, or drop a leg.
 
 # Exact Deliverables
 1. **Stage-1 load order** (design §2.4 + §1.2.1, exactly this sequence): after the `(st_dev, st_ino)` re-`fstat` that `MB.42.2.1.3` added, and **after** `test_swap_pause`:

@@ -83,7 +83,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check \
         py-format py-lint test-critical docs-check docs-unit docs-test e2e mutants-rust \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
-        rs-test-php rs-test-php-image platform-matrix-check standalone standalone-glibc workflow-check \
+        rs-test-php rs-test-php-image python-runtime platform-matrix-check standalone standalone-glibc workflow-check \
         packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp
 
 help: ## Show available Make targets
@@ -125,13 +125,22 @@ rs-lint: ## Clippy workspace with warnings denied (python feature enabled)
 rs-doc: ## Check rustdoc across workspace with warnings denied
 	$(RUST_ENV) RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --locked --features python
 
-rs-test: ## Run all unprivileged Rust unit, integration (including critical_*), and doc tests
+# The per-minor CPython shims every WSGI test loads: `target/py-sapi` is a
+# build artifact, so a gate that skipped it would pass only on a machine that
+# already had it. `PY_SAPI_REQUIRE_ALL=1` turns a missing interpreter into a
+# refusal instead of a skip.
+python-runtime: ## Build both CPython shims for the test gate (fails closed)
+	$(MAKE) PY_SAPI_REQUIRE_ALL=1 py-sapi
+
+rs-test: python-runtime ## Run all unprivileged Rust unit, integration (including critical_*), and doc tests
 	$(RUST_ENV) $(CARGO) test --workspace --all-targets --locked --features python
 	$(RUST_ENV) $(CARGO) test --workspace --doc --locked --features python
 
-# Verify default standalone `blastit` links zero libpython/RUNPATH and `blastit-view` stays runtime-agnostic.
-rs-no-python: ## Build + inspect default standalone binary: zero libpython, zero RUNPATH
-	@echo "cargo build -p blastit --locked            # default standalone artifact"
+# Verify the default universal `blastit` links zero libpython/libphp/RUNPATH and still
+# pulls the shim ABI (design universal-distribution.md §1.1), and that
+# `blastit-view` stays runtime-agnostic.
+rs-no-python: ## Build + inspect the universal binary: zero libpython, zero libphp, zero RUNPATH
+	@echo "cargo build -p blastit --locked            # default universal artifact"
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
 	scripts/check-portable-elf.sh "$(CURDIR)/target/debug/blastit"
 	@set -e; count=$$(grep -c -e pyo3 -e blastit-php-sapi crates/blastit-view/Cargo.toml || true); \
@@ -145,20 +154,28 @@ rs-no-python: ## Build + inspect default standalone binary: zero libpython, zero
 	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --test no_python_build
 	$(STANDALONE_ENV) $(CARGO) clippy -p blastit --all-targets --locked -- -D warnings
 	$(CARGO) clippy -p blastit-view --lib --locked -- -D warnings
-	@count=$$($(CARGO) tree -p blastit -e normal \
-		| grep -c pyo3 || true); \
-	if [ "$$count" -ne 0 ]; then \
-		echo "error: the default build depends on pyo3 ($$count): it would link libpython" >&2; \
+	@set -e; tree=$$($(CARGO) tree -p blastit --locked -e normal --prefix none); \
+	for crate in pyo3 blastit-view-python; do \
+		count=$$(printf '%s\n' "$$tree" | grep -c "^$$crate v" || true); \
+		if [ "$$count" -ne 0 ]; then \
+			echo "error: the default build still depends on $$crate ($$count): the cut-over is incomplete" >&2; \
+			exit 1; \
+		fi; \
+		echo "default build: 0 $$crate dependencies"; \
+	done; \
+	count=$$(printf '%s\n' "$$tree" | grep -c "^blastit-py-sapi v" || true); \
+	if [ "$$count" -eq 0 ]; then \
+		echo "error: the default build must pull blastit-py-sapi (the frozen shim ABI)" >&2; \
 		exit 1; \
 	fi; \
-	echo "default build: 0 pyo3 dependencies (no libpython linked)"
+	echo "default build: blastit-py-sapi present, 0 pyo3, no libpython linked"
 
 # Verify `--no-default-features` pulls no view/pyo3 crates and exercises `static_feature_off`.
 rs-no-default: ## Build feature-less binary and prove static mount refusal when disabled
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked --no-default-features --all-targets
 	$(STANDALONE_ENV) $(CARGO) clippy -p blastit --locked --no-default-features --all-targets -- -D warnings
 	@set -e; tree=$$($(CARGO) tree -p blastit --no-default-features --locked -e normal --prefix none); \
-	for crate in blastit-view-php blastit-view-static pyo3; do \
+	for crate in blastit-py-sapi blastit-view-php blastit-view-static pyo3; do \
 		count=$$(printf '%s\n' "$$tree" | grep -c "^$$crate v" || true); \
 		if [ "$$count" -ne 0 ]; then \
 			echo "error: --no-default-features still pulls $$crate ($$count): a feature edge is inverted" >&2; \
@@ -582,8 +599,8 @@ py-sapi: ## Build CPython shims per minor (PY_MINORS="3.14 3.13"; PY_SAPI_REQUIR
 		scripts/check-portable-elf.sh "$$out"; \
 		readelf -d "$$out" | sed -n 's/.*(SONAME).*\[\(.*\)\]/\1/p' | grep -qx "$$soname" \
 			|| { echo "py-sapi: $$out does not carry DT_SONAME $$soname" >&2; exit 1; }; \
-		nm -uD "$$out" | grep -q ' Py_InitializeEx$$' \
-			|| { echo "py-sapi: $$out carries no undefined dynamic Py_InitializeEx" >&2; exit 1; }; \
+		nm -uD "$$out" | grep -qE ' Py_Initialize(Ex|FromConfig)$$' \
+			|| { echo "py-sapi: $$out carries no undefined dynamic Py_Initialize entry point" >&2; exit 1; }; \
 		for symbol in blastit_py_abi_v1 blastit_py_abi_version blastit_py_minor; do \
 			nm -D --defined-only "$$out" | awk '{print $$2" "$$3}' | grep -qx "T $$symbol" \
 				|| { echo "py-sapi: $$out does not export $$symbol" >&2; exit 1; }; \

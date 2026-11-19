@@ -54,6 +54,11 @@ pub(crate) struct Answer {
     pub(crate) reason: Option<String>,
     /// How long the pass took, in nanoseconds (0 when it was skipped).
     pub(crate) elapsed_ns: u64,
+    /// Everything a view must be able to read (§7.2): computed when this call
+    /// applied the `Hosted` path half, empty when `init_paths` already answered.
+    pub(crate) view_paths: Vec<String>,
+    /// The interpreter's own `sys.path`, absolute and de-duplicated (§5.3).
+    pub(crate) sys_path: Vec<String>,
 }
 
 /// Imports and prepares the application (§4 of the design).
@@ -69,6 +74,14 @@ pub(crate) fn preload(req: &Preload) -> Result<(Box<Zygote>, Answer), String> {
 
 /// The body of [`preload`], with the GIL held.
 fn boot(py: Python<'_>, req: &Preload) -> Result<(Box<Zygote>, Answer), String> {
+    // `Hosted`: the wheel's stage 1 never calls `init_paths` (design §1.2.1 item
+    // 1), so the path half of the boot runs here, before the first import —
+    // including the loaded-file tracker, which canonicalises against the project
+    // root and must see the restored `sys.path`.
+    let paths = match req.paths.as_ref() {
+        Some(paths) => Some(crate::env::apply(py, paths)?),
+        None => None,
+    };
     let (tracker, socket) = install_tracker(py, req)?;
     let app = match req.app.as_deref() {
         Some(spec) => {
@@ -109,6 +122,12 @@ fn boot(py: Python<'_>, req: &Preload) -> Result<(Box<Zygote>, Answer), String> 
         elapsed_ns: outcome
             .millis()
             .map_or(0, |millis| (millis * 1_000_000.0) as u64),
+        view_paths: paths
+            .as_ref()
+            .map_or_else(Vec::new, |paths| paths.view_paths.clone()),
+        sys_path: paths
+            .as_ref()
+            .map_or_else(Vec::new, |paths| paths.sys_path.clone()),
     };
     Ok((Box::new(Zygote { app }), answer))
 }

@@ -21,8 +21,6 @@ use crate::logs::{Emitter, fail};
 use blastit_view_php::discovery::{Deployment, PhpBoot, PhpSearch, PhpShimScope, php_boot_in};
 // The discovery surface the `php_boot_gate` cases drive: their subjects are the
 // crate's, so the names are the tests' only.
-#[cfg(feature = "python")]
-use crate::py::Python;
 
 use super::current_uid;
 
@@ -567,7 +565,7 @@ pub(super) fn emit_runtime(
 pub(super) fn runtime_shape(
     entrypoint_php: bool,
     has_app: bool,
-    interpreter: bool,
+    _interpreter: bool,
 ) -> Option<Runtime> {
     if entrypoint_php {
         // The probe reports it, after `php_module_startup`
@@ -575,52 +573,14 @@ pub(super) fn runtime_shape(
         return None;
     }
     if has_app {
-        python_runtime(interpreter)
+        // The `runtime` line is stage 1's now: the shim's `init_paths` answer
+        // carries `sys.version`, which is the only honest source for it once the
+        // interpreter is `dlopen`ed (design §1.2.1). Stage 0 links no
+        // interpreter and may not execute one (§7 `R3`).
+        None
     } else {
         Some(Runtime::Static)
     }
-}
-
-/// What `entrypoint python` resolved to, from the interpreter that is already
-/// running in this process (`MB.25.2`).
-///
-/// A wheel install is the only install where that is true: `blastit._blastit`
-/// is called from the interpreter the wheel was installed into, so stage 0 can
-/// ask it for `sys.version_info` and `sys.prefix` before anything is forked —
-/// the earliest point the interpreter exists. `VIRTUAL_ENV` wins over
-/// `sys.prefix` because that is the environment a developer named.
-#[cfg(feature = "python")]
-pub(super) fn python_runtime(interpreter: bool) -> Option<Runtime> {
-    use pyo3::prelude::PyAnyMethods as _;
-
-    if !interpreter {
-        return None;
-    }
-    // `try_attach`, not `attach`: a caller that said "an interpreter is live"
-    // and is wrong gets no line, never a panic before the fork.
-    Python::try_attach(|py| {
-        let version = py.version_info();
-        let environment = std::env::var("VIRTUAL_ENV")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                py.import("sys")
-                    .and_then(|sys| sys.getattr("prefix"))
-                    .and_then(|prefix| prefix.extract::<String>())
-                    .ok()
-            })?;
-        Some(Runtime::python(
-            format!("{}.{}.{}", version.major, version.minor, version.patch),
-            environment,
-        ))
-    })
-    .flatten()
-}
-
-/// A build with no interpreter has no `python` shape to report.
-#[cfg(not(feature = "python"))]
-pub(super) fn python_runtime(_interpreter: bool) -> Option<Runtime> {
-    None
 }
 
 /// `R13` step 5: the first declared static root the responder's uid could not
@@ -657,16 +617,19 @@ pub(crate) fn static_root_permission(
         probe,
     };
     for (index, path) in manifest.static_roots(manifest_dir) {
-        let refused = match crate::visibility::unreadable(
-            std::slice::from_ref(&path),
-            &dropped,
-            crate::py::runtime_hooks(interpreter),
-        ) {
-            Ok(None) => false,
-            // A probe that could not answer is refused rather than assumed
-            // fine: a root nobody proved readable is one nobody serves.
-            Ok(Some(_)) | Err(_) => true,
+        let hooks = match crate::py::runtime_hooks(interpreter) {
+            Ok(hooks) => hooks,
+            // A live interpreter whose fork protocol cannot be resolved is a
+            // refusal: a bare `fork(2)` there is the case §9.3 forbids.
+            Err(message) => return Some(message),
         };
+        let refused =
+            match crate::visibility::unreadable(std::slice::from_ref(&path), &dropped, hooks) {
+                Ok(None) => false,
+                // A probe that could not answer is refused rather than assumed
+                // fine: a root nobody proved readable is one nobody serves.
+                Ok(Some(_)) | Err(_) => true,
+            };
         if refused {
             return Some(static_root_refusal(manifest, index));
         }

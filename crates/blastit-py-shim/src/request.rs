@@ -30,6 +30,11 @@ pub(crate) struct InitPaths {
     /// Whether an embedded interpreter has to be pointed at the distribution's
     /// `site-packages` (false for the wheel's own interpreter).
     pub(crate) site_packages: bool,
+    /// The installation prefix CPython must call home before it starts: the
+    /// one `Config.python.python_home` recorded (design §2.4). This is the
+    /// **only** way the prefix reaches the interpreter now — stage 0 exports no
+    /// `PYTHONHOME` (`MB.42.2.1.4`).
+    pub(crate) python_home: Option<Vec<u8>>,
 }
 
 impl Default for InitPaths {
@@ -42,6 +47,7 @@ impl Default for InitPaths {
             // An embedded interpreter does not find `site-packages` on its own;
             // the wheel's own interpreter is the caller that turns this off.
             site_packages: true,
+            python_home: None,
         }
     }
 }
@@ -86,6 +92,10 @@ pub(crate) struct Preload {
     pub(crate) root: Option<Vec<u8>>,
     /// `BLASTIT_IMMORTALIZE` as stage 0 parsed it.
     pub(crate) immortalize: Immortalize,
+    /// The path half of the boot, for a `Hosted` interpreter (a wheel), where
+    /// `init_paths` is never called (design §1.2.1 item 1). An `Embed` boot
+    /// applies this in `init_paths` and leaves it `None`.
+    pub(crate) paths: Option<InitPaths>,
 }
 
 impl Default for Preload {
@@ -97,6 +107,7 @@ impl Default for Preload {
             report_fd: -1,
             root: None,
             immortalize: Immortalize::Auto,
+            paths: None,
         }
     }
 }
@@ -120,6 +131,9 @@ pub(crate) struct Serve {
     pub(crate) max_threads: Option<u32>,
     /// The private scratch directory: `HOME`, `TMPDIR` and the working directory.
     pub(crate) home: Option<Vec<u8>>,
+    /// `BLASTIT_FRAME_MAX`: the frame ceiling of this `view.chan` (§3.1). `None`
+    /// keeps the transport's default.
+    pub(crate) max_frame: Option<usize>,
 }
 
 impl Default for Serve {
@@ -132,6 +146,7 @@ impl Default for Serve {
             script_name: String::new(),
             max_threads: None,
             home: None,
+            max_frame: None,
         }
     }
 }

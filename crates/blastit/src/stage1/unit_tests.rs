@@ -10,6 +10,19 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::child::{ChildIo, Filter, Privileges, child_exit, install_filter};
+use crate::config::{Config, LogFormat};
+#[cfg(feature = "python")]
+use crate::dev_reload::{MarkOutcome, Unavailable};
+use crate::logs::{Emitter, output_event};
+use crate::mem_usage;
+use crate::roles::{HttpFds, SchedulerFds};
+use crate::stage1::adopt::*;
+use crate::stage1::boot::*;
+use crate::stage1::serve::*;
+use crate::stage1::spawn::*;
+use crate::stage1::*;
+use crate::supervise::{ComponentPipes, Parts, Supervisor};
 #[cfg(feature = "python")]
 use blastit_events::ManifestWarning;
 #[cfg(feature = "php")]
@@ -25,30 +38,6 @@ use blastit_sys::{
     Fork, Pid, SeccompRole, Signal, SignalFd, SignalMask, bind_tcp, drop_privileges, harden_child,
     pipe, restore_signal_mask_in_child, set_dumpable, socketpair_stream,
 };
-#[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-#[cfg(feature = "python")]
-use pyo3::types::{PyBytes, PyDict};
-
-use crate::child::{ChildIo, Filter, Privileges, child_exit, install_filter};
-use crate::config::{Config, LogFormat};
-#[cfg(feature = "python")]
-use crate::dev_reload::{MarkOutcome, Unavailable};
-use crate::logs::{Emitter, output_event};
-use crate::mem_usage;
-use crate::py::Python;
-use crate::roles::{HttpFds, SchedulerFds};
-use crate::stage1::adopt::*;
-use crate::stage1::boot::*;
-use crate::stage1::python_env::*;
-use crate::stage1::serve::*;
-use crate::stage1::spawn::*;
-use crate::stage1::*;
-use crate::supervise::{ComponentPipes, Parts, Supervisor};
-#[cfg(feature = "python")]
-use blastit_view_python::immortal::{Decision, Outcome};
 
 #[cfg(all(test, feature = "python"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -57,62 +46,8 @@ mod tests {
     use std::os::unix::ffi::OsStrExt;
     use std::time::Duration;
 
-    use blastit_events::encode_json;
-
     use super::*;
     use crate::config::Immortalize;
-    use blastit_view_python::immortal::Outcome;
-
-    /// Runs `f` with an emitter on a pipe, and returns the lines it wrote.
-    ///
-    /// Nothing here touches the heap: the setting below is the one that never
-    /// walks it, so these tests cannot race the whole-interpreter passes in
-    /// `blastit_view_python::immortal`'s own tests.
-    fn capture<T>(f: impl FnOnce(&Emitter) -> T) -> (String, T) {
-        let (read, write) = pipe().unwrap();
-        let emitter = Emitter::new(write.as_raw_fd(), LogFormat::Json, Level::Debug, false);
-        let value = f(&emitter);
-        drop(write);
-        let mut text = String::new();
-        File::from(read).read_to_string(&mut text).unwrap();
-        (text, value)
-    }
-
-    /// The preload `boot` event as JSON, which is what an operator reads.
-    fn boot_json(config: &Config, outcome: &Outcome) -> serde_json::Value {
-        let event = Event::now(
-            Component::Init,
-            EventKind::Boot(preload_lifecycle(config, outcome, None, false)),
-        );
-        serde_json::from_str(&encode_json(&event)).unwrap()
-    }
-
-    #[test]
-    fn preload_stamps_unprivileged_dev_and_build_when_adopting_a_dev_root() {
-        let config = Config {
-            // Even if a caller forged `privilege: "root"` in `--config-fd`,
-            // adopting `--dev-root` stamps `"unprivileged-dev"`.
-            privilege: Some(crate::config::Privilege {
-                mode: crate::config::Mode::Root,
-                capabilities: Vec::new(),
-                bounding_set_dropped: true,
-            }),
-            ..Config::default()
-        };
-        let outcome = Outcome {
-            decision: Decision::Off("for the test".to_string()),
-            stats: None,
-        };
-        let event = Event::now(
-            Component::Init,
-            EventKind::Boot(preload_lifecycle(&config, &outcome, None, true)),
-        );
-        let value: serde_json::Value = serde_json::from_str(&encode_json(&event)).unwrap();
-        assert_eq!(value["stage"], "preload");
-        assert_eq!(value["privilege"], "unprivileged-dev");
-        assert_eq!(value["build"], env!("CARGO_PKG_VERSION"));
-        assert!(value.get("bounding_set").is_none(), "{value}");
-    }
 
     #[test]
     fn learn_routing_table_reserves_slot_zero_and_preserves_declared_matches() {
@@ -160,166 +95,6 @@ view b regex '/robots\\.txt' {}\n";
             serde_json::to_value(BodyCodec::Raw).unwrap(),
             serde_json::json!("raw")
         );
-    }
-
-    #[test]
-    fn a_skipped_pass_is_reported_in_the_boot_event() {
-        let config = Config::default();
-        let outcome = Outcome {
-            decision: Decision::Off("CPython 3.14: unsupported here".to_string()),
-            stats: None,
-        };
-        let value = boot_json(&config, &outcome);
-        assert_eq!(value["event"], "boot");
-        assert_eq!(value["stage"], "preload");
-        assert_eq!(value["immortalize"], "off");
-        assert_eq!(value["immortalized"], 0);
-        assert_eq!(
-            value["immortalize_reason"],
-            "CPython 3.14: unsupported here"
-        );
-        assert!(value.get("immortalize_ms").is_none(), "{value}");
-    }
-
-    #[test]
-    fn a_pass_that_ran_is_reported_in_the_boot_event() {
-        let config = Config::default();
-        let outcome = Outcome {
-            decision: Decision::On,
-            stats: Some(blastit_view_python::immortal::Stats {
-                objects: 1_610_300,
-                elapsed: Duration::from_secs_f64(1.7854),
-            }),
-        };
-        let value = boot_json(&config, &outcome);
-        assert_eq!(value["immortalize"], "on");
-        assert_eq!(value["immortalized"], 1_610_300);
-        assert!(value.get("immortalize_reason").is_none(), "{value}");
-        let millis = value["immortalize_ms"].as_f64().unwrap();
-        assert!((millis - 1785.4).abs() < 1.0, "{millis}");
-        assert!(value["preset"].is_null(), "no preset: {value}");
-    }
-
-    #[test]
-    fn the_preload_boot_event_carries_the_preset_stage_zero_chose() {
-        // E1: the preset is stage 0's decision and travels in the document, and
-        // the preload `boot` line repeats it — a line in the middle of a log is
-        // read on its own, and the mode it describes came from the same source.
-        let config = Config {
-            preset: Some(crate::config::PresetChoice {
-                name: "compose-traefik".to_string(),
-                supplied: std::collections::BTreeMap::from([(
-                    "BLASTIT_TRUSTED_PROXIES".to_string(),
-                    "*".to_string(),
-                )]),
-                overridden: vec!["BLASTIT_LOG_FORMAT".to_string()],
-            }),
-            ..Config::default()
-        };
-        let outcome = Outcome {
-            decision: Decision::Off("for the test".to_string()),
-            stats: None,
-        };
-        let value = boot_json(&config, &outcome);
-        assert_eq!(value["stage"], "preload");
-        assert_eq!(value["preset"], "compose-traefik");
-        assert_eq!(value["preset_settings"]["BLASTIT_TRUSTED_PROXIES"], "*");
-        assert_eq!(
-            value["preset_overridden"],
-            serde_json::json!(["BLASTIT_LOG_FORMAT"])
-        );
-    }
-
-    #[test]
-    fn skipping_immortalisation_warns_once_with_the_reason() {
-        // `BLASTIT_IMMORTALIZE=0` never walks the heap, on any interpreter: the
-        // decision is the setting's, whatever version this is.
-        let config = Config {
-            immortalize: Immortalize::Off,
-            ..Config::default()
-        };
-        Python::initialize();
-        Python::attach(|py| {
-            let (text, outcome) = capture(|emitter| immortalize(py, &config, emitter, None));
-            assert!(!outcome.decision.is_on());
-            let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
-            assert_eq!(lines.len(), 1, "one warn line, got {text:?}");
-            let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-            assert_eq!(value["level"], "warn");
-            assert_eq!(value["event"], "app.output");
-            assert_eq!(value["component"], "init");
-            let line = value["line"].as_str().unwrap();
-            assert!(line.contains("BLASTIT_IMMORTALIZE=0"), "{line}");
-            assert!(line.contains("views will copy"), "{line}");
-        });
-    }
-
-    /// §5.3: the directory blastit was started in is first on `sys.path`, once.
-    ///
-    /// This is what a project that is not installed serves itself from, so the
-    /// two things that matter are that it is *first* — ahead of the recorded
-    /// `sys.path` of the console script, and of the interpreter's own entries —
-    /// and that a directory already on the path is moved rather than added
-    /// twice. Everything happens under one attached interpreter, and the
-    /// interpreter is put back afterwards, so no other test in this binary sees
-    /// the directory.
-    #[test]
-    fn the_working_directory_goes_first_on_sys_path() {
-        let dir = std::env::temp_dir().join(format!("blastit-cwd-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let bytes = dir.as_os_str().as_bytes().to_vec();
-        let decoded = dir.to_str().unwrap().to_string();
-        Python::initialize();
-        Python::attach(|py| {
-            let path = py.import("sys").unwrap().getattr("path").unwrap();
-            let before: Vec<String> = path.extract().unwrap();
-
-            put_cwd_first(py, Some(&bytes)).unwrap();
-            assert_eq!(
-                path.get_item(0).unwrap().extract::<String>().unwrap(),
-                decoded,
-                "the working directory is first: {before:?}"
-            );
-            assert_eq!(
-                path.call_method1("count", (decoded.as_str(),))
-                    .unwrap()
-                    .extract::<usize>()
-                    .unwrap(),
-                1,
-                "and it is on the path exactly once"
-            );
-
-            // A second call moves it back to the front instead of duplicating
-            // it, which is what a `sys.path` that already holds the directory
-            // (a `PYTHONPATH=.` on the console script) looks like.
-            put_cwd_first(py, Some(&bytes)).unwrap();
-            assert_eq!(
-                path.get_item(0).unwrap().extract::<String>().unwrap(),
-                decoded
-            );
-            assert_eq!(
-                path.call_method1("count", (decoded.as_str(),))
-                    .unwrap()
-                    .extract::<usize>()
-                    .unwrap(),
-                1
-            );
-
-            // `None` is a stage 0 that could not read its own working
-            // directory: nothing changes.
-            let with_dir: Vec<String> = path.extract().unwrap();
-            put_cwd_first(py, None).unwrap();
-            assert_eq!(path.extract::<Vec<String>>().unwrap(), with_dir);
-
-            // Put the interpreter back as it was for every other test here.
-            path.call_method1("remove", (decoded.as_str(),)).unwrap();
-            assert_eq!(
-                path.extract::<Vec<String>>().unwrap(),
-                before,
-                "the path is exactly as it was found"
-            );
-        });
-        let _ = std::fs::remove_dir(&dir);
     }
 
     /// Finding: the post-preload `sync_marks` can come back `Dead` — the boot's

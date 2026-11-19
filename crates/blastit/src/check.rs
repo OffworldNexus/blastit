@@ -1073,16 +1073,6 @@ fn python_program(host: &Host, manifest_dir: &Path) -> Result<PathBuf, String> {
     if let Some(found) = path_python() {
         return Ok(found);
     }
-    // The build's own interpreter is the fallback for a `PATH` that names no
-    // `python3` at all (`env -i PATH=/usr/bin:/bin` on a host whose python is
-    // elsewhere), never for an environment with no `PATH` whatsoever: a caller
-    // that cleared its whole environment cannot say which project is being
-    // audited, and "no interpreter to run pytest on" is the honest answer.
-    if std::env::var_os("PATH").is_some()
-        && let Some(found) = embedded_python()
-    {
-        return Ok(found);
-    }
     Err(
         "no interpreter to run pytest on: set BLASTIT_PYTHON to the `python3` \
          that has pytest installed"
@@ -1116,21 +1106,6 @@ fn path_python() -> Option<PathBuf> {
         }
     }
     None
-}
-
-/// `<BLASTIT_PYTHON_HOME>/bin/python3`, the interpreter this build embedded.
-///
-/// The last resort, so a machine where `PATH` holds no `python3` at all — an
-/// `env -i` run, a minimal container — still audits a suite against the
-/// interpreter the binary was built with. Silent in a build that links no
-/// `libpython`, which records no prefix.
-fn embedded_python() -> Option<PathBuf> {
-    let home = option_env!("BLASTIT_PYTHON_HOME")?;
-    let candidate = Path::new(home).join("bin").join("python3");
-    if !candidate.is_file() {
-        return None;
-    }
-    Some(candidate)
 }
 
 /// `<exe_dir>/../python` when it holds the staged `blastit` gate (`MB.40.8`).

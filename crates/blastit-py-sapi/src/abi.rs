@@ -66,6 +66,66 @@ pub struct PyZygoteOpaque {
     _private: [u8; 0],
 }
 
+/// A preloaded interpreter image, as the composition root holds it.
+///
+/// The pointer names a box the **shim** allocated (`Box::into_raw` in
+/// `preload`) and owns for the process's lifetime: `crates/blastit` never reads
+/// it, never frees it, and there is no `free_zygote` entry to call (design
+/// §1.2.1 item 2). Every forked view still references the `Py<PyAny>` inside it,
+/// so dropping the box would strand them.
+#[derive(Clone, Copy)]
+pub struct PyZygote(*mut PyZygoteOpaque);
+
+impl PyZygote {
+    /// The handle of a boot that has not preloaded anything.
+    #[must_use]
+    pub fn null() -> Self {
+        Self(core::ptr::null_mut())
+    }
+
+    /// Whether this handle names no interpreter image.
+    #[must_use]
+    pub fn is_null(self) -> bool {
+        self.0.is_null()
+    }
+
+    /// The opaque pointer, for the one caller that hands it back to the shim.
+    #[must_use]
+    pub fn as_raw(self) -> *mut PyZygoteOpaque {
+        self.0
+    }
+
+    /// The handle a shim's `preload` wrote through its out parameter.
+    #[must_use]
+    pub fn from_raw(raw: *mut PyZygoteOpaque) -> Self {
+        Self(raw)
+    }
+}
+
+/// Everything `crates/blastit` knows about a loaded shim (design §1.2.1 item 2).
+///
+/// A `Copy` value of three parts, and the whole of the composition root's
+/// Python surface: the opaque zygote, the three `PyOS_*Fork` hooks and the
+/// frozen vtable the entry points live in. **No `pyo3` type appears anywhere in
+/// `crates/blastit`** — this handle is what replaces them.
+///
+/// # The lifetime is the loader's
+///
+/// `vtable` and `hooks` point inside the `dlopen`ed shim, so `'a` is the borrow
+/// of the [`crate::loader::LoadedPy`] that owns it. Stage 1's `Serving`/`Parts`
+/// owns that loader and the supervisor borrows this value; a handle that
+/// outlived its shim is not expressible through safe code, and there is no
+/// `'static` spelling and no `transmute`.
+#[derive(Clone, Copy)]
+pub struct PyRuntime<'a> {
+    /// The preloaded image every view is forked from.
+    pub zygote: PyZygote,
+    /// The three `PyOS_*Fork` entry points, called with the GIL held.
+    pub hooks: PyForkHooks<'a>,
+    /// The frozen table the entry points live in.
+    pub vtable: &'a BlastitPyVtableV1,
+}
+
 /// The vtable one shim returns from `blastit_py_abi_v1()`.
 #[repr(C)]
 pub struct BlastitPyVtableV1 {

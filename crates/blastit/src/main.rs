@@ -15,6 +15,6 @@ fn main() -> ExitCode {
     ExitCode::from(cli::main(
         Host::binary(),
         std::env::args().skip(1).collect(),
-        None,
+        blastit::NoInterpreter,
     ))
 }

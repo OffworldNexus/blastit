@@ -1,36 +1,27 @@
 #![cfg_attr(not(feature = "python"), allow(unused_imports))]
 
 use std::os::fd::OwnedFd;
-#[cfg(feature = "python")]
-use std::os::unix::ffi::OsStringExt;
-use std::path::{Path, PathBuf};
-
-#[cfg(feature = "php")]
-use blastit_events::Runtime;
-use blastit_events::{Component, Event, EventKind, Level, Stream};
-use blastit_frame::Limits;
-use blastit_http::HttpConfig;
-use blastit_manifest::{Manifest, RoutingTable, UidLayout};
-use blastit_scheduler::{MemoryProbe, SchedulerConfig};
-use blastit_sys::{
-    Fork, Pid, SeccompRole, Signal, SignalMask, drop_privileges, harden_child, pipe,
-    restore_signal_mask_in_child, set_dumpable, socketpair_stream,
-};
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
-#[cfg(feature = "python")]
-use pyo3::types::PyDict;
+use std::path::Path;
 
 use crate::child::{ChildIo, Filter, Privileges, child_exit, install_filter};
 use crate::config::Config;
 use crate::logs::{Emitter, output_event};
 use crate::mem_usage;
-use crate::py::Python;
+use crate::py::PyForkHooks;
 use crate::roles::{HttpFds, SchedulerFds};
+#[cfg(feature = "php")]
+use blastit_events::Runtime;
+use blastit_events::{Component, Event, EventKind, Level, Stream};
+use blastit_frame::Limits;
+use blastit_http::HttpConfig;
+use blastit_manifest::{Manifest, RoutingTable};
+use blastit_scheduler::{MemoryProbe, SchedulerConfig};
+use blastit_sys::{
+    Fork, Pid, SeccompRole, Signal, SignalMask, drop_privileges, harden_child, pipe,
+    restore_signal_mask_in_child, set_dumpable, socketpair_stream,
+};
 
 use super::fail;
-#[cfg(feature = "python")]
-use super::{SYS_PATH, VIEW_PATHS, python_fail};
 
 /// The front end's configuration (§8.2).
 pub(super) fn http_config(config: &Config, limits: Limits) -> HttpConfig {
@@ -148,21 +139,23 @@ pub(super) fn read_memory(emitter: &Emitter) -> Option<mem_usage::Usage> {
 /// descriptor another one needs: `child` and `fds` are handed to
 /// [`prepare_child`] and the role together, and the only early return is a
 /// failed `fork`, where every end is being torn down anyway.
-pub(super) struct HttpFork {
+pub(super) struct HttpFork<'a> {
     pub(super) child: ChildIo,
     pub(super) fds: HttpFds,
     pub(super) cfg: HttpConfig,
     pub(super) uid: Option<u32>,
     pub(super) mask: SignalMask,
     pub(super) seccomp: bool,
-    pub(super) hosted: bool,
+    /// The interpreter's three `PyOS_*Fork` hooks, when one is live in this
+    /// image (§9.3): `None` in the `Embed` boot, whose forks precede the load.
+    pub(super) hooks: Option<PyForkHooks<'a>>,
 }
 
 /// Forks the http process, which drops to `uid` and serves (§4).
 ///
 /// `hosted` runs the fork under CPython's protocol when an interpreter is live
 /// in this image (§9.3, [`crate::forking`]).
-pub(super) fn fork_http(request: HttpFork) -> std::io::Result<Pid> {
+pub(super) fn fork_http(request: HttpFork<'_>) -> std::io::Result<Pid> {
     let HttpFork {
         child,
         fds,
@@ -170,9 +163,9 @@ pub(super) fn fork_http(request: HttpFork) -> std::io::Result<Pid> {
         uid,
         mask,
         seccomp,
-        hosted,
+        hooks,
     } = request;
-    match crate::forking::fork(crate::py::runtime_hooks(hosted))? {
+    match crate::forking::fork(hooks)? {
         Fork::Parent(pid) => Ok(pid),
         Fork::Child => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Http, seccomp) {
@@ -191,7 +184,7 @@ pub(super) fn fork_http(request: HttpFork) -> std::io::Result<Pid> {
 /// always read and destructured back into the same locals; nothing here owns a
 /// descriptor another field depends on, and the only early return is a failed
 /// `fork`.
-pub(super) struct SchedulerFork {
+pub(super) struct SchedulerFork<'a> {
     pub(super) child: ChildIo,
     pub(super) fds: SchedulerFds,
     pub(super) cfg: SchedulerConfig,
@@ -201,11 +194,12 @@ pub(super) struct SchedulerFork {
     pub(super) uid: Option<u32>,
     pub(super) mask: SignalMask,
     pub(super) seccomp: bool,
-    pub(super) hosted: bool,
+    /// The same three hooks as `HttpFork`'s: `Some` when an interpreter is live.
+    pub(super) hooks: Option<PyForkHooks<'a>>,
 }
 
 /// Forks the scheduler process, which drops to `uid` and routes (§4).
-pub(super) fn fork_scheduler(request: SchedulerFork) -> std::io::Result<Pid> {
+pub(super) fn fork_scheduler(request: SchedulerFork<'_>) -> std::io::Result<Pid> {
     let SchedulerFork {
         child,
         fds,
@@ -216,9 +210,9 @@ pub(super) fn fork_scheduler(request: SchedulerFork) -> std::io::Result<Pid> {
         uid,
         mask,
         seccomp,
-        hosted,
+        hooks,
     } = request;
-    match crate::forking::fork(crate::py::runtime_hooks(hosted))? {
+    match crate::forking::fork(hooks)? {
         Fork::Parent(pid) => Ok(pid),
         Fork::Child => {
             if let Err(message) = prepare_child(child, uid, mask, SeccompRole::Scheduler, seccomp) {
@@ -259,119 +253,6 @@ pub(super) fn prepare_child(
     restore_signal_mask_in_child(mask).map_err(|err| format!("{name}: {err}"))
 }
 
-/// §7.2: refuses a boot whose interpreter or code a view uid could not read.
-///
-/// `app` is `BLASTIT_APP`; its module names the directory the application's own
-/// code comes from, which a view imports through as much as it imports the
-/// standard library. Called *before* the application is imported: this is the
-/// check that has to happen while a failure is a boot failure, because the
-/// imports it stands for happen after the fork, inside one view, long after
-/// everything looked healthy.
-///
-/// A module that cannot be found at all is skipped: the import right after says
-/// so, with the name of the variable an operator has to fix.
-#[cfg(feature = "python")]
-pub(super) fn check_view_paths(
-    py: Python<'_>,
-    config: &Config,
-    routes: usize,
-    scope: &Bound<'_, PyDict>,
-    emitter: &Emitter,
-) {
-    let layout = UidLayout::new(config.uid_base);
-    let dropped = crate::visibility::DroppedTo::of(layout, routes);
-    let module = config.app.as_deref().unwrap_or_default();
-    let module = module.split(':').next().unwrap_or_default();
-    // The snippet defines a function, so its names have to live in a *globals*
-    // mapping rather than in a locals one: Python resolves a function's globals,
-    // not its caller's locals. The dict is this call's own, and nothing in it
-    // travels anywhere.
-    if let Err(err) = scope.set_item("blastit_app_module", module) {
-        python_fail(py, emitter, None, "BLASTIT_APP (the module to check)", &err);
-    }
-    if let Err(err) = py.run(VIEW_PATHS, Some(scope), None) {
-        python_fail(py, emitter, None, "the paths a view imports through", &err);
-    }
-    let paths: Vec<String> =
-        match scope
-            .get_item("blastit_view_paths")
-            .and_then(|value| match value {
-                Some(value) => value.extract::<Vec<String>>(),
-                None => Ok(Vec::new()),
-            }) {
-            Ok(paths) => paths,
-            Err(err) => python_fail(py, emitter, None, "the paths a view imports through", &err),
-        };
-    let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
-    // A live interpreter is in this image — stage 1 is past the point where
-    // CPython is up in both installations — and this thread holds the GIL, which
-    // is what the fork protocol needs (§9.3).
-    match crate::visibility::unreadable(&paths, &dropped, crate::py::runtime_hooks(true)) {
-        Ok(Some(blocker)) => fail(emitter, None, &blocker.message()),
-        Ok(None) => {}
-        Err(timed_out) => fail(emitter, None, &timed_out.message()),
-    }
-
-    // §5.3: the whole `sys.path` — not only the directories blastit added. An
-    // entry a view imports through that another uid can write is a route
-    // planting a module another route imports, whoever put the entry there:
-    // blastit, `PYTHONPATH`, a `.pth` file, or the interpreter itself. Refused
-    // at boot rather than served.
-    if let Err(err) = py.run(SYS_PATH, Some(scope), None) {
-        python_fail(py, emitter, None, "sys.path", &err);
-    }
-    match scope.get_item("blastit_sys_path") {
-        Ok(Some(value)) => match value.extract::<Vec<String>>() {
-            Ok(entries) => {
-                let mut entries: Vec<PathBuf> = entries.into_iter().map(PathBuf::from).collect();
-                // The working directory blastit was started in is a `sys.path`
-                // entry like any other — but it is also the one place this check
-                // has to cover even if `put_cwd_first` did not have to insert
-                // it, because that is where the application's own module comes
-                // from.
-                if let Some(cwd) = config.cwd.as_deref() {
-                    let cwd = PathBuf::from(std::ffi::OsString::from_vec(cwd.to_vec()));
-                    if !entries.contains(&cwd) {
-                        entries.insert(0, cwd);
-                    }
-                }
-                match crate::visibility::writable(
-                    &entries,
-                    &dropped,
-                    crate::py::runtime_hooks(true),
-                ) {
-                    Ok(Some(writable)) => fail(emitter, None, &writable.message()),
-                    Ok(None) => {}
-                    Err(timed_out) => fail(emitter, None, &timed_out.message()),
-                }
-            }
-            Err(err) => python_fail(py, emitter, None, "the paths on sys.path", &err),
-        },
-        Ok(None) => {}
-        Err(err) => python_fail(py, emitter, None, "the paths on sys.path", &err),
-    }
-}
-
-/// Puts the working directory `blastit` was started in first on `sys.path`
-/// (§5.3, D2).
-///
-/// `python -I` implies `-P`, so the interpreter that runs stage 1 starts with
-/// neither `PYTHONPATH` nor the working directory on `sys.path` — and a project
-/// that is not installed (`pip install -e .` never run) has nowhere else for its
-/// `wsgi:application` to come from. gunicorn, uwsgi and granian all make the
-/// directory they were started in importable, so a project ported from one of
-/// them must not need `PYTHONPATH=$PWD` to serve itself.
-///
-/// This is the **only** thing `-I`'s isolation is given back besides
-/// [`restore_sys_path`]'s recorded entries: no `PYTHON*` variable changes how
-/// the interpreter starts, because none is read. An entry that is already there
-/// is moved to the front rather than duplicated, and `None` — a stage 0 that
-/// could not read its own working directory — does nothing.
-///
-/// # Errors
-///
-/// Whatever the interpreter raises while `sys.path` is edited, which is a boot
-/// that cannot say where its own application lives.
 /// The identity and the filter every view child is forked with
 /// (`view-crates-architecture` §4.4 D1) — the boot data a view crate receives,
 /// in routing order.

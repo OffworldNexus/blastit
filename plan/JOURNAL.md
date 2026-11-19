@@ -3850,3 +3850,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T19:08 [MB.42.2.1.3] (lead) REVIEW FIX (filtered): BLOCKER PYTHONHOME now names the DISCOVERED prefix while stage 1 still Py_Initialize's the LINKED interpreter and the minor-agreement gua
 - 2026-11-19T19:20 [MB.42.2.1.3] (lead) flake observed (pre-existing, not this slice): blastit-view-php worker::tests::a_runtime_that_retires_ends_the_loop_after_its_done failed once under parallel ma
 - 2026-11-19T19:21 [MB.42.2.1.3] (lead) status review -> done
+- 2026-11-19T19:21 [MB.42.2.1.4] (lead) status ready -> active
+- 2026-11-19T19:21 [MB.42.2.1.4] (lead) attempt 1/3 started
+- 2026-11-19T19:21 [MB.42.2.1.4] (lead) base 6b2f21198795c8839a6073e418be8e2b1804959f
+- 2026-11-19T19:29 [MB.42.2.1.4] (lead) run 1 stalled at step cap mid-cutover (tree did not compile). Measured: 6 mechanical errors (E0405 LiveInterpreter, E0432 adopt imports, E0425 no_interpreter/Py
+- 2026-11-19T19:44 [MB.42.2.1.4] (lead) authorized protected-test retarget (lead): crates/blastit-view-python/tests/critical_loaded_files.rs asserts the tracker install site by include_str! of crates/
+- 2026-11-19T19:49 [MB.42.2.1.4] (lead) status active -> review
+- 2026-11-19T19:54 [MB.42.2.1.4] (lead) REVIEW FIX (filtered): BLOCKER no gate builds target/py-sapi (rs-test has no prereq, .github has no step) so 3 protected Python suites are red on a clean checko
+- 2026-11-19T20:06 [MB.42.2.1.4] (lead) status review -> done

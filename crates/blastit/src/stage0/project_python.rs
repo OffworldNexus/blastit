@@ -21,12 +21,14 @@ use std::path::{Path, PathBuf};
 
 use blastit_manifest::Manifest;
 use blastit_py_sapi::abi::dotted_py_minor;
-use blastit_py_sapi::discovery::{self, DevEnv, DiscoveredPython, DiscoveryEnv, ProductionEnv};
+use blastit_py_sapi::discovery::{
+    self, DevEnv, DiscoveredPython, DiscoveryEnv, ProductionEnv, SUPPORTED_MINORS,
+};
 use blastit_py_sapi::loader::gate_libpython;
 use blastit_sys::pin::SharedObject;
 
 use crate::config::{Config, PythonHandoff};
-use crate::host::{Claim, Install, Provenance};
+use crate::host::{Claim, Provenance};
 
 /// Which stage-0 boot is asking.
 ///
@@ -109,41 +111,35 @@ pub(super) fn boot(
     let env = discovery_env(boot);
     let found = discovery::discover(&env, boot.verb(), &config.manifest_dir)
         .map_err(|error| error.to_string())?;
+    // The shim this boot found was resolved for `found.py_minor` (design §2.3),
+    // and stage 1 re-checks the loaded shim against it (`MinorMismatch`), so a
+    // boot whose shim is another CPython is still the named both-versions
+    // refusal — never a fatal `init_fs_encoding` inside the interpreter.
     agree_minor(boot, &found)?;
     discover(&found, config, boot).map(Some)
 }
 
-/// Refuses a venv built for another CPython than the one this image links.
+/// Refuses a boot whose discovered CPython is one this build ships no shim for.
 ///
-/// `MB.40.8`'s check, restored after the discovery moved: `PYTHONHOME` for the
-/// linked interpreter is the build's own (transitional), and stage 1's
-/// `Py_Initialize` cannot read another minor's `site-packages`. The refusal
-/// names both versions and one command.
-#[cfg(feature = "python")]
+/// The both-versions sentence a project venv on another minor gets (design §2.3):
+/// the interpreter may be perfectly usable for `blastit check`, but a WSGI view is
+/// served by the per-minor shim this build carries, and installing a second
+/// CPython is a different action from reinstalling one. The runtime half — the
+/// loaded shim's own `py_minor` against the discovered one — is the loader's
+/// (`LoadError::MinorMismatch`), which names both in dotted form too.
 fn agree_minor(boot: Boot, found: &DiscoveredPython) -> Result<(), String> {
-    let Some(linked) = option_env!("BLASTIT_PYTHON_MM") else {
-        return Ok(());
-    };
-    // Only a project venv is this image's business: a host interpreter a wheel
-    // will `dlopen` (`.1.4`) is the shim's own minor, checked by the shim.
-    if found.venv_root.is_none() {
-        return Ok(());
-    }
-    let found_mm = dotted_py_minor(found.py_minor);
-    if found_mm == linked {
+    // `SUPPORTED_MINORS` is the minor alone (`14`, `13`); the discovery record is
+    // the wire encoding (`314`, `313`).
+    if SUPPORTED_MINORS.contains(&(found.py_minor % 100)) {
         return Ok(());
     }
     Err(format!(
-        "blastit {}: the project's virtualenv is CPython {found_mm}, but this blastit embeds \
-         CPython {linked}; use a {linked} virtualenv (uv venv --python {linked})",
-        boot.verb()
+        "blastit {}: CPython {} at {} is not supported for WSGI views (CPython 3.13 and 3.14 \
+         are supported); run uv python install 3.14 && uv venv --python 3.14",
+        boot.verb(),
+        dotted_py_minor(found.py_minor),
+        found.interpreter.display()
     ))
-}
-
-/// A build with no linked interpreter has no minor to agree with.
-#[cfg(not(feature = "python"))]
-fn agree_minor(_boot: Boot, _found: &DiscoveredPython) -> Result<(), String> {
-    Ok(())
 }
 
 /// The process environment, in the shape this boot may read it.
@@ -164,7 +160,7 @@ fn discovery_env(boot: Boot) -> DiscoveryEnv {
     let wheel_python = std::env::var_os("BLASTIT_WHEEL_PYTHON")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| dev_linked_python(boot));
+        .or_else(|| prefix_python(boot));
     match boot {
         Boot::Serve => DiscoveryEnv::production(ProductionEnv {
             blastit_python,
@@ -187,34 +183,21 @@ fn discovery_env(boot: Boot) -> DiscoveryEnv {
     }
 }
 
-/// The interpreter this image was built against, for a `dev` shell that names
-/// none.
+/// `<PYTHONHOME>/bin/python3`, when a dev shell (or its harness) activated a prefix.
 ///
-/// `// transitional (MB.42.2.1.4)`: a `python`-feature build still links the
-/// interpreter `PYO3_PYTHON` named, and `make` exports its `PYTHONHOME` to every
-/// test binary. Until stage 1 loads the shim, that prefix *is* the interpreter
-/// this image serves with, so a development shell with no `BLASTIT_PYTHON`,
-/// venv or `PATH` entry is not a refusal — and the sentence stays reachable
-/// because any candidate the shell *does* name is still checked. Delete with
-/// the linked supervisor.
-#[cfg(feature = "python")]
-fn dev_linked_python(boot: Boot) -> Option<PathBuf> {
+/// `PYTHONHOME` names an interpreter prefix the caller already chose, so probing it
+/// is not a build-host path baked into the artifact (`MB.42.2.1.4` deleted those):
+/// it is a *dev* candidate only, and a deployment still reads `BLASTIT_PYTHON`, the
+/// manifest venv, the wheel's interpreter or the system directories (design §2.2).
+fn prefix_python(boot: Boot) -> Option<PathBuf> {
     if boot.is_deployment() {
         return None;
     }
-    let home = option_env!("BLASTIT_PYTHON_HOME")?;
-    // `make` exports the same prefix as `PYTHONHOME`; a child boot that did not
-    // get it (a wheel, a stripped environment) simply searches what it can.
-    let minor = option_env!("BLASTIT_PYTHON_MM")?;
-    ["python3", &format!("python{minor}")]
+    let home = std::env::var_os("PYTHONHOME").filter(|value| !value.is_empty())?;
+    ["python3", "python"]
         .into_iter()
-        .map(|name| Path::new(home).join("bin").join(name))
+        .map(|name| Path::new(&home).join("bin").join(name))
         .find(|candidate| candidate.is_file())
-}
-
-#[cfg(not(feature = "python"))]
-fn dev_linked_python(_boot: Boot) -> Option<PathBuf> {
-    None
 }
 
 /// The `target/` ancestor of a `cargo` build, for `<target>/py-sapi` (§2.3).
@@ -227,12 +210,16 @@ fn cargo_target(exe_dir: &Path) -> Option<PathBuf> {
 
 /// [`boot`]'s pinning and recording half, once the discovery found an object.
 fn discover(found: &DiscoveredPython, config: &Config, boot: Boot) -> Result<PythonBoot, String> {
-    let lib = SharedObject::open(&found.libpython, None).map_err(|err| err.to_string())?;
-    gate_libpython(&lib, found.py_minor, boot.verb(), &found.interpreter)
-        .map_err(|err| err.to_string())?;
-    let shim = SharedObject::open(&found.shim, None).map_err(|err| err.to_string())?;
+    // Every refusal this half prints carries the boot's verb exactly once, the
+    // way the discovery's own sentences do (`blastit {cmd}: …`).
+    let verb = boot.verb();
+    let head = |err: String| format!("blastit {verb}: {err}");
+    let lib = SharedObject::open(&found.libpython, None).map_err(|err| head(err.to_string()))?;
+    gate_libpython(&lib, found.py_minor, verb, &found.interpreter)
+        .map_err(|err| head(err.to_string()))?;
+    let shim = SharedObject::open(&found.shim, None).map_err(|err| head(err.to_string()))?;
     if boot.is_deployment() {
-        check_provenance(config, found)?;
+        check_provenance(config, found).map_err(head)?;
     }
     let identity = |object: &SharedObject| {
         object
@@ -284,32 +271,9 @@ fn check_provenance(config: &Config, found: &DiscoveredPython) -> Result<(), Str
     provenance.check_trees()
 }
 
-/// The `PYTHONHOME` a standalone image hands stage 1.
-///
-/// `// transitional (MB.42.2.1.4)`: this is the **linked** interpreter's own
-/// prefix — the one `Py_Initialize` in this image reads — recorded by the build
-/// script, and only for [`Install::Binary`]. A wheel's stage 1 already runs on
-/// its interpreter and gets no `PYTHONHOME` from us. The discovered prefix
-/// stays in [`Config::python`] for the shim's `init_paths` in `.1.4`.
-///
-/// An operator's own `PYTHONHOME` always wins: it names an interpreter this
-/// build did not choose.
-pub(super) fn python_home(
-    install: Install,
-    app_env: &std::collections::BTreeMap<String, String>,
-) -> Option<String> {
-    if install != Install::Binary || app_env.contains_key("PYTHONHOME") {
-        return None;
-    }
-    let home = option_env!("BLASTIT_PYTHON_HOME")?;
-    Path::new(home).is_dir().then(|| home.to_string())
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
 
     /// A manifest source whose every request one of its own executors answers.
@@ -369,45 +333,27 @@ mod tests {
     }
 
     #[test]
-    fn python_home_comes_from_the_linked_install_and_only_for_a_binary() {
-        let empty = BTreeMap::new();
-        let binary = python_home(Install::Binary, &empty);
-        assert_eq!(
-            binary.is_some(),
-            option_env!("BLASTIT_PYTHON_HOME").is_some(),
-            "a build script that recorded a home is what the boot hands over"
-        );
-        assert_eq!(
-            python_home(Install::Wheel, &empty),
-            None,
-            "a wheel's stage 1 already runs on its interpreter"
-        );
-        let operator = BTreeMap::from([("PYTHONHOME".to_string(), "/elsewhere".to_string())]);
-        assert_eq!(python_home(Install::Binary, &operator), None);
-    }
-
-    #[test]
     fn a_production_boot_has_no_shell_to_read() {
         // `ProductionEnv` has no `virtual_env`/`path`/`shim_dir` field at all:
         // the guarantee is the type. This drives the discovery with it: only the
         // `<manifest_dir>/.venv` it was given can be chosen, never a shell.
-        let Some(python) = option_env!("BLASTIT_PYTHON_MM")
-            .and_then(|minor| std::env::var_os(format!("PYO3_PYTHON_{minor}")))
-            .or_else(|| std::env::var_os("PYO3_PYTHON"))
-        else {
+        let Some(python) = std::env::var_os("BLASTIT_PYTHON") else {
             return;
         };
-        let python = std::fs::canonicalize(python).expect("the build interpreter");
+        let python = std::fs::canonicalize(python).expect("the named interpreter");
         let dir = std::env::temp_dir().join(format!("blastit-prod-python-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let venv = dir.join(".venv");
         std::fs::create_dir_all(venv.join("bin")).expect("the venv");
         std::os::unix::fs::symlink(&python, venv.join("bin/python3")).expect("the interpreter");
-        let minor = option_env!("BLASTIT_PYTHON_MM").unwrap_or("3.14");
+        let minor = {
+            let text = python.to_string_lossy();
+            text.rsplit("python3.").next().unwrap_or("14").to_string()
+        };
         std::fs::write(
             venv.join("pyvenv.cfg"),
             format!(
-                "home = {}\nversion = {minor}.0\n",
+                "home = {}\nversion = 3.{minor}\n",
                 python.parent().expect("bin").display()
             ),
         )
@@ -427,34 +373,30 @@ mod tests {
 
     #[test]
     fn a_venv_for_another_minor_is_refused_naming_both() {
-        let Some(linked) = option_env!("BLASTIT_PYTHON_MM") else {
-            return;
-        };
+        // `3.12` is a perfectly usable `blastit check` interpreter and no WSGI
+        // one: the refusal names it, both supported minors and one command.
         let found = DiscoveredPython {
             interpreter: PathBuf::from("/tmp/venv/bin/python3"),
-            py_minor: if linked == "3.13" { 314 } else { 313 },
+            py_minor: 312,
             python_home: PathBuf::from("/opt/python"),
             venv_root: Some(PathBuf::from("/tmp/venv")),
             release: None,
             sys_path: Vec::new(),
-            libpython: PathBuf::from("/opt/python/lib/libpython3.14.so.1.0"),
-            shim: PathBuf::from("/opt/blastit/libblastit_py314-x86_64-gnu.so"),
+            libpython: PathBuf::from("/opt/python/lib/libpython3.12.so.1.0"),
+            shim: PathBuf::from("/opt/blastit/libblastit_py312-x86_64-gnu.so"),
         };
         let refusal = agree_minor(Boot::Dev, &found).expect_err("a different minor");
+        assert!(refusal.contains("CPython 3.12"), "{refusal}");
         assert!(
-            refusal.contains("the project's virtualenv is CPython"),
+            refusal.contains("CPython 3.13 and 3.14 are supported"),
             "{refusal}"
         );
-        assert!(
-            refusal.contains(linked),
-            "the linked minor is named: {refusal}"
-        );
-        assert!(refusal.contains("uv venv --python"), "{refusal}");
-        // No venv: a host interpreter the shim will load is not this check's.
-        let host = DiscoveredPython {
-            venv_root: None,
+        assert!(refusal.contains("uv venv --python 3.14"), "{refusal}");
+        // A supported minor is no refusal at all.
+        let supported = DiscoveredPython {
+            py_minor: 314,
             ..found
         };
-        assert!(agree_minor(Boot::Dev, &host).is_ok());
+        assert!(agree_minor(Boot::Dev, &supported).is_ok());
     }
 }

@@ -18,7 +18,7 @@ use crate::child::{ChildIo, Deadline, read_one, wait_readable};
 use crate::config::Config;
 // The two provenance types are the deployment gate's (`php` only): the rest of
 // stage 0 names neither.
-use crate::host::{Host, Install, Placement, Reexec};
+use crate::host::{Host, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
 // The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
@@ -117,7 +117,11 @@ pub(super) fn fork_dbproxy_dev(
         working_dir: None,
     };
 
-    let forked = match crate::forking::fork(crate::py::runtime_hooks(interpreter)) {
+    let hooks = match crate::py::runtime_hooks(interpreter) {
+        Ok(hooks) => hooks,
+        Err(message) => fail_with_root(emitter, boot.root, &message),
+    };
+    let forked = match crate::forking::fork(hooks) {
         Ok(fork) => fork,
         Err(err) => fail_with_root(emitter, boot.root, &format!("fork: {err}")),
     };
@@ -326,40 +330,26 @@ pub(super) fn exec_stage1_dev(request: DevExec<'_>) -> ! {
         }
     }
 
-    let env = stage1_env(app_env, boot.config, boot.host.install());
+    let env = stage1_env(app_env);
     let err = exec(&cstring_dev(boot.root, &stage1.program), &argv, &env);
     fail_dev_root(boot.root, &format!("exec stage 1: {err}"))
 }
 
 /// The environment the stage-1 `execve` hands its program.
 ///
-/// The application's secret-free environment plus the one variable a Python
-/// boot must add: the `PYTHONHOME` stage 0 discovered, unless the app already
-/// names one. Stage 1 owns no `PYTHONPATH` and no working directory (§4), and
-/// under `env -i` nothing else tells CPython where its stdlib is. The value
-/// comes from [`Config::python`] — the document — never from the environment:
-/// `blastit-env` strips every `BLASTIT_*` variable across this barrier.
-fn stage1_env(
-    app_env: &BTreeMap<String, String>,
-    config: &Config,
-    install: Install,
-) -> Vec<(String, String)> {
-    // Only a `python` build ever pushes the home, so the binding is not
-    // mutated in the standalone archive's build.
-    #[allow(unused_mut)]
-    let mut env: Vec<(String, String)> = app_env
+/// The application's secret-free environment, and nothing about CPython. The
+/// interpreter this boot will `dlopen` learns its prefix from the shim's
+/// `init_paths` request — `config.python.python_home` travels in the
+/// configuration document and nowhere else (design §1.2.1, §2.4). Stage 0 no
+/// longer exports a `PYTHONHOME`: the image links no interpreter, so there would
+/// be nothing for the variable to configure, and a `PYTHONHOME` inherited by a
+/// child would be a second, unchecked answer to a question this boot already
+/// answered.
+fn stage1_env(app_env: &BTreeMap<String, String>) -> Vec<(String, String)> {
+    app_env
         .iter()
         .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    #[cfg(feature = "python")]
-    if let Some(home) = super::project_python::python_home(install, app_env) {
-        env.push(("PYTHONHOME".to_string(), home));
-    }
-    #[cfg(not(feature = "python"))]
-    let _ = (config, install);
-    #[cfg(feature = "python")]
-    let _ = config;
-    env
+        .collect()
 }
 /// Forks dbproxy, hands it the secrets and waits for its ready byte (§4).
 ///
@@ -385,10 +375,14 @@ pub(super) fn fork_dbproxy(
     let layout = UidLayout::new(config.uid_base);
     // The route count is not needed here: the execute question never reads the
     // sticky exemption, which is the only thing the uid list is for.
+    let hooks = match crate::py::runtime_hooks(interpreter) {
+        Ok(hooks) => hooks,
+        Err(message) => fail(emitter, &message),
+    };
     match crate::visibility::unexecutable(
         std::slice::from_ref(&placement.dbproxy),
         layout.dbproxy(),
-        crate::py::runtime_hooks(interpreter),
+        hooks,
         &crate::visibility::DroppedTo::of(layout, 0),
     ) {
         Ok(Some(blocker)) => fail(emitter, &blocker.message()),
@@ -735,7 +729,7 @@ pub(super) fn exec_stage1(
         }
     }
 
-    let env = stage1_env(app_env, config, host.install());
+    let env = stage1_env(app_env);
     let err = exec(&program(emitter, &stage1), &argv, &env);
     fail(emitter, &format!("exec stage 1: {err}"))
 }
@@ -785,7 +779,11 @@ pub(super) fn pipe_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
 /// ([`crate::forking`]): a wheel's stage 0 forks dbproxy from inside the
 /// console script's interpreter, and §9.3 applies to it as much as to a view.
 pub(super) fn fork_ok(emitter: &Emitter, interpreter: bool) -> Fork {
-    match crate::forking::fork(crate::py::runtime_hooks(interpreter)) {
+    let hooks = match crate::py::runtime_hooks(interpreter) {
+        Ok(hooks) => hooks,
+        Err(message) => fail(emitter, &message),
+    };
+    match crate::forking::fork(hooks) {
         Ok(fork) => fork,
         Err(err) => fail(emitter, &format!("fork: {err}")),
     }

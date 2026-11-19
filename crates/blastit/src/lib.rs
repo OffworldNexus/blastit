@@ -77,6 +77,10 @@ mod logs;
 // library through the gate, `stage 1` builds the `PhpSlot`s and the bindings,
 // and `init`'s `Ctl::Spawn` reads the binding (`ADR-0016`).
 mod py;
+/// The WSGI view fork: the parent half stage 1 runs, and the child half that
+/// enters its plan and calls the shim's `serve_view` (design §1.2.1).
+#[cfg(feature = "python")]
+mod py_view;
 mod roles;
 mod stage0;
 mod stage1;
@@ -96,3 +100,7 @@ mod visibility;
 use blastit_view as _;
 
 pub use crate::host::{Host, Reexec};
+/// Whether this process already runs CPython, as a value: the wheel's
+/// `_blastit.main()` passes the interpreter it was called from, the binary
+/// passes [`NoInterpreter`] (design §1.2.1 item 2).
+pub use crate::py::{LiveInterpreter, NoInterpreter};

@@ -39,7 +39,6 @@ use std::os::fd::RawFd;
 
 use crate::host::Host;
 use crate::logs::Colour;
-use crate::py::Python;
 use crate::stage0;
 use crate::stage1;
 
@@ -186,7 +185,11 @@ struct Args {
 /// Returns the process exit status, which is also what a Python console script
 /// raises out of `main()` — the caller turns it into `ExitCode::from` or
 /// `SystemExit`. Stage 0 and stage 1 never return at all.
-pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
+pub fn main<H: crate::LiveInterpreter>(host: Host, argv: Vec<String>, py: H) -> u8 {
+    // The installation fact, as a value: a wheel's `_blastit.main()` passes the
+    // interpreter it was called from, the binary passes `NoInterpreter`
+    // (design §1.2.1). No `pyo3` type reaches this signature.
+    let live = py.is_live();
     // `A-4`: the terminal is asked once, here — the composition root every
     // image of this program starts at — and the answer travels as a value.
     // Nothing below this line reads `NO_COLOR`, `TERM` or `isatty` again.
@@ -201,7 +204,7 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
                 println!("{}", help::DEV_USAGE);
                 SUCCESS
             }
-            Ok(Subcommand::Run(options)) => run_dev(&host, &options, py.is_some(), colour),
+            Ok(Subcommand::Run(options)) => run_dev(&host, &options, live, colour),
             Err(message) => {
                 refuse("blastit dev", &message, false, colour);
                 // `1` for `dev`'s own grammar: the protected CLI matrix pins
@@ -285,7 +288,7 @@ pub fn main(host: Host, argv: Vec<String>, py: Option<Python<'_>>) -> u8 {
                         refuse("blastit", &message, true, colour);
                         return USAGE_FAILURE;
                     }
-                    dispatch(args, &host, py, colour)
+                    dispatch(args, &host, live, colour)
                 }
                 Err(refusal) => {
                     refuse("blastit", &refusal.message, true, colour);
@@ -350,9 +353,9 @@ fn run_lsp() -> u8 {
 }
 
 /// Runs the role the arguments name.
-fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>, colour: Colour) -> u8 {
+fn dispatch(args: Args, host: &Host, live: bool, colour: Colour) -> u8 {
     if let Some(role) = args.role.as_deref() {
-        if let Err(message) = role_is_allowed(role, py.is_some()) {
+        if let Err(message) = role_is_allowed(role, live) {
             eprintln!("blastit: {message}");
             return FAILURE;
         }
@@ -392,15 +395,11 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>, colour: Colour) -> 
     }
 
     match args.stage {
-        None | Some(0) => stage0::run(host, py.is_some(), args.preset.as_deref(), colour),
+        None | Some(0) => stage0::run(host, live, args.preset.as_deref(), colour),
         Some(1) => {
             let Some(config_fd) = args.config_fd else {
                 eprintln!("blastit: --stage=1 needs --config-fd");
                 return FAILURE;
-            };
-            let interpreter = match py {
-                Some(py) => stage1::Interpreter::Hosted(py),
-                None => stage1::Interpreter::Embed,
             };
             stage1::run(
                 stage1::Options {
@@ -422,7 +421,7 @@ fn dispatch(args: Args, host: &Host, py: Option<Python<'_>>, colour: Colour) -> 
                     #[cfg(feature = "python")]
                     py_shim_fd: args.py_shim_fd,
                 },
-                interpreter,
+                live,
                 colour,
             )
         }

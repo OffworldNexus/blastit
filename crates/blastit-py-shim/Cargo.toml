@@ -31,6 +31,8 @@ extension-module = ["pyo3/extension-module"]
 blastit-py-sapi = { version = "0.2.0", path = "../blastit-py-sapi" }
 # `child::panic_message`, for the one sentence a caught panic becomes.
 blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
+# `Limits`: the `view.chan` frame ceiling a view process is told about (§3.1).
+blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
 # The loaded-file datagram and its codec: the boot batch a `dev` view reports.
 blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
 # The interpreter half: `serve_reporting`, `immortal`, `LoadedTracker`,

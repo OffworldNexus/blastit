@@ -49,8 +49,6 @@ use blastit_scheduler::RouteInfo;
 use blastit_sys::{
     ExitStatus, Pid, Signal, SignalFd, SignalMask, kill, pipe, reap, recv_with_fd, send_with_fd,
 };
-#[cfg(feature = "python")]
-use pyo3::{Py, PyAny};
 
 #[cfg(feature = "python")]
 use crate::child::wait_readable;
@@ -60,14 +58,13 @@ use crate::dev_reload::{self, Class, Effect, Reload};
 use crate::dev_reload::{ReloadConfig, SystemClock};
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
 use crate::py::PyForkHooks;
-use crate::py::Python;
+#[cfg(feature = "python")]
+use crate::py::PyRuntime;
 use crate::stage1::ViewChildPlans;
 #[cfg(feature = "php")]
 use blastit_view::spawn::ForkProtocol;
 #[cfg(any(feature = "php", feature = "python"))]
 use blastit_view::spawn::SpawnContext;
-#[cfg(feature = "python")]
-use blastit_view_python::zygote;
 
 /// How long the surviving children get after `SIGTERM` before `SIGKILL`, once
 /// the drain is over.
@@ -241,8 +238,8 @@ struct Forked {
 }
 
 #[cfg(feature = "python")]
-impl From<zygote::ForkedView> for Forked {
-    fn from(view: zygote::ForkedView) -> Self {
+impl From<crate::py_view::ForkedView> for Forked {
+    fn from(view: crate::py_view::ForkedView) -> Self {
         Self {
             pid: view.pid,
             scheduler_end: view.scheduler_end,
@@ -381,7 +378,7 @@ enum CycleStage {
 const CYCLE_GRACE: Duration = Duration::from_secs(10);
 
 /// What stage 1 hands the supervisor.
-pub struct Parts {
+pub struct Parts<'a> {
     /// The configuration, already parsed.
     pub cfg: Config,
     /// Frame limits of every channel.
@@ -404,16 +401,12 @@ pub struct Parts {
     /// D1), decided by stage 1 where the boot mode exists. Laid out in every
     /// build; only the WSGI fork reads it.
     pub plans: ViewChildPlans,
-    /// The imported WSGI callable. Only a build with an interpreter can import
-    /// one, and only a WSGI view can be forked from it (`MB.3.11`).
+    /// The composition root's whole handle on the preloaded interpreter
+    /// (design §1.2.1 item 2): the opaque zygote, the three `PyOS_*Fork` hooks
+    /// and the frozen vtable. Only a build with an interpreter has one, and
+    /// only a WSGI view is forked from it.
     #[cfg(feature = "python")]
-    pub app: Py<PyAny>,
-    /// The live interpreter's `PyOS_*Fork` hooks, injected by stage 1 (§1.2.1).
-    ///
-    /// `None` for a PHP/static image and for a stage 1 that has not loaded the
-    /// project's runtime yet; a fork with `None` is the bare `fork(2)` the
-    /// protocol calls for in exactly those images.
-    pub hooks: Option<PyForkHooks<'static>>,
+    pub runtime: Option<PyRuntime<'a>>,
     /// The `(libpython, shim)` descriptors this image inherited from stage 0,
     /// when it may reload: `exec_cycle` hands them to the replacement instead of
     /// re-opening the objects by path (§1.2.1 item 6).
@@ -479,12 +472,14 @@ pub struct Supervisor<'a> {
     /// boot mode exists. Read by the WSGI fork alone.
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     plans: ViewChildPlans,
-    /// The imported WSGI callable, in a build that has an interpreter.
+    /// The composition root's handle on the preloaded interpreter, in a build
+    /// that has one.
     #[cfg(feature = "python")]
-    app: Py<PyAny>,
+    runtime: Option<PyRuntime<'a>>,
     /// The live interpreter's fork protocol, injected by stage 1 (§1.2.1);
     /// `None` for a PHP/static image.
-    hooks: Option<PyForkHooks<'static>>,
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    hooks: Option<PyForkHooks<'a>>,
     emitter: &'a Emitter,
     ctl: Option<OwnedFd>,
     decoder: Decoder,
@@ -547,7 +542,7 @@ pub struct Supervisor<'a> {
 
 impl<'a> Supervisor<'a> {
     /// Builds the supervisor and registers every pipe it must drain.
-    pub fn new(parts: Parts, emitter: &'a Emitter) -> Self {
+    pub fn new(parts: Parts<'a>, emitter: &'a Emitter) -> Self {
         // The adoption snapshot is taken before the pipes move into `sources`:
         // the numbers stay valid because the `OwnedFd`s that own them live as
         // long as the supervisor, and a component that closed its pipe is fatal
@@ -643,8 +638,9 @@ impl<'a> Supervisor<'a> {
             egress: parts.egress,
             plans: parts.plans,
             #[cfg(feature = "python")]
-            app: parts.app,
-            hooks: parts.hooks,
+            runtime: parts.runtime,
+            // One owner: the hooks are the runtime's own three pointers (§1.2.1).
+            hooks: parts.runtime.map(|runtime| runtime.hooks),
             emitter,
             ctl: Some(parts.ctl),
             decoder: Decoder::new(parts.limits),
@@ -669,9 +665,9 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Runs until the process is asked to stop, then exits (§8).
-    pub fn run(&mut self, py: Python<'_>) -> ! {
+    pub fn run(&mut self) -> ! {
         loop {
-            self.poll_once(py);
+            self.poll_once();
             self.reap_children();
             self.progress_cycle();
             self.progress_shutdown();
@@ -679,7 +675,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// One `poll` and everything it found ready.
-    fn poll_once(&mut self, py: Python<'_>) {
+    fn poll_once(&mut self) {
         // The shutdown deadline and the debounce window share the timeout: the
         // loop must wake for whichever comes first, and it sleeps forever while
         // neither is armed (§4.5).
@@ -772,7 +768,7 @@ impl<'a> Supervisor<'a> {
                 .get(1)
                 .is_some_and(|flags| flags.intersects(readable()))
         {
-            self.read_ctl(py);
+            self.read_ctl();
         }
         let learn_at = if self.ctl.is_some() { 2 } else { 1 };
         if self.learn.as_ref().is_some_and(|learn| learn.open)
@@ -831,22 +827,20 @@ impl<'a> Supervisor<'a> {
                 }
                 effects.extend(reload.tick(now));
             }
-            self.apply_effects(py, effects);
+            self.apply_effects(effects);
         }
     }
 
     /// Turns one policy step into what init does: one event, one `Ctl::Reload`,
     /// and — when the watcher is gone — one warning and no retry (§4.6, §4.7).
-    fn apply_effects(&mut self, py: Python<'_>, effects: Vec<Effect>) {
-        #[cfg(not(feature = "python"))]
-        let _ = py;
+    fn apply_effects(&mut self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
                 // The all-views transaction, or the cycle when the changed file
                 // is one every view's heap already holds (§4.5, §4.6).
                 #[cfg(feature = "python")]
                 Effect::Reload(fire) if fire.needs_cycle() && self.reload_source.is_some() => {
-                    self.begin_cycle(py, &fire);
+                    self.begin_cycle(&fire);
                 }
                 Effect::Reload(fire) => self.reload_all(&fire),
                 // The ladder's one `dev.reload.unavailable`: marking ran out of
@@ -1029,7 +1023,7 @@ impl<'a> Supervisor<'a> {
     /// Under `--learn` the manifest cycle does not run at all: the one-pass
     /// tally lives in this image and a re-exec would discard it (§4.6 step 0).
     #[cfg(feature = "python")]
-    fn begin_cycle(&mut self, py: Python<'_>, fire: &dev_reload::Fire) {
+    fn begin_cycle(&mut self, fire: &dev_reload::Fire) {
         if self.learn.is_some() {
             self.warn(
                 "the Blastfile changed; restart `blastit dev --learn` to apply it".to_string(),
@@ -1070,19 +1064,23 @@ impl<'a> Supervisor<'a> {
                 // fails is the boot's own sentence, after the exec.
                 continue;
             };
-            let (Ok(code), Ok(name)) = (
-                CString::new(bytes),
-                CString::new(path.as_os_str().as_bytes()),
-            ) else {
+            // `PyCode::compile` with `PyCodeInput::File`, in the preloaded
+            // parent, through the frozen vtable (design §1.2.1 item 4): compile
+            // only, no import and no execution. The refusal the `dev` reload
+            // path prints is the shim's own `<path>: <message>` sentence.
+            let Some(runtime) = self.runtime else {
+                // One file this boot cannot preflight is not the whole cycle: warn
+                // (the save is named) and keep checking the rest, never abandon the
+                // reload silently.
+                self.warn(format!(
+                    "{}: this boot has no interpreter to compile with; the save was not \
+                     checked",
+                    path.display()
+                ));
                 continue;
             };
-            if let Err(err) = pyo3::types::code::PyCode::compile(
-                py,
-                &code,
-                &name,
-                pyo3::types::code::PyCodeInput::File,
-            ) {
-                self.warn(format!("{}: {err}", path.display()));
+            if let Err(err) = runtime.check_syntax(&bytes, path.as_os_str().as_bytes()) {
+                self.warn(crate::py::refusal_message(&err));
                 return;
             }
         }
@@ -1308,7 +1306,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Reads `ctl.chan` once and handles every complete frame it holds.
-    fn read_ctl(&mut self, py: Python<'_>) {
+    fn read_ctl(&mut self) {
         let Some(raw) = self.ctl.as_ref().map(AsRawFd::as_raw_fd) else {
             return;
         };
@@ -1343,7 +1341,7 @@ impl<'a> Supervisor<'a> {
         self.decoder.push(&buffer[..read]);
         loop {
             match self.decoder.next_frame() {
-                Ok(Some((_id, frame))) => self.on_ctl(py, frame),
+                Ok(Some((_id, frame))) => self.on_ctl(frame),
                 Ok(None) => break,
                 Err(err) => self.fail(&format!("ctl.chan: {err}")),
             }
@@ -1382,7 +1380,7 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Handles one `ctl.chan` message from the scheduler.
-    fn on_ctl(&mut self, py: Python<'_>, frame: Frame) {
+    fn on_ctl(&mut self, frame: Frame) {
         let message = match frame {
             Frame::Ctl(message) => message,
             other => self.fail(&format!(
@@ -1390,7 +1388,7 @@ impl<'a> Supervisor<'a> {
             )),
         };
         match message {
-            Ctl::Spawn { route } => self.spawn(py, route),
+            Ctl::Spawn { route } => self.spawn(route),
             Ctl::Retire { route, pid, .. } => self.retire(route, pid),
             // init is the sender of SPAWNED, EXITED, DRAIN and RELOAD; a
             // scheduler that sends one back has broken the protocol, but that
@@ -1413,7 +1411,7 @@ impl<'a> Supervisor<'a> {
     /// may own several processes: there is no held `SPAWN` any more. What is
     /// kept is init's own fork bound — see [`may_fork`] — because the scheduler
     /// must not be the only thing deciding how many processes init holds.
-    fn spawn(&mut self, py: Python<'_>, route: u32) {
+    fn spawn(&mut self, route: u32) {
         // A cycle has asked every view to retire and is about to replace this
         // image: forking a view now would fork the **old** pre-fork heap after
         // the reload, which is exactly the mixed-version bug the cycle exists
@@ -1440,7 +1438,7 @@ impl<'a> Supervisor<'a> {
             self.send_spawn_refused(route);
             return;
         }
-        self.spawn_now(py, index, &info);
+        self.spawn_now(index, &info);
     }
 
     /// Forks the view for `index`, hands its channel over, and records it.
@@ -1450,7 +1448,7 @@ impl<'a> Supervisor<'a> {
     /// (`ADR-0010` §1) and every other slot the WSGI zygote. The binding was
     /// verified at boot (`st_dev`/`st_ino` against stage 0's record), so a
     /// `SPAWN` can only ever start the runtime this boot already admitted.
-    fn spawn_now(&mut self, py: Python<'_>, index: usize, info: &RouteInfo) {
+    fn spawn_now(&mut self, index: usize, info: &RouteInfo) {
         let egress = self.egress.get(index).copied().unwrap_or(false);
         // Production gives each route its own uid and `<scratch>/views/<uid>`;
         // `dev` gives every view the caller's uid and names the directory by
@@ -1500,17 +1498,14 @@ impl<'a> Supervisor<'a> {
                 return;
             }
         };
-        let child = match self.fork_view(
-            py,
-            Spawn {
-                index,
-                info,
-                egress,
-                dir: &dir,
-                drop_privileges,
-                report,
-            },
-        ) {
+        let child = match self.fork_view(Spawn {
+            index,
+            info,
+            egress,
+            dir: &dir,
+            drop_privileges,
+            report,
+        }) {
             Ok(child) => child,
             Err(err) => {
                 // Never `fail`: one route's resource exhaustion is not the
@@ -1578,7 +1573,7 @@ impl<'a> Supervisor<'a> {
     /// The PHP arm reads the binding the boot stored; the WSGI arm is the
     /// zygote. Neither is reached by asking what backend a request is — the
     /// scheduler sends `SPAWN { route }` and the slot's own data decides.
-    fn fork_view(&self, py: Python<'_>, spawn: Spawn<'_>) -> std::io::Result<Forked> {
+    fn fork_view(&self, spawn: Spawn<'_>) -> std::io::Result<Forked> {
         let Spawn {
             index,
             info,
@@ -1668,10 +1663,10 @@ impl<'a> Supervisor<'a> {
                     nproc: drop_privileges.then(|| {
                         self.cfg
                             .view_worker_cap()
-                            .saturating_add(zygote::VIEW_PROCESS_MARGIN)
+                            .saturating_add(crate::py_view::VIEW_PROCESS_MARGIN)
                             as u64
                     }),
-                    nofile: Some(zygote::VIEW_NOFILE),
+                    nofile: Some(crate::py_view::VIEW_NOFILE),
                     core_zero: true,
                 },
                 privileges,
@@ -1679,21 +1674,24 @@ impl<'a> Supervisor<'a> {
                 egress,
                 mask: self.mask,
             };
-            // The one CPython fork protocol is this crate's (`fork_for`): the
-            // view crate asks for the protocol its image needs and never calls
-            // `fork(2)` itself (§9.3, `view-crates-architecture` §4.4 D1).
-            let forker = |protocol| crate::forking::fork_for(protocol, self.hooks);
-            zygote::fork_view(
-                py,
-                zygote::ViewSpawn {
+            // The handle carries the three fork hooks and the vtable: the
+            // shim's `serve_view` is the child's whole entry (§1.2.1).
+            let runtime = self.runtime.ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "route {:?} (slot {index}): ctl.chan asked for a view but this boot \
+                     preloaded no interpreter",
+                    info.name
+                ))
+            })?;
+            crate::py_view::fork_view(
+                runtime,
+                crate::py_view::ViewSpawn {
                     ctx,
-                    app: &self.app,
                     script_name: crate::config::mount_point(self.cfg.script_name.as_deref()),
                     max_threads: self.cfg.view_worker_cap(),
                     dir: dir.to_path_buf(),
                     loaded: report,
                 },
-                &forker,
             )
             .map(Forked::from)
             .map_err(|err| std::io::Error::other(format!("forking a view: {err}")))
@@ -1706,7 +1704,7 @@ impl<'a> Supervisor<'a> {
             // ([`crate::stage0::no_python_support`]). Failing the boot keeps it
             // true: a scheduler that asks anyway is one the manifest gate never
             // admitted.
-            let _ = (py, dir, drop_privileges, egress, report);
+            let _ = (dir, drop_privileges, egress, report);
             Err(std::io::Error::other(format!(
                 "route {:?} (slot {index}): ctl.chan asked for a view and this blastit build \
                  has no Python worker runtime",
@@ -2259,16 +2257,22 @@ pub fn boot_reload(cfg: &Config, emitter: &Emitter, fault: Option<&str>) -> Opti
 ///
 /// The `socketpair` errno, which a normal boot never sees.
 #[cfg(feature = "python")]
-pub fn open_preload_report(reload: &mut Reload) -> std::io::Result<blastit_view::Reporter> {
+pub fn open_preload_report(
+    reload: &mut Reload,
+) -> std::io::Result<std::os::unix::net::UnixDatagram> {
     let (read, write) = dev_reload::report_socket()?;
-    let reporter = blastit_view::Reporter::new(write, dev_reload::PRELOAD_SOURCE)?;
     reload.policy().reports().register(
         read.into(),
         dev_reload::PRELOAD_SOURCE,
         Class::Loaded,
         true,
     );
-    Ok(reporter)
+    // The **shim** owns the write end now: it adopts this descriptor and sends
+    // the `preload` phase's boot batch through it (`boot::report_boot`). This
+    // process keeps the read end in the policy above, and nothing else — a
+    // second writer would be a second source's batch.
+    write.set_nonblocking(true)?;
+    Ok(write)
 }
 
 /// The one fault the debug-only reload seam injects (§4.6 step 5, `T31`).
@@ -3140,9 +3144,6 @@ mod tests {
             let (a, b) = UnixStream::pair().expect("a socketpair");
             (OwnedFd::from(a), OwnedFd::from(b))
         };
-        Python::initialize();
-        let app = Python::attach(|py| py.None());
-
         let (read, write) = std::io::pipe().expect("a pipe");
         let emitter = Emitter::new(
             write.as_raw_fd(),
@@ -3164,7 +3165,8 @@ mod tests {
                         blastit_sys::SeccompRole::View { egress: false },
                     )],
                 },
-                app,
+                #[cfg(feature = "python")]
+                runtime: None,
                 ctl,
                 signals,
                 mask,
@@ -3176,7 +3178,6 @@ mod tests {
                 chan: None,
                 policy: None,
                 boot_pairs: BTreeSet::new(),
-                hooks: None,
                 py_fds: None,
                 learn_fds: None,
             },
@@ -3497,8 +3498,6 @@ view plain regex '/plain/.*' {}
                 components.insert(100_002, (Component::Dbproxy, component_pipes()));
             }
 
-            Python::initialize();
-            let app = Python::attach(|py| py.None());
             let (read, write) = std::io::pipe().expect("a pipe");
             let emitter = Emitter::new(
                 write.as_raw_fd(),
@@ -3520,7 +3519,8 @@ view plain regex '/plain/.*' {}
                             blastit_sys::SeccompRole::View { egress: false },
                         )],
                     },
-                    app,
+                    #[cfg(feature = "python")]
+                    runtime: None,
                     ctl: OwnedFd::from(ctl),
                     signals,
                     mask,
@@ -3537,7 +3537,6 @@ view plain regex '/plain/.*' {}
                     chan: Some(OwnedFd::from(chan)),
                     policy: Some(OwnedFd::from(policy)),
                     boot_pairs: policy_pairs(&manifest).into_iter().collect(),
-                    hooks: None,
                     py_fds: None,
                     learn_fds: None,
                 },
@@ -3701,8 +3700,6 @@ view plain regex '/plain/.*' {}
         let mut components = BTreeMap::new();
         components.insert(100_001, (Component::Http, component_pipes()));
         components.insert(100_002, (Component::Dbproxy, component_pipes()));
-        Python::initialize();
-        let app = Python::attach(|py| py.None());
         let (read, write) = std::io::pipe().expect("a pipe");
         let emitter = Emitter::new(
             write.as_raw_fd(),
@@ -3724,7 +3721,8 @@ view plain regex '/plain/.*' {}
                         blastit_sys::SeccompRole::View { egress: false },
                     )],
                 },
-                app,
+                #[cfg(feature = "python")]
+                runtime: None,
                 ctl: OwnedFd::from(ctl),
                 signals,
                 mask,
@@ -3741,7 +3739,6 @@ view plain regex '/plain/.*' {}
                 chan: Some(OwnedFd::from(chan)),
                 policy: Some(OwnedFd::from(policy)),
                 boot_pairs: policy_pairs(&manifest).into_iter().collect(),
-                hooks: None,
                 py_fds: None,
                 learn_fds: None,
             },

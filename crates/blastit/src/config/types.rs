@@ -204,8 +204,8 @@ pub enum Immortalize {
 }
 
 impl Immortalize {
-    /// The `BLASTIT_IMMORTALIZE` spelling, which is also the stage 1
-    /// document's.
+    /// The `BLASTIT_IMMORTALIZE` spelling, which is also the stage 1 document's
+    /// and the `preload` request's.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Auto => "auto",
@@ -214,20 +214,14 @@ impl Immortalize {
         }
     }
 
-    /// The interpreter crate's own spelling of this setting.
+    /// The token the shim's `preload` request carries.
     ///
-    /// `blastit-view-python` owns the pass, so it owns the type, and it may not
-    /// name this crate's `Config`. The map is therefore here, in the
-    /// composition root: the environment variable is parsed where every other
-    /// one is, and the crate that acts on it is handed a value it already
-    /// knows.
-    #[cfg(feature = "python")]
-    pub(crate) fn setting(self) -> blastit_view_python::immortal::Setting {
-        match self {
-            Self::Auto => blastit_view_python::immortal::Setting::Auto,
-            Self::On => blastit_view_python::immortal::Setting::On,
-            Self::Off => blastit_view_python::immortal::Setting::Off,
-        }
+    /// The pass itself lives in the per-minor shim now (design §1.2.1 item 3),
+    /// so the composition root only hands it this three-word spelling — never a
+    /// type from a crate it does not depend on.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    pub(crate) const fn as_token(self) -> &'static str {
+        self.as_str()
     }
 }
 

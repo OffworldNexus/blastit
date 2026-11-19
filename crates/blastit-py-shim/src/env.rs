@@ -45,21 +45,81 @@ pub(crate) struct Answer {
 /// A sentence naming the step that failed. A minor mismatch names both CPythons
 /// in dotted form, never the `313` wire encoding.
 pub(crate) fn init_paths(req: &InitPaths) -> Result<Answer, String> {
-    initialize();
-    Python::attach(|py| run(py, req))
+    initialize(req)?;
+    Python::attach(|py| apply(py, req))
 }
 
-/// The one `Py_InitializeEx` call, on the thread that will hold the GIL.
-fn initialize() {
+/// The one interpreter start, on the thread that will hold the GIL.
+///
+/// `PyConfig_InitPythonConfig` + `Py_InitializeFromConfig` is `Py_InitializeEx(0)`
+/// with one addition: the prefix the composition root recorded goes in through
+/// `PyConfig.home`, so the interpreter finds its stdlib under `env -i` and the
+/// retired `PYTHONHOME` is not needed (`MB.42.2.1.4`, design 00a72.4).
+fn initialize(req: &InitPaths) -> Result<(), String> {
+    use core::ptr;
+
     // SAFETY: the shim is `dlopen`ed into stage 1 before any other call, and
-    // this is the embedding contract's own first step: one initialisation, on
-    // the main thread, before any Python API use. `initsigs = 0` keeps the
-    // host's signal handlers.
-    unsafe { pyo3::ffi::Py_InitializeEx(0) };
+    // this is the embedding contract's own first step. `config` is zeroed and
+    // then initialised by CPython itself; `wide` is freed once CPython has
+    // copied it (`PyConfig_Clear` releases the rest).
+    unsafe {
+        let mut config = core::mem::MaybeUninit::<pyo3::ffi::PyConfig>::zeroed();
+        pyo3::ffi::PyConfig_InitPythonConfig(config.as_mut_ptr());
+        let mut config = config.assume_init();
+        // `Py_InitializeEx(0)`: the host's signal handlers stay installed.
+        config.install_signal_handlers = 0;
+        if let Some(home) = &req.python_home {
+            let name = std::ffi::CString::new(home.clone())
+                .map_err(|_| "the Python prefix holds a NUL byte".to_string())?;
+            let wide = pyo3::ffi::Py_DecodeLocale(name.as_ptr(), ptr::null_mut());
+            if wide.is_null() {
+                pyo3::ffi::PyConfig_Clear(&mut config);
+                return Err("the Python prefix could not be decoded".to_string());
+            }
+            config.home = wide;
+        }
+        let status = pyo3::ffi::Py_InitializeFromConfig(&config);
+        let failed = pyo3::ffi::PyStatus_Exception(status) != 0;
+        // `PyConfig_Clear` releases every string the config owns, `home`
+        // included: freeing it again here is the double free that aborts a boot.
+        pyo3::ffi::PyConfig_Clear(&mut config);
+        if failed {
+            // `PyStatus` carries the failing step and CPython's own message (which
+            // names a file, never a secret): a bare sentence here hides exactly the
+            // diagnosis an `init_fs_encoding` refusal needs.
+            let func = if status.func.is_null() {
+                "CPython".to_string()
+            } else {
+                // SAFETY: a non-null `func`/`err_msg` in a `PyStatus` is a
+                // static, NUL-terminated string owned by CPython (and this block
+                // is already `unsafe`).
+                core::ffi::CStr::from_ptr(status.func)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let detail = if status.err_msg.is_null() {
+                String::new()
+            } else {
+                // SAFETY: as above.
+                core::ffi::CStr::from_ptr(status.err_msg)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            return Err(format!(
+                "CPython could not be started with the recorded prefix ({func}: {detail})"
+            ));
+        }
+    }
+    Ok(())
 }
 
-/// The body of [`init_paths`], with the GIL held.
-fn run(py: Python<'_>, req: &InitPaths) -> Result<Answer, String> {
+/// What `init_paths` does to a **live** interpreter, with no initialisation.
+///
+/// `Hosted` never calls `init_paths` (design §1.2.1 item 1): its CPython is the
+/// interpreter the wheel installed into. The path half is still needed — a
+/// wheel's stage 1 runs with `-I`, so the entries stage 0 recorded have to go
+/// back in front — so `preload` calls this before the application import.
+pub(crate) fn apply(py: Python<'_>, req: &InitPaths) -> Result<Answer, String> {
     let info = py.version_info();
     let running = u32::from(info.major) * 100 + u32::from(info.minor);
     if req.expected_minor != 0 && req.expected_minor != running {

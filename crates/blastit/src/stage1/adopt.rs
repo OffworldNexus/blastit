@@ -7,24 +7,15 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use blastit_events::{Component, Event, EventKind, Level, Lifecycle, Stream};
+use blastit_events::{Component, Event, EventKind, Lifecycle};
 #[cfg(feature = "python")]
 use blastit_scheduler::derived_view_cap;
-#[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
-#[cfg(feature = "python")]
-use pyo3::prelude::*;
 
 use crate::config::Config;
-use crate::logs::{Emitter, output_event};
+use crate::logs::Emitter;
 use crate::mem_usage;
-use crate::py::Python;
-#[cfg(feature = "python")]
-use blastit_view_python::immortal::{Decision, Outcome};
 
 use super::fail;
-#[cfg(feature = "python")]
-use super::python_fail;
 
 /// Reads the configuration document stage 0 wrote into the pipe (§4), the
 /// `entrypoint php` probe timeout that travelled with it (`ADR-0010` §3), and —
@@ -457,36 +448,23 @@ pub(super) fn test_swap_pause(
     _point: Option<&Path>,
 ) {
 }
-/// §9.2 #7: makes the preloaded heap immortal, when the interpreter's marker is
-/// known here.
+/// §9.2 #7's pass as the shim reported it through `preload`.
 ///
-/// The decision is `BLASTIT_IMMORTALIZE` against the running interpreter
-/// ([`Decision`]): every interpreter blastit knows gets the
-/// marker *it* reads — 3.14 CPython's own split word — and one whose marker
-/// blastit does not know is skipped, so the server starts rather than refusing
-/// and every view process simply copies more of the preloaded heap (§9.2 #6).
-///
-/// A skip is one `warn` line saying why; the same reason travels in the
-/// preload `boot` event ([`preload_lifecycle`]). A pass that was *decided* and
-/// then failed is still fatal: a heap that was not immortalised when it could
-/// have been is the copy §9.2 #6 measured.
+/// The pass itself runs inside `blastit_py_abi_v1`'s `preload` (design §1.2);
+/// this crate only carries the numbers to the boot line. `on` is
+/// `"on"`/`"off"`, `objects` how many allocations carry the marker, `reason`
+/// why the pass was skipped, and `elapsed_ns` what it cost (0 when skipped).
 #[cfg(feature = "python")]
-pub(super) fn immortalize(
-    py: Python<'_>,
-    config: &Config,
-    emitter: &Emitter,
-    dev: Option<&crate::dev_learn::Dev>,
-) -> Outcome {
-    let outcome = match blastit_view_python::immortal::apply(py, config.immortalize.setting()) {
-        Ok(outcome) => outcome,
-        Err(err) => python_fail(py, emitter, dev, "heap immortalisation", &err),
-    };
-    if let Decision::Off(reason) = &outcome.decision {
-        emitter.emit(
-            &output_event(Component::Init, None, Stream::Stderr, reason).with_level(Level::Warn),
-        );
-    }
-    outcome
+#[derive(Debug, Clone, Default)]
+pub(super) struct Immortalised {
+    /// Whether the pass ran.
+    pub(super) on: bool,
+    /// How many objects carry the marker afterwards.
+    pub(super) objects: u64,
+    /// Why the pass did not run, when it did not.
+    pub(super) reason: Option<String>,
+    /// How long the pass took, in nanoseconds.
+    pub(super) elapsed_ns: u64,
 }
 
 /// The reading §8 Sizing's `boot` event reports, taken now that the app is
@@ -513,7 +491,7 @@ pub(super) fn refresh_memory(before: Option<mem_usage::Usage>) -> Option<mem_usa
 pub(super) fn emit_preload(
     emitter: &Emitter,
     config: &Config,
-    outcome: &Outcome,
+    outcome: &Immortalised,
     memory: Option<mem_usage::Usage>,
     dev: bool,
 ) {
@@ -532,14 +510,14 @@ pub(super) fn emit_preload(
 #[cfg(feature = "python")]
 pub(super) fn preload_lifecycle(
     config: &Config,
-    outcome: &Outcome,
+    outcome: &Immortalised,
     memory: Option<mem_usage::Usage>,
     dev: bool,
 ) -> Lifecycle {
     let mut lifecycle = Lifecycle::default()
         .with_stage("preload")
-        .with_immortalize(outcome.decision.is_on())
-        .with_immortalized(outcome.objects());
+        .with_immortalize(outcome.on)
+        .with_immortalized(outcome.objects);
     // `R22`, `R23`: adopting a `dev` root stamps `"unprivileged-dev"` (and the
     // binary's build) in stage 1 itself, even if `--stage=1 --dev-root=…` was
     // started without stage 0. Otherwise D6's stage-0 `Privilege` supplies both.
@@ -555,11 +533,11 @@ pub(super) fn preload_lifecycle(
     if let Some(choice) = &config.preset {
         lifecycle = choice.lifecycle(lifecycle);
     }
-    if let Some(reason) = outcome.decision.reason() {
-        lifecycle = lifecycle.with_immortalize_reason(reason);
+    if let Some(reason) = &outcome.reason {
+        lifecycle = lifecycle.with_immortalize_reason(reason.clone());
     }
-    if let Some(millis) = outcome.millis() {
-        lifecycle = lifecycle.with_immortalize_ms(millis);
+    if outcome.elapsed_ns > 0 {
+        lifecycle = lifecycle.with_immortalize_ms(outcome.elapsed_ns as f64 / 1_000_000.0);
     }
     if let Some(usage) = memory {
         lifecycle = lifecycle
@@ -572,23 +550,6 @@ pub(super) fn preload_lifecycle(
             ));
     }
     lifecycle
-}
-
-/// `module:attribute` as a Python object.
-///
-/// # Errors
-///
-/// A [`PyValueError`] when the spec is malformed, and whatever the import or
-/// the attribute lookup raises.
-#[cfg(feature = "python")]
-pub(super) fn import_callable(py: Python<'_>, spec: &str) -> PyResult<Py<PyAny>> {
-    let Some((module, attribute)) = spec.split_once(':') else {
-        return Err(PyValueError::new_err(format!(
-            "`{spec}` is not `module:attribute`"
-        )));
-    };
-    let module = py.import(module)?;
-    Ok(module.getattr(attribute)?.unbind())
 }
 
 #[cfg(all(test, feature = "python"))]

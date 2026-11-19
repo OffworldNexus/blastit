@@ -39,15 +39,19 @@
 //! assert!(activates(false, false));
 //! ```
 pub mod abi;
+mod boundary;
 pub mod discovery;
 pub mod loader;
 
 pub use abi::{
-    ABI_VERSION, BlastitPyVtableV1, PY_MINOR_313, PY_MINOR_314, PyBufV1, PyForkHooks,
-    PyZygoteOpaque, dotted_py_minor, encode_py_minor,
+    ABI_VERSION, BlastitPyVtableV1, PY_MINOR_313, PY_MINOR_314, PyBufV1, PyForkHooks, PyRuntime,
+    PyZygote, PyZygoteOpaque, dotted_py_minor, encode_py_minor,
 };
 pub use discovery::{
     DevEnv, DiscoveredPython, DiscoveryEnv, DiscoveryError, ProductionEnv, SUPPORTED_MINORS,
     activates, discover, shim_file,
 };
-pub use loader::{LoadError, LoadedPy, Opened, REQUIRED_SYMBOLS, gate_libpython};
+pub use loader::{
+    LoadError, LoadedPy, Opened, PinnedRef, REQUIRED_SYMBOLS, gate_libpython, gate_pinned,
+    hosted_hooks,
+};

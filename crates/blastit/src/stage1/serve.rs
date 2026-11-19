@@ -9,14 +9,13 @@ use blastit_manifest::{Manifest, RoutingTable};
 use crate::dev_reload::Class;
 use crate::dev_reload::{MarkOutcome, Reload, Unavailable};
 use crate::logs::Emitter;
-use crate::py::Python;
 use crate::supervise::{Parts, Supervisor};
 
 use super::boot::Serving;
 #[cfg(feature = "python")]
 use super::emit_ready;
 #[cfg(feature = "python")]
-use super::{Boot, load};
+use super::load::{self, Inputs, Loaded};
 
 /// What the post-preload marking pass owes the boot line (§4.7, `T32`).
 ///
@@ -54,11 +53,11 @@ pub(super) fn after_preload_marks(
 /// paths only the boot knows, and settles it (`MB.40.9`; `ADR-0014` §4.1).
 ///
 /// `between` runs while the watcher exists and **before** the marking pass: the
-/// WSGI boot's `preload` import lives there, so the files it opens are reported
-/// and marked, and whatever it returns (the preload reporter, or `()`) comes
-/// back beside the watcher. The `php`-only boot passes a no-op — its workers
-/// report their own files — so both boot paths share one construction, one
-/// seeding pass, one marking pass and one `reconcile`.
+/// WSGI boot's `preload` lives there, so the files it opens are reported and
+/// marked, and whatever it returns comes back beside the watcher. The
+/// `php`-only boot passes a no-op — its workers report their own files — so
+/// both boot paths share one construction, one seeding pass, one marking pass
+/// and one `reconcile`.
 ///
 /// Returns `None` — and the ladder's one `dev.reload.unavailable` — exactly as
 /// [`crate::supervise::boot_reload`] does. A production boot, `check` and a
@@ -133,13 +132,28 @@ fn settle_reload(reload: &mut Option<Reload>, serving: &Serving, emitter: &Emitt
     }
 }
 
-/// Loads the application, emits `ready`, and supervises. Never returns.
+/// Loads the application through the frozen vtable, emits `ready`, and
+/// supervises. Never returns.
+///
+/// `shim` is the `Hosted` pre-load: a wheel's shim, `dlopen`ed in `boot::run`
+/// before the forks so its hooks wrapped them. `None` in an `Embed` boot, which
+/// loads `libpython` and the shim here, **after** those forks.
 #[cfg(feature = "python")]
-pub(super) fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
+pub(super) fn serve(
+    emitter: &Emitter,
+    mut serving: Serving,
+    shim: Option<blastit_py_sapi::LoadedPy>,
+) -> ! {
     // The watcher exists **before** the first import, so the `preload` phase's
     // modules and file opens are watched too (§4.1 boot order), and the marking
-    // pass runs once the import has reported what it loaded.
-    let (reload, app) = boot_and_seed_reload(emitter, &serving, |reload| {
+    // pass runs once the load has reported what it opened.
+    let (reload, loaded) = boot_and_seed_reload(emitter, &serving, |reload| {
+        // `R13`: an all-static site (and a PHP-only one) has no application to
+        // import — stage 0 pinned no interpreter at all (`Config::python` is
+        // `None`), so this image loads nothing and forks no WSGI view.
+        if serving.config.python.is_none() {
+            return Ok::<Option<Loaded>, String>(None);
+        }
         // The `preload` phase reports on source `0xffff`; its paths are
         // `pre_fork`, so a change to one takes the reload cycle (§4.4). This
         // socket is also the **gate** for the loaded-file hook: no socket, no
@@ -159,23 +173,60 @@ pub(super) fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             },
             None => None,
         };
-        load(
-            py,
-            &serving.config,
-            serving.declared_routes,
+        let report_fd = preload.as_ref().map_or(-1, std::os::fd::AsRawFd::as_raw_fd);
+        let inputs = Inputs {
+            config: &serving.config,
+            routes: serving.declared_routes,
             emitter,
-            serving.memory,
-            serving.hosted,
-            Boot {
-                dev: serving.dev.as_ref(),
-                report: preload,
-                announce: serving.announce,
+            dev: serving.dev.is_some(),
+            report_fd,
+            memory: serving.memory,
+            announce: serving.announce,
+        };
+        // `Hosted` is the boot that already runs CPython; `Embed` is every other
+        // one, and it is the only path that loads `libpython`.
+        let result = match (serving.live, shim) {
+            (true, Some(shim)) => load::hosted(&inputs, shim).map(Some),
+            (_, None) => match &serving.py_fds {
+                Some(pair) => load::embed(&inputs, pair).map(Some),
+                None => Err(
+                    "this boot has no pinned Python runtime to serve with (a blastit bug — \
+                     report the boot log above)"
+                        .to_string(),
+                ),
             },
-        )
+            (false, Some(_)) => Err(
+                "this boot was handed the wheel's shim, but no interpreter is live \
+                 (a blastit bug — report the boot log above)"
+                    .to_string(),
+            ),
+        };
+        // The shim adopted the report socket (or nothing did): either way this
+        // process must not close a descriptor the shim now writes through.
+        if let Some(socket) = preload {
+            std::mem::forget(socket);
+        }
+        result
     });
+    let loaded: Option<Loaded> = match loaded {
+        Ok(loaded) => loaded,
+        Err(message) => super::fail(emitter, serving.dev.as_ref(), &message),
+    };
     if serving.announce {
         emit_ready(emitter, &serving.config, serving.declared_routes);
     }
+    // §1.2.1 item 6: the pinned `(libpython, shim)` descriptors are held only
+    // when a `dev` cycle can re-exec from them; every other boot drops them the
+    // moment the `dlopen` above finished (`take` releases them here, since this
+    // frame never returns).
+    let keep_py_fds = serving.reload_source.is_some();
+    let py_fds = serving.py_fds.take().filter(|_| keep_py_fds);
+    // The handle borrows the loader, and the supervisor borrows both: declared
+    // in this order so the supervisor drops first. A boot with no pinned
+    // runtime (static-only, PHP-only) has neither.
+    let runtime = loaded
+        .as_ref()
+        .map(|loaded| loaded.python.runtime(loaded.zygote));
     let mut supervisor = Supervisor::new(
         Parts {
             cfg: serving.config,
@@ -185,12 +236,8 @@ pub(super) fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
             php: serving.php,
             egress: serving.egress,
             plans: serving.plans,
-            app,
-            // `serve` runs after `Python::initialize()` in the `Embed` arm and
-            // inside the host's interpreter in the `Hosted` one: CPython is live
-            // in both by the time a view forks.
-            hooks: crate::py::runtime_hooks(true),
-            py_fds: serving.py_fds,
+            runtime,
+            py_fds,
             ctl: serving.ctl,
             signals: serving.signals,
             mask: serving.mask,
@@ -206,7 +253,7 @@ pub(super) fn serve(py: Python<'_>, emitter: &Emitter, serving: Serving) -> ! {
         },
         emitter,
     );
-    supervisor.run(py)
+    supervisor.run()
 }
 
 /// Builds the routing table for `dev --learn`, reserving slot `0` for the

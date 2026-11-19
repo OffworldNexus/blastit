@@ -38,7 +38,6 @@ use blastit_view_php::discovery::{Deployment, PhpBoot, PhpSearch, PhpShimScope, 
 // The discovery surface the `php_boot_gate` cases drive: their subjects are the
 // crate's, so the names are the tests' only.
 #[cfg(feature = "python")]
-use crate::py::Python;
 #[cfg(all(test, feature = "php"))]
 use blastit_view_php::discovery::{PhpVersion, discover_php, shim_name};
 

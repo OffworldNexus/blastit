@@ -9,7 +9,6 @@ use crate::child::ChildIo;
 use crate::config::{Config, LogFormat};
 use crate::logs::{Colour, Emitter, output_event};
 use crate::mem_usage;
-use crate::py::Python;
 use crate::roles::{HttpFds, SchedulerFds};
 use crate::supervise::ComponentPipes;
 #[cfg(not(feature = "python"))]
@@ -39,19 +38,16 @@ use super::spawn::{
 };
 #[cfg(feature = "php")]
 use super::spawn::{emit_php_runtime, php_max_body_bytes, php_max_requests, php_slots};
-use super::{Adoption, Interpreter, Options, fail};
+use super::{Adoption, Options, fail};
 #[cfg(all(not(feature = "python"), feature = "php"))]
 use crate::dev_reload::Class;
 
 /// Runs stage 1. Never returns.
 ///
-/// `interpreter` says whether CPython has to be started here (the standalone
-/// binary) or is the interpreter this process already runs on (a wheel install,
-/// §4, §9.3).
-pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! {
-    // Whether a live interpreter is in this image, which decides how the forks
-    // below behave (§9.3) and how stage 1 finds the application's modules.
-    let hosted = interpreter.is_hosted();
+/// `live` is the installation fact: `true` when this process already runs
+/// CPython (a wheel's stage 1), `false` for the standalone binary, which
+/// `dlopen`s a pinned interpreter below (design §1.2.1 item 1).
+pub fn run(options: Options, live: bool, colour: Colour) -> ! {
     // The configuration itself is not known yet, so a failure here is JSON —
     // which carries no colour.
     let boot = Emitter::stdout(LogFormat::Json, Level::Info, Colour::PLAIN);
@@ -227,6 +223,42 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
             None
         }
     };
+    // `Hosted` (a wheel whose CPython is already live): the shim is loaded
+    // **here**, before `http` and the scheduler — no `libpython`, no gate, no
+    // `init_paths` (design §1.2.1 item 1) — so its three `PyOS_*Fork` hooks
+    // wrap those forks. `Embed` forks with `None` and loads after them.
+    #[cfg(feature = "python")]
+    let shim_only = match (&py_fds, live) {
+        (Some(pair), true) => match load_shim_only(&emitter, dev.as_ref(), &config, &pair.1) {
+            Ok(loaded) => Some(loaded),
+            Err(message) => fail(&emitter, dev.as_ref(), &message),
+        },
+        _ => None,
+    };
+    #[cfg(feature = "python")]
+    let hooks = shim_only
+        .as_ref()
+        .map(blastit_py_sapi::LoadedPy::hooks)
+        // `Hosted` without a pinned runtime (a wheel on a PHP-only/static-only
+        // manifest, `crates/blastit-py` until `MB.42.2.2`) still has CPython live
+        // in this image: its three `PyOS_*Fork` entry points come from the loaded
+        // interpreter, never from a bare `fork(2)` under it.
+        .or_else(|| match crate::py::runtime_hooks(live) {
+            Ok(hooks) => hooks,
+            Err(message) => fail(&emitter, dev.as_ref(), &message),
+        });
+    #[cfg(not(feature = "python"))]
+    let hooks = {
+        if live {
+            fail(
+                &emitter,
+                dev.as_ref(),
+                "this blastit was built without the `python` capability, so it cannot serve \
+                 on a live interpreter; install the blastit that ships the CPython shim",
+            );
+        }
+        None
+    };
     // `ADR-0010` §3: stage 1 re-opens the NTS `libphp` and the shim stage 0
     // inspected, asserts `(st_dev, st_ino)` against that record, renders the INI
     // lockdown once and holds the descriptors every PHP worker is forked with.
@@ -305,13 +337,13 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
             },
             libphp: config.php.as_ref(),
             timeout: php_probe_timeout,
-            protocol: if hosted {
+            protocol: if hooks.is_some() {
                 blastit_view::spawn::ForkProtocol::InterpreterLive
             } else {
                 blastit_view::spawn::ForkProtocol::NoInterpreter
             },
         },
-        &|protocol| crate::forking::fork_for(protocol, crate::py::runtime_hooks(hosted)),
+        &|protocol| crate::forking::fork_for(protocol, hooks),
     ) {
         Ok(report) => emit_php_runtime(&emitter, &config, report),
         Err(message) => fail(&emitter, dev.as_ref(), &message),
@@ -443,7 +475,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
                 uid: drop_http,
                 mask,
                 seccomp: config.seccomp,
-                hosted,
+                hooks,
             }) {
                 Ok(pid) => pid,
                 Err(err) => fail(&emitter, dev.as_ref(), &format!("forking http: {err}")),
@@ -492,7 +524,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
         uid: drop_scheduler,
         mask,
         seccomp: config.seccomp,
-        hosted,
+        hooks,
     }) {
         Ok(pid) => pid,
         Err(err) => fail(
@@ -621,7 +653,7 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
         mask,
         components,
         #[cfg(feature = "python")]
-        hosted: interpreter.is_hosted(),
+        live,
         py_fds,
         dev,
         learn,
@@ -658,20 +690,9 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
     // the roles it forked: the boot gate refused every route that would need a
     // view, so the scheduler asks for none (`MB.3.11`).
     #[cfg(feature = "python")]
-    match interpreter {
-        Interpreter::Embed => {
-            Python::initialize();
-            Python::attach(|py| serve(py, &emitter, serving))
-        }
-        Interpreter::Hosted(py) => serve(py, &emitter, serving),
-    }
+    serve(&emitter, serving, shim_only);
     #[cfg(not(feature = "python"))]
-    {
-        // There is no interpreter to be hosted by: a `python`-less build can
-        // only ever be handed `Embed`, and the variant carries nothing to use.
-        let _ = interpreter;
-        serve_without_interpreter(&emitter, serving)
-    }
+    serve_without_interpreter(&emitter, serving)
 }
 
 /// Supervises the forked roles in a build that carries no interpreter
@@ -708,7 +729,6 @@ pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> 
             signals: serving.signals,
             mask: serving.mask,
             components: serving.components,
-            hooks: None,
             py_fds: serving.py_fds,
             dev: serving.dev,
             learn: serving.learn,
@@ -721,7 +741,7 @@ pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> 
         },
         emitter,
     );
-    supervisor.run(crate::py::no_interpreter())
+    supervisor.run()
 }
 
 /// Everything stage 1 needs once an interpreter is available (§4).
@@ -762,7 +782,7 @@ pub(super) struct Serving {
     /// Whether the interpreter was started by the host rather than embedded
     /// here. Only a build with one can ask the question.
     #[cfg(feature = "python")]
-    pub(super) hosted: bool,
+    pub(super) live: bool,
     /// The `(libpython, shim)` descriptors this image adopted and verified
     /// (design §1.2.1 item 6). Held until the supervisor either takes them for
     /// a reload or the boot ends.
@@ -809,4 +829,37 @@ pub(super) struct Serving {
     /// pairs dbproxy's listeners were bound for (§4.8).
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub(super) boot_pairs: std::collections::BTreeSet<(String, String)>,
+}
+
+/// `Hosted`: `dlopen` the shim alone, with no `libpython` and no gate.
+///
+/// The interpreter is already live in this image, so there is nothing to load
+/// and nothing to verify: design §1.2.1 item 1's `Hosted` order is the shim,
+/// its hooks, and then the forks. `init_paths` is deliberately **not** called —
+/// starting an interpreter that is already running is what the vtable refuses.
+#[cfg(feature = "python")]
+fn load_shim_only(
+    emitter: &Emitter,
+    dev: Option<&crate::dev_learn::Dev>,
+    config: &Config,
+    shim: &std::os::fd::OwnedFd,
+) -> Result<blastit_py_sapi::LoadedPy, String> {
+    let handoff = config
+        .python
+        .as_ref()
+        .ok_or_else(|| "this boot has no pinned Python runtime to serve with".to_string())?;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(shim);
+    // The path is for refusals only; the load reads `/proc/self/fd/<fd>`.
+    let source = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap_or_else(|_| {
+        std::path::PathBuf::from(format!("the pinned CPython shim (descriptor {fd})"))
+    });
+    let _ = (emitter, dev);
+    blastit_py_sapi::LoadedPy::load_shim_only(
+        blastit_py_sapi::PinnedRef {
+            fd,
+            source: source.as_path(),
+        },
+        handoff.py_minor,
+    )
+    .map_err(|err| err.to_string())
 }

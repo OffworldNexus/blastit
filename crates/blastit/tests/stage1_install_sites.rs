@@ -1,5 +1,5 @@
-//! The dev boot's loaded-file hook, across every file the stage split put stage 1
-//! in (`MB.40.4.3`).
+//! The dev boot's loaded-file hook, across every file the stage split put it in
+//! (`MB.40.4.3`, `MB.42.2.1.4`).
 //!
 //! `crates/blastit-view-python/tests/critical_loaded_files.rs` reads
 //! `blastit/src/stage1.rs` alone — the whole stage before it became the root
@@ -9,14 +9,18 @@
 //! outside the dev gate and therefore *run in production*) or a dead branch
 //! pretending to be that gate could live in a sibling file and pass silently.
 //!
-//! This suite restores the crate-wide guarantee without touching the protected
-//! test:
+//! Since the cut-over (`design/universal-distribution.md` §1.2.1) `crates/blastit`
+//! has **no** interpreter, so it has no install site at all: the tracker is
+//! installed inside the per-minor shim, pre-fork, by `vtable.preload`. This
+//! suite therefore proves the move rather than the old ordering:
 //!
 //! * the scanned set is proven equal to the directory's real `.rs` set, so a new
 //!   module cannot quietly escape the scan;
-//! * exactly one install site and no `if false` across the root and every file;
-//! * the ordering obligations stay asserted in the file that actually holds
-//!   `load` — the root shim, where the protected `include_str!` pins it.
+//! * zero install sites and no `if false` across the stage — `crates/blastit`
+//!   cannot arm a tracker it has no interpreter for;
+//! * exactly one install site in the shim's `boot.rs`, before the first import
+//!   and after the dev-only report socket is adopted, so the instrumentation
+//!   still cannot reach a production boot.
 //!
 //! Like the protected leg it is a token-and-order witness, not behavioural
 //! proof: it cannot see control flow, so it would still pass if the install were
@@ -24,14 +28,17 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-/// The stage-1 root module: the file that holds `load` and its install site.
+/// The stage-1 root module.
 const ROOT: &str = include_str!("../src/stage1.rs");
+
+/// The shim's `preload`, which owns the tracker now (`MB.42.2.1.4`).
+const SHIM_BOOT: &str = include_str!("../../blastit-py-shim/src/boot.rs");
 
 /// Every child file of the stage, with the name the completeness check compares.
 const FILES: [(&str, &str); 6] = [
     ("adopt.rs", include_str!("../src/stage1/adopt.rs")),
     ("boot.rs", include_str!("../src/stage1/boot.rs")),
-    ("python_env.rs", include_str!("../src/stage1/python_env.rs")),
+    ("load.rs", include_str!("../src/stage1/load.rs")),
     ("serve.rs", include_str!("../src/stage1/serve.rs")),
     ("spawn.rs", include_str!("../src/stage1/spawn.rs")),
     ("unit_tests.rs", include_str!("../src/stage1/unit_tests.rs")),
@@ -40,7 +47,7 @@ const FILES: [(&str, &str); 6] = [
 /// A panic when `source` has no `needle`, naming what the stage lost.
 fn at(source: &str, file: &str, needle: &str) -> usize {
     source.find(needle).unwrap_or_else(|| {
-        panic!("{file} no longer contains {needle:?}: the dev boot's ordering moved")
+        panic!("{file} no longer contains {needle:?}: the preload ordering moved")
     })
 }
 
@@ -74,93 +81,40 @@ fn the_scan_covers_every_file_of_the_split_stage() {
 }
 
 #[test]
-fn exactly_one_install_site_across_the_whole_stage() {
-    let sites: Vec<&str> = stage_sources()
-        .filter(|(_, source)| source.contains("LoadedTracker::install"))
-        .map(|(name, _)| name)
-        .collect();
-
-    assert_eq!(
-        sites,
-        ["stage1.rs"],
-        "exactly one tracker install site, in the file that holds `load`: a second \
-         copy could sit outside the `if dev.is_some()` gate and keep this suite — and \
-         the protected source scan — green while running in production"
-    );
-
+fn the_composition_root_arms_no_loaded_file_tracker() {
     for (file, source) in stage_sources() {
         assert_eq!(
             source.matches("LoadedTracker::install").count(),
-            usize::from(file == "stage1.rs"),
-            "exactly one install site in {file}, so a copy cannot hide behind a \
-             shared helper"
+            0,
+            "{file} must arm no tracker: `crates/blastit` links no interpreter, and \
+             the shim's `preload` is the one install site"
         );
-    }
-}
-
-#[test]
-fn no_dead_branch_pretends_to_be_the_dev_gate() {
-    for (file, source) in stage_sources() {
         assert!(
             !source.contains("if false"),
-            "{file} must not carry a dead `if false` branch: one would let an install \
-             site look gated while every boot runs it"
+            "{file} must not carry a dead `if false` branch"
         );
     }
 }
 
 #[test]
-fn the_dev_boot_installs_the_tracker_before_the_first_import_and_harvests_after_warmup() {
-    // `ROOT` is the file that holds `load`, which is where the protected
-    // `include_str!` pins the ordering; the counts above keep the rest of the
-    // stage from adding a second site.
-    assert!(
-        ROOT.contains("fn load("),
-        "stage1.rs must still hold `load`: the protected `critical_loaded_files` \
-         test reads this exact file"
-    );
-
-    // One install site: a second copy could otherwise sit outside the gate and
-    // keep this test green while running in production.
+fn the_shim_installs_the_tracker_before_the_first_import() {
     assert_eq!(
-        ROOT.matches("LoadedTracker::install").count(),
+        SHIM_BOOT.matches("LoadedTracker::install").count(),
         1,
-        "exactly one tracker install site, inside the dev-only gate"
+        "exactly one tracker install site, inside the shim's `preload`"
     );
-    let install = at(ROOT, "stage1.rs", "LoadedTracker::install");
-    let gate = at(ROOT, "stage1.rs", "let loaded = if dev.is_some() {");
+    // The call that arms it comes before the first import in `boot()`, so the
+    // preload phase's own modules and file opens are reported; the socket check
+    // inside `install_tracker` is what keeps a production boot silent (`S3`).
+    let armed = at(SHIM_BOOT, "boot.rs", "install_tracker(py, req)");
+    let first_import = at(SHIM_BOOT, "boot.rs", "import_callable(py, spec)");
     assert!(
-        gate < install,
-        "the install is inside the `if dev.is_some()` gate, not before it"
+        armed < first_import,
+        "the tracker is armed **before** the application is imported"
     );
-    let gated = &ROOT[gate..install];
+    let socket = at(SHIM_BOOT, "boot.rs", "req.report_fd >= 0");
     assert!(
-        !gated.contains("else"),
-        "the install is in the gate's then-branch, not its else-branch"
-    );
-    assert!(
-        install < at(ROOT, "stage1.rs", "import_callable(py, spec)"),
-        "the tracker is installed before the application is imported, or the preload \
-         closure is missed"
-    );
-    assert!(
-        install < at(ROOT, "stage1.rs", "for module in &config.preload"),
-        "the tracker is installed before the `preload` list is imported, or a \
-         preloaded module is missed"
-    );
-    let harvest = at(ROOT, "stage1.rs", "loaded.harvest(py)");
-    assert_eq!(
-        ROOT.matches("loaded.harvest(py)").count(),
-        1,
-        "one baseline harvest, so the cost is paid once"
-    );
-    assert!(
-        at(ROOT, "stage1.rs", "config.warmup.as_deref()") < harvest,
-        "the harvest runs after `BLASTIT_WARMUP`, so the warmed closure is in the \
-         boot batch"
-    );
-    assert!(
-        harvest < at(ROOT, "stage1.rs", "py.run(CLOSE_AND_COLLECT, None, None)"),
-        "the harvest runs before the heap is immortalised"
+        socket > armed,
+        "the socket check is inside `install_tracker`, which `boot` called first"
     );
 }
