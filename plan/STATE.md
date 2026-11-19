@@ -17,8 +17,8 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.42.2.1 Shared fd pinning + blastit-py-sapi/-py-shim + Stage-0/1 dlopen + make py-sapi (one libpython-free binary)
 - execute: MB.4.1 Decide Node integration topology: napi-rs/neon embedding vs sidecar fd handoff, and the fair-queue CPU model (ADR)
+- execute: MB.42.2.2 blastit-audit extraction + blastit --internal-json + pure-Python _blastit.py bridge; retire blastit-py/pyo3
 
 ## Stuck / attention
 
@@ -26,8 +26,6 @@
 
 ## Recent journal
 
-- 2026-11-19T18:45 [MB.42.2.1.3] (lead) status ready -> active
-- 2026-11-19T18:45 [MB.42.2.1.3] (lead) attempt 1/3 started
 - 2026-11-19T18:45 [MB.42.2.1.3] (lead) base d3e87e3171e8bbac52b88c0d9762f3cc03fd2c7e
 - 2026-11-19T19:03 [MB.42.2.1.3] (lead) status active -> review
 - 2026-11-19T19:08 [MB.42.2.1.3] (lead) REVIEW FIX (filtered): BLOCKER PYTHONHOME now names the DISCOVERED prefix while stage 1 still Py_Initialize's the LINKED interpreter and the minor-agreement gua
@@ -41,3 +39,5 @@
 - 2026-11-19T19:49 [MB.42.2.1.4] (lead) status active -> review
 - 2026-11-19T19:54 [MB.42.2.1.4] (lead) REVIEW FIX (filtered): BLOCKER no gate builds target/py-sapi (rs-test has no prereq, .github has no step) so 3 protected Python suites are red on a clean checko
 - 2026-11-19T20:06 [MB.42.2.1.4] (lead) status review -> done
+- 2026-11-19T20:06 [MB.42.2.1] (lead) status ready -> done
+- 2026-11-19T20:06 [MB.42.2.1] (lead) epic closed on leaf evidence (every child make fast-check green on the merged tree: 159 suites; critical_guard clean; portable ELF zero libpython/libphp/RUNPATH

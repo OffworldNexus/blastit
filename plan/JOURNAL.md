@@ -3858,3 +3858,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T19:49 [MB.42.2.1.4] (lead) status active -> review
 - 2026-11-19T19:54 [MB.42.2.1.4] (lead) REVIEW FIX (filtered): BLOCKER no gate builds target/py-sapi (rs-test has no prereq, .github has no step) so 3 protected Python suites are red on a clean checko
 - 2026-11-19T20:06 [MB.42.2.1.4] (lead) status review -> done
+- 2026-11-19T20:06 [MB.42.2.1] (lead) status ready -> done
+- 2026-11-19T20:06 [MB.42.2.1] (lead) epic closed on leaf evidence (every child make fast-check green on the merged tree: 159 suites; critical_guard clean; portable ELF zero libpython/libphp/RUNPATH

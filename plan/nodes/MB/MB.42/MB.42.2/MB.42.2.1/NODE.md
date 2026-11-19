@@ -2,7 +2,7 @@
 id: MB.42.2.1
 title: "Shared fd pinning + blastit-py-sapi/-py-shim + Stage-0/1 dlopen + make py-sapi (one libpython-free binary)"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths: [Cargo.toml, Cargo.lock, "crates/**", Makefile, "scripts/**", "e2e/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T17:18"
-updated: "2026-11-19T17:20"
+updated: "2026-11-19T20:06"
 ---
 
 # Goal
