@@ -16,11 +16,11 @@
 //!   `/products/` + `/products/42/` is one view with two patterns), while a
 //!   name already taken becomes `<name>-2`, `<name>-3`, …;
 //! * the insertion point is the first method-unrestricted catch-all
-//!   ([`Route::is_unrestricted_catch_all`], which matches the lowered `/.*`
+//!   ([`blastit_manifest::Route::is_unrestricted_catch_all`], which matches the lowered `/.*`
 //!   and `.*` fragments alike), or the end of the file.
 //!
-//! [`infer`] is pure: it reads a [`Manifest`] and the paths, and returns a
-//! [`RoutePlan`]. Writing the plan into a document belongs to
+//! [`crate::infer_routes::infer`] is pure: it reads a [`blastit_manifest::Manifest`] and the paths, and returns a
+//! [`crate::infer_routes::RoutePlan`]. Writing the plan into a document belongs to
 //! `blastit_manifest::edit` (`R29`), which owns the comment-preserving splice.
 
 use std::collections::{BTreeMap, BTreeSet};

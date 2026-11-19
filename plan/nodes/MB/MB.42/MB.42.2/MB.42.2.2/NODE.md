@@ -1,9 +1,8 @@
 ---
 id: MB.42.2.2
 title: "blastit-audit extraction + blastit --internal-json + pure-Python _blastit.py bridge; retire blastit-py/pyo3"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 1
 depends_on: [MB.42.2.1]
 paths: [Cargo.toml, Cargo.lock, "crates/**", "python/**", Makefile]
@@ -11,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T17:18"
-updated: "2026-11-19T17:18"
+updated: "2026-11-19T20:07"
 ---
 
 # Goal

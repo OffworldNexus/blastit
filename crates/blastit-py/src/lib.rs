@@ -23,7 +23,6 @@
 //! against what a manifest grants. Both are pure: they parse, they compare, they
 //! return — no file, no connection, nothing to clean up.
 
-mod audit;
 mod check;
 
 use std::path::PathBuf;
@@ -148,7 +147,7 @@ fn plain_interpreter(py: Python<'_>) -> PyResult<Vec<PathBuf>> {
 /// The normalised text, which is what an allowlist stores and compares.
 #[pyfunction]
 fn normalize(sql: &str) -> String {
-    audit::normalize_sql(sql)
+    blastit_audit::normalize(sql)
 }
 
 /// Whether one SQL text holds any quoted literal (R24, R25).
@@ -165,7 +164,7 @@ fn normalize(sql: &str) -> String {
 #[pyfunction]
 #[pyo3(name = "has_quoted_literal")]
 fn has_quoted_literal(sql: &str) -> bool {
-    blastit_sqlpolicy::has_quoted_literal(sql)
+    blastit_audit::has_quoted_literal(sql)
 }
 
 /// One SQL text with every quoted literal replaced by `…` (R24, ADR-0003).
@@ -176,7 +175,7 @@ fn has_quoted_literal(sql: &str) -> bool {
 #[pyfunction]
 #[pyo3(name = "redact_literals")]
 fn redact_literals(sql: &str) -> String {
-    blastit_sqlpolicy::redact_literals(sql)
+    blastit_audit::redact_literals(sql)
 }
 
 /// Diffs what a test suite observed against what a manifest grants (D3b, §6).
@@ -212,7 +211,7 @@ fn redact_literals(sql: &str) -> String {
 #[pyfunction]
 #[pyo3(name = "audit")]
 fn audit_report(manifest_text: &str, observations_json: &str) -> PyResult<String> {
-    audit::audit(manifest_text, observations_json)
+    blastit_audit::audit(manifest_text, observations_json)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
@@ -247,7 +246,7 @@ fn audit_report(manifest_text: &str, observations_json: &str) -> PyResult<String
 #[pyfunction]
 #[pyo3(name = "analyze")]
 fn analyze_statement(sql: &str) -> PyResult<String> {
-    audit::analyze_statement(sql).map_err(PyValueError::new_err)
+    blastit_audit::analyze(sql).map_err(PyValueError::new_err)
 }
 
 /// The smallest table grant covering a set of statements (D3c, §6).
@@ -277,7 +276,7 @@ fn analyze_statement(sql: &str) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(name = "covering")]
 fn covering_statements(statements: Vec<String>, locator: String) -> PyResult<String> {
-    audit::covering(&statements, &locator).map_err(PyValueError::new_err)
+    blastit_audit::covering(&statements, &locator).map_err(PyValueError::new_err)
 }
 
 /// Classifies one statement with PostgreSQL's own parser, without analysing it
@@ -311,7 +310,7 @@ fn covering_statements(statements: Vec<String>, locator: String) -> PyResult<Str
 #[pyfunction]
 #[pyo3(name = "classify")]
 fn classify_statement(sql: &str) -> PyResult<String> {
-    audit::classify(sql).map_err(PyValueError::new_err)
+    blastit_audit::classify(sql).map_err(PyValueError::new_err)
 }
 
 /// Diffs one `blastit check` run against the manifest (D3b, §6, `R32..R38`).
@@ -443,14 +442,7 @@ fn interpreter_path(py: Python<'_>) -> PyResult<Vec<Vec<u8>>> {
 #[pyfunction]
 #[pyo3(name = "blastfile_apply_edits", signature = (source, edits_json))]
 fn blastfile_apply_edits(source: &str, edits_json: &str) -> PyResult<String> {
-    let edits: blastit_manifest::blastfile::BlastfileEdits = serde_json::from_str(edits_json)
-        .map_err(|error| {
-            PyValueError::new_err(format!(
-                "the edits are not a BlastfileEdits document: {error}"
-            ))
-        })?;
-    blastit_manifest::blastfile::apply_edits(source, &edits)
-        .map_err(|error| PyValueError::new_err(error.to_string()))
+    blastit_audit::blastfile_apply_edits(source, edits_json).map_err(PyValueError::new_err)
 }
 
 /// Reads a `Blastfile` and returns its lowered model as JSON (§15.2's one reader).
@@ -474,7 +466,7 @@ fn blastfile_apply_edits(source: &str, edits_json: &str) -> PyResult<String> {
 #[pyfunction]
 #[pyo3(name = "blastfile_model")]
 fn blastfile_model(source: &str) -> PyResult<String> {
-    audit::model(source).map_err(|error| PyValueError::new_err(error.to_string()))
+    blastit_audit::blastfile_model(source).map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 /// The `blastit._blastit` module: the console script's `main`, and the

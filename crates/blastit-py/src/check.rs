@@ -3,11 +3,11 @@
 //!
 //! Three thin wrappers, so the rules live in one place:
 //!
-//! * [`check_audit`] is [`blastit::audit_v1::check_audit`]: the JSONL streams
+//! * [`check_audit`] is [`blastit_audit::check_audit`]: the JSONL streams
 //!   the pytest gate wrote, diffed against the manifest;
-//! * [`plan_learn`] is [`blastit::audit_v1::plan_learn_json`]: the routes and
+//! * [`plan_learn`] is [`blastit_audit::plan_learn_json`]: the routes and
 //!   exact queries `--learn` would add;
-//! * [`probe_ingress`] is [`blastit::audit_v1::probe_ingress_json`]:
+//! * [`probe_ingress`] is [`blastit_audit::probe_ingress_json`]:
 //!   [`blastit_ingress::probe_sample`] over at most 64 KiB of body, which is
 //!   all the WSGI gate hands over.
 //!
@@ -26,7 +26,7 @@ pub(crate) fn check_audit(
     http_obs_jsonl: &str,
     sql_obs_jsonl: &str,
 ) -> Result<String, String> {
-    blastit::audit_v1::check_audit(manifest_text, http_obs_jsonl, sql_obs_jsonl)
+    blastit_audit::check_audit(manifest_text, http_obs_jsonl, sql_obs_jsonl)
         .map_err(|error| error.to_string())
 }
 
@@ -41,7 +41,7 @@ pub(crate) fn plan_learn(
     sql_obs_jsonl: &str,
     dry_run: bool,
 ) -> Result<String, String> {
-    blastit::audit_v1::plan_learn_json(manifest_text, http_obs_jsonl, sql_obs_jsonl, dry_run)
+    blastit_audit::plan_learn_json(manifest_text, http_obs_jsonl, sql_obs_jsonl, dry_run)
         .map_err(|error| error.to_string())
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn probe_ingress(
     prefix: &[u8],
     total_len: u64,
 ) -> Result<String, String> {
-    blastit::audit_v1::probe_ingress_json(content_type, prefix, total_len)
+    blastit_audit::probe_ingress_json(content_type, prefix, total_len)
         .map_err(|error| error.to_string())
 }
 

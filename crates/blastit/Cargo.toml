@@ -50,6 +50,7 @@ static = ["blastit-scheduler/static"]
 coverage = []
 
 [dependencies]
+blastit-audit = { version = "0.2.0", path = "../blastit-audit" }
 blastit-dbproxy = { version = "0.2.0", path = "../blastit-dbproxy" }
 blastit-env = { version = "0.2.0", path = "../blastit-env" }
 blastit-events = { version = "0.2.0", path = "../blastit-events" }

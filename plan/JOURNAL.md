@@ -3860,3 +3860,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T20:06 [MB.42.2.1.4] (lead) status review -> done
 - 2026-11-19T20:06 [MB.42.2.1] (lead) status ready -> done
 - 2026-11-19T20:06 [MB.42.2.1] (lead) epic closed on leaf evidence (every child make fast-check green on the merged tree: 159 suites; critical_guard clean; portable ELF zero libpython/libphp/RUNPATH
+- 2026-11-19T20:07 [MB.42.2.2] (unknown) edited fields
+- 2026-11-19T20:07 [MB.42.2.2] (unknown) edited fields
+- 2026-11-19T20:07 [MB.42.2.2] (lead) status ready -> ready
+- 2026-11-19T20:07 [MB.42.2.2.1] (unknown) created (task) Extract crates/blastit-audit: one grant-diff owner (<500 LOC modules), audit.rs + audit_v1 collapsed
+- 2026-11-19T20:07 [MB.42.2.2.2] (unknown) created (task) blastit --internal-json (12-row contract) + pure-stdlib _blastit.py bridge; retire crates/blastit-py
+- 2026-11-19T20:07 [MB.42.2.2] (unknown) edited fields
+- 2026-11-19T20:07 [MB.42.2.2.1] (lead) status ready -> active
+- 2026-11-19T20:07 [MB.42.2.2.1] (lead) attempt 1/3 started
+- 2026-11-19T20:07 [MB.42.2.2.1] (lead) base a393cbf80434b8aa0850c26ac57d9f6e6bd34c1a
+- 2026-11-19T20:19 [MB.42.2.2.1] (lead) status active -> review
+- 2026-11-19T20:21 [MB.42.6] (unknown) created (task) Fix wrong remediation text for an unused proxy in blastit check human output (no 'proxy <name>' directive exists)
+- 2026-11-19T20:22 [MB.42.2.2.1] (lead) REVIEW FIX (filtered): MAJOR matched has two storage sites (evaluate keeps its own map while Ledger builds the same; Ledger::matched() zero callers; two false d
+- 2026-11-19T20:30 [MB.42.2.2.1] (lead) status review -> done
