@@ -537,8 +537,15 @@ def _plan_route(
             continue
         # An exact `query` entry is trusted as it is: whatever function it calls
         # runs, which is why a statement calling one outside the safe set is
-        # refused here unless the operator asks for it (D3c).
-        functions = _unsafe_functions(analyse, denial)
+        # refused here unless the operator asks for it (D3c). The analysis is
+        # asked, not the text: it is the same `pg_query` walk the policy runs,
+        # and a statement it refuses (a system catalogue, a construct it cannot
+        # walk) has nothing to say about its functions.
+        try:
+            analysis = json.loads(analyse(denial.parseable))
+        except ValueError:
+            analysis = {}
+        functions = _text_list(analysis.get("functions"))
         if functions and not allow_dangerous:
             addition.notes.append(
                 f"{shown!r}: refused — it calls {', '.join(functions)}, which is outside "
@@ -628,30 +635,30 @@ _KNOWN_STATIC_SETUP_SQL = frozenset(
 def _has_quoted_literal(sql: str) -> bool:
     """Whether `sql` holds any of PostgreSQL 18's 8 quoted literal forms (R24, R25).
 
-    Follows [`blastit_sqlpolicy::has_quoted_literal`] via [`logs.sql_regions`]:
+    [`blastit_sqlpolicy::has_quoted_literal`] through the compiled extension:
     `'…'`, `E'…'`, `B'…'`, `X'…'`, `N'…'`, `U&'…'`, `$$…$$` and `$tag$…$tag$`
     count (including unterminated spans), while quoted identifiers (`"…"`,
     `U&"…"`), `$` inside identifiers (`a$b$c`), placeholders (`$1`, `$?`) and
-    comments do not.
+    comments do not. The lexer is Rust's; nothing here re-derives it.
     """
-    return any(kind == logs.SQL_LITERAL for kind, _, _ in logs.sql_regions(sql))
+    from blastit import _blastit
+
+    return _blastit.has_quoted_literal(sql)
 
 
 def _redact_literal(sql: str) -> str:
     """`sql` with every quoted literal token (prefix included) replaced by `…`.
 
-    Matches [`blastit_sqlpolicy::redact_literals`] (R24, ADR-0003): all 8
-    PostgreSQL literal forms (`'…'`, `E'…'` with `\\` escapes, `B'…'`, `X'…'`,
-    `N'…'`, `U&'…'`, `$$…$$` and `$tag$…$tag$`) collapse to a single `…` with no
-    surviving prefix or tag, while comments, quoted identifiers and exact
-    [`_KNOWN_STATIC_SETUP_SQL`] entries are preserved verbatim.
+    [`blastit_sqlpolicy::redact_literals`] through the compiled extension (R24,
+    ADR-0003): all 8 PostgreSQL literal forms (`'…'`, `E'…'` with `\\` escapes,
+    `B'…'`, `X'…'`, `N'…'`, `U&'…'`, `$$…$$` and `$tag$…$tag$`) collapse to a
+    single `…` with no surviving prefix or tag, while comments, quoted
+    identifiers and exact [`_KNOWN_STATIC_SETUP_SQL`] entries are preserved
+    verbatim.
     """
-    if sql in _KNOWN_STATIC_SETUP_SQL:
-        return sql
-    return "".join(
-        "…" if kind == logs.SQL_LITERAL else sql[start:end]
-        for kind, start, end in logs.sql_regions(sql)
-    )
+    from blastit import _blastit
+
+    return _blastit.redact_literals(sql)
 
 
 def _sanitize_parser_message(message: str) -> str:
@@ -697,28 +704,6 @@ def _kind(judge: Callable[[str], str], denial: _Denial) -> dict[str, Any]:
     verdict.setdefault("reason", "")
     verdict.setdefault("statements", 1)
     return verdict
-
-
-def _unsafe_functions(describe: Callable[[str], str], denial: _Denial) -> list[str]:
-    """The functions a statement calls that are outside blastit's safe set.
-
-    The analysis is asked, not the text: it is the same `pg_query` walk the
-    policy runs, and it reports a function it does not know as a `functions`
-    entry the grant would have to name — `set_config`, `pg_read_file`,
-    `lo_import`, `pg_terminate_backend`, and a cast to a type that needs one.
-
-    `[]` when the analysis refuses the statement (a system catalogue, a
-    construct it cannot walk): there is nothing to say about its functions, and
-    refusing it for that reason is the analysis's business, not this one's.
-    """
-    try:
-        analysis = json.loads(describe(denial.parseable))
-    except ValueError:
-        return []
-    functions = analysis.get("functions")
-    if not isinstance(functions, list):
-        return []
-    return [str(function) for function in functions]
 
 
 def _order(

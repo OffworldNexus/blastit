@@ -50,7 +50,6 @@ from collections.abc import Iterable
 from typing import Any
 
 __all__ = [
-    "SQL_CODE",
     "SQL_COMMENT",
     "SQL_IDENT",
     "SQL_LITERAL",
@@ -58,7 +57,6 @@ __all__ = [
     "parse_events",
     "parseable_sql",
     "routed_requests",
-    "sql_regions",
     "unrouted_requests",
 ]
 
@@ -194,7 +192,6 @@ def _text(value: Any) -> str:
 # PostgreSQL 18 `scan.l` region lexer & normalised SQL reconstruction.
 #
 
-SQL_CODE = "code"
 SQL_LITERAL = "literal"
 SQL_IDENT = "ident"
 SQL_COMMENT = "comment"
@@ -412,33 +409,6 @@ def _construct_at(sql: str, index: int) -> tuple[str, int] | None:
     if char == "/" and index + 1 < len(sql) and sql[index + 1] == "*":
         return SQL_COMMENT, _skip_block_comment(sql, index)
     return None
-
-
-def sql_regions(sql: str) -> list[tuple[str, int, int]]:
-    """Splits `sql` into `(kind, start, end)` regions following PG 18 `scan.l`.
-
-    Matches `blastit_sqlpolicy::lexer::lex`: all 8 quoted literal forms (`'…'`,
-    `E'…'` with `\\` and `''` escapes, `B'…'`, `X'…'`, `N'…'`, `U&'…'`, `$$…$$`,
-    `$tag$…$tag$`), quoted identifiers (`"…"`), `--` and nested `/* … */`
-    comments, and `$`-containing identifiers (`a$b$c`) are bounded identically.
-    """
-    regions: list[tuple[str, int, int]] = []
-    code_start = 0
-    index = 0
-    while index < len(sql):
-        found = _construct_at(sql, index)
-        if found is not None:
-            kind, end = found
-            if index > code_start:
-                regions.append((SQL_CODE, code_start, index))
-            regions.append((kind, index, end))
-            index = end
-            code_start = end
-        else:
-            index = _code_token_end(sql, index)
-    if code_start < len(sql):
-        regions.append((SQL_CODE, code_start, len(sql)))
-    return regions
 
 
 def parseable_sql(sql: str) -> str:

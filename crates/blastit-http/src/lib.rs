@@ -27,8 +27,8 @@
 //! # What it does
 //!
 //! * **Accept and parse.** [`serve`] takes the inherited listening socket and
-//!   the inherited channel; [`serve_with`] and [`Acceptor`] are the same loop
-//!   with both left generic. Each connection is handled by its own task, one
+//!   the inherited channel; [`serve_with`] is the same loop with the channel
+//!   left generic. Each connection is handled by its own task, one
 //!   request at a time, strictly in order, so leftover bytes after a head are
 //!   simply the start of the next pipelined request. Above
 //!   [`HttpConfig::max_connections`], an accepted connection is answered with
@@ -93,8 +93,8 @@
 //! # Layout
 //!
 //! * [`HttpConfig`] — the §8.2 knobs, filled in by init.
-//! * [`Server`], [`serve`], [`serve_with`], [`Acceptor`], [`TcpAcceptor`] —
-//!   accepting and running connections.
+//! * [`Server`], [`serve`], [`serve_with`], [`TcpAcceptor`] — accepting and
+//!   running connections.
 //! * [`Chan`], [`Stream`] — the client side of `http.chan`, shared by every
 //!   connection.
 //! * [`HttpError`] — the only failure that stops the server.
@@ -125,7 +125,7 @@ pub use crate::head::{BodyFraming, Reject, RequestHead, Version};
 pub use crate::reason::canonical_reason;
 #[cfg(unix)]
 pub use crate::server::serve;
-pub use crate::server::{Acceptor, Server, TcpAcceptor, serve_with};
+pub use crate::server::{Server, TcpAcceptor, serve_with};
 pub use blastit_frame::INITIAL_WINDOW;
 
 /// Where the front end sends its structured events (ARCHITECTURE.md §8.1).

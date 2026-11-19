@@ -685,22 +685,7 @@ impl Dbproxy {
             spec.fd = listener.as_raw_fd();
         }
         let uid = rustix::process::geteuid().as_raw();
-        let proxies: Vec<ProxySpec> = prepared
-            .upstreams()
-            .iter()
-            .map(|(name, upstream)| ProxySpec {
-                name: name.as_str().to_string(),
-                host: upstream.host().to_string(),
-                port: upstream.port(),
-                user: upstream.user().to_string(),
-                password: upstream.password().expose().to_string().into(),
-                database: upstream.database().to_string(),
-                sslmode: upstream.sslmode().map(str::to_string),
-                ca_cert: upstream.ca_cert().map(|ca| ca.expose().to_string().into()),
-                options: upstream.options().to_vec(),
-                max_connections: 4,
-            })
-            .collect();
+        let proxies: Vec<ProxySpec> = crate::dbproxy_wiring::proxy_specs(prepared, |_| 4);
         let mut document = DbproxyConfig::enforcing(
             proxies,
             listeners.iter().map(|(_, spec)| spec.clone()).collect(),

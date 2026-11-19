@@ -1,7 +1,6 @@
 //! The WSGI `environ` of PEP 3333, built from a `REQ_HEAD`.
 
 use std::borrow::Cow;
-use std::sync::Mutex;
 
 use blastit_frame::{ReqHead, Scheme};
 use pyo3::intern;
@@ -10,7 +9,6 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyString, PyTuple};
 
 use crate::input::Input;
-use blastit_view::sync::lock;
 
 /// The interpreter's `sys.stderr`, resolved once per process.
 ///
@@ -29,25 +27,6 @@ static STDERR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 /// it is built once, under the GIL, exactly as [`STDERR`] is.
 static WSGI_VERSION: PyOnceLock<Py<PyTuple>> = PyOnceLock::new();
 
-/// A bounded cache of the decimal form of a port, keyed by the port.
-///
-/// A request writes a port at most twice — `SERVER_PORT`, and `REMOTE_PORT` when
-/// the peer has one — and both draw from a small set: a process serves one
-/// listening port for as long as it lives, and a client's source port is
-/// ephemeral. Reusing the `str` saves a `String` and a Python `str` per port.
-/// The cache is **deliberately bounded**: `REMOTE_PORT` is chosen by the client,
-/// so an unbounded map keyed by it would let a peer grow this process's memory
-/// with a stream of fresh source ports. At [`PORT_CACHE`] entries the oldest is
-/// evicted, which is what caps what a peer can make this process retain; the
-/// keys are `u16` besides, so the whole key space is bounded by construction.
-static PORTS: Mutex<Vec<(u16, Py<PyString>)>> = Mutex::new(Vec::new());
-
-/// How many port strings a process keeps — see [`PORTS`].
-///
-/// Small on purpose: one entry for the process's own port and a handful for the
-/// clients a view serves at once is the whole working set.
-const PORT_CACHE: usize = 16;
-
 /// Build the `environ` dictionary for one request.
 ///
 /// Every value is a `str` (PEP 3333), decoded as latin-1 wherever the input was
@@ -56,11 +35,10 @@ const PORT_CACHE: usize = 16;
 ///
 /// Nothing here that is the same for every request is built from scratch: the
 /// keys are interned, the constant values are cached (the `(1, 0)` tuple,
-/// `sys.stderr`, the scheme names, `HTTP/1.1`) and the ports come from a bounded
-/// cache, so a request reuses objects — and their cached string hashes — instead
-/// of minting a fresh `str` for each one. The one deliberate exception is a
-/// header's own `HTTP_*` key, which is the client's to choose (see the loop
-/// below).
+/// `sys.stderr`, the scheme names, `HTTP/1.1`) and a port is formatted into a
+/// five-byte stack buffer, so no intermediate `String` is minted for it. The
+/// deliberate exception is a header's own `HTTP_*` key, which is the client's
+/// to choose (see the loop below).
 ///
 /// # Errors
 ///
@@ -154,32 +132,26 @@ fn scheme<'py>(py: Python<'py>, scheme: Scheme) -> &'py Bound<'py, PyString> {
     }
 }
 
-/// The `str` for `port`, from [`PORTS`] or a fresh conversion.
+/// The `str` for `port`, formatted into a stack buffer.
 ///
-/// The cache's lock is held around the lookup and around the insert, and no
-/// Python runs while it is held — the `to_string` and `PyString::new` that can
-/// allocate are called with it released — which is what keeps a lock that is
-/// not the GIL from ever being held across a Python call.
+/// No cache and no lock: a process-wide map keyed by a client-chosen
+/// `REMOTE_PORT` was a per-request allocation saved at the cost of a global
+/// `Mutex` on the request path. Five bytes of stack do the same job with nothing
+/// to share, and nothing a peer can grow.
 fn port_str<'py>(py: Python<'py>, port: u16) -> PyResult<Bound<'py, PyString>> {
-    let cached = {
-        let cache = lock(&PORTS);
-        cache
-            .iter()
-            .find(|(cached, _)| *cached == port)
-            .map(|(_, text)| text.bind(py).clone())
-    };
-    if let Some(text) = cached {
-        return Ok(text);
+    let mut digits = [0u8; 5];
+    let mut at = digits.len();
+    let mut rest = port;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + u8::try_from(rest % 10).unwrap_or(0);
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
     }
-    let text = PyString::new(py, &port.to_string());
-    let mut cache = lock(&PORTS);
-    // Another thread may have filled the entry between the two locks.
-    cache.retain(|(cached, _)| *cached != port);
-    if cache.len() >= PORT_CACHE {
-        cache.remove(0);
-    }
-    cache.push((port, text.clone().unbind()));
-    Ok(text)
+    let text = std::str::from_utf8(&digits[at..]).unwrap_or("0");
+    Ok(PyString::new(py, text))
 }
 
 /// Decode bytes as latin-1 (PEP 3333's `str` for byte-ish values), borrowing

@@ -27,3 +27,7 @@ REVIEW FIX: (1) coverage.rs cfg(coverage) is never set by rustc -C instrument-co
 ## 2026-11-19T01:25 [lead]
 
 status review -> done
+
+## 2026-11-19T01:25 [lead]
+
+committed 88fd2cf

@@ -67,6 +67,7 @@ pub mod mem_usage;
 
 mod child;
 mod coverage;
+mod dbproxy_wiring;
 mod dev_learn;
 mod forking;
 mod logs;

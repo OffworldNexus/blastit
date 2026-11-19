@@ -3617,3 +3617,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T01:05 [MB.40.2] (lead) status active -> review
 - 2026-11-19T01:10 [MB.40.2] (lead) REVIEW FIX: (1) coverage.rs cfg(coverage) is never set by rustc -C instrument-coverage -> flush is dead code; gate on a real cargo feature/build.rs cfg and test
 - 2026-11-19T01:25 [MB.40.2] (lead) status review -> done
+- 2026-11-19T01:25 [MB.40.2] (lead) committed 88fd2cf
+- 2026-11-19T01:25 [MB.40.3] (lead) status ready -> active
+- 2026-11-19T01:25 [MB.40.3] (lead) attempt 1/3 started
+- 2026-11-19T01:25 [MB.40.3] (lead) base 88fd2cf4053b7f466f4a2a7401dff204aa10a200
+- 2026-11-19T01:36 [MB.40.3] (lead) status active -> review

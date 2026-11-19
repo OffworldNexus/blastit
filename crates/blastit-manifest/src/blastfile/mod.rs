@@ -73,7 +73,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::edit::{BlastfileEditor, EditError, Editor as _};
+use crate::edit::{BlastfileEditor, EditError};
 use crate::error::{ManifestError, ManifestErrors, ManifestWarning, Position, escape_control};
 use crate::model::Manifest;
 

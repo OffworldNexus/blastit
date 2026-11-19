@@ -90,6 +90,14 @@ impl Sample {
     }
 
     /// How much of it is in use now, in bytes.
+    ///
+    /// This is the **raw** figure: the cgroup's `memory.current`, or
+    /// `MemTotal − MemAvailable` without one. It counts page cache the kernel
+    /// will hand back on demand, so it is the right answer to "how big is this
+    /// cgroup" and the wrong one to "may another process start". That second
+    /// question is `blastit`'s `mem_usage` reading — this sample minus the
+    /// `memory.stat` bytes the kernel can reclaim — which builds on this one and
+    /// adds no second parser of `/proc/meminfo` or the cgroup files.
     pub fn used(&self) -> u64 {
         self.used
     }

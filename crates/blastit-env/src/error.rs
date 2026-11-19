@@ -7,9 +7,11 @@
 //! output (§5.1 "secrets can't be templated", §8.1 "never logged").
 
 use std::fmt;
-use std::fmt::Write as _;
 
-use blastit_manifest::ProxyName;
+// §18 renders a path for the CLI with one escaper, and this crate renders
+// variable names; asking `blastit-manifest` keeps the two identical instead of
+// keeping a second copy of the control-character table.
+use blastit_manifest::{ProxyName, escape_control};
 
 use crate::template::TemplateError;
 
@@ -48,23 +50,6 @@ pub(crate) fn quoted(value: impl fmt::Display) -> String {
         None => out.push_str(&escape_control(&text)),
     }
     out.push('"');
-    out
-}
-
-/// Escapes control characters, so a name never breaks a line.
-fn escape_control(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            character if character.is_control() => {
-                let _ = write!(out, "\\u{{{:x}}}", character as u32);
-            }
-            character => out.push(character),
-        }
-    }
     out
 }
 

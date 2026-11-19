@@ -39,6 +39,15 @@
 //! [`read`] takes its root as a parameter rather than hard-coding `/`, so the
 //! arithmetic can be pinned against files instead of the machine that runs the
 //! test.
+//!
+//! # One reader, one reading
+//!
+//! [`blastit_sys::mem::Reader`] owns the raw sample and every file format:
+//! `MemTotal`, both cgroup layouts, and the `total`/`used` figures
+//! [`blastit_sys::mem::Sample`] exposes. This module owns the *refined* reading
+//! blastit acts on — that sample plus the `memory.stat` bytes the kernel can
+//! reclaim — and adds no second parser of those files. [`sample`] is the whole
+//! layering: one `Reader::sample`, then [`reclaimable`].
 
 use std::fs;
 use std::path::Path;
@@ -167,6 +176,10 @@ pub fn read(root: &Path) -> Option<Usage> {
 }
 
 /// [`read`] with the reason a reading could not be taken.
+///
+/// The raw figures are [`blastit_sys::mem::Reader::sample`]'s — there is no
+/// second parser of `/proc/meminfo` or the cgroup files — and this adds only the
+/// `memory.stat` subtraction.
 ///
 /// # Errors
 ///

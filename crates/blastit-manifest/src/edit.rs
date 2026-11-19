@@ -3,8 +3,8 @@
 //!
 //! [`crate::blastfile::apply_edits`] is the `Blastfile` editor (§14.5): it
 //! splices into the CST of §14.1 and proves the result with
-//! [`crate::Manifest::equivalent`]. The crate-private `Editor` seam keeps the
-//! splicing in the `blastfile` writer, so every caller (`dev_learn`, `check`,
+//! [`crate::Manifest::equivalent`]. The crate-private [`BlastfileEditor`] keeps
+//! the splicing in the `blastfile` writer, so every caller (`dev_learn`, `check`,
 //! `fold`) reaches it through one function.
 //!
 //! `--learn` has to add views and exact `queries` to a file a person wrote by
@@ -62,31 +62,22 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{ManifestErrors, escape_control, quoted};
 
-/// The seam between the edit types and the `Blastfile` writer (§14.5).
+/// The `Blastfile` editor: parse, splice, prove (P4).
 ///
-/// [`crate::blastfile::apply_edits`] is its one caller and the `Blastfile`
-/// editor its one implementation, so the splicing stays in
-/// [`crate::blastfile::write`] and every caller (`dev_learn`, `check`, `fold`)
-/// reaches it through one function.
-pub(crate) trait Editor {
+/// [`crate::blastfile::apply_edits`] is its one caller and this its one
+/// implementation, so the splicing stays in [`crate::blastfile::write`] and
+/// every caller (`dev_learn`, `check`, `fold`) reaches it through one function.
+/// A concrete type, not a trait: there is no second editor to abstract over.
+pub(crate) struct BlastfileEditor;
+
+impl BlastfileEditor {
     /// Applies `edits` to `source`, returning the edited document.
     ///
     /// # Errors
     ///
     /// The refusal of the rule the edit broke, or [`EditError::Verification`]
     /// when the splice cannot reproduce the model the edit intended.
-    fn apply(
-        &self,
-        source: &str,
-        edits: &crate::blastfile::BlastfileEdits,
-    ) -> Result<String, EditError>;
-}
-
-/// The `Blastfile` editor: parse, splice, prove (P4).
-pub(crate) struct BlastfileEditor;
-
-impl Editor for BlastfileEditor {
-    fn apply(
+    pub(crate) fn apply(
         &self,
         source: &str,
         edits: &crate::blastfile::BlastfileEdits,

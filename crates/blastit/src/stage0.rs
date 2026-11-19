@@ -1772,22 +1772,8 @@ fn fork_dbproxy_dev(
         return None;
     }
     let uid = crate::dev_learn::euid();
-    let proxies: Vec<ProxySpec> = prepared
-        .upstreams()
-        .iter()
-        .map(|(name, upstream)| ProxySpec {
-            name: name.as_str().to_string(),
-            host: upstream.host().to_string(),
-            port: upstream.port(),
-            user: upstream.user().to_string(),
-            password: upstream.password().expose().to_string().into(),
-            database: upstream.database().to_string(),
-            sslmode: upstream.sslmode().map(str::to_string),
-            ca_cert: upstream.ca_cert().map(|ca| ca.expose().to_string().into()),
-            options: upstream.options().to_vec(),
-            max_connections: boot.config.max_connections_for(name.as_str()),
-        })
-        .collect();
+    let proxies: Vec<ProxySpec> =
+        crate::dbproxy_wiring::proxy_specs(prepared, |name| boot.config.max_connections_for(name));
     let mut document = DbproxyConfig::enforcing(
         proxies,
         listeners.iter().map(|(_, spec)| spec.clone()).collect(),
@@ -2181,22 +2167,8 @@ fn fork_dbproxy(
         Err(timed_out) => fail(emitter, &timed_out.message()),
     }
 
-    let proxies: Vec<ProxySpec> = prepared
-        .upstreams()
-        .iter()
-        .map(|(name, upstream)| ProxySpec {
-            name: name.as_str().to_string(),
-            host: upstream.host().to_string(),
-            port: upstream.port(),
-            user: upstream.user().to_string(),
-            password: upstream.password().expose().to_string().into(),
-            database: upstream.database().to_string(),
-            sslmode: upstream.sslmode().map(str::to_string),
-            ca_cert: upstream.ca_cert().map(|ca| ca.expose().to_string().into()),
-            options: upstream.options().to_vec(),
-            max_connections: config.max_connections_for(name.as_str()),
-        })
-        .collect();
+    let proxies: Vec<ProxySpec> =
+        crate::dbproxy_wiring::proxy_specs(prepared, |name| config.max_connections_for(name));
     let document = DbproxyConfig::enforcing(
         proxies,
         listeners.iter().map(|(_, spec)| spec.clone()).collect(),

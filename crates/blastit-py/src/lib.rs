@@ -151,6 +151,34 @@ fn normalize(sql: &str) -> String {
     audit::normalize_sql(sql)
 }
 
+/// Whether one SQL text holds any quoted literal (R24, R25).
+///
+/// The rule is [`blastit_sqlpolicy::has_quoted_literal`]'s; this is how Python
+/// reaches it. `fold` used to re-derive the lexer from `logs.sql_regions`, which
+/// is exactly the kind of second implementation that drifts from the policy.
+///
+/// # Returns
+///
+/// `true` for `'…'`, `E'…'`, `B'…'`, `X'…'`, `N'…'`, `U&'…'`, `$$…$$` and
+/// `$tag$…$tag$` (unterminated spans included); `false` for quoted identifiers,
+/// placeholders, comments and a `$` inside an identifier.
+#[pyfunction]
+#[pyo3(name = "has_quoted_literal")]
+fn has_quoted_literal(sql: &str) -> bool {
+    blastit_sqlpolicy::has_quoted_literal(sql)
+}
+
+/// One SQL text with every quoted literal replaced by `…` (R24, ADR-0003).
+///
+/// [`blastit_sqlpolicy::redact_literals`], exposed so a Python caller never
+/// carries its own copy of the eight literal forms. The fixed protocol setup
+/// statements keep their constants, exactly as the policy does.
+#[pyfunction]
+#[pyo3(name = "redact_literals")]
+fn redact_literals(sql: &str) -> String {
+    blastit_sqlpolicy::redact_literals(sql)
+}
+
 /// Diffs what a test suite observed against what a manifest grants (D3b, §6).
 ///
 /// `manifest_text` is the whole manifest the pytest plugin and `fold` read;
@@ -460,6 +488,8 @@ fn blastfile_model(source: &str) -> PyResult<String> {
 fn _blastit(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(main, module)?)?;
     module.add_function(wrap_pyfunction!(normalize, module)?)?;
+    module.add_function(wrap_pyfunction!(has_quoted_literal, module)?)?;
+    module.add_function(wrap_pyfunction!(redact_literals, module)?)?;
     module.add_function(wrap_pyfunction!(audit_report, module)?)?;
     module.add_function(wrap_pyfunction!(analyze_statement, module)?)?;
     module.add_function(wrap_pyfunction!(covering_statements, module)?)?;

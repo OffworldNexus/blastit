@@ -19,3 +19,8 @@ tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "time", "macro
 
 [dev-dependencies]
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "test-util"] }
+# The accept-failure test shuts a live listening socket down; `std` has no
+# `shutdown` for a listener, and rustix is the workspace's safe wrapper.
+# `time` is not used here: rustix 1.1.5's linux_raw `net` backend references its
+# `timespec` module, which only that module group (or `fs`/`process`) declares.
+rustix = { version = "1.1.5", features = ["net", "time"] }
