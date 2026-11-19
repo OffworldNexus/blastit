@@ -3710,3 +3710,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T05:10 [MB.40.5.2] (implementer) edited fields
 - 2026-11-19T05:13 [MB.40.5.2] (lead) status active -> done
 - 2026-11-19T05:13 [MB.40.5] (lead) status ready -> done
+- 2026-11-19T05:13 [MB.40.6] (unknown) edited fields
+- 2026-11-19T05:13 [MB.40.6] (lead) status ready -> active
+- 2026-11-19T05:13 [MB.40.6] (lead) attempt 1/3 started
+- 2026-11-19T05:13 [MB.40.6] (lead) base 41c6cb7; paths + ARCHITECTURE.md (the new reload event row)
+- 2026-11-19T05:17 [MB.40.6] (lead) attempt 2/3 started
+- 2026-11-19T05:17 [MB.40.6] (lead) attempt 1 hit its step limit: README + docs/{index,getting-started,local,ci,blastfile,security}, frameworks/index, deploy headings and ARCHITECTURE 8.1 reload r
+- 2026-11-19T05:22 [MB.40.6] (lead) status active -> review
+- 2026-11-19T05:24 [MB.40.6] (unknown) edited fields
+- 2026-11-19T05:31 [MB.40.6] (lead) ratified: the learn-plural fix re-pinned critical_dev_and_fail_closed.rs:2211 (1 route, 2 queries added) — same counts, same sentence, assertion intent preserve
+- 2026-11-19T05:31 [MB.40.6] (lead) attempt 3/3 started
+- 2026-11-19T05:36 [MB.40.6] (unknown) edited fields
+- 2026-11-19T05:36 [MB.40.6] (lead) ratified path: crates/blastit-manifest/tests/docs_fences.rs (the fence census table must follow the added diagrams/pins)
+- 2026-11-19T05:39 [MB.40.6] (lead) status review -> done

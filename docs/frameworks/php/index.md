@@ -3,6 +3,18 @@
 Blastit runs `public/index.php` inside each view worker: no PHP server beside it, no rewrite rules,
 one `entrypoint` line, and the host library is the only step that needs `sudo`.
 
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched --> api["view api · body json"]
+    sched --> app["view app · body form"]
+    sched -. "a file under public/" .-> static["static mount"]
+    api -- "socket" --> dbproxy["dbproxy"]
+    app -- "socket" --> dbproxy
+    dbproxy --> db[("PostgreSQL")]
+```
+
 ## The Blastfile
 
 ```text title="Blastfile"
@@ -18,14 +30,17 @@ static "/" {
 
 view api POST "/api/*" {
     body json
-    postgres {}
+    postgres { insert orders(customer_id, total) }
 }
 
 view app {
     GET, DELETE, OPTIONS "/*"
     POST "/*" { body form }
 
-    postgres {}
+    postgres {
+        select products(id, name, price), carts(id)
+        select cart_items(cart_id, product_id, quantity)
+    }
 }
 ```
 

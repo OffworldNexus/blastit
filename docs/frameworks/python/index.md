@@ -3,6 +3,15 @@
 A Python app is one WSGI callable, `entrypoint python` names it, and `uv add blastit` adds the CLI
 while the app keeps its own driver.
 
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched --> view["view · python<br/>shop.wsgi:application"]
+    view -- "socket" --> dbproxy["dbproxy<br/>real credential"]
+    dbproxy --> db[("PostgreSQL")]
+```
+
 ## The Blastfile
 
 ```text title="Blastfile"
@@ -15,7 +24,7 @@ entrypoint python "shop.wsgi:application" {
 postgres $DATABASE_URL
 
 view products GET "/products" {
-    postgres {}
+    postgres { select products(id, name, price) }
 }
 ```
 

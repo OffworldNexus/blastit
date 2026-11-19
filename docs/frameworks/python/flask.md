@@ -3,6 +3,16 @@
 Flask is a decorator around a WSGI callable, a bare WSGI app drops it, SQLAlchemy changes two
 lines, and the [connector](index.md) has the runtime mechanics.
 
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched --> products["view products<br/>body form · use connection"]
+    sched --> fallback["view fallback<br/>no store"]
+    products -- "socket" --> dbproxy["dbproxy"]
+    dbproxy --> db[("PostgreSQL")]
+```
+
 ## Install
 
 ```console
@@ -32,7 +42,7 @@ trait connection {
 view products POST "/products/" {
     body form
     use connection
-    postgres {}
+    postgres { insert products(name, price) }
 }
 
 view fallback "/*" {}
@@ -40,8 +50,8 @@ view fallback "/*" {}
 
 `app:app` is the module attribute `entrypoint python` names: `app.py` in the project root exposes
 `app`. The `connection` trait carries the transaction control and the setup statements every view
-that opens the engine needs; `view products` adds the trait and an empty grant, and the catch-all
-shows "no database here" — it is not the shape for the app's other routes.
+that opens the engine needs; `view products` adds the trait and the one `insert` its handler runs,
+and the catch-all shows "no database here" — it is not the shape for the app's other routes.
 
 ## The callable you name
 

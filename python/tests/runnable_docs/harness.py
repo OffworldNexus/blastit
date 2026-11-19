@@ -1173,22 +1173,38 @@ class Harness:
                 + "\n".join(dev.stdout[-40:])
             )
         match = re.match(
-            r"^learn: (\d+) routes?, (\d+) queries? added → (.+)$", summary
+            r"^learn: (\d+) (route|routes), (\d+) (query|queries) added → (.+)$",
+            summary,
         )
         if match is None:
             raise Failure(
                 "the `learn:` summary does not match the documented shape "
                 "`learn: N routes, M queries added → <path>`:\n" + summary
             )
-        added_routes, added_queries, printed_path = (
+        added_routes, routes_noun, added_queries, queries_noun, printed_path = (
             int(match.group(1)),
-            int(match.group(2)),
-            Path(match.group(3).strip()),
+            match.group(2),
+            int(match.group(3)),
+            match.group(4),
+            Path(match.group(5).strip()),
         )
+        # Every count is written in its own number: `1 route`, `2 routes`,
+        # `1 query`, `38 queries` (`AGENTS.md` §4). Comparing the noun makes a
+        # page or binary that prints `1 routes` red again.
+        for count, noun, singular, plural in (
+            (added_routes, routes_noun, "route", "routes"),
+            (added_queries, queries_noun, "query", "queries"),
+        ):
+            expected_noun = singular if count == 1 else plural
+            if noun != expected_noun:
+                raise Failure(
+                    f"the `learn:` summary writes `{count} {noun}`; a count of "
+                    f"{count} takes `{expected_noun}`:\n" + summary
+                )
         if added_routes < 1 or added_queries < 1:
             raise Failure(
                 "one `dev --learn` pass must add the view and its queries; the "
-                f"summary says {added_routes} routes, {added_queries} queries:\n"
+                f"summary says {added_routes} {routes_noun}, {added_queries} {queries_noun}:\n"
                 + summary
             )
         if printed_path.resolve() != learned_path.resolve():
@@ -1902,8 +1918,8 @@ def _free_port() -> int:
 _NUMBER = re.compile(r"\d+")
 _ABSOLUTE_PATH = re.compile(r"(?<![\w.])/(?:[^\s`'\"]+/)+[^\s`'\"]+")
 _CLEAN = re.compile(
-    r"^blastit check: (\d+) requests?, (\d+) statements?, (\d+)/(\d+) (?:routes|views)"
-    r"(?:, \d+ proxies)?, clean$"
+    r"^blastit check: (\d+) requests?, (\d+) statements?, (\d+)/(\d+) (?:routes?|views?)"
+    r"(?:, \d+ prox(?:y|ies))?, clean$"
 )
 
 

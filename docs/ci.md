@@ -1,6 +1,6 @@
 # CI/CD
 
-One command, no root, any WSGI framework:
+One command, no root, any runtime:
 
 ```console
 $ uv run blastit check
@@ -11,19 +11,30 @@ request the suite makes and every statement it sends is checked against
 `./Blastfile`. A clean run means every view and every declared store was
 observed, and nothing **your suite exercised** was forgotten.
 
-An all-static file has no app: `check` audits every `root` (exists, a
-directory, readable), runs no `pytest`, prints nothing and exits `0` — or exits
-`2` naming the root, and the view whenever the filesystem refuses the root. With
-`--json` it is the same document, counts at zero except `routes.total`.
-Everything below is a file with an `app`.
+```mermaid
+sequenceDiagram
+    participant suite as pytest
+    participant check as blastit check
+    participant proxy as dbproxy
+    participant report as audit report
+    suite->>check: one request
+    check->>proxy: the app's statement
+    proxy-->>check: allowed, or SQLSTATE 42501
+    check->>report: requests, statements, views, findings
+    report-->>suite: exit 0 clean · 1 findings
+```
+
+An all-static file has no app: `check` audits every `root` (exists, a directory,
+readable), runs no `pytest`, prints nothing and exits `0` — or exits `2` naming
+the root, and the view whenever the filesystem refuses it. With `--json` it is
+the same document, counts at zero except `routes.total`.
 
 ## What it fails on
 
-A `query` that does not parse is not a finding and has no row below. The file does
-not load, so `check` exits `2`, writes the refusal to stderr — one line per
-problem, with the `line:col` before the sentence — and prints nothing on stdout:
-`--json` included, and an empty stdout is a refusal, never a clean audit. The
-refusal adds no `kind` and no `fix.action`; edit the line it names and rerun.
+A `query` that does not parse is not a finding and has no row below: the file does
+not load, so `check` exits `2`, writes one `line:col` line per problem to stderr,
+and prints nothing on stdout — `--json` included. An empty stdout is a refusal,
+never a clean audit.
 
 | Finding | Meaning | Fix |
 |---|---|---|
@@ -47,18 +58,28 @@ closed. Deleting a view or a grant is never safe automatically: the path becomes
 
 ```console
 $ uv run blastit check
-blastit check: 412 requests, 977 statements, 7/8 routes, 2 proxies
-  route catalog: 1 statement not granted
+blastit check: 412 requests, 977 statements, 7/8 views, 2 proxies
+  view catalog: 1 statement not granted on proxy db
     SELECT "shop_product"."price" FROM "shop_product"
-  route search: 1 grant never used
-  route checkout: never exercised
-  route upload: takes a body and declares no ingress validation
-  request GET /robots.txt: no route
+      fix: add it to view catalog postgres
+  view search: 1 grant never used on proxy db
+    SELECT count(*) FROM "shop_product"
+      fix: remove it from view search postgres
+  view checkout: never exercised
+      fix: add a test that reaches it
+  view upload: takes a body and declares no ingress validation; observed application/x-www-form-urlencoded
+      fix: write `body form`
+  request GET /robots.txt: no view matches
+      fix: add a `view` whose pattern matches this request
   proxy analytics: declared, 0 statements observed
+      fix: remove `proxy analytics` or add the call that uses it
 blastit check: 6 problems · `--json` for the machine-readable list
 ```
 
-One finding per line, the indented statement as detail; `--json` below lists the same six.
+One finding per line, its statement and its `fix:` line indented beneath it — a
+grant finding also indents the statement it is about. The human form names the
+same `Blastfile` node `--json` does — `view catalog postgres`, `trait
+connection` — and never a route id.
 
 ## For agents: `--json`
 
@@ -75,7 +96,7 @@ $ uv run blastit check --json
     {"kind": "missing_grant", "severity": "error", "route": "catalog", "proxy": "db", "sql": "SELECT \"shop_product\".\"price\" FROM \"shop_product\"", "fix": {"action": "add_query", "to": "view catalog postgres"}},
     {"kind": "dead_grant", "severity": "error", "route": "search", "proxy": "db", "sql": "SELECT count(*) FROM \"shop_product\"", "fix": {"action": "remove_query", "to": "view search postgres", "unsafe": true}},
     {"kind": "unexercised_route", "severity": "error", "route": "checkout", "fix": {"action": "add_test"}},
-    {"kind": "missing_ingress", "severity": "error", "route": "upload", "observed": ["multipart/form-data"], "fix": {"action": "declare_ingress", "codecs": ["raw"], "allow_raw": true}},
+    {"kind": "missing_ingress", "severity": "error", "route": "upload", "observed": ["application/x-www-form-urlencoded"], "fix": {"action": "declare_ingress", "codecs": ["form"]}},
     {"kind": "unrouted_request", "severity": "error", "method": "GET", "path": "/robots.txt", "fix": {"action": "add_route"}},
     {"kind": "proxy_unused", "severity": "error", "proxy": "analytics", "fix": {"action": "observe"}}
   ]
@@ -85,13 +106,15 @@ $ uv run blastit check --json
 `severity` is `error` on every kind in 0.2.0, so any finding fails the run and
 `ok` is `false`; a `warning` leaves the exit code alone. `sql` is the normalised
 statement, never a literal value, and a grant finding's `fix.to` is the
-`Blastfile` node it edits: `"view catalog postgres"`, or `"trait connection"` for
-a trait's grant. `fix.action` is `add_query`, `add_group`, `remove_query`,
-`add_route`, `remove_route`, `add_test`, `declare_ingress`, `fix_ingress` or
-`observe`; a destructive one carries `"unsafe": true`. `add_group` fits only
-`SET`, `SHOW` or `set_config('TimeZone', …)`; another `set_config(…)` is
-`observe`. Setup runs on whichever view connects first, so `fix.to` names a
-trait: write it once and attach it everywhere.
+`Blastfile` node it edits. `fix.action` is `add_query`, `add_group`,
+`remove_query`, `add_route`, `remove_route`, `add_test`, `declare_ingress`,
+`fix_ingress` or `observe`; a destructive one carries `"unsafe": true`. The JSON
+key is still `routes` (a document never pluralises or renames); the human form
+says `views`.
+
+`add_group` fits only `SET`, `SHOW` or `set_config('TimeZone', …)`; another
+`set_config(…)` is `observe`. Setup runs on whichever view connects first, so
+`fix.to` names a trait: write it once and attach it everywhere.
 
 ```text
 trait connection {
@@ -143,8 +166,7 @@ For an agent, `--learn --json` prints exactly one document on stdout:
 {"proposed": {"routes": 2, "queries": 38}, "wrote": true}
 ```
 
-Add `--dry-run` and the document says `"wrote": false`, with nothing written. A
-real `--learn` replaces the file atomically and only after the suite passed,
+A real `--learn` replaces the file atomically and only after the suite passed,
 writes exact `query` lines (never table grants) and refuses a statement that
 inlines a value: parameterise it first. Review `git diff` before committing.
 
@@ -178,3 +200,9 @@ jobs:
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/shop
 ```
+
+## Where next
+
+* [Deployments](deploy/index.md) — the same file under real uids and capabilities.
+* [Blastfile reference](reference/blastfile.md) — every directive the audit reads.
+* [Local development](local.md) — fill the grants before CI sees them.

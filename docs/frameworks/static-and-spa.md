@@ -2,6 +2,16 @@
 
 A built front end is one `static` mount and no app: no `entrypoint`, no worker, no database.
 
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched --> mount["static mount<br/>one root, one dirfd"]
+    mount --> file["a regular file under root<br/>200 · cached if immutable"]
+    mount -. "no such file" .-> shell["fallback: index.html<br/>no-cache"]
+    sched -. "dotfile, .., .php source" .-> deny(["404"])
+```
+
 ## The Blastfile
 
 ```text title="Blastfile"
@@ -17,7 +27,7 @@ into a throwaway cache with no project and no venv.
 
 ```console
 $ uvx blastit dev
-  blastit dev · single-uid simulation · 127.0.0.1:8080
+  blastit dev · single-uid simulation · http://127.0.0.1:8080
   Not a sandbox. Production `blastit` refuses to run like this.
   http · scheduler · dbproxy · 1 route
 ```

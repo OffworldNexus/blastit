@@ -3,6 +3,16 @@
 A Laravel app is a front controller plus caches and a Vite build made before the image starts; the
 [connector](index.md) has the host install and the gate.
 
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched -. "public/ and /build/assets/*" .-> static["static mount"]
+    sched --> view["view app<br/>libphp, one request"]
+    view -- "socket" --> dbproxy["dbproxy<br/>DB_* from the store"]
+    dbproxy --> db[("PostgreSQL")]
+```
+
 ## The Blastfile
 
 ```text title="Blastfile"
@@ -28,7 +38,9 @@ view app {
     POST "/*" { body form }
     PUT, PATCH "/*" { body json }
 
-    postgres {}
+    postgres {
+        select products(id, name, price); insert cart_items(cart_id, product_id, quantity)
+    }
 }
 ```
 

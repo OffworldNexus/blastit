@@ -3,6 +3,17 @@
 A Django project is a WSGI callable; the [connector](index.md) starts it, and this file and the
 settings below are the whole adaptation, with `SECRET_KEY` still coming from the environment.
 
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched --> admin["view admin<br/>body form · transactions"]
+    sched --> checkout["view checkout<br/>body json"]
+    admin -- "socket" --> dbproxy["dbproxy"]
+    checkout -- "socket" --> dbproxy
+    dbproxy --> db[("PostgreSQL")]
+```
+
 ## The Blastfile { #manifest }
 
 ```text title="Blastfile"

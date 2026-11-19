@@ -1,7 +1,33 @@
 # Frameworks
 
-Blastit starts your app and calls it: pick the runtime you deploy, and read only what your
-framework changes.
+Blastit starts your app and calls it. Pick the runtime you deploy, and read only
+what your framework changes: the `Blastfile` and the trust boundary are the same
+for all three.
+
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched --> py["view · python<br/>WSGI callable"]
+    sched --> php["view · php<br/>public/index.php"]
+    sched --> mounts["static mount<br/>scheduler's uid"]
+    py -- "socket" --> dbproxy["dbproxy"]
+    php -- "socket" --> dbproxy
+    dbproxy --> db[("PostgreSQL")]
+```
+
+`entrypoint` is declared once, at the top level of the file, and every view below
+it is identical: its own process, its own uid, its own grants. Two things change
+per runtime — what the entrypoint names and which files it may read — and one
+page per framework covers the rest.
+
+!!! note "PHP: `blastit dev --learn` writes the grants"
+
+    A PHP app has no request audit in 0.2.0, so `check` proves the file, every
+    `root` and the `libphp` preflight, and `fmt --check` proves the layout. The
+    grants come from one `blastit dev --learn` pass: send every route with your
+    client or a `curl` list, stop it with ++ctrl+c++, then read `git diff`
+    ([the workflow](php/index.md#learn-the-grants)).
 
 ## Pick your runtime
 
@@ -13,9 +39,9 @@ framework changes.
 
 ## Nine things to decide
 
-Every runtime answers these nine things. Each answer has one home — or two where filling the file
-and proving it are different jobs — and a page below adds only where its framework changes the
-answer.
+Every runtime answers these nine things. Each answer has one home — or two where
+filling the file and proving it are different jobs — and a page below adds only
+where its framework changes the answer.
 
 1. How does Blastit start my code? ([entrypoint](../reference/blastfile.md#sections))
 2. Where do the built files live, and what is cached for a year? ([static mounts](../reference/blastfile.md#static-mounts))
@@ -28,8 +54,3 @@ answer.
 9. Which parts become their own process, and how many run at once? ([privilege layout](../reference/settings.md#privileges-and-the-uid-layout), [threads](../reference/settings.md#admission-and-threads))
 
 A PHP app has no request audit in 0.2.0, so question 8's proof is Python's; [the connector](php/index.md#what-ci-can-prove) names its gate.
-
-## Roadmap
-
-Node and Tomcat join this tree as their connectors land, each with a connector page and one page
-per framework in this shape.

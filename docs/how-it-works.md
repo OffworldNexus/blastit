@@ -147,7 +147,7 @@ swap and a denial are the real code paths, so a mistake shows up on localhost
 instead of in production.
 
 What it cannot do is the part that needs privilege. There is no uid boundary
-between roles, so there is no sandbox between routes; the banner says so, and
+between roles, so there is no sandbox between views; the banner says so, and
 production `blastit` exits rather than serve that way.
 
 ## Keep reading

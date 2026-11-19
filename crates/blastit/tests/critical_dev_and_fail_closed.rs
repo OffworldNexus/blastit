@@ -2208,9 +2208,12 @@ view sql \"/sql\" {}
         "the view this pass discovered keeps the statement it ran:\n{learned}"
     );
     dev.wait_for_line("learn: ");
+    // Each count is spelled in its own number (`1 route`, `2 routes`), and
+    // `docs/local.md` shows `learn: 1 route, 1 query added` — so this pin is
+    // the singular-and-plural sentence, not the old invariant `routes`.
     assert!(
         dev.stdout_text()
-            .contains("learn: 1 routes, 2 queries added"),
+            .contains("learn: 1 route, 2 queries added"),
         "the summary counts the routed and the discovered statement:\n{}",
         dev.stdout_text()
     );

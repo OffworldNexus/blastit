@@ -2,16 +2,24 @@
 id: MB.40.6
 title: "Visual documentation hierarchy pass: Python+PHP+static README, Mermaid diagrams, admonitions, command-first guides & runnable-docs check"
 kind: task
-status: ready
+status: done
 owner: writer
 priority: 1
 depends_on: [MB.40.5]
-paths: [README.md, "docs/**", zensical.toml, "python/tests/**"]
-attempts: 0
+paths:
+  - README.md
+  - "docs/**"
+  - zensical.toml
+  - "python/tests/**"
+  - ARCHITECTURE.md
+  - crates/blastit/src/dev_learn.rs
+  - crates/blastit/tests/critical_dev_and_fail_closed.rs
+  - "crates/blastit-manifest/tests/docs_fences.rs"
+attempts: 3
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T00:36"
+updated: "2026-11-19T05:39"
 ---
 
 # Goal

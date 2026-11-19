@@ -95,7 +95,7 @@ pub fn banner(
     let routes = manifest.routes().len();
     out.push_str(&format!(
         "  http · scheduler · dbproxy · {routes} {}\n",
-        route_noun(routes)
+        crate::audit_v1::plural(routes, "route")
     ));
     for route in manifest.routes() {
         let methods = match route.methods() {
@@ -117,11 +117,6 @@ fn address(host: &std::net::IpAddr, port: u16, exposed: bool) -> String {
         (true, true) => format!("[{host}]:{port}"),
         (true, false) => format!("{host}:{port}"),
     }
-}
-
-/// `1 route` / `2 routes`: the noun that matches the count.
-fn route_noun(count: usize) -> &'static str {
-    if count == 1 { "route" } else { "routes" }
 }
 
 /// The ephemeral `0700` runtime root of one `blastit dev` run (`R20`).
@@ -660,15 +655,27 @@ impl LearnRun {
     }
 }
 
+/// Builds the `learn:` summary line (`§1.3`), with the absolute manifest path.
+///
+/// Both counts are written in their own number — `1 route, 1 query added`,
+/// `2 routes, 38 queries added` — because this is a sentence a developer reads,
+/// and it is the one `docs/local.md` shows. `plural` is the same helper
+/// `check.rs`'s `learn_line` uses, so the two entry points cannot drift.
+fn summary_line(manifest: &Path, routes: usize, queries: usize) -> String {
+    let path = crate::config::display_path(
+        &std::path::absolute(manifest).unwrap_or_else(|_| manifest.to_path_buf()),
+    );
+    let route_noun = crate::audit_v1::plural(routes, "route");
+    let query_noun = crate::audit_v1::plural(queries, "query");
+    format!("learn: {routes} {route_noun}, {queries} {query_noun} added → {path}")
+}
+
 /// Prints the `learn:` summary line (`§1.3`).
 ///
 /// It goes to stdout in `pretty` and to stderr under `BLASTIT_LOG_FORMAT=json`,
 /// where stdout is the event stream alone (`§1.1`).
 fn print_summary(manifest: &Path, pretty: bool, routes: usize, queries: usize) {
-    let path = crate::config::display_path(
-        &std::path::absolute(manifest).unwrap_or_else(|_| manifest.to_path_buf()),
-    );
-    let summary = format!("learn: {routes} routes, {queries} queries added → {path}");
+    let summary = summary_line(manifest, routes, queries);
     if pretty {
         println!("{summary}");
     } else {
@@ -837,7 +844,31 @@ mod tests {
             banner(&host, 8080, &two, false, false).contains("dbproxy · 2 routes\n"),
             "two routes are plural"
         );
-        assert_eq!(route_noun(0), "routes", "zero routes are plural");
+        assert_eq!(
+            crate::audit_v1::plural(0, "route"),
+            "routes",
+            "zero routes are plural"
+        );
+    }
+
+    #[test]
+    fn the_learn_summary_pluralises_both_counts() {
+        let manifest = Path::new("/srv/shop/Blastfile");
+        assert_eq!(
+            summary_line(manifest, 1, 1),
+            "learn: 1 route, 1 query added → /srv/shop/Blastfile",
+            "one route and one query are both singular"
+        );
+        assert_eq!(
+            summary_line(manifest, 2, 38),
+            "learn: 2 routes, 38 queries added → /srv/shop/Blastfile",
+            "many routes and many queries are both plural"
+        );
+        assert_eq!(
+            summary_line(manifest, 1, 0),
+            "learn: 1 route, 0 queries added → /srv/shop/Blastfile",
+            "zero counts are plural"
+        );
     }
 
     #[test]

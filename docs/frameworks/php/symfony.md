@@ -3,6 +3,16 @@
 A Symfony app is a front controller plus a cache built before the first request; start with the
 [PHP connector](index.md).
 
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched -. "a file under public/" .-> static["static mount"]
+    sched --> view["view app<br/>libphp, one request"]
+    view -- "socket" --> dbproxy["dbproxy"]
+    dbproxy --> db[("PostgreSQL")]
+```
+
 ## The Blastfile
 
 ```text title="Blastfile"
@@ -21,7 +31,10 @@ view app {
     POST "/*" { body form }
     PUT, PATCH "/*" { body json }
 
-    postgres {}
+    postgres {
+        query 'SELECT id, name, price FROM products WHERE id = $?'
+        insert orders(customer_id, total)
+    }
 }
 ```
 

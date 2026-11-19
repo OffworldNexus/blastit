@@ -70,25 +70,25 @@ const THE_RETIRED_OPENING_IS_GONE: bool = true;
 /// absent from this table fails rather than being absorbed by "some
 /// illustration".
 const PAGES: [(&str, Counts); 13] = [
-    ("README.md", Counts::new(1, 4)),
-    ("docs/index.md", Counts::new(1, 1)),
-    ("docs/getting-started.md", Counts::new(1, 4)),
-    ("docs/local.md", Counts::new(1, 7)),
-    ("docs/frameworks/index.md", Counts::new(0, 0)),
-    ("docs/frameworks/python/index.md", Counts::new(1, 0)),
-    ("docs/frameworks/python/django.md", Counts::new(1, 2)),
-    ("docs/frameworks/python/flask.md", Counts::new(1, 2)),
-    ("docs/frameworks/php/index.md", Counts::new(1, 3)),
-    ("docs/frameworks/php/symfony.md", Counts::new(1, 0)),
-    ("docs/frameworks/php/laravel.md", Counts::new(1, 0)),
-    ("docs/frameworks/static-and-spa.md", Counts::new(1, 6)),
+    ("README.md", Counts::new(1, 6)),
+    ("docs/index.md", Counts::new(1, 2)),
+    ("docs/getting-started.md", Counts::new(1, 5)),
+    ("docs/local.md", Counts::new(1, 8)),
+    ("docs/frameworks/index.md", Counts::new(0, 1)),
+    ("docs/frameworks/python/index.md", Counts::new(1, 1)),
+    ("docs/frameworks/python/django.md", Counts::new(1, 3)),
+    ("docs/frameworks/python/flask.md", Counts::new(1, 3)),
+    ("docs/frameworks/php/index.md", Counts::new(1, 4)),
+    ("docs/frameworks/php/symfony.md", Counts::new(1, 1)),
+    ("docs/frameworks/php/laravel.md", Counts::new(1, 1)),
+    ("docs/frameworks/static-and-spa.md", Counts::new(1, 7)),
     ("docs/blastfile.md", Counts::new(1, 3)),
 ];
 
 /// The whole pinned set: one `text title="Blastfile"` document on each of the
 /// twelve pages that carry one (the chooser carries none), and every
 /// illustration on those thirteen pages.
-const TOTAL: Counts = Counts::new(12, 32);
+const TOTAL: Counts = Counts::new(12, 45);
 
 /// Pages whose plain `text` fences are statement lists: syntax, not documents
 /// and not illustrations (§16.1). `docs/reference/blastfile.md` is deliberately

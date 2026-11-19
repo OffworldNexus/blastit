@@ -46,7 +46,7 @@ flowchart TB
 Each container hop is a bridge network, not the internet; the
 [model](index.md#the-topology) is unchanged inside the box.
 
-## What we thought the config would be
+## Preset defaults
 
 | Thing | Value | Why |
 |---|---|---|

@@ -97,7 +97,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `permission denied` creating the runtime directory | mount a `tmpfs` owned by the service uid, or use `RuntimeDirectory=` |
 | the container is OOM-killed | the view-process cap is too high: set `BLASTIT_MAX_VIEW_PROCESSES` or raise `BLASTIT_VIEW_MEM_ESTIMATE` |
 | a `memory:` WARN, then it serves | the reading is above the `85%` default and you raised `BLASTIT_MEM_HIGH_WATERMARK` past it; the line names the knob, the measured value and the cache it left out. Free memory to quieten it |
-| a route's first request is slower | a lazy view process forking: mark hot routes `prefork` |
+| a view's first request is slower | a lazy view process forking: mark hot views `prefork` |
 
 ## The editor
 

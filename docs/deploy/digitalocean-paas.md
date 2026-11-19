@@ -45,7 +45,7 @@ flowchart TB
 
 Everything inside the box is the [model](index.md#the-topology) unchanged.
 
-## What we thought the config would be
+## Preset defaults
 
 | Thing | Value | Why |
 |---|---|---|

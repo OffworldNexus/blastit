@@ -1332,7 +1332,10 @@ SQL_KEYWORDS = (
 #: reordered or reclassified still fails, naming the page and the line it sits
 #: on now.
 EXPECTED_FENCES: dict[str, tuple[tuple[str, bool], ...]] = {
-    "README.md": (('app "hello"', True),),
+    "README.md": (
+        ('app "hello"', True),
+        ("blastit check: 4 requests, 2 statements, 3/4 views, 2 proxies", False),
+    ),
     "docs/blastfile.md": (('app "shop"', True),),
     "docs/ci.md": (("trait connection {", True),),
     "docs/deploy/digitalocean-paas.md": (("postgres {", True),),
@@ -1355,6 +1358,7 @@ EXPECTED_FENCES: dict[str, tuple[tuple[str, bool], ...]] = {
     ),
     "docs/index.md": (('app "myshop"', True),),
     "docs/local.md": (
+        ("15:41:02.119 INFO reload 2 directories", False),
         ('app "shop"', True),
         ("view products regex '/products/.*' {", True),
     ),
@@ -1630,6 +1634,37 @@ def blocks_for(highlight: bool) -> list[tuple[str, int, str]]:
     return found
 
 
+#: The statement the README's `blastit check` block prints under the denied
+#: grant. `audit_v1::human` prints the normalised statement **verbatim**, so a
+#: placeholder such as `SELECT 2` claims an output the binary never produces.
+#: The census keys a fence by its first line (the summary) and cannot see this
+#: one, which is why it is pinned by its own assertion.
+README_CHECK_SUMMARY = "blastit check: 4 requests, 2 statements, 3/4 views, 2 proxies"
+README_CHECK_STATEMENT = (
+    '    SELECT "shop_product"."price" FROM "shop_product" '
+    'WHERE "shop_product"."id" = $?'
+)
+
+
+def test_the_readme_check_block_shows_a_real_statement():
+    """The illustrative block prints a statement `check` would really print."""
+    page = "README.md"
+    blocks = [
+        block.body
+        for block in fences.scan_page(page, text_of(ROOT / page))[0]
+        if block.language == "text"
+    ]
+    matched = [body for body in blocks if body.startswith(README_CHECK_SUMMARY)]
+    assert len(matched) == 1, (
+        f"{page} carries no `{README_CHECK_SUMMARY}` block (found {len(blocks)} "
+        "`text` blocks): the check output moved, so this pin no longer has a subject"
+    )
+    assert README_CHECK_STATEMENT in matched[0], (
+        f"{page}'s check block no longer shows the statement the binary prints:\n"
+        f"expected {README_CHECK_STATEMENT!r} in\n{matched[0]}"
+    )
+
+
 def excluded_asset_paths() -> list[str]:
     """The `exclude_docs` patterns the site build applies to `docs/`."""
     project = tomllib.loads(text_of(ZENSICAL))["project"]
@@ -1727,7 +1762,7 @@ def test_the_highlighter_is_wired_and_published():
 
 
 def test_every_text_block_classifies_as_measured(tmp_path):
-    """The 29 + 5 split, matched by first line so a prose edit cannot break it."""
+    """The 29 + 7 split, matched by first line so a prose edit cannot break it."""
     rows = fence_rows()
     verdicts = run_lexer(tmp_path, {"classify": [body for *_, body in rows]})[
         "classify"
@@ -1771,9 +1806,9 @@ def test_every_text_block_classifies_as_measured(tmp_path):
     highlighted = sum(
         1 for entries in measured.values() for _, verdict in entries if verdict
     )
-    assert (highlighted, len(rows) - highlighted) == (29, 5), (
+    assert (highlighted, len(rows) - highlighted) == (29, 7), (
         f"{highlighted} fences highlighted and {len(rows) - highlighted} plain, "
-        "not 29 + 5"
+        "not 29 + 7"
     )
 
 
@@ -2087,7 +2122,7 @@ def test_nothing_outside_a_query_string_is_sql(tmp_path):
 def test_the_plain_fences_stay_plain_with_a_query_line_appended(tmp_path):
     """The refusal is the block's, not the line's: a `query` line cannot rescue it."""
     bodies = blocks_for(highlight=False)
-    assert len(bodies) == 5, f"{len(bodies)} plain fences, not 5"
+    assert len(bodies) == 7, f"{len(bodies)} plain fences, not 7"
     appended = [body + "\nquery 'SELECT 1'\n" for _, _, body in bodies]
     verdicts = run_lexer(tmp_path, {"classify": appended})["classify"]
     wrong = [

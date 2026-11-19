@@ -327,8 +327,8 @@ path = "docs/security.md"
 
 [[page.fence]]
 index = 1
-mode = "static"
-reason = "The e2e harnesses need Docker and root; the runnable-docs gate is unprivileged and Docker-free, so only the command names and the scripts they name are checked."
+mode = "example"
+reason = "The page opens with the documented `blastit dev` banner and a one-request denial. Both are executed elsewhere: README.md and Getting started run the same `dev` and `dev-curl` pair on the `hello` fixture, and docs/local.md's `denial` fence asserts the same `sql.denied` line this page quotes. The e2e commands it names are the harnesses those scripts are."
 
 [[page]]
 path = "docs/troubleshooting.md"
