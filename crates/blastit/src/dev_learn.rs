@@ -71,9 +71,11 @@ pub fn expose_requested() -> bool {
 /// exposed non-loopback bind keeps the bare `host:port` form, because the point
 /// there is which address the whole network reaches, not a link.
 ///
-/// Then the honesty line, the components that run, and one line per declared
-/// view: `view  METHODS pattern`. `routes` and the marks count are spelled in
-/// the singular when there is one (`1 route`, `1 directory`).
+/// Then the honesty line, the components that run, and one aligned row per
+/// served thing: `view  NAME  METHODS patterns` per declared route, plus a
+/// `static  PREFIX  GET, HEAD  ROOT` row per mount (§9.5). `routes` and the
+/// marks count are spelled in the singular when there is one (`1 route`,
+/// `1 directory`).
 pub fn banner(
     host: &std::net::IpAddr,
     port: u16,
@@ -97,6 +99,22 @@ pub fn banner(
         "  http · scheduler · dbproxy · {routes} {}\n",
         crate::audit_v1::plural(routes, "route")
     ));
+    out.push_str(&serving_table(manifest));
+    out
+}
+
+/// The banner's one row per served thing: a `view` per declared route and a
+/// `static` row per mount, in three aligned columns.
+///
+/// A route with no method list answers every method, and the table says `*` the
+/// same way the front end does. A `static` mount is not a route (§9.5) — it owns
+/// no uid and starts no process — but it answers requests, so a banner that
+/// listed only views named a tree it was not serving. The columns are as wide as
+/// their widest cell, so one route reads `  view  home  GET, HEAD  /` and a file
+/// with mounts lines up under it.
+fn serving_table(manifest: &Manifest) -> String {
+    // (kind, name, methods, target)
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
     for route in manifest.routes() {
         let methods = match route.methods() {
             Some(methods) => methods.join(", "),
@@ -104,7 +122,47 @@ pub fn banner(
             // lets through (§8.4), and the banner says so the same way.
             None => "*".to_string(),
         };
-        out.push_str(&format!("  view  {methods}  {}\n", route.path().join(", ")));
+        rows.push((
+            "view".to_string(),
+            route.name().to_string(),
+            methods,
+            route.path().join(", "),
+        ));
+    }
+    for mount in manifest.mounts() {
+        // A mount answers `GET`/`HEAD` and nothing else (design §4.4), so the
+        // row states the same two methods a `405` would.
+        rows.push((
+            "static".to_string(),
+            mount.prefix.clone(),
+            "GET, HEAD".to_string(),
+            mount.policy.root.clone(),
+        ));
+    }
+    // Column widths are counted in `char`s, not bytes: `format!` pads a `str` by
+    // its characters, so a non-ASCII mount prefix (or a view name) would shift
+    // every column after it if the width were `len()`.
+    let kind_width = rows
+        .iter()
+        .map(|row| row.0.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let name_width = rows
+        .iter()
+        .map(|row| row.1.chars().count())
+        .max()
+        .unwrap_or(0);
+    let method_width = rows
+        .iter()
+        .map(|row| row.2.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (kind, name, methods, target) in rows {
+        out.push_str(&format!(
+            "  {kind:<kind_width$}  {name:<name_width$}  {methods:<method_width$}  {target}\n"
+        ));
     }
     out
 }
@@ -796,8 +854,8 @@ mod tests {
             "  Not a sandbox. Production `blastit` refuses to run like this."
         );
         assert_eq!(lines[2], "  http · scheduler · dbproxy · 2 routes");
-        assert_eq!(lines[3], "  view  GET, HEAD  /");
-        assert_eq!(lines[4], "  view  GET, HEAD  /cart");
+        assert_eq!(lines[3], "  view  home  GET, HEAD  /");
+        assert_eq!(lines[4], "  view  cart  GET, HEAD  /cart");
         assert_eq!(lines.len(), 5, "one line per declared view:\n{rendered}");
 
         // IPv6 has to be bracketed, or the URL is not one a terminal links.
@@ -824,6 +882,51 @@ mod tests {
                 "  blastit dev · single-uid simulation · 127.0.0.1:8080 · uid {} (EXPOSED, no auth)",
                 euid()
             )
+        );
+    }
+
+    #[test]
+    fn the_banner_names_static_mounts_in_the_same_columns() {
+        let (manifest, _) = Manifest::parse_blastfile(
+            "view home GET \"/\" {}\n\nstatic \"/assets\" {\n    root \"public/assets\"\n}\n",
+            20_000,
+        )
+        .unwrap();
+        let host: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let rendered = banner(&host, 8080, &manifest, false, false);
+        let lines: Vec<&str> = rendered.lines().collect();
+        // A mount is not a route (§9.5), so it adds no route count — but it
+        // answers requests, so the table names it and the columns line up with
+        // the view row above it.
+        assert_eq!(lines[2], "  http · scheduler · dbproxy · 1 route");
+        assert_eq!(lines[3], "  view    home     GET, HEAD  /");
+        assert_eq!(lines[4], "  static  /assets  GET, HEAD  public/assets");
+        assert_eq!(lines.len(), 5, "one row per view and mount:\n{rendered}");
+    }
+
+    #[test]
+    fn a_non_ascii_mount_prefix_keeps_the_columns_aligned() {
+        // `format!` pads a `str` by characters, so the widths must be counted in
+        // characters too: with `len()` the methods column of the second row
+        // would start two bytes later than the first row's.
+        let (manifest, _) = Manifest::parse_blastfile(
+            "view home GET \"/\" {}\n\nstatic \"/café\" {\n    root \"public/café\"\n}\n",
+            20_000,
+        )
+        .unwrap();
+        let host: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        let rendered = banner(&host, 8080, &manifest, false, false);
+        let rows: Vec<&str> = rendered
+            .lines()
+            .filter(|line| line.starts_with("  view") || line.starts_with("  static"))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                "  view    home   GET, HEAD  /",
+                "  static  /café  GET, HEAD  public/café",
+            ],
+            "a non-ASCII prefix must not shift the columns:\n{rendered}"
         );
     }
 

@@ -675,6 +675,37 @@ impl ReportTable {
             },
         );
     }
+
+    /// Seeds the union with paths the **boot** already serves, before any
+    /// worker has reported (`MB.40.9`).
+    ///
+    /// A view's first report is its `boot` batch, and that batch is what puts
+    /// its files in the union — so an app whose front controller is edited
+    /// before the first request was not watched at all, and the save was lost
+    /// until something else armed the window. The one caller is stage 1 on a
+    /// `dev` boot with reload on: it hands over every `entrypoint php` and the
+    /// application root of each PHP slot, which are exactly the paths a PHP
+    /// worker would report one request later.
+    ///
+    /// `pre_fork` is `false`: a PHP file is not in any view's heap, so a change
+    /// to it is the all-views transaction, never the cycle. A path that does
+    /// not stat right now is skipped — a boot never invents a file.
+    pub fn track_boot_files(&mut self, paths: &[PathBuf], class: Class) {
+        for path in paths {
+            let Ok(metadata) = std::fs::metadata(path) else {
+                continue;
+            };
+            let is_dir = metadata.is_dir();
+            if !is_dir && !metadata.is_file() {
+                continue;
+            }
+            self.union.entry(path.clone()).or_insert(Entry {
+                class,
+                pre_fork: false,
+                is_dir,
+            });
+        }
+    }
 }
 
 /// Whether `path` is under the skip list (§1.5).
@@ -865,6 +896,15 @@ impl Policy {
     /// The report table, for the supervisor's `register`/`revoke` calls.
     pub fn reports(&mut self) -> &mut ReportTable {
         &mut self.reports
+    }
+
+    /// Seeds the union with the paths the boot itself serves (`MB.40.9`).
+    ///
+    /// Stage 1 calls this once, after the watcher exists and before the marking
+    /// pass: an `entrypoint php` edited before the first request is watched from
+    /// boot, exactly as if its worker had already reported it.
+    pub fn track_boot_files(&mut self, paths: &[PathBuf], class: Class) {
+        self.reports.track_boot_files(paths, class);
     }
 
     /// The union, read-only.

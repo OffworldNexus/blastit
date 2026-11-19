@@ -30,6 +30,14 @@ use super::dev::{DevBoot, cstring_dev, fail_dev_root, fail_with_root, pipe_dev, 
 use super::gates::{RESTART_MEMBER, config_document};
 use super::{CHILD_OUTPUT_TIMEOUT, DBPROXY_READY_TIMEOUT, MAX_CONFIG_DOCUMENT};
 
+/// How long dbproxy has to report ready before the wait is worth a line (§1.2).
+///
+/// The ordinary ready byte lands in a few milliseconds. A boot still waiting
+/// after this is the slow one the phase line exists for, so the line is printed
+/// then — and never on the fast path, where it reads as a stall above a banner
+/// that is already there.
+const SLOW_READY_LINE: Duration = Duration::from_millis(200);
+
 /// The limits dbproxy runs under: a descriptor budget sized from the
 /// configuration, and no core file (§7.2).
 ///
@@ -127,9 +135,10 @@ pub(super) fn fork_dbproxy_dev(
             }
             drop(secrets);
 
-            // `§1.2`: a line before the wait, so a slow dbproxy never looks hung.
-            crate::logs::phase(emitter, "dbproxy", "waiting for the ready byte");
-            if let Err(reason) = wait_ready(&ready_read, DBPROXY_READY_TIMEOUT) {
+            // `§1.2`: a line only if the wait is actually slow — a ready byte in
+            // the ordinary few milliseconds is not worth a stall warning above
+            // the banner.
+            if let Err(reason) = wait_ready_with_line(emitter, &ready_read) {
                 emit_child_output(emitter, &stdout_read, Stream::Stdout);
                 emit_child_output(emitter, &stderr_read, Stream::Stderr);
                 fail_with_root(emitter, boot.root, &reason);
@@ -416,9 +425,9 @@ pub(super) fn fork_dbproxy(
             }
             drop(secrets);
 
-            // `§1.2`: a line before the wait, so a slow dbproxy never looks hung.
-            crate::logs::phase(emitter, "dbproxy", "waiting for the ready byte");
-            if let Err(reason) = wait_ready(&ready_read, DBPROXY_READY_TIMEOUT) {
+            // `§1.2`: a line only if the wait is actually slow (see
+            // `wait_ready_with_line`).
+            if let Err(reason) = wait_ready_with_line(emitter, &ready_read) {
                 // Whatever dbproxy said on the way out is in the pipes init is
                 // holding for stage 1, and a boot that fails with nothing but
                 // "exited" is a boot nobody can debug (§8.1). On a *timeout* the
@@ -508,14 +517,29 @@ pub struct DbproxyHandover {
 /// A message saying how the wait ended — the deadline, a failed `poll`, or the
 /// child exiting first. The caller prints it together with whatever the child
 /// left in its output pipes.
+///
+/// Only the stage-0 unit tests call this: the boot itself goes through
+/// [`wait_ready_with_line`], because it also decides whether the wait is worth a
+/// phase line.
+#[cfg(test)]
 pub(super) fn wait_ready(ready: &OwnedFd, timeout: Duration) -> Result<(), String> {
-    let deadline = Deadline::after(timeout);
+    if wait_ready_until(ready, Deadline::after(timeout))? {
+        return Ok(());
+    }
+    Err(format!(
+        "dbproxy did not report ready within {}s",
+        timeout.as_secs_f32()
+    ))
+}
+
+/// Waits for dbproxy's ready byte until `deadline` (§4).
+///
+/// `Ok(true)` is the byte, `Ok(false)` the deadline, `Err` the end nobody can
+/// retry — a failed `poll`, or the child exiting first.
+fn wait_ready_until(ready: &OwnedFd, deadline: Deadline) -> Result<bool, String> {
     loop {
         if deadline.expired() {
-            return Err(format!(
-                "dbproxy did not report ready within {}s",
-                timeout.as_secs_f32()
-            ));
+            return Ok(false);
         }
         match wait_readable(ready.as_fd(), deadline.left()) {
             Ok(true) => {}
@@ -523,11 +547,39 @@ pub(super) fn wait_ready(ready: &OwnedFd, timeout: Duration) -> Result<(), Strin
             Err(err) => return Err(format!("waiting for dbproxy: {err}")),
         }
         match read_one(ready.as_fd()) {
-            Ok(Some(_)) => return Ok(()),
+            Ok(Some(_)) => return Ok(true),
             Ok(None) => return Err("dbproxy exited before it was ready".to_string()),
             Err(err) => return Err(format!("waiting for dbproxy: {err}")),
         }
     }
+}
+
+/// Waits for dbproxy's ready byte, printing the §1.2 phase line **only** when
+/// the wait is actually slow.
+///
+/// The ordinary boot is ready in a few milliseconds, and a line saying
+/// "waiting for the ready byte" above a banner that appears immediately beside
+/// it is noise a developer reads as a stall. So the first [`SLOW_READY_LINE`]
+/// gets no line at all; only a wait that outlives it — a slow host, a cold
+/// page cache, a debugger — prints one and then keeps waiting inside the same
+/// [`DBPROXY_READY_TIMEOUT`] budget.
+///
+/// # Errors
+///
+/// [`wait_ready`]'s sentence, on the deadline the boot started with.
+pub(super) fn wait_ready_with_line(emitter: &Emitter, ready: &OwnedFd) -> Result<(), String> {
+    let budget = Deadline::after(DBPROXY_READY_TIMEOUT);
+    if wait_ready_until(ready, Deadline::after(SLOW_READY_LINE))? {
+        return Ok(());
+    }
+    crate::logs::phase(emitter, "dbproxy", "waiting for the ready byte");
+    if wait_ready_until(ready, budget)? {
+        return Ok(());
+    }
+    Err(format!(
+        "dbproxy did not report ready within {}s",
+        DBPROXY_READY_TIMEOUT.as_secs_f32()
+    ))
 }
 
 /// Prints what a child that died before reporting ready left in one of its

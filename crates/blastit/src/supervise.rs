@@ -37,7 +37,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
 
-#[cfg(feature = "python")]
 use blastit_events::ReloadBoot;
 use blastit_events::{
     Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind, Level, Lifecycle,
@@ -58,7 +57,6 @@ use crate::child::wait_readable;
 use crate::child::{Deadline, wait_writable};
 use crate::config::Config;
 use crate::dev_reload::{self, Class, Effect, Reload};
-#[cfg(feature = "python")]
 use crate::dev_reload::{ReloadConfig, SystemClock};
 use crate::logs::{Emitter, LineBuffer, Pipe, lossy};
 use crate::py::Python;
@@ -436,8 +434,15 @@ pub struct Parts {
     pub learn: Option<crate::dev_learn::Learn>,
     /// The one live-reload watcher of this boot (`ADR-0014`), when `dev` has
     /// reload on. `None` for every production boot, for `check`, and for a dev
-    /// boot with reload off.
+    /// boot with reload off. A `php`-only standalone build gets one too: a PHP
+    /// worker needs no interpreter, so its saves are served by repinning the
+    /// entry (`MB.40.9`).
     pub reload: Option<Reload>,
+    /// Whether this `dev` boot promised live reload (`--dev-reload=on`, the
+    /// default) — the gate for re-pinning an `entrypoint php` a save replaced
+    /// (`MB.40.9`). It stays true if the watcher later latches dead: the
+    /// promise the boot made is what decides, not the health of one watcher.
+    pub dev_reload: bool,
     /// What a reload **cycle** re-execs with (§4.6 step 6). `Some` only on a
     /// dev boot with reload on; the reload cycle has no other way to rebuild the
     /// pre-fork heap while keeping `:8080`.
@@ -505,6 +510,11 @@ pub struct Supervisor<'a> {
     /// event loop: a boot that never constructed it (production, `check`,
     /// `--no-reload`) costs the poll loop nothing.
     reload: Option<Reload>,
+    /// Whether this `dev` boot promised live reload (`MB.40.9`): the gate for
+    /// re-pinning a PHP entry a save replaced, before a worker is forked from it
+    /// or the views are reloaded.
+    #[cfg_attr(not(feature = "php"), allow(dead_code))]
+    dev_reload: bool,
     /// What a reload cycle re-execs with; `None` on every boot that cannot
     /// cycle (§4.6).
     reload_source: Option<ReloadSource>,
@@ -650,6 +660,7 @@ impl<'a> Supervisor<'a> {
             dev: parts.dev,
             learn: parts.learn,
             reload: parts.reload,
+            dev_reload: parts.dev_reload,
             reload_source: parts.reload_source,
             adoption,
             cycle: None,
@@ -864,7 +875,40 @@ impl<'a> Supervisor<'a> {
     fn reload_all(&mut self, fire: &dev_reload::Fire) {
         let routes: Vec<String> = self.routes.iter().map(|route| route.name.clone()).collect();
         self.emit_reload(&routes, fire.files.as_slice(), fire.reason);
+        // `MB.40.9`: the file every worker will run was just saved, so the
+        // boot's `EntryPin` is stale by definition. Re-record it **before** the
+        // old workers are retired: a replacement worker forked from the old pin
+        // would answer every request with "changed since this boot recorded it",
+        // which is `500` for a save that is exactly what dev promises to serve.
+        #[cfg(feature = "php")]
+        self.repin_php_bindings();
         self.send_ctl(&Ctl::Reload);
+    }
+
+    /// Re-records every PHP slot's `entrypoint php` after a save (§4.6,
+    /// `MB.40.9`).
+    ///
+    /// `None` on every boot that did not promise reload, and on a slot with no
+    /// binding. A refusal — the file mid-save, or a symlink that now points out
+    /// of the manifest directory — is one `manifest.warning` and the previous
+    /// pin stays, so the worker keeps refusing that path instead of running
+    /// something the boot did not resolve.
+    #[cfg(feature = "php")]
+    fn repin_php_bindings(&mut self) {
+        if self.dev.is_none() || !self.dev_reload {
+            return;
+        }
+        let mut failures: Vec<String> = Vec::new();
+        for binding in self.php.iter_mut().flatten() {
+            let dir = binding.document_root.clone();
+            let declared = binding.declared_entry.clone();
+            if let Err(message) = binding.repin_entry(&dir, &declared) {
+                failures.push(message);
+            }
+        }
+        for message in failures {
+            self.warn(message);
+        }
     }
 
     /// One `dev.reload` in the §4.9 shape.
@@ -1410,6 +1454,28 @@ impl<'a> Supervisor<'a> {
             Some(dev) => (dev.view_dir(index), false),
             None => (crate::config::view_dir(info.uid), true),
         };
+        // `MB.40.9`: a save can land before the watcher's debounce fired, or
+        // before this boot's very first request. A PHP worker forked from a
+        // stale `EntryPin` answers every request with "changed since this boot
+        // recorded it", so the entry is recorded again here — and a refusal (a
+        // file mid-save, or a symlink out of the tree) is one warning, never a
+        // failed boot.
+        #[cfg(feature = "php")]
+        if self.dev.is_some() && self.dev_reload {
+            let mut refusal: Option<String> = None;
+            if let Some(binding) = self.php.get_mut(index).and_then(Option::as_mut)
+                && !binding.entry_is_current()
+            {
+                let root = binding.document_root.clone();
+                let declared = binding.declared_entry.clone();
+                if let Err(message) = binding.repin_entry(&root, &declared) {
+                    refusal = Some(message);
+                }
+            }
+            if let Some(message) = refusal {
+                self.warn(message);
+            }
+        }
         // The view's report socket, created **before** the fork so its read end
         // is in the supervisor's poll set before the child could send its boot
         // batch, and a fresh reporter per boot (§4.4).
@@ -2107,12 +2173,13 @@ fn reload_pause() {
 
 /// Boots the one dev-only live-reload watcher (`ADR-0014`, design §4.1).
 ///
-/// Called by stage 1 **before** the application's first import, so the
-/// preload phase's files are watched too. Returns `None` — and exactly one
+/// Called by stage 1 on a `dev` boot with reload on — before the application's
+/// first import on a WSGI boot (so the `preload` phase's files are watched too)
+/// and before `ready` on a `php`-only standalone build, which serves its views
+/// without an interpreter. Returns `None` — and exactly one
 /// `dev.reload.unavailable` — for every row of the failure ladder: there is no
 /// retry and no second watcher (§4.7). Production, `check` and a dev boot with
 /// reload off never call it.
-#[cfg(feature = "python")]
 #[must_use]
 pub fn boot_reload(cfg: &Config, emitter: &Emitter, fault: Option<&str>) -> Option<Reload> {
     use std::os::unix::ffi::OsStringExt;
@@ -2192,11 +2259,11 @@ pub fn open_preload_report(reload: &mut Reload) -> std::io::Result<blastit_view:
 }
 
 /// The one fault the debug-only reload seam injects (§4.6 step 5, `T31`).
-#[cfg(all(debug_assertions, feature = "python"))]
+#[cfg(debug_assertions)]
 pub const FAULT_OPEN: &str = "open";
 
 /// The fault seam in a release build can never match: it has no name.
-#[cfg(all(not(debug_assertions), feature = "python"))]
+#[cfg(not(debug_assertions))]
 pub const FAULT_OPEN: &str = "\u{0}release-has-no-seam";
 
 /// The live-reload boot line, as an event (§4.7 `reload`).
@@ -2206,7 +2273,6 @@ pub const FAULT_OPEN: &str = "\u{0}release-has-no-seam";
 /// longer free text printed beside the stream — a `json` boot carries it on the
 /// machine stream, and a `pretty` one puts it in the same columns as every
 /// other line, with `1 directory` spelled in the singular.
-#[cfg(feature = "python")]
 pub fn announce_reload(emitter: &Emitter, dirs: usize) {
     emitter.emit(&Event::now(
         Component::Init,
@@ -3079,6 +3145,7 @@ mod tests {
                 dev: None,
                 learn: None,
                 reload: None,
+                dev_reload: false,
                 reload_source: None,
                 chan: None,
                 policy: None,
@@ -3433,6 +3500,7 @@ view plain regex '/plain/.*' {}
                     dev: None,
                     learn: None,
                     reload: None,
+                    dev_reload: false,
                     reload_source: Some(ReloadSource {
                         config: Vec::new(),
                         program: Vec::new(),
@@ -3635,6 +3703,7 @@ view plain regex '/plain/.*' {}
                 dev: None,
                 learn: None,
                 reload: None,
+                dev_reload: false,
                 reload_source: Some(ReloadSource {
                     config: Vec::new(),
                     program: Vec::new(),

@@ -77,6 +77,7 @@ fn a_php_route_answers_two_requests_through_view_chan() {
         libphp,
         shim,
         entry: entry.clone(),
+        declared_entry: "index.php".to_string(),
         entry_pin,
         entry_fd: OwnedFd::from(std::fs::File::open(&entry).expect("the entry")),
         document_root: app.clone(),

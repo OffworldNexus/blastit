@@ -22,11 +22,18 @@ and `parts`.
 {"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","request_id":"01JB9…","method":"GET","path":"/products/42/","route":"product-detail","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}
 ```
 
+`pretty` puts the same event in aligned columns, naming the mount that answered
+a file and leaving `(unmatched)` for a path nothing claimed:
+
+```console
+<ts> INFO  request     GET /css/app.css → static  304  0.2ms
+```
+
 ## The events
 
 | Event | When | Key fields |
 |---|---|---|
-| `request` | once per request, at the end — the routing decision | `request_id`, `method`, `path`, `route` (null if unmatched), `rule`, `status`, `outcome`, `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `cost_ns`, `cpu_ns`, `remote_addr` |
+| `request` | once per request, at the end — the routing decision | `request_id`, `method`, `path`, `route` (the view's name; `static` when a static mount answered; null when neither did), `rule`, `status`, `outcome`, `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `cost_ns`, `cpu_ns`, `remote_addr` |
 | `sql.denied` | a statement was rejected | `route`, `pid`, `proxy`, `kind`, `sql` (normalised), `sqlstate`, `in_transaction`, `reason` |
 | `pg.refused` | a connection to a proxy was refused | `route`, `proxy`, `reason` (`credentials_mismatch`, `upstream_unreachable`, …) |
 | `http.rejected` | a request was refused before the scheduler | `remote_addr`, `status` (`400`, `413`, `431`, `501`…), `reason` |

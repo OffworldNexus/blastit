@@ -230,6 +230,37 @@ async fn the_declared_fallback_answers_after_the_views_and_only_get_and_head() {
     );
 }
 
+/// `MB.40.9`: a request a `static` mount answered carries `route: "static"`,
+/// and one nothing claimed still carries none.
+///
+/// The pretty lane renders an absent route as `(unmatched)`, which for a served
+/// file read as "nothing matched this" beside a `200`/`304` — the mount is the
+/// answer, so it is the name the event carries. The deny side is the same boot:
+/// a path outside every mount and every view pattern keeps `None`.
+#[tokio::test]
+async fn a_static_answer_names_the_mount_and_an_untouched_path_names_nothing() {
+    tokio::time::pause();
+    let tree = MountTree::build();
+    let mut world = world(&tree);
+
+    let frames = round_trip(&mut world, 1, "GET", "/assets/app.js").await;
+    assert_eq!(status_of(&frames), 200, "{frames:?}");
+    // A miss under a mount with no fallback and no view: the responder's own
+    // `404`, which is still a static answer.
+    let frames = round_trip(&mut world, 2, "GET", "/assets/v2/gone.js").await;
+    assert_eq!(status_of(&frames), 404, "{frames:?}");
+    // Nothing claims this: no mount prefix, no view pattern.
+    let frames = round_trip(&mut world, 3, "GET", "/no-such-path").await;
+    assert_eq!(status_of(&frames), 404, "{frames:?}");
+
+    world.until(|world| world.requests().len() >= 3).await;
+    assert_eq!(
+        world.request_routes(),
+        vec![Some("static".to_string()), Some("static".to_string()), None,],
+        "the mount is named where it answered, and only there"
+    );
+}
+
 /// The two mounts the scheduler boots are the file's, in file order, with their
 /// own prefixes and policies: this is the manifest half of the test above, and
 /// it fails if the boot ever folds a mount back into a route.

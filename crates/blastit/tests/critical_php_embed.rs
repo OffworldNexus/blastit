@@ -1195,16 +1195,27 @@ impl Boot {
     /// needs is named here, so nothing ambient — in particular no
     /// `BLASTIT_LIBPHP` — can make the probe and the boot disagree.
     fn start(dir: &Path, env: &[(&str, &str)]) -> Self {
-        Self::launch(dir, env, None)
+        Self::launch(dir, env, None, false)
+    }
+
+    /// The same boot with live reload **off** (`--no-reload`).
+    ///
+    /// The `EntryPin` legs use it: they measure the static boot-pin invariant —
+    /// a file that moved is refused until a boot records it again — which is
+    /// what production does and what `--no-reload` promises. On the default
+    /// `dev` boot a save is exactly what reload repins (`MB.40.9`), so those
+    /// legs would be measuring the opposite contract.
+    fn start_without_reload(dir: &Path, env: &[(&str, &str)]) -> Self {
+        Self::launch(dir, env, None, true)
     }
 
     /// The same, renaming `swap.from` over `swap.to` while the boot is paused at
     /// the test-only rendezvous `<point>.ready`.
     fn start_swapping(dir: &Path, env: &[(&str, &str)], swap: Swap) -> Self {
-        Self::launch(dir, env, Some(swap))
+        Self::launch(dir, env, Some(swap), false)
     }
 
-    fn launch(dir: &Path, env: &[(&str, &str)], swap: Option<Swap>) -> Self {
+    fn launch(dir: &Path, env: &[(&str, &str)], swap: Option<Swap>, no_reload: bool) -> Self {
         let serial = boot_lock();
         // A port nobody listens on: `dev` binds it, and a refusal never gets
         // that far.
@@ -1223,6 +1234,9 @@ impl Boot {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if no_reload {
+            command.arg("--no-reload");
+        }
         for (key, value) in env {
             command.env(key, value);
         }
@@ -1428,6 +1442,62 @@ impl Boot {
             event["event"] == "request" && event["path"] == path
         })
         .unwrap_or_else(|| panic!("no `request` event for {path}: {}", self.stdout_text()))
+    }
+
+    /// The pids of the views this boot considers live, read from its own
+    /// `process.spawned` / `process.exited` / `process.retired` events.
+    ///
+    /// A reload is only served once the worker that held the old file is gone:
+    /// asking before that can reach the worker the reload is retiring.
+    fn live_view_pids(&self) -> Vec<u32> {
+        let mut live: Vec<u32> = Vec::new();
+        for event in self.events() {
+            let pid = event["pid"].as_u64().unwrap_or(0) as u32;
+            match event["event"].as_str().unwrap_or_default() {
+                "process.spawned" => live.push(pid),
+                "process.exited" | "process.retired" => live.retain(|live| *live != pid),
+                _ => {}
+            }
+        }
+        live
+    }
+
+    /// Waits (bounded) until every pid in `before` has left the live set.
+    fn wait_replaced(&self, before: &[u32]) {
+        let deadline = Instant::now() + BOOT_TIMEOUT;
+        loop {
+            let live = self.live_view_pids();
+            if before.iter().all(|pid| !live.contains(pid)) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the reload never retired {before:?} (live {live:?}): {}",
+                self.stdout_text()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Waits (bounded) until `count` `dev.reload` events have been emitted.
+    fn wait_reloads(&self, count: usize) {
+        let deadline = Instant::now() + BOOT_TIMEOUT;
+        loop {
+            let seen = self
+                .events()
+                .into_iter()
+                .filter(|event| event["event"] == "dev.reload")
+                .count();
+            if seen >= count {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {seen} `dev.reload` event(s), wanted {count}: {}",
+                self.stdout_text()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// The pids forked by init, from `/proc/<pid>/task/<pid>/children`.
@@ -3231,7 +3301,7 @@ fn a_decoy_inside_the_manifest_dir_is_refused_and_a_restart_serves() {
     let scratch = Scratch::new("entry-pin", PHP_MANIFEST);
     let entry = scratch.write(ENTRY, NORMAL_PHP);
     let pinned = std::fs::metadata(&entry).expect("the entry's metadata");
-    let mut boot = Boot::start(
+    let mut boot = Boot::start_without_reload(
         &scratch.dir,
         &[
             ("BLASTIT_LIBPHP", &host.libphp.to_string_lossy()),
@@ -3323,7 +3393,7 @@ fn a_decoy_inside_the_manifest_dir_is_refused_and_a_restart_serves() {
     );
     boot.stop();
     drop(boot);
-    let mut fresh = Boot::start(
+    let mut fresh = Boot::start_without_reload(
         &scratch.dir,
         &[
             ("BLASTIT_LIBPHP", &host.libphp.to_string_lossy()),
@@ -3394,7 +3464,7 @@ fn an_entry_rewritten_in_place_is_refused_and_a_restart_serves_the_new_file() {
         ("BLASTIT_LIBPHP", libphp.as_str()),
         ("BLASTIT_PHP_SHIM_DIR", shim_dir.as_str()),
     ];
-    let mut boot = Boot::start(&scratch.dir, &boot_env);
+    let mut boot = Boot::start_without_reload(&scratch.dir, &boot_env);
     assert!(
         boot.await_boot().is_none(),
         "this host has {} and {}, so the route must be served: {}",
@@ -4189,4 +4259,164 @@ fn a_dev_boot_of_a_world_writable_tree_still_serves() {
         "`blastit dev` served a 0777 tree the deployment rule refuses: {}",
         response.lines().next().unwrap_or_default()
     );
+}
+
+// ------------------------------------------------------------ live reload
+
+/// `MB.40.9`: a `blastit dev` boot with reload on **serves what you save**.
+///
+/// The boot's `EntryPin` is what makes a swapped front controller un-runnable
+/// (`MB.3.56`), so a dev save used to answer every request with `500 changed
+/// since this boot recorded it` even though `dev.reload` had already retired the
+/// old worker: the replacement inherited the boot-time record. The four accepted
+/// legs are the three shapes a save takes — a write **in place** (`cp`, an
+/// editor), an atomic `rename` (a new inode, what most editors and `rsync` do)
+/// and an edit to a `require_once`d file — plus the boot itself. Each is a
+/// `dev.reload`, a retired worker and a `200` with the saved bytes, and the run
+/// must not contain a single `5xx`.
+///
+/// The refused twin is why repinning re-runs the boot's own resolution: a
+/// `public/index.php` replaced by a symlink out of the manifest directory is
+/// **never** pinned, so the worker keeps refusing that path (`manifest.warning`
+/// says why) and the file outside the tree never runs.
+#[test]
+fn a_dev_boot_reloads_a_php_save_in_place_by_rename_and_through_an_include() {
+    let _root = StubRootGuard::start();
+    let Some(host) = host_php() else {
+        refused_without_a_host("live reload", "php-live-reload");
+        return;
+    };
+    let scratch = Scratch::new("php-live-reload", PHP_MANIFEST);
+    scratch.write("src/helper.php", &helper_page("h1"));
+    let entry = scratch.write(ENTRY, &front_controller("v1"));
+    let libphp = host.libphp.to_string_lossy().into_owned();
+    let shim_dir = host
+        .shim
+        .parent()
+        .expect("a shim directory")
+        .to_string_lossy()
+        .into_owned();
+    let boot_env = [
+        ("BLASTIT_LIBPHP", libphp.as_str()),
+        ("BLASTIT_PHP_SHIM_DIR", shim_dir.as_str()),
+    ];
+    // No `--no-reload`: this leg is the default `blastit dev`.
+    let mut boot = Boot::start(&scratch.dir, &boot_env);
+    assert!(
+        boot.await_boot().is_none(),
+        "live reload needs a served route, not a refusal: {}\n{}",
+        boot.stderr_text(),
+        boot.stdout_text()
+    );
+
+    // (a) The boot serves v1.
+    let served = boot.get("/");
+    assert!(
+        served.starts_with("HTTP/1.1 200") && served.contains("v1-h1"),
+        "the boot must serve its own front controller: {served}"
+    );
+
+    // (b) A write in place: the same inode, new bytes.
+    let before = boot.live_view_pids();
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&entry, front_controller("v2")).expect("the in-place save");
+    boot.wait_reloads(1);
+    boot.wait_replaced(&before);
+    let served = boot.get("/");
+    assert!(
+        served.starts_with("HTTP/1.1 200") && served.contains("v2-h1"),
+        "an in-place save must be served, not refused: {served}"
+    );
+
+    // (c) An atomic save: a new file renamed over the entry, so the inode moves.
+    let before = boot.live_view_pids();
+    let side = scratch.dir.join("public/.index.php.saving");
+    std::fs::write(&side, front_controller("v3")).expect("the replacement");
+    std::fs::rename(&side, &entry).expect("the atomic save");
+    boot.wait_reloads(2);
+    boot.wait_replaced(&before);
+    let served = boot.get("/");
+    assert!(
+        served.starts_with("HTTP/1.1 200") && served.contains("v3-h1"),
+        "an atomic rename save must be served, not refused: {served}"
+    );
+
+    // (d) An edit to a `require_once`d file: the worker reports what it loaded,
+    // so the include is watched too.
+    let before = boot.live_view_pids();
+    scratch.write("src/helper.php", &helper_page("h4"));
+    boot.wait_reloads(3);
+    boot.wait_replaced(&before);
+    let served = boot.get("/");
+    assert!(
+        served.starts_with("HTTP/1.1 200") && served.contains("v3-h4"),
+        "an included file's save must be served: {served}"
+    );
+
+    // Not one of those saves was answered with a `5xx`: the whole point of
+    // repinning is that a save is a reload, never the pin's refusal.
+    let failures: Vec<serde_json::Value> = boot
+        .events()
+        .into_iter()
+        .filter(|event| {
+            event["event"] == "request"
+                && event["status"].as_u64().is_some_and(|status| status >= 500)
+        })
+        .collect();
+    assert!(
+        failures.is_empty(),
+        "a save answered with a `5xx`: {failures:?}\n{}",
+        boot.stdout_text()
+    );
+
+    // (e) The refused twin: a symlink pointing out of the manifest directory is
+    // never pinned, so the path keeps refusing and nothing outside the tree runs.
+    let outside =
+        std::env::temp_dir().join(format!("blastit-php-outside-{}-live", std::process::id()));
+    std::fs::write(&outside, b"<?php echo \"OUTSIDE-THE-ROOT-RAN\\n\";\n")
+        .expect("the outside file");
+    std::fs::remove_file(&entry).expect("removing the entry");
+    std::os::unix::fs::symlink(&outside, &entry).expect("planting the symlink");
+    let warning = boot.wait_event(Duration::from_secs(20), |event| {
+        event["event"] == "manifest.warning"
+            && event["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("outside the application root"))
+    });
+    assert!(
+        warning.is_some(),
+        "a symlink out of the manifest directory must emit `manifest.warning`: {}",
+        boot.stdout_text()
+    );
+    let refused = boot.get("/");
+    assert!(
+        refused.starts_with("HTTP/1.1 5"),
+        "the escaped entry must be refused, not served: {refused}"
+    );
+    assert!(
+        !refused.contains("OUTSIDE-THE-ROOT-RAN"),
+        "a file outside the manifest directory ran: {refused}"
+    );
+    boot.stop();
+    let _ = std::fs::remove_file(&outside);
+    println!(
+        "one `blastit dev` boot served v1, then v2 (in place), v3 (atomic rename), v3-h4 (include) \
+         with zero `5xx`, and refused a symlink out of the tree: {}",
+        refused.lines().next().unwrap_or_default()
+    );
+}
+
+/// A front controller that requires the shared helper and echoes both halves, so
+/// an edit to either file is visible in the body.
+fn front_controller(release: &str) -> String {
+    format!(
+        "<?php\nrequire_once __DIR__ . '/../src/helper.php';\n\
+         header('Content-Type: text/plain');\n\
+         echo '{release}-', helper_tag(), \"\\n\";\n"
+    )
+}
+
+/// The `require_once`d helper the front controller reports as loaded.
+fn helper_page(tag: &str) -> String {
+    format!("<?php\nfunction helper_tag() {{ return '{tag}'; }}\n")
 }

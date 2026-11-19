@@ -26,6 +26,8 @@ use super::adopt::{BootConfig, read_config};
 use super::adopt::{dev_root_from_cmdline, stage1_program};
 #[cfg(not(feature = "python"))]
 use super::emit_ready;
+#[cfg(not(feature = "python"))]
+use super::serve::boot_and_seed_reload;
 use super::serve::learn_routing_table;
 #[cfg(feature = "python")]
 use super::serve::serve;
@@ -36,6 +38,8 @@ use super::spawn::{
 #[cfg(feature = "php")]
 use super::spawn::{emit_php_runtime, php_max_body_bytes, php_max_requests, php_slots};
 use super::{Adoption, Interpreter, Options, fail};
+#[cfg(all(not(feature = "python"), feature = "php"))]
+use crate::dev_reload::Class;
 
 /// Runs stage 1. Never returns.
 ///
@@ -647,13 +651,23 @@ pub fn run(options: Options, interpreter: Interpreter<'_>, colour: Colour) -> ! 
 /// Supervises the forked roles in a build that carries no interpreter
 /// (`MB.3.11`). Never returns.
 ///
-/// Nothing here can start a view: [`crate::stage0::no_python_support`] refused
-/// every route that would need one before a listener was bound, so the
-/// scheduler only holds `static` mount policies. A `SPAWN` on `ctl.chan`
-/// would therefore be a protocol violation, and [`Supervisor`] fails the boot on
-/// it rather than ignoring it.
+/// Nothing here can start a WSGI view: [`crate::stage0::no_python_support`]
+/// refused every route that would need one before a listener was bound. It can
+/// and does serve `entrypoint php` (the standalone artifact's default feature
+/// set is `php,static`), which is why this path boots the same live-reload
+/// watcher a WSGI `dev` boot does (`MB.40.9`): a PHP worker needs no
+/// interpreter to fork, and a save is served by repinning the entry, not by
+/// re-execing an image.
+///
+/// A `SPAWN` for a slot this build cannot fork is still a protocol violation,
+/// and [`Supervisor`] fails the boot on it rather than ignoring it.
 #[cfg(not(feature = "python"))]
 pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
+    // The same construction, PHP boot-file seeding, marking pass, boot line and
+    // §4.6 step 7 `reconcile` a WSGI `dev` boot runs (`MB.40.9`): a PHP worker
+    // needs no interpreter, so this build reloads saves the same way. The no-op
+    // `between` is the one difference — there is no `preload` import here.
+    let (reload, ()) = boot_and_seed_reload(emitter, &serving, |_| ());
     emit_ready(emitter, &serving.config, serving.declared_routes);
     let mut supervisor = Supervisor::new(
         Parts {
@@ -670,9 +684,8 @@ pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> 
             components: serving.components,
             dev: serving.dev,
             learn: serving.learn,
-            // A build with no interpreter forks no view and imports no app, so
-            // it has no report to watch (§4.4).
-            reload: None,
+            reload,
+            dev_reload: serving.dev_reload,
             reload_source: None,
             chan: None,
             policy: None,

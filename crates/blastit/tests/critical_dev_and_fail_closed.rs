@@ -1253,19 +1253,22 @@ view home regex '/.*' {
         "the banner pluralises and counts the manifest's routes"
     );
 
-    // The view table: one line per declared route, `view  METHODS pattern`, in
-    // the same run's stdout — the banner names what is actually served.
+    // The view table: one line per declared route, `view  NAME  METHODS
+    // pattern`, in the same run's stdout — the banner names what is actually
+    // served, route by route.
     let views: Vec<&str> = stdout
         .lines()
         .filter(|line| line.starts_with("  view  "))
         .collect();
     assert_eq!(views.len(), 2, "one line per declared view:\n{stdout}");
     assert!(
-        views.iter().any(|line| line.trim() == "view  POST  /json"),
-        "the json view's methods and pattern:\n{stdout}"
+        views
+            .iter()
+            .any(|line| line.trim() == "view  json  POST  /json"),
+        "the json view's name, methods and pattern:\n{stdout}"
     );
     assert!(
-        views.iter().any(|line| line.starts_with("  view  *  ")),
+        views.iter().any(|line| line.starts_with("  view  home  *")),
         "a view with no methods answers every method:\n{stdout}"
     );
 

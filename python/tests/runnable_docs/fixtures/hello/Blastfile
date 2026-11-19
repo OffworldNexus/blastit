@@ -2,4 +2,4 @@ app "hello"
 
 entrypoint python "hello:application"
 
-view hello regex '.*' {}
+view hello GET "/*" {}

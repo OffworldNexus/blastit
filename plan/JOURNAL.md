@@ -3739,3 +3739,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T10:35 [MB.40.8] (conductor) base 94dffa212e3ce18b0e74ec70ea0a4495c592c709
 - 2026-11-19T11:02 [MB.40.8] (conductor) status active -> done
 - 2026-11-19T11:02 [MB.40] (conductor) status ready -> done
+- 2026-11-19T11:25 [MB.40] (conductor) status done -> ready: Re-opening for MB.40.9 PHP live reload repinning & dev log/banner polish
+- 2026-11-19T11:25 [MB.40.9] (conductor) created (task) Fix PHP live reload EntryPin repinning (in-place + atomic save + boot watch) & polish dev banner/static/phase UX
+- 2026-11-19T11:25 [MB.40.9] (conductor) status ready -> active
+- 2026-11-19T11:25 [MB.40.9] (conductor) attempt 1/3 started
+- 2026-11-19T11:25 [MB.40.9] (conductor) base 88646f21c5fd291bc6b23b0455f782684b30a6a3
+- 2026-11-19T11:52 [MB.40.9] (conductor) status active -> done
+- 2026-11-19T11:52 [MB.40] (conductor) status ready -> done

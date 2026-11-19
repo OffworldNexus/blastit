@@ -402,6 +402,13 @@ impl Scheduler {
             && let Some(route) = self.routes.get(route)
         {
             event = event.with_route(route.name.clone());
+        } else if !request.learn_fallback && served_by_static(request) {
+            // §9.2: the `static` mount answered, and saying so is the whole
+            // point of the column: a served file used to read
+            // `GET /css/app.css` with an unmatched route, as if nothing had
+            // matched it. A request neither a mount nor a route claimed keeps
+            // `None` and still renders `(unmatched)`.
+            event = event.with_route("static".to_string());
         }
         if let Some(request) = self.requests.get_mut(&stream_id) {
             request.emitted = true;
@@ -901,6 +908,25 @@ pub(super) fn canned(status: u16) -> (&'static str, &'static str) {
         503 => ("Service Unavailable", "unavailable\n"),
         504 => ("Gateway Timeout", "gateway timeout\n"),
         _ => ("Error", "error\n"),
+    }
+}
+
+/// Whether a `static` mount answered this request (§9.2).
+///
+/// The mount is recorded on every request the responder admitted, so this is
+/// exactly "a mount served this" — a genuinely unmatched path has no mount and
+/// keeps its `(unmatched)` rendering. A request a mount matched but a **view**
+/// then answered keeps its route name, because the route branch is asked first.
+fn served_by_static(request: &Request) -> bool {
+    #[cfg(feature = "static")]
+    {
+        request.static_mount.is_some()
+    }
+    #[cfg(not(feature = "static"))]
+    {
+        // A build without the responder has no mount a request could hold.
+        let _ = request;
+        false
     }
 }
 

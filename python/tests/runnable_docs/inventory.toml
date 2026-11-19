@@ -319,6 +319,11 @@ path = "docs/reference/settings.md"
 [[page]]
 path = "docs/reference/log-events.md"
 
+[[page.fence]]
+index = 1
+mode = "static"
+reason = "The pretty line is one request event rendered by `pretty.rs`, whose clock, status and duration a real run supplies; the gate checks the fence's shape and that the page's JSON example parses, never a live clock."
+
 [[page]]
 path = "docs/how-it-works.md"
 
