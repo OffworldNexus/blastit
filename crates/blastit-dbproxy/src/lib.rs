@@ -106,7 +106,7 @@ pub use config::{
     WILDCARD_ROUTE, read_config, write_config,
 };
 pub use error::DbproxyError;
-pub use learn::{ObsTarget, ObsVerdict, WireSqlObs};
+pub use learn::{ObsTarget, WireSqlObs};
 pub use policy::{ACK_REFUSED, ACK_SWAPPED, MAX_POLICY_DOCUMENT};
 pub use server::{run, run_with_listeners, run_with_ready};
 

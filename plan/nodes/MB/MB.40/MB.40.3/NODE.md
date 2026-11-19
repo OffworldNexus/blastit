@@ -1,17 +1,16 @@
 ---
 id: MB.40.3
 title: "Deduplicate forks & seams: ObsVerdict, fold.py SQL FFI, single-impl traits, shared ELF & ProxySpec builders, delete mock_pg.rs"
-kind: task
-status: review
-owner: implementer
+kind: epic
+status: ready
 priority: 1
 depends_on: [MB.40.2]
 paths: ["crates/**", "python/**", Cargo.toml, Cargo.lock]
-attempts: 1
+attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T01:36"
+updated: "2026-11-19T01:44"
 ---
 
 # Goal

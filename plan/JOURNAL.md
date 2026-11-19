@@ -3622,3 +3622,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T01:25 [MB.40.3] (lead) attempt 1/3 started
 - 2026-11-19T01:25 [MB.40.3] (lead) base 88fd2cf4053b7f466f4a2a7401dff204aa10a200
 - 2026-11-19T01:36 [MB.40.3] (lead) status active -> review
+- 2026-11-19T01:44 [MB.40.3] (lead) committed e6b1291 (delivered portion: items 2,3,4a,4b,4d,6)
+- 2026-11-19T01:44 [MB.40.3] (unknown) edited fields
+- 2026-11-19T01:44 [MB.40.3] (lead) status review -> ready
+- 2026-11-19T01:45 [MB.40.3.1] (planner) created (task) ObsVerdict -> sqlpolicy LearnVerdict (wire serde adapter) + RequestIo -> concrete ChanIo wire-frame tests
+- 2026-11-19T01:45 [MB.40.3.2] (planner) created (task) One shared safe ELF reader in blastit-sys::elf for host.rs and view-php discovery.rs
+- 2026-11-19T01:45 [MB.40.3.3] (planner) created (task) Delete tests/common/mock_pg.rs: real TCP PostgreSQL-upstream harness for both critical suites
+- 2026-11-19T01:45 [MB.40.3.1] (lead) status ready -> active
+- 2026-11-19T01:45 [MB.40.3.1] (lead) attempt 1/3 started
+- 2026-11-19T01:45 [MB.40.3.1] (lead) base e6b1291
+- 2026-11-19T01:46 [MB.40.3.1] (unknown) edited fields
+- 2026-11-19T01:47 [MB.40.3.4] (unknown) created (task) RequestIo trait -> concrete ChanIo transport (converge the ADR-0016 exemption)
+- 2026-11-19T01:47 [MB.40.3.1] (lead) re-scoped: RequestIo moved to MB.40.3.4 (ADR-0016 exemption needs its own authorization); paths corrected to crates/blastit/src/{dev_learn,audit_v1}.rs
+- 2026-11-19T01:47 [MB.40.3.4] (unknown) edited fields
+- 2026-11-19T01:53 [MB.40.3.1] (lead) status active -> review
+- 2026-11-19T02:03 [MB.40.3.1] (lead) status review -> done
+- 2026-11-19T02:03 [MB.40.3.1] (lead) committed; flaky-parallel note: 3 distinct timing-sensitive tests (critical_dev_reload x2, critical_rewrite x1) failed only under full-workspace runs at loadavg

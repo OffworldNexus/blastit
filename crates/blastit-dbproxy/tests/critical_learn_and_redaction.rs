@@ -782,10 +782,11 @@ async fn learning_ignores_fixture_sql_and_replays_setup_once_on_the_first_route(
         observed[2].verdict
     );
     assert!(
-        observed[2]
-            .verdict
-            .reason()
-            .is_some_and(|reason| reason.contains("literal")),
+        matches!(
+            observed[2].verdict.reason(),
+            Some(blastit_sqlpolicy::RefuseReason::Reported(reason))
+                if reason.contains("inlines a quoted literal")
+        ),
         "{:?}",
         observed[2].verdict
     );

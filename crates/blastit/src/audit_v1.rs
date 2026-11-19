@@ -18,7 +18,7 @@
 //! Two rules protect the machine contract:
 //!
 //! * `add_query` is emitted **only** for a statement dbproxy's learn policy
-//!   proved grantable (`ObsVerdict::Query`, never a redacted `…`). A redacted
+//!   proved grantable (`LearnVerdict::Query`, never a redacted `…`). A redacted
 //!   literal, and every transaction-control denial, names `observe` instead, so
 //!   every `add_query` this engine emits passes
 //!   [`Manifest::parse_blastfile`] once written (`R33`);
@@ -52,7 +52,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blastit_dbproxy::{ObsTarget, ObsVerdict, WireSqlObs};
+use blastit_dbproxy::{ObsTarget, WireSqlObs};
 use blastit_ingress::{
     BodyCodec, BodySample, IngressPolicy, parse_mime, probe_sample, suggest_fix,
 };
@@ -60,7 +60,9 @@ use blastit_manifest::blastfile::{BlastfileEdits, ProposedGrant, ProposedView};
 use blastit_manifest::{
     BodyOwner, Grant, Manifest, MountTable, PgGrant, ProxyName, Route, RoutingTable,
 };
-use blastit_sqlpolicy::{Allowlist, KNOWN_STATIC_SETUP_SQL, is_introspection_setup_sql, normalize};
+use blastit_sqlpolicy::{
+    Allowlist, KNOWN_STATIC_SETUP_SQL, LearnVerdict, is_introspection_setup_sql, normalize,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -742,7 +744,7 @@ pub fn evaluate(manifest: &Manifest, observations: &CheckObsV1) -> Result<Report
                 transaction_label(&statement.sql).to_string(),
                 Fix::observe(),
             )
-        } else if let ObsVerdict::Query { normalized } = &statement.verdict
+        } else if let LearnVerdict::Query { normalized } = &statement.verdict
             && !normalized.contains('\u{2026}')
         {
             // A connection-setup statement is not a route's statement: it runs
@@ -1528,7 +1530,7 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
     // manifest after the edit would still be incomplete (`R25`, `R29`).
     let mut refused: BTreeSet<String> = BTreeSet::new();
     for statement in observations.sql() {
-        if let ObsVerdict::Refused { redacted, reason } = &statement.verdict {
+        if let LearnVerdict::Refused { redacted, reason } = &statement.verdict {
             refused.insert(format!("{redacted}: {reason}"));
         }
     }
@@ -1554,7 +1556,7 @@ pub fn plan_learn(manifest: &Manifest, observations: &CheckObsV1) -> Result<Lear
             ));
             continue;
         }
-        if let ObsVerdict::Query { normalized } = &statement.verdict {
+        if let LearnVerdict::Query { normalized } = &statement.verdict {
             if normalized.contains('\u{2026}') {
                 // A redaction is never grantable, whatever a broken verdict
                 // says (`R24`, `R33`): the plan stays unwritable.

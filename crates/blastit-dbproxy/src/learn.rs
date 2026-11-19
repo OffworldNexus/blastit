@@ -36,7 +36,7 @@
 //! # Redaction
 //!
 //! [`WireSqlObs::sql`] is always [`redact_literals`] of the normalised text, and
-//! a refused statement's [`ObsVerdict::Refused`] carries the redacted text too.
+//! a refused statement's [`LearnVerdict::Refused`] carries the redacted text too.
 //! No user-derived literal byte reaches `obs_fd` (S1, R24).
 
 use std::collections::{HashMap, HashSet};
@@ -97,77 +97,65 @@ pub enum ObsTarget {
     },
 }
 
-/// What `--learn` decided about one statement, in its wire form.
+/// [`LearnVerdict`] as `WireSqlObs.verdict` has always spelled it on the wire:
+/// the tag `kind`, the field names `normalized` / `redacted` / `reason`, and a
+/// one-line reason a consumer prints rather than matches on.
 ///
-/// The variants, the tag and the field names are
-/// [`LearnVerdict`](blastit_sqlpolicy::LearnVerdict)'s: `query` carries the
-/// normalised grant text, `refused` the redacted text and why. `LearnVerdict`
-/// itself carries a `RefuseReason`, which has no serialised form, so the wire
-/// record keeps the reason's one-line explanation instead — a consumer never
-/// matches on it, it prints it to a human (`docs/local.md`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ObsVerdict {
-    /// The statement is grantable, as the normalised text a grant holds.
-    Query {
-        /// Normalised text, placeholders as `$?`.
-        normalized: String,
-    },
-    /// The statement cannot be granted.
-    Refused {
-        /// The statement normalised and redacted, safe to print.
-        redacted: String,
-        /// Why it was refused.
-        reason: String,
-    },
-}
+/// This module is the **one** adapter between the policy's verdict and that
+/// record, and it is deliberately the whole of it: `check --json`, the audit and
+/// the Python readers parse the record, so its bytes are a contract. The reason
+/// is rendered with [`RefuseReason`]'s `Display` — already stripped of the token
+/// the parser quoted — and read back as [`RefuseReason::Reported`], which prints
+/// that text unchanged, so a refused record round-trips byte for byte.
+mod verdict_wire {
+    use blastit_sqlpolicy::{LearnVerdict, RefuseReason};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-impl ObsVerdict {
-    /// Whether the statement is grantable.
-    pub fn is_query(&self) -> bool {
-        matches!(self, Self::Query { .. })
+    /// The record's shape and only its shape: `LearnVerdict` converts to this
+    /// and back, so the policy type itself needs no `serde`.
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum Wire {
+        /// The statement is grantable, as the normalised text a grant holds.
+        Query { normalized: String },
+        /// The statement cannot be granted.
+        Refused { redacted: String, reason: String },
     }
 
-    /// The normalised text of a grantable statement.
-    pub fn normalized(&self) -> Option<&str> {
-        match self {
-            Self::Query { normalized } => Some(normalized),
-            Self::Refused { .. } => None,
-        }
-    }
-
-    /// The redacted text of a refused statement.
-    pub fn redacted(&self) -> Option<&str> {
-        match self {
-            Self::Query { .. } => None,
-            Self::Refused { redacted, .. } => Some(redacted),
-        }
-    }
-
-    /// Why a statement was refused.
-    pub fn reason(&self) -> Option<&str> {
-        match self {
-            Self::Query { .. } => None,
-            Self::Refused { reason, .. } => Some(reason),
-        }
-    }
-}
-
-impl From<LearnVerdict> for ObsVerdict {
-    fn from(verdict: LearnVerdict) -> Self {
-        match verdict {
-            LearnVerdict::Query { normalized } => Self::Query { normalized },
-            LearnVerdict::Refused { redacted, reason } => Self::Refused {
-                redacted,
+    /// Writes `verdict` as the record's JSON object.
+    pub(super) fn serialize<S: Serializer>(
+        verdict: &LearnVerdict,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let wire = match verdict {
+            LearnVerdict::Query { normalized } => Wire::Query {
+                normalized: normalized.clone(),
+            },
+            LearnVerdict::Refused { redacted, reason } => Wire::Refused {
+                redacted: redacted.clone(),
                 reason: reason.to_string(),
             },
             // `LearnVerdict` is non-exhaustive: a verdict this build does not
             // know is reported as a refusal, never as a grant.
-            _ => Self::Refused {
+            _ => Wire::Refused {
                 redacted: "…".to_string(),
                 reason: "the statement was refused by a newer policy verdict".to_string(),
             },
-        }
+        };
+        wire.serialize(serializer)
+    }
+
+    /// Reads the record's JSON object back into a [`LearnVerdict`].
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<LearnVerdict, D::Error> {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Query { normalized } => LearnVerdict::Query { normalized },
+            Wire::Refused { redacted, reason } => LearnVerdict::Refused {
+                redacted,
+                reason: RefuseReason::Reported(reason),
+            },
+        })
     }
 }
 
@@ -188,7 +176,8 @@ pub struct WireSqlObs {
     /// Whether the route's grants would have allowed it in `Enforce`.
     pub allowed: bool,
     /// What `--learn` would propose for it.
-    pub verdict: ObsVerdict,
+    #[serde(with = "verdict_wire")]
+    pub verdict: LearnVerdict,
 }
 
 /// [`SqlKind`] as the one string vocabulary the event stream already uses.
@@ -233,7 +222,7 @@ pub(crate) struct ObsBody {
     /// Whether the route's grants would have allowed it.
     pub(crate) allowed: bool,
     /// What `--learn` would propose for it.
-    pub(crate) verdict: ObsVerdict,
+    pub(crate) verdict: LearnVerdict,
 }
 
 impl ObsBody {
@@ -659,7 +648,7 @@ pub(crate) fn observe(
         sql: redact_literals(normalized),
         is_tx: is_transaction_control(normalized),
         allowed,
-        verdict: check_learnable(sql).into(),
+        verdict: check_learnable(sql),
     }
 }
 
@@ -668,7 +657,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use blastit_sqlpolicy::KNOWN_STATIC_SETUP_SQL;
+    use blastit_sqlpolicy::{KNOWN_STATIC_SETUP_SQL, RefuseReason};
 
     fn policy(route: &str, queries: &[&str]) -> RoutePolicySpec {
         RoutePolicySpec {
@@ -938,14 +927,78 @@ mod tests {
 
     #[test]
     fn a_refused_verdict_carries_the_redacted_text_and_the_reason() {
-        let verdict = ObsVerdict::from(check_learnable("SELECT 's3cr3t'"));
+        let verdict = check_learnable("SELECT 's3cr3t'");
         assert!(!verdict.is_query());
         assert_eq!(verdict.redacted(), Some("SELECT …"));
         assert!(
+            matches!(verdict.reason(), Some(RefuseReason::InlineLiteral)),
+            "{verdict:?}"
+        );
+        assert!(
             verdict
                 .reason()
-                .is_some_and(|reason| reason.contains("literal"))
+                .is_some_and(|reason| reason.to_string().contains("literal"))
         );
         assert!(!format!("{verdict:?}").contains("s3cr3t"));
+    }
+
+    /// `WireSqlObs.verdict` is a contract `check --json`, the audit and the
+    /// Python readers parse: the adapter must not move one byte of it, in
+    /// either direction, and a refused reason must survive exactly.
+    #[test]
+    fn the_verdict_wire_object_is_byte_identical_in_both_directions() {
+        let refused = body("SELECT 's3cr3t'", "SELECT 's3cr3t'").with_target(&ObsTarget::Routed {
+            route: "a".to_string(),
+        });
+        let text = serde_json::to_string(&refused).expect("serialised");
+        assert_eq!(
+            text,
+            "{\"target\":{\"scope\":\"routed\",\"route\":\"a\"},\"proxy\":\"db\",\
+             \"kind\":\"query\",\"sql\":\"SELECT …\",\"is_tx\":false,\"allowed\":false,\
+             \"verdict\":{\"kind\":\"refused\",\"redacted\":\"SELECT …\",\"reason\":\
+             \"the statement inlines a quoted literal; bind the value with a placeholder \
+             instead\"}}"
+        );
+        let back: WireSqlObs = serde_json::from_str(&text).expect("deserialised");
+        // The record read back carries `Reported`, not the variant the writer
+        // held: that is the carrier's whole job, and what must match is the
+        // text, byte for byte — never the enum's identity.
+        assert_eq!(back.sql, refused.sql);
+        assert_eq!(back.verdict.redacted(), refused.verdict.redacted());
+        assert_eq!(
+            back.verdict.reason().map(ToString::to_string),
+            refused.verdict.reason().map(ToString::to_string),
+            "the one-line reason survives the round trip verbatim"
+        );
+        assert_eq!(
+            serde_json::to_string(&back).expect("re-serialised"),
+            text,
+            "a refused record keeps its reason byte for byte"
+        );
+        assert!(
+            matches!(
+                back.verdict.reason(),
+                Some(RefuseReason::Reported(reason))
+                    if reason.as_str()
+                        == "the statement inlines a quoted literal; bind the value with a \
+                            placeholder instead"
+            ),
+            "{:?}",
+            back.verdict
+        );
+
+        // The grantable half of the contract: the same tag, the same field, and
+        // no `reason` at all.
+        let query = body("SELECT $1", "SELECT $1").with_target(&ObsTarget::Routed {
+            route: "a".to_string(),
+        });
+        let text = serde_json::to_string(&query).expect("serialised");
+        assert!(
+            text.ends_with(r#""verdict":{"kind":"query","normalized":"SELECT $?"}}"#),
+            "{text}"
+        );
+        let back: WireSqlObs = serde_json::from_str(&text).expect("deserialised");
+        assert_eq!(back, query);
+        assert_eq!(back.verdict.normalized(), Some("SELECT $?"));
     }
 }

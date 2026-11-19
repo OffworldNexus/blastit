@@ -1229,7 +1229,7 @@ view fallback regex '.*' {}
             sql: sql.to_string(),
             is_tx: false,
             allowed: false,
-            verdict: blastit_dbproxy::ObsVerdict::Query {
+            verdict: blastit_sqlpolicy::LearnVerdict::Query {
                 normalized: sql.to_string(),
             },
         }

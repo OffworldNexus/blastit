@@ -370,7 +370,8 @@ impl LearnRun {
                 continue;
             }
             if let Ok(obs) = serde_json::from_str::<WireSqlObs>(text) {
-                if let blastit_dbproxy::ObsVerdict::Refused { redacted, reason } = &obs.verdict {
+                if let blastit_sqlpolicy::LearnVerdict::Refused { redacted, reason } = &obs.verdict
+                {
                     self.refusals.insert(format!("{redacted}: {reason}"));
                 }
                 self.observations.push(obs);

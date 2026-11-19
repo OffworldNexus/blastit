@@ -99,6 +99,16 @@ pub enum RefuseReason {
     CopyProgram,
     /// The statement calls a [`DANGEROUS_LEARN_FUNCTIONS`] entry.
     DangerousFunction(String),
+    /// Only the one-line explanation of a refusal survived: the text a
+    /// `WireSqlObs.verdict` record carries (`{"kind":"refused",…,"reason":…}`).
+    ///
+    /// [`check_learnable`] never returns it — it is the record's round-trip
+    /// carrier, built when a refused observation written by this or an older
+    /// build is read back. [`Display`](std::fmt::Display) prints the text
+    /// unchanged, because it was already rendered (and stripped of any token
+    /// the parser quoted) by whoever wrote the record; that is what makes the
+    /// record serialise byte for byte again.
+    Reported(String),
 }
 
 impl std::fmt::Display for RefuseReason {
@@ -127,6 +137,7 @@ impl std::fmt::Display for RefuseReason {
                 f,
                 "`{name}` reaches the server's files or network; it cannot be learned"
             ),
+            Self::Reported(text) => f.write_str(text),
         }
     }
 }
