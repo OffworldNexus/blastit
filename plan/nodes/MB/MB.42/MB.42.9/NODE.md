@@ -2,16 +2,16 @@
 id: MB.42.9
 title: "Handoff: an unsafe $VIRTUAL_ENV must be skipped, not exit 1 (blasts every dev|check|fmt|lsp in a 0775 checkout)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.2.3]
 paths: [crates/blastit/src/cli/handoff.rs, crates/blastit/tests/critical_handoff.rs, Makefile]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T23:26"
-updated: "2026-11-19T23:26"
+updated: "2026-11-19T23:35"
 ---
 
 # Goal

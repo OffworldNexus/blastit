@@ -33,9 +33,10 @@
 //!
 //! An *auto-discovered* candidate that fails a check is skipped with one
 //! `stderr` line and probing continues: a `0775` CI checkout or a
-//! third-party-owned `node_modules` must never brick `blastit dev`. A
-//! `$VIRTUAL_ENV` the user named explicitly fails closed (`exit 1`) instead,
-//! because that is the installation they asked for.
+//! third-party-owned `node_modules` must never brick `blastit dev`.
+//! `$VIRTUAL_ENV` belongs to that set — an activated venv is *ambient*, a shell
+//! that happens to have one did not point at a binary. Only `$BLASTIT_BIN` fails
+//! closed (`exit 1`), because that one really does name a path.
 
 use std::env;
 use std::ffi::{CString, OsStr};
@@ -59,15 +60,20 @@ const DONE: &str = "BLASTIT_HANDOFF_DONE";
 /// The documented escape hatch: any value but `""`/`"0"` turns handoff off.
 const NO_HANDOFF: &str = "BLASTIT_NO_LOCAL_HANDOFF";
 
-/// The venv the user activated. Explicit: when it is set there is **no**
-/// `./.venv` fallback, so a shell outside the project cannot silently hop.
+/// The venv the user activated. Ambient: when it is set there is **no**
+/// `./.venv` fallback, so a shell outside the project cannot silently hop — but
+/// a failure is a skip, exactly like the auto-discovered locations.
 const VIRTUAL_ENV: &str = "VIRTUAL_ENV";
+
+/// The one name that *does* point at a path (`BLASTIT_BIN`, the wheel's own
+/// override): a failure is a refusal (`exit 1`), not a skip.
+const EXPLICIT: &str = "BLASTIT_BIN";
 
 /// One location that may hold the project's own `blastit`.
 struct Candidate {
     path: PathBuf,
-    /// `true` when the user named the installation (`$VIRTUAL_ENV`): a failure
-    /// is then a refusal (`exit 1`), not a skip.
+    /// `true` only for `$BLASTIT_BIN`, where the user named this exact path: a
+    /// failure is then a refusal (`exit 1`), not a skip.
     explicit: bool,
 }
 
@@ -91,9 +97,9 @@ struct Verified {
 /// Hands `command` to the project's `blastit`, or answers why this image keeps
 /// running instead.
 ///
-/// Returns `Some(status)` only for a refusal this image must report: an
-/// explicitly named `$VIRTUAL_ENV` that failed a check. On a valid handoff the
-/// process image is replaced and this never returns.
+/// Returns `Some(status)` only for a refusal this image must report: a
+/// `$BLASTIT_BIN` that failed a check. On a valid handoff the process image is
+/// replaced and this never returns.
 pub(super) fn attempt(command: Command, argv: &[String]) -> Option<u8> {
     let name = name(command, argv)?;
     if disabled() {
@@ -174,23 +180,25 @@ fn refuse(name: &str, path: &Path, reason: &str) -> u8 {
     super::FAILURE
 }
 
-/// The three locations, in the order §4 pins.
+/// The candidate locations, in the order §4 pins.
 ///
 /// `$VIRTUAL_ENV` replaces the auto-discovered `.venv` rather than joining it:
-/// an activated venv is a choice, and silently preferring a `./.venv` next to
-/// the working directory would answer a different question.
+/// an activated venv is the environment the user is working in, and silently
+/// preferring a `./.venv` next to the working directory would answer a different
+/// question. `$BLASTIT_BIN` is appended last and is the only *explicit* one: the
+/// user named a path there, so it fails closed instead of being skipped.
 fn candidates(cwd: &Path) -> Vec<Candidate> {
-    let mut candidates = Vec::with_capacity(3);
-    match env::var_os(VIRTUAL_ENV).filter(|value| !value.is_empty()) {
-        Some(venv) => candidates.push(Candidate {
-            path: PathBuf::from(venv).join("bin").join("blastit"),
-            explicit: true,
-        }),
-        None => candidates.push(Candidate {
-            path: cwd.join(".venv/bin/blastit"),
-            explicit: false,
-        }),
-    }
+    let mut candidates = Vec::with_capacity(4);
+    let venv = env::var_os(VIRTUAL_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    candidates.push(Candidate {
+        path: match venv {
+            Some(venv) => venv.join("bin").join("blastit"),
+            None => cwd.join(".venv/bin/blastit"),
+        },
+        explicit: false,
+    });
     candidates.push(Candidate {
         path: cwd.join("vendor/bin/blastit"),
         explicit: false,
@@ -199,6 +207,12 @@ fn candidates(cwd: &Path) -> Vec<Candidate> {
         path: cwd.join("node_modules/.bin/blastit"),
         explicit: false,
     });
+    if let Some(named) = env::var_os(EXPLICIT).filter(|value| !value.is_empty()) {
+        candidates.push(Candidate {
+            path: PathBuf::from(named),
+            explicit: true,
+        });
+    }
     candidates
 }
 

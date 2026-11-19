@@ -3907,3 +3907,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T23:26 [MB.42.9] (unknown) created (task) Handoff: an unsafe $VIRTUAL_ENV must be skipped, not exit 1 (blasts every dev|check|fmt|lsp in a 0775 checkout)
 - 2026-11-19T23:26 [MB.42] (lead) MB.42.9 created: handoff treats ambient $VIRTUAL_ENV as 'explicit' so an unsafe active venv exits 1 - reproduced on this repo (parent dir 0775) where every blas
 - 2026-11-19T23:26 [MB.42.2.4] (lead) status review -> done
+- 2026-11-19T23:26 [MB.42.9] (lead) status ready -> active
+- 2026-11-19T23:26 [MB.42.9] (lead) attempt 1/3 started
+- 2026-11-19T23:26 [MB.42.9] (lead) base 876c37c01cded49f0371205925d185100dfc3c22
+- 2026-11-19T23:35 [MB.42.9] (lead) status active -> done

@@ -5,8 +5,8 @@
 //! the promises are about the process image: a project's own `blastit` runs
 //! instead of the global one for `dev`/`check`/`fmt`/`lsp`, `BLASTIT_HANDOFF_DONE`
 //! arrives in the child, and a candidate that fails a safety check is either
-//! skipped (auto-discovered, probing continues) or refused (`exit 1`, only for
-//! the `$VIRTUAL_ENV` the user named).
+//! skipped (ambient or auto-discovered, probing continues) or refused (`exit 1`,
+//! only for a `$BLASTIT_BIN` that names a path).
 //!
 //! The fixtures are `#!/bin/sh` scripts that write a marker, so the child's own
 //! `$0`, arguments, working directory and environment are observable — and one
@@ -224,8 +224,8 @@ fn every_auto_discovered_location_hands_off() {
     }
 }
 
-/// §4: `$VIRTUAL_ENV` is an explicit choice, and the `./.venv` beside the
-/// working directory is then not consulted at all.
+/// §4: an activated `$VIRTUAL_ENV` decides which location is probed, and the
+/// `./.venv` beside the working directory is then not consulted at all.
 #[test]
 fn an_activated_venv_replaces_the_project_venv() {
     let project = Project::new("activated");
@@ -328,19 +328,23 @@ fn a_group_or_world_writable_binary_is_skipped_and_the_next_one_runs() {
     }
 }
 
-/// §4: a `$VIRTUAL_ENV` the user named fails closed, with the sentence and fix.
+/// §4: an unsafe `$VIRTUAL_ENV` is skipped, and probing continues.
+///
+/// An activated venv is *ambient*: the shell happens to have one, so a `0775`
+/// checkout (or a `umask 002` container) must not turn every `dev` into a
+/// security-flavoured `exit 1`. The unsafe binary still never runs.
 #[test]
-fn an_unsafe_activated_venv_is_refused_with_the_fix() {
-    let project = Project::new("refusal");
+fn an_unsafe_activated_venv_is_skipped_and_the_next_candidate_runs() {
+    let project = Project::new("activated-skip");
     let activated = project.path("activated");
-    let marker = project.path("ran-activated.txt");
-    write_script(&activated.join("bin/blastit"), &marker, "");
+    let unsafe_marker = project.path("ran-activated.txt");
+    write_script(&activated.join("bin/blastit"), &unsafe_marker, "");
     fs::set_permissions(
         activated.join("bin/blastit"),
         fs::Permissions::from_mode(0o777),
     )
     .expect("make the activated shim world-writable");
-    let project_marker = project.shim(".venv/bin/blastit", "ran-project.txt");
+    let vendor_marker = project.shim("vendor/bin/blastit", "ran-vendor.txt");
     let output = project.run(
         &["dev"],
         &[(
@@ -351,8 +355,64 @@ fn an_unsafe_activated_venv_is_refused_with_the_fix() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
+        Some(0),
+        "an unsafe ambient venv must be skipped, not fail the command: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "blastit dev: skipping local binary {}",
+            activated.join("bin/blastit").display()
+        )),
+        "the skip line names the command and the path: {stderr}"
+    );
+    assert!(
+        stderr.contains("0777"),
+        "the skip line names the real reason: {stderr}"
+    );
+    assert!(
+        stderr.contains("continuing with the next candidate or the global binary"),
+        "the skip line says what ran instead: {stderr}"
+    );
+    assert!(
+        !stderr.contains("refusing local handoff"),
+        "an ambient venv is never a refusal: {stderr}"
+    );
+    assert!(
+        !unsafe_marker.exists(),
+        "the unsafe binary never runs: {stderr}"
+    );
+    let text = marker_text(&vendor_marker, &output);
+    assert!(
+        text.contains("done=1"),
+        "the next candidate ran after the skip: {text}"
+    );
+}
+
+/// §4: a `$BLASTIT_BIN` the user named fails closed, with the sentence and fix.
+///
+/// This is the one explicit name left: the user pointed at a path, so a check
+/// that fails is answered instead of skipped — and no auto-discovered candidate
+/// is tried in its place.
+#[test]
+fn an_unsafe_blastit_bin_is_refused_with_the_fix() {
+    let project = Project::new("explicit");
+    let named = project.path("named/blastit");
+    let marker = project.path("ran-named.txt");
+    write_script(&named, &marker, "");
+    fs::set_permissions(&named, fs::Permissions::from_mode(0o777))
+        .expect("make the named shim world-writable");
+    let output = project.run(
+        &["dev"],
+        &[(
+            "BLASTIT_BIN",
+            named.to_str().expect("the fixture path is UTF-8"),
+        )],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
         Some(1),
-        "an explicit venv fails closed: {stderr}"
+        "an explicitly named binary fails closed: {stderr}"
     );
     assert!(
         stderr.contains("blastit dev: refusing local handoff to"),
@@ -364,8 +424,8 @@ fn an_unsafe_activated_venv_is_refused_with_the_fix() {
     );
     assert!(!marker.exists(), "an unsafe candidate never runs");
     assert!(
-        !project_marker.exists(),
-        "an explicit `$VIRTUAL_ENV` that fails is a refusal, not a fallback"
+        !stderr.contains("skipping local binary"),
+        "an explicit name is a refusal, not a skip: {stderr}"
     );
     assert!(
         output.stdout.is_empty(),
