@@ -2,7 +2,7 @@
 id: MB.40.4
 title: "Split god-files (scheduler.rs, config.rs, sqlpolicy/analysis.rs, stage0/1) into cohesive modules & serde wire structs"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.40.3]
 paths:
@@ -15,7 +15,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T00:16"
-updated: "2026-11-19T03:12"
+updated: "2026-11-19T04:04"
 ---
 
 # Goal

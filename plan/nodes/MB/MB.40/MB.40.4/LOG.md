@@ -31,3 +31,7 @@ edited fields
 ## 2026-11-19T03:12 [lead]
 
 status review -> ready
+
+## 2026-11-19T04:04 [lead]
+
+status ready -> done

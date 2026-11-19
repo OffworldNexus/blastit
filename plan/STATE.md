@@ -17,8 +17,8 @@
 
 ## Next actionable (top 12)
 
-- gate: MB.40.4 Split god-files (scheduler.rs, config.rs, sqlpolicy/analysis.rs, stage0/1) into cohesive modules & serde wire structs
 - execute: MB.4.1 Decide Node integration topology: napi-rs/neon embedding vs sidecar fd handoff, and the fair-queue CPU model (ADR)
+- execute: MB.40.5 CLI visual & UX craft overhaul: --version, clean --help, NO_COLOR/IsTerminal, http:// banner, actionable check & fmt diffs
 
 ## Stuck / attention
 
@@ -26,7 +26,6 @@
 
 ## Recent journal
 
-- 2026-11-19T03:13 [MB.40.4.1] (lead) status ready -> active
 - 2026-11-19T03:13 [MB.40.4.1] (lead) attempt 1/3 started
 - 2026-11-19T03:13 [MB.40.4.1] (lead) base fd9e28e
 - 2026-11-19T03:25 [MB.40.4.1] (lead) status active -> review
@@ -41,3 +40,4 @@
 - 2026-11-19T03:43 [MB.40.4.3] (lead) base 834b2bc
 - 2026-11-19T03:58 [MB.40.4.3] (lead) status active -> review
 - 2026-11-19T04:04 [MB.40.4.3] (lead) status review -> done
+- 2026-11-19T04:04 [MB.40.4] (lead) status ready -> done
