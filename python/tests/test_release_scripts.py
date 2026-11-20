@@ -26,6 +26,7 @@ wheel assertion only reads a wheel that a previous `make docs-test` left in
 from __future__ import annotations
 
 import email
+import importlib.util
 import os
 import re
 import shutil
@@ -710,3 +711,98 @@ def test_build_lsp_never_assumes_var_tmp_exists():
         + "\n".join(offenders)
     )
     assert '"$tmp_base/blastit-lsp-stage.XXXXXX"' in BUILD_LSP.read_text()
+
+
+# --------------------------------------------------------------------------- #
+# `check-long-description.py`: `Requires-Python` is read from `pyproject.toml`
+# --------------------------------------------------------------------------- #
+
+CHECK_LONG_DESCRIPTION = SCRIPTS / "check-long-description.py"
+
+
+def load_long_description_check():
+    """The release script as a module, loaded without its third-party renderer.
+
+    `readme_renderer` is imported inside `check_description`, so this needs
+    nothing beyond the standard library, and a broken `pyproject.toml` is
+    exercised here rather than only in a publish run.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "check_long_description", CHECK_LONG_DESCRIPTION
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_declared_requires_python_follows_pyproject_toml(tmp_path):
+    """The value is read, not repeated: a wheel cannot drift from the build."""
+    module = load_long_description_check()
+    project = tmp_path / "pyproject.toml"
+    project.write_text(
+        '[project]\nname = "blastit"\nrequires-python = ">=3.99"\n', encoding="utf-8"
+    )
+    assert module.declared_requires_python(project) == ">=3.99"
+
+
+def test_declared_requires_python_names_a_missing_file(tmp_path):
+    module = load_long_description_check()
+    project = tmp_path / "pyproject.toml"
+    with pytest.raises(module.Failure) as raised:
+        module.declared_requires_python(project)
+    assert str(project) in str(raised.value)
+
+
+def test_declared_requires_python_requires_the_key(tmp_path):
+    module = load_long_description_check()
+    project = tmp_path / "pyproject.toml"
+    project.write_text('[project]\nname = "blastit"\n', encoding="utf-8")
+    with pytest.raises(module.Failure) as raised:
+        module.declared_requires_python(project)
+    message = str(raised.value)
+    assert str(project) in message
+    assert "[project].requires-python" in message
+
+
+def test_declared_requires_python_rejects_invalid_toml(tmp_path):
+    module = load_long_description_check()
+    project = tmp_path / "pyproject.toml"
+    project.write_text('[project\nname = "blastit"\n', encoding="utf-8")
+    with pytest.raises(module.Failure) as raised:
+        module.declared_requires_python(project)
+    assert str(project) in str(raised.value)
+
+
+def test_declared_requires_python_rejects_a_non_string_value(tmp_path):
+    module = load_long_description_check()
+    project = tmp_path / "pyproject.toml"
+    project.write_text("[project]\nrequires-python = 3.12\n", encoding="utf-8")
+    with pytest.raises(module.Failure) as raised:
+        module.declared_requires_python(project)
+    message = str(raised.value)
+    assert "3.12" in message
+    assert "PEP 440" in message
+
+
+def test_main_reports_a_broken_pyproject_once_and_exits_2(
+    tmp_path, monkeypatch, capsys
+):
+    """A `pyproject.toml` without the key is a configuration error, said once.
+
+    `PROJECT_FILE` is patched rather than passed, because that is the path
+    `main` really takes: exit 2, one line naming the file, and no
+    `dist/…whl: FAILED` line — nothing about the artifact is wrong.
+    """
+    module = load_long_description_check()
+    project = tmp_path / "pyproject.toml"
+    project.write_text('[project]\nname = "blastit"\n', encoding="utf-8")
+    monkeypatch.setattr(module, "PROJECT_FILE", project)
+    wheel = "dist/blastit-0.0.0-py3-none-any.whl"
+
+    assert module.main([wheel]) == 2
+
+    lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
+    assert len(lines) == 1, lines
+    assert str(project) in lines[0]
+    assert not lines[0].startswith(wheel)

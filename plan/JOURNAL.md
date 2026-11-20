@@ -4083,3 +4083,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T10:50 [MB.50] (lead) status active -> done
 - 2026-11-20T10:50 [MB.50] (lead) commit a60d6c4
 - 2026-11-20T10:51 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
+- 2026-11-20T11:15 [MB.51] (conductor) created (task) Fix final 3 PR #64 CI items (Requires-Python >=3.12 in check-long-description.py, setup-uv before chown in ci.yml & BLASTIT_REQUIRE_ROOT_TESTS in
+- 2026-11-20T11:15 AUTOPILOT on by conductor closing final 3 PR #64 CI items in MB.51
+- 2026-11-20T11:16 [MB.51] (lead) status ready -> active
+- 2026-11-20T11:16 [MB.51] (lead) attempt 1/3 started
+- 2026-11-20T11:16 [MB.51] (lead) base c0576557d1f8ff3078c49c43bfed35cc88e8a094
+- 2026-11-20T11:25 [MB.51] (lead) REVIEW FIX (7 genuine): 1) ci.yml pytest-plugin: /opt comment block orphaned above rust-toolchain -> reattach to its step. 2) ci.yml smoke (root) job comment bu
+- 2026-11-20T11:33 [MB.51] (lead) REVIEW FIX 2 (4 min): 1) split OSError ('cannot read <path>') from TypeError/ValueError ('not valid project metadata') in declared_requires_python. 2) path=None
+- 2026-11-20T11:38 [MB.51] (lead) status active -> done
+- 2026-11-20T11:38 [MB.51] (lead) commit 6a94156

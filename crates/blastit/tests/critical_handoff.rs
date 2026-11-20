@@ -493,8 +493,11 @@ fn an_unsafe_blastit_bin_is_refused_with_the_fix() {
 /// §4: a binary another uid owns is refused.
 ///
 /// Building the fixture needs root (`chown` to another uid). The skip is
-/// **loud** and, under `CI`, fatal: a gate must never report a pass for the one
-/// assertion an unprivileged runner cannot make. Root is its real home.
+/// **loud** and, when `BLASTIT_REQUIRE_ROOT_TESTS` is set, fatal: a gate must
+/// never report a pass for the one assertion an unprivileged runner cannot
+/// make. `smoke (root)` sets that variable, because ambient `CI` is also true in
+/// the unprivileged `test` job, where the fixture's `chown` legitimately cannot
+/// run. Root is its real home.
 #[test]
 fn a_binary_owned_by_another_uid_is_refused() {
     if !is_root() {
@@ -502,9 +505,10 @@ fn a_binary_owned_by_another_uid_is_refused() {
             "SKIP a_binary_owned_by_another_uid_is_refused: creating another uid's file needs root"
         );
         assert!(
-            std::env::var_os("CI").is_none(),
-            "CI is set, so this safety rule must not go untested: run this suite as root \
-             (or drop the rule from the gate's claims) — the fixture needs `chown` to another uid"
+            std::env::var_os("BLASTIT_REQUIRE_ROOT_TESTS").is_none(),
+            "BLASTIT_REQUIRE_ROOT_TESTS is set, so this safety rule must not go untested: run \
+             this suite as root (or drop the rule from the gate's claims) — the fixture needs \
+             `chown` to another uid"
         );
         return;
     }

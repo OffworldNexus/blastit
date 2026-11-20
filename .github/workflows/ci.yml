@@ -132,11 +132,13 @@ jobs:
     # log, so the only visible symptom was "still running" (run 43407063422).
     # Every phase below is independently bounded, so a regression is a red phase
     # whose log and `::error::` name what blocked (a healthy run is ~8 minutes).
-    # The bounds do not sum to a promise, though: 1 + 2 + 10 + 10 + 20 + 3 = 46
-    # worst-case minutes, so the 30-minute `timeout-minutes` below - not any
-    # single step - is the outer bound in a pathological run where several
-    # phases go long at once. (A cold `rust-cache` is the one legitimate way to
-    # approach it: the build step below is then the long one.)
+    # The bounds do not sum to a promise, though: 5 + 1 + 2 + 10 + 2 + 10 + 20
+    # + 3 = 53 worst-case minutes, so the 30-minute `timeout-minutes` below - not
+    # any single step - is the outer bound in a pathological run where several
+    # phases go long at once. (The 5 is `uv python install`, the one phase that
+    # can stall on the index without being wrong, which is why it is capped at 5;
+    # `MB.51`. A cold `rust-cache` is the one legitimate way to approach the
+    # bound: the build step below is then the long one.)
     timeout-minutes: 30
     services:
       postgres:
@@ -157,14 +159,34 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The per-minor CPython shims are a **build artifact** (`target/py-sapi`),
+      # so every root-run test binary that needs one would otherwise fail on a
+      # runner that never built it. `uv python install` puts CPython 3.13 and
+      # 3.14 under `$UV_PYTHON_INSTALL_DIR` (`~/.local/share/uv`) — the tree
+      # root's provenance check has to trust — and `make python-runtime` builds
+      # both shims, failing closed when a minor is absent (`MB.47.2`).
+      # `astral-sh/setup-uv` has to come before any `chown` of
+      # `/opt/hostedtoolcache` (`MB.51`): it runs as runner uid 1001 and creates
+      # `/opt/hostedtoolcache/uv`, so handing that tree to root first fails with
+      # `EACCES: permission denied, mkdir '/opt/hostedtoolcache/uv'`.
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          uv python install 3.13 3.14
       # The runner image ships /opt and its tool cache world-writable; blastit refuses an
       # interpreter a view uid could plant a module in, as it should.
       # This step runs before the preflight, so it must not be able to wait on
       # anything either: `--non-interactive` turns "sudo wants a password" into an
       # instant readable error, and the step is bounded so a wedged `chmod -R` is a
       # red step rather than a job that idles to its timeout (MA.9).
-      # `~/.local` (where `uv` keeps its CPython) gets the same treatment right
-      # after `uv python install` below, once that tree exists (`MB.47.2`).
+      # It runs *after* `setup-uv` and `uv python install` above (`MB.51`), so
+      # setup-uv still owns the tool cache when it creates its own subtree.
+      # `~/.local` (where `uv` keeps its CPython) gets the same treatment in the
+      # step after this one, once that tree exists (`MB.47.2`).
       # `actions/setup-python` extracts the tool cache as runner uid 1001, so
       # root's provenance check would refuse its `libpython`; `chown` makes the
       # tree root's before that check runs (`MB.50`).
@@ -175,23 +197,14 @@ jobs:
           sudo --non-interactive chmod go-w /opt
           sudo --non-interactive chmod -R go-w /opt/hostedtoolcache
           sudo --non-interactive chown -R root:root /opt/hostedtoolcache
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # The per-minor CPython shims are a **build artifact** (`target/py-sapi`),
-      # so every root-run test binary that needs one would otherwise fail on a
-      # runner that never built it. `uv python install` puts CPython 3.13 and
-      # 3.14 under `$UV_PYTHON_INSTALL_DIR` (`~/.local/share/uv`) — the tree
-      # root's provenance check has to trust — and `make python-runtime` builds
-      # both shims, failing closed when a minor is absent (`MB.47.2`).
-      - uses: astral-sh/setup-uv@v10.3.2
-      - name: Install the CPython minors the shims need
+      # Nothing may write to the interpreters' tree: root's provenance check
+      # refuses a `libpython` another uid could have modified, and `uv` keeps
+      # them under `$UV_PYTHON_INSTALL_DIR` rather than `$HOME/.local` when
+      # that variable is set (`MB.49`).
+      - name: Make the uv interpreters root-owned and put the minors on PATH
+        timeout-minutes: 2
         run: |
           set -euo pipefail
-          uv python install 3.13 3.14
-          # Nothing may write to the interpreters' tree: root's provenance check
-          # refuses a `libpython` another uid could have modified, and `uv` keeps
-          # them under `$UV_PYTHON_INSTALL_DIR` rather than `$HOME/.local` when
-          # that variable is set (`MB.49`).
           interpreters="${UV_PYTHON_INSTALL_DIR:-$HOME/.local}"
           if [ -d "$interpreters" ]; then
             sudo --non-interactive chmod -R go-w "$interpreters"
@@ -204,7 +217,8 @@ jobs:
           fi
           # `uv python install` puts CPython under that tree, not on `PATH`, so a
           # consumer asking for `/usr/local/bin/python3.13` finds nothing
-          # (`MB.49`). The link is the interpreter `uv` just installed.
+          # (`MB.49`). The link is the interpreter `uv` just installed, so it
+          # can only be made after that install has finished.
           for minor in 3.13 3.14; do
             sudo --non-interactive ln -sfn "$(uv python find --no-project "$minor")" "/usr/local/bin/python$minor"
           done
@@ -426,6 +440,10 @@ jobs:
       # than a wedged binary being cut off.) `HOME` is passed so root's stage-0
       # provenance check resolves the same `uv` CPython the runner did
       # (`~/.local/share/uv`, made `go-w` above — `MB.47.2`).
+      # `BLASTIT_REQUIRE_ROOT_TESTS=1` makes a root-only fixture's skip fatal
+      # (`critical_handoff::a_binary_owned_by_another_uid_is_refused`); ambient
+      # `CI` is not a root signal because GitHub sets it on the unprivileged
+      # `test` job too (`MB.51`).
       - name: Run every test binary as root, one at a time
         timeout-minutes: 20
         run: |
@@ -451,6 +469,7 @@ jobs:
                 "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
                 "PYO3_PYTHON=$PYO3_PYTHON" \
                 "BLASTIT_TEST_PG_URL=$BLASTIT_TEST_PG_URL" \
+                "BLASTIT_REQUIRE_ROOT_TESTS=1" \
                 stdbuf -oL -eL "$binary" --test-threads=1 --nocapture 2>&1 \
               | tee -a "$log"
             status=${PIPESTATUS[0]}
@@ -753,21 +772,36 @@ jobs:
         with:
           python-version: "3.14"
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      # The runner image ships /opt and its tool cache world-writable; blastit refuses an
-      # interpreter a view uid could plant a module in, as it should.
-      - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache && sudo --non-interactive chown -R root:root /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The plugin's tests boot a WSGI view through the wheel (`MB.47.2`), so the
       # wheel must carry both CPython shims. `uv`'s CPython lands under
       # `$UV_PYTHON_INSTALL_DIR` (`~/.local/share/uv`), and root's provenance
-      # check has to trust that tree: the same `go-w` treatment `/opt` got above,
-      # applied once it exists (`MB.49`: not `$HOME/.local` unconditionally).
+      # check has to trust that tree: the same `go-w` treatment `/opt` gets
+      # below, applied once it exists (`MB.49`: not `$HOME/.local`
+      # unconditionally).
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the CPython minors the shims need
+        timeout-minutes: 5
+        run: uv python install 3.13 3.14
+      # The runner image ships /opt and its tool cache world-writable; blastit
+      # refuses an interpreter a view uid could plant a module in, as it should.
+      # It runs *after* `astral-sh/setup-uv` and `uv python install` above
+      # (`MB.51`): setup-uv runs as runner uid 1001 and creates
+      # `/opt/hostedtoolcache/uv`, so a `chown -R root:root
+      # /opt/hostedtoolcache` before it fails with `EACCES: permission denied,
+      # mkdir '/opt/hostedtoolcache/uv'`.
+      - name: Make /opt and the tool cache non-world-writable (as root)
+        timeout-minutes: 2
         run: |
           set -euo pipefail
-          uv python install 3.13 3.14
+          sudo --non-interactive chmod go-w /opt
+          sudo --non-interactive chmod -R go-w /opt/hostedtoolcache
+          sudo --non-interactive chown -R root:root /opt/hostedtoolcache
+      - name: Make the uv interpreters root-owned
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
           interpreters="${UV_PYTHON_INSTALL_DIR:-$HOME/.local}"
           if [ -d "$interpreters" ]; then
             sudo --non-interactive chmod -R go-w "$interpreters"
