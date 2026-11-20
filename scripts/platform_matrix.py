@@ -229,12 +229,13 @@ INSTALL_LEGS = (
 # hard-codes a keyring or an `edge/testing` line in the Dockerfile, the workflow
 # or the probe driver. `""` is a stock image's own repositories.
 #
-# `suites` is whether this leg also compiles and runs the two protected suites
-# (`critical_php_backend`, `critical_php_embed`) **in its own image**
-# (`MB.3.58`). A leg whose distro cannot carry them says why in
-# `suites_because`, and the reason is part of the matrix rather than a step
-# condition buried in a workflow: "the shim builds and probes here, but the
-# worker-level suites cannot run" is a claim a reader has to be able to see.
+# `suites` is whether this leg also compiles and runs the PHP legs
+# (`e2e_dev.rs`, `--no-default-features --features php,static`) **in its own
+# image** (`MB.3.58`, retargeted by `MB.56.3.2.2`). A leg whose distro cannot
+# carry them says why in `suites_because`, and the reason is part of the matrix
+# rather than a step condition buried in a workflow: "the shim builds and probes
+# here, but the worker-level legs cannot run" is a claim a reader has to be able
+# to see.
 PHP_BUILDS = {
     ("8.6", "gnu"): {
         # `dpkg -L libphp8.6-embed` in `debian:bookworm-slim` (glibc 2.36, the
@@ -405,54 +406,54 @@ SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
         "served",
         "measured by MB.42.5 in the `debian:bookworm-slim` image with Ondřej Surý's "
         "signed repository: with `BLASTIT_LIBPHP` unset the boot reaches "
-        "`/usr/lib/libphp8.6.so` and serves `GET / → app 200`; `critical_php_backend` "
-        "and `critical_php_embed` pass in the same image",
+        "`/usr/lib/libphp8.6.so` and serves `GET / → app 200`; its PHP legs "
+        "(`e2e_dev`) run in the same image",
     ),
     ("8.6", "musl", "x86_64"): (
         "served",
         "measured by MB.42.10 in the `alpine:edge` image with `edge/testing` "
         "appended: with `BLASTIT_LIBPHP` unset the boot reaches "
         "`/usr/lib/php86/libphp.so` through the per-minor directory and serves "
-        "`GET / → 200`; `critical_php_backend` 9/9 and `critical_php_embed` 29/29 "
-        "pass in the same image (MB.42.5's `suites: False` "
-        "was only the handoff's gnu-only `libc::execveat`, fixed by MB.42.10), and "
-        "the unprivileged `PR_SET_DUMPABLE(0)` witness denies 2 roles",
+        "`GET / → 200`; its PHP legs (`e2e_dev`) run in the same image as root "
+        "and as a normal uid (MB.42.5's `suites: False` "
+        "was only the handoff's gnu-only `libc::execveat`, fixed by MB.42.10)",
     ),
     ("8.5", "gnu", "x86_64"): (
         "served",
         "measured by MB.3.65 in the `ubuntu:26.04` image: with `BLASTIT_LIBPHP` "
         "unset the boot reaches `/usr/lib/libphp8.5.so` and serves `GET / → app "
-        "200`; `critical_php_backend` and `critical_php_embed` pass in the same image",
+        "200`; its PHP legs (`e2e_dev`) run in the same image",
     ),
     ("8.4", "gnu", "x86_64"): (
         "served",
         "MB.3.12's protected suite, re-measured by MB.3.58 in the `debian:trixie` "
-        "image: `GET / → app 200` through the worker (5 + 21 tests)",
+        "image: `GET / → app 200` through the worker; its PHP legs (`e2e_dev`) "
+        "run in the same image",
     ),
     ("8.3", "gnu", "x86_64"): (
         "served",
-        "MB.3.58 in the `ubuntu:24.04` image: `critical_php_backend` 5/5 and "
-        "`critical_php_embed` 21/21, `served: HTTP/1.1 200 OK`",
+        "MB.3.58 in the `ubuntu:24.04` image: `served: HTTP/1.1 200 OK` from its "
+        "PHP legs (`e2e_dev`)",
     ),
     ("8.5", "musl", "x86_64"): (
         "served",
         "measured by MB.3.65 in the `alpine:3.23` image: with `BLASTIT_LIBPHP` "
         "unset the boot reaches `/usr/lib/php85/libphp.so` through the per-minor "
-        "directory and serves `GET / → app 200`; both protected suites pass in the "
-        "same image",
+        "directory and serves `GET / → app 200`; its PHP legs (`e2e_dev`) run in "
+        "the same image",
     ),
     ("8.4", "musl", "x86_64"): (
         "served",
         "measured by MB.3.59 in the `alpine:3.21` image: with `BLASTIT_LIBPHP` "
         "unset the boot reaches `/usr/lib/php84/libphp.so` through the per-minor "
-        "directory and serves `GET / → app 200`; `critical_php_backend` and "
-        "`critical_php_embed` pass in the same image",
+        "directory and serves `GET / → app 200`; its PHP legs (`e2e_dev`) run in "
+        "the same image",
     ),
     ("8.3", "musl", "x86_64"): (
         "served",
         "measured by MB.3.59 in the `alpine:3.21` image: with `BLASTIT_LIBPHP` "
         "unset the boot reaches `/usr/lib/libphp83.so` through the packed name "
-        "and serves `GET / → app 200`; both protected suites pass in the same "
+        "and serves `GET / → app 200`; its PHP legs (`e2e_dev`) run in the same "
         "image",
     ),
 }

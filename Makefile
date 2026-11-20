@@ -737,21 +737,27 @@ php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (n
 		--image "$(PHP_SAPI_IMAGE)" \
 		$(if $(PHP_SAPI_KEEP),--keep)
 
-# Real-pair PHP suites (`--nocapture` preserves served/respawn evidence lines checked by CI).
-PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed \
-	--test critical_parallel_views
+# Real-pair PHP legs (`--nocapture` preserves the `served:` / `retired pid …
+# respawned pid` evidence lines CI greps). One suite carries them now:
+# `e2e_dev.rs`'s PHP half, built without the WSGI legs so this target needs no
+# CPython shim on the host (`--no-default-features --features php,static`).
+PHP_SUITE_ARGS := --test e2e_dev --no-default-features --features php,static
 PHP_SAPI_IMAGE ?= blastit-php-sapi-e2e:local
 PHP_SAPI_IMAGE_MINOR ?= 8.4
 PHP_SAPI_IMAGE_LIBPHP ?= /usr/lib/libphp$(PHP_SAPI_IMAGE_MINOR).so
 PHP_SAPI_IMAGE_SHIM_DIR ?= /src/target/php-sapi
 
-rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed + critical_parallel_views
+rs-test-php: php-sapi ## Real-pair PHP legs: e2e_dev's PHP half (per-view grants, faults, php2shell, pin)
 	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit $(PHP_SUITE_ARGS) -- --nocapture"
 	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
 		$(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) -- --nocapture
 
-# Run image-built PHP suites first as root (`--cap-add SYS_PTRACE` for maps content check), then unprivileged (`PR_SET_DUMPABLE(0)` EACCES witness).
-rs-test-php-image: ## Docker: run image-built PHP suites as root + unprivileged dumpable witness
+# Run the image-built `e2e_dev` PHP legs twice: as the image's root and as the
+# caller's uid, so a served leg is proved for an ordinary user too. Both runs
+# must print the `served:` line and the crash-recovery line, and neither may
+# print a `SKIP` line: a skipped leg is not a witness, and this image is the only
+# boot-level proof of the documented 8.3–8.6 support.
+rs-test-php-image: ## Docker: run the image-built e2e_dev PHP legs (root + unprivileged)
 	@docker image inspect "$(PHP_SAPI_IMAGE)" >/dev/null 2>&1 || { \
 		echo "rs-test-php-image: no image '$(PHP_SAPI_IMAGE)'; build it first:" >&2; \
 		echo "  make php-sapi-e2e PHP_SAPI_KEEP=1" >&2; \
@@ -761,45 +767,37 @@ rs-test-php-image: ## Docker: run image-built PHP suites as root + unprivileged 
 # with EPERM, and `blastit dev`'s reload needs it; `seccomp=unconfined` on the outer container leaves
 # blastit's own inner `seccomp(SECCOMP_SET_MODE_FILTER)` enforcing every view/probe sandbox inside.
 	@set -eu; \
-	echo "docker run $(PHP_SAPI_IMAGE)  # the suites this image built (root)"; \
-	docker run --rm --cap-add SYS_PTRACE --security-opt seccomp=unconfined \
-		-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
-		-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
-		"$(PHP_SAPI_IMAGE)" \
-		sh -eu -c ' \
-			set --; \
-			while IFS= read -r binary; do set -- "$$@" "$$binary"; done \
-				< /src/target/php-suite-executables; \
-			if [ "$$#" -ne 2 ]; then \
-				echo "rs-test-php-image: the image records $$# suite executable(s), expected 2" >&2; \
-				exit 1; \
-			fi; \
-			for binary in "$$@"; do \
-				echo "$$binary --nocapture"; \
-				"$$binary" --nocapture; \
-			done'
-	@set -eu; \
-	echo "docker run --user $$(id -u):$$(id -g) $(PHP_SAPI_IMAGE)  # the PR_SET_DUMPABLE(0) witness"; \
-	out=$$(docker run --rm --user "$$(id -u):$$(id -g)" --security-opt seccomp=unconfined \
-		-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
-		-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
-		"$(PHP_SAPI_IMAGE)" \
-		sh -eu -c ' \
-			binary=$$(grep -m1 critical_php_embed /src/target/php-suite-executables); \
-			[ -n "$$binary" ] || { \
-				echo "rs-test-php-image: the image records no critical_php_embed executable" >&2; \
+	for run in "root:" "unprivileged:--user $$(id -u):$$(id -g)"; do \
+		label=$${run%%:*}; userarg=$${run#*:}; \
+		echo "docker run $$userarg $(PHP_SAPI_IMAGE)  # e2e_dev PHP legs ($$label)"; \
+		out=$$(docker run --rm $$userarg --security-opt seccomp=unconfined \
+			-e BLASTIT_LIBPHP="$(PHP_SAPI_IMAGE_LIBPHP)" \
+			-e BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_IMAGE_SHIM_DIR)" \
+			"$(PHP_SAPI_IMAGE)" \
+			sh -eu -c ' \
+				set --; \
+				while IFS= read -r binary; do set -- "$$@" "$$binary"; done \
+					< /src/target/php-suite-executables; \
+				if [ "$$#" -ne 1 ]; then \
+					echo "rs-test-php-image: the image records $$# suite executable(s), expected 1 (e2e_dev)" >&2; \
+					exit 1; \
+				fi; \
+				exec "$$1" --nocapture' 2>&1) && rc=0 || rc=$$?; \
+		printf '%s\n' "$$out"; \
+		[ "$$rc" -eq 0 ] || { echo "rs-test-php-image: the $$label run failed (exit $$rc)" >&2; exit 1; }; \
+		if skipped=$$(printf '%s\n' "$$out" | grep '^SKIP '); then \
+			echo "rs-test-php-image: a PHP leg skipped instead of serving, so nothing was proved:" >&2; \
+			printf '%s\n' "$$skipped" >&2; \
+			exit 1; \
+		fi; \
+		for evidence in 'served: HTTP/1\.1 200 OK' 'retired pid .* respawned pid'; do \
+			printf '%s\n' "$$out" | grep -qE "$$evidence" || { \
+				echo "rs-test-php-image: the $$label run printed no '$$evidence' line" >&2; \
 				exit 1; \
 			}; \
-			exec "$$binary" no_libphp_is_mapped_above_the_view_worker --exact --nocapture' \
-		2>&1) && rc=0 || rc=$$?; \
-	printf '%s\n' "$$out"; \
-	[ "$$rc" -eq 0 ] || { echo "rs-test-php-image: the unprivileged maps leg failed (exit $$rc)" >&2; exit 1; }; \
-	denied=$$(printf '%s\n' "$$out" | sed -n 's/.* \([0-9][0-9]*\) denied (EACCES).*/\1/p' | tail -n 1); \
-	if [ -z "$$denied" ] || [ "$$denied" -lt 1 ]; then \
-		echo "rs-test-php-image: NO role was denied its maps to an unprivileged caller ($${denied:-none} denied)" >&2; \
-		exit 1; \
-	fi; \
-	echo "rs-test-php-image: PR_SET_DUMPABLE(0) witness — $$denied role(s) denied (EACCES) to uid $$(id -u)"
+		done; \
+		echo "rs-test-php-image: $$label run served, crashed and recovered, no leg skipped"; \
+	done
 
 fast-check: guard rs-fmt rs-lint rs-doc rs-test py-lint plan-validate universal-smoke ## Fast per-slice Rust + Python + plan check
 

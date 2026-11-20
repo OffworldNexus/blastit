@@ -68,13 +68,13 @@ COPY . /src
 RUN bash -euo pipefail -c '\
         export RUSTFLAGS="-C target-feature=-crt-static"; \
         make php-sapi PHP_MINORS="8.4"; \
-        cargo test --locked -p blastit --test critical_php_backend --test critical_php_embed --no-run \
+        cargo test --locked -p blastit --test e2e_dev --no-default-features --features php,static --no-run \
             2>&1 | tee /dev/stderr \
             | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\1/p" \
             > /src/target/php-suite-executables; \
         count=$(wc -l < /src/target/php-suite-executables); \
-        if [ "$count" -ne 2 ]; then \
-            echo "expected 2 suite executables, recorded $count:" >&2; \
+        if [ "$count" -ne 1 ]; then \
+            echo "expected 1 suite executable (e2e_dev), recorded $count:" >&2; \
             cat /src/target/php-suite-executables >&2; \
             exit 1; \
         fi' \

@@ -1,15 +1,15 @@
 //! `TESTING_PLAN.md` §2 (applications & runtimes) and §4 (`blastit dev`) — the
-//! **Python WSGI** half, driven through the real binary.
+//! embedded-PHP and Python WSGI halves, driven through the real binary.
 //!
-//! This file is one of three slices that share it: `.1` (this one) owns the
-//! Python story, `.2` appends the PHP story, `.3` appends static assets, live
-//! reload, `--learn` and shutdown. The harness at the top — a temporary project
-//! root, a port from `28080+`, a boot whose whole stdout/stderr is collected, and
-//! deadline-based waits — is the part every slice reuses, so a new story appends
-//! tests and fixtures below it and never a fourth helper.
+//! This file is one of three slices that share it: `.1` (the Python story),
+//! `.2` (this one: PHP), `.3` (static assets, live reload, `--learn` and
+//! shutdown). The harness at the top — a temporary project root, a port from
+//! `28080+`, a boot whose whole stdout/stderr is collected, and deadline-based
+//! waits — is the part every slice reuses, so a new story appends tests and
+//! fixtures below it and never a fourth helper.
 //!
-//! The cases here re-prove what `MB.56.2.1`/`MB.56.2.2` inventoried and what the
-//! deleted `critical_python_shim`, `python_activation_gate`,
+//! The Python half re-proves what `MB.56.2.1`/`MB.56.2.2` inventoried and what
+//! the deleted `critical_python_shim`, `python_activation_gate`,
 //! `embed_venv_sys_path` and the WSGI half of `critical_parallel_views` covered:
 //!
 //! 1. a multi-view WSGI project on CPython 3.13 **and** 3.14 whose shared
@@ -26,16 +26,40 @@
 //! 4. a threaded WSGI route really answers four 200 ms requests at once, on one
 //!    process, against a serialized control measured in the same function.
 //!
+//! The PHP half absorbs `critical_php_embed`, `critical_php_backend` and the PHP
+//! half of `critical_parallel_views`, and re-proves §2's PHP story:
+//!
+//! 1. a PSR/Laravel-shaped front controller (`public/index.php` + a static mount
+//!    under `public/`) where two views hold **distinct** PostgreSQL rights: a
+//!    public read-only route, a write route, and a compromised public view
+//!    refused `SELECT` on another table's columns and refused `INSERT` — both
+//!    `500`, both with the documented `sql.denied … <view> db parse … = $?` line,
+//!    and the upstream peer never contacted with the forbidden table;
+//! 2. fault isolation: one request calling `exit()` and one hitting a fatal both
+//!    recover — the pool keeps its single slot, a fresh pid serves the next
+//!    request, and the crashed pid is gone from `/proc`;
+//! 3. `php2shell` / CGI-argument-injection immunity, behaviourally over the real
+//!    SAPI: a query string, headers and a form body never become `-d` flags,
+//!    `auto_prepend_file` or `HTTP_PROXY`;
+//! 4. entry pinning: an entry script rewritten in place is refused with the
+//!    documented sentence until a restart;
+//! 5. the pool really runs four requests at once (one process each) against the
+//!    same serialized control the WSGI leg measures.
+//!
 //! Every leg is a real `blastit dev` process answering on loopback, and the
 //! database legs dial a real PostgreSQL v3 peer (`tests/common/pg_upstream.rs`)
-//! through the route's own dbproxy socket. Nothing is `#[ignore]`d and nothing
-//! skips: a host that cannot run a leg fails with the sentence that says what to
-//! install.
+//! through the route's own dbproxy socket. Nothing is `#[ignore]`d: a host with
+//! no usable NTS `libphp` + shim skips its PHP legs **loudly** (one `SKIP …`
+//! line naming what to install) instead of asserting a refusal it cannot make,
+//! because the refusal sentences themselves are §6's story, not §2's.
+//!
+//! Every leg maps to a `TESTING_PLAN.md` story: the grant, credential, fault and
+//! concurrency legs to §2, the concurrency numbers to §4's diagnostics, and the
+//! entry pin to §6's "tampered application entry files".
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// The PHP/static stories (`.2`, `.3`) use this harness; until they land, a build
-// without the `python` feature has no test that reaches it.
-#![cfg_attr(not(feature = "python"), allow(dead_code))]
+// A build with neither runtime feature has no test that reaches this harness.
+#![cfg_attr(not(any(feature = "python", feature = "php")), allow(dead_code))]
 
 use std::io::Read;
 use std::net::TcpListener;
@@ -46,20 +70,30 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 #[path = "common/pg_upstream.rs"]
 mod pg_upstream;
 
-/// The HTTP client, request burst and calibration both concurrency suites read
-/// (`views::CONTROL_FLOOR`, `views::CONTROL_MARGIN`, `views::WIDTH`), kept once
-/// for this file and `critical_parallel_views.rs`.
+/// The independent host probe (`host_php`) and the discovery-order drift check
+/// every PHP leg reads instead of the code under test.
+#[cfg(feature = "php")]
+#[path = "common/libphp_probes.rs"]
+mod libphp_probes;
+
+/// The host's NTS `libphp` + shim, resolved without `blastit`.
+#[cfg(feature = "php")]
+#[path = "common/php_host.rs"]
+mod php_host;
+
+/// The HTTP client, request burst and calibration both concurrency legs read
+/// (`views::CONTROL_FLOOR`, `views::CONTROL_MARGIN`, `views::WIDTH`), kept once.
 #[path = "common/views.rs"]
 mod views;
 
 use views::{Client, Response};
 
-// The burst and its assertion are used by the Python concurrency leg only.
-#[cfg(feature = "python")]
+// The burst and its assertion are used by the WSGI and PHP concurrency legs.
+#[cfg(any(feature = "python", feature = "php"))]
 use views::{assert_200, burst};
 
 /// The binary cargo built for this suite.
@@ -154,12 +188,15 @@ impl Drop for Project {
 }
 
 /// The documented `sql.denied` line whose normalised statement carries `needle`
-/// for `route`.
+/// for `route`, in either log format: the human stream aligns the route in its
+/// own column (`  db  parse  `), the JSON one names it (`"route":"public"`).
 fn denial_line<'a>(log: &'a str, needle: &str, route: &str) -> Option<&'a str> {
+    let aligned = format!("  {route}  ");
+    let json = format!("\"route\":\"{route}\"");
     log.lines().find(|line| {
         line.contains("sql.denied")
             && line.contains(needle)
-            && line.contains(&format!("  {route}  "))
+            && (line.contains(&aligned) || line.contains(&json))
     })
 }
 
@@ -589,6 +626,52 @@ impl Dev {
                 since = Instant::now();
             }
         }
+    }
+
+    /// The `request` event for `path`, waiting bounded for init's pipe.
+    ///
+    /// The event is written after the last body byte, so a snapshot taken at the
+    /// instant the client is answered can be one tick early: this polls instead
+    /// of reading the buffer once.
+    fn request_event(&self, path: &str) -> serde_json::Value {
+        let deadline = Instant::now() + BOOT_TIMEOUT;
+        loop {
+            let found = self
+                .events()
+                .into_iter()
+                .find(|event| event["event"] == "request" && event["path"] == path);
+            if let Some(event) = found {
+                return event;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no `request` event for {path} on 127.0.0.1:{}:\n{}",
+                self.port,
+                self.text()
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// The pids of the views this boot considers live, from its own
+    /// `process.spawned` / `process.exited` / `process.retired` events.
+    ///
+    /// "The pool kept its slot" is this set: a crash that retired a worker and
+    /// left nothing behind reads the same status as one that respawned, and only
+    /// the live set tells them apart.
+    fn live_view_pids(&self) -> Vec<u32> {
+        let mut live: Vec<u32> = Vec::new();
+        for event in self.events() {
+            let pid = event["pid"].as_u64().unwrap_or(0) as u32;
+            match event["event"].as_str().unwrap_or_default() {
+                "process.spawned" => live.push(pid),
+                "process.exited" | "process.retired" => live.retain(|live| *live != pid),
+                _ => {}
+            }
+        }
+        live.sort_unstable();
+        live.dedup();
+        live
     }
 
     /// The boot's whole transcript: stdout events then stderr, one per line.
@@ -1500,5 +1583,1187 @@ fn a_threaded_wsgi_route_serves_four_requests_at_once() {
          over {} process(es), four t0s spanning {:.1} ms",
         spawned.len(),
         span * 1000.0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §2/§6: embedded PHP — the PSR front controller, per-view grants, faults,
+// `php2shell`, and the entry pin. Absorbed from `critical_php_embed`,
+// `critical_php_backend` and the PHP half of `critical_parallel_views`.
+// ---------------------------------------------------------------------------
+
+/// The host's NTS `libphp` + shim, or one loud `SKIP` line naming what a PHP
+/// view needs.
+///
+/// A PHP leg cannot be graded on a host with no embed library: the boot's own
+/// refusal is §6's story (pinned by `e2e_prod_refusals`), and asserting it here
+/// would let a discovery regression pass as "this host has no PHP". The probe
+/// decides, and the leg says so in one line rather than failing the run.
+#[cfg(feature = "php")]
+fn host_php_or_skip(what: &str) -> Option<php_host::HostPhp> {
+    let host = php_host::host_php();
+    if host.is_none() {
+        eprintln!(
+            "SKIP {what}: this host has no usable NTS libphp + shim (install the PHP embed \
+             package and run `make php-sapi`); the served half needs the real pair"
+        );
+    }
+    host
+}
+
+/// The host probe's table is the boot's discovery order: a copy that drifted
+/// would walk a host the boot walks differently (`MB.3.62`).
+#[cfg(feature = "php")]
+#[test]
+fn the_php_probe_table_matches_the_boot() {
+    if let Err(drift) = libphp_probes::assert_matches(
+        &php_host::PROBES,
+        include_str!("../../blastit-view-php/src/discovery.rs"),
+    ) {
+        panic!("{drift}");
+    }
+}
+
+/// Starts a PHP boot with the probe's own pair, the JSON event stream and
+/// `extra` on top — the one place a PHP leg names `BLASTIT_LIBPHP`.
+#[cfg(feature = "php")]
+fn start_php(project: &Project, host: &php_host::HostPhp, extra: &[(&str, &str)]) -> Dev {
+    let libphp = host.libphp.to_string_lossy().into_owned();
+    let shim_dir = host
+        .shim
+        .parent()
+        .expect("a shim directory")
+        .to_string_lossy()
+        .into_owned();
+    let mut env: Vec<(String, String)> = vec![
+        ("BLASTIT_LIBPHP".to_owned(), libphp),
+        ("BLASTIT_PHP_SHIM_DIR".to_owned(), shim_dir),
+        ("BLASTIT_LOG_FORMAT".to_owned(), "json".to_owned()),
+    ];
+    env.extend(
+        extra
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    );
+    let pairs: Vec<(&str, &str)> = env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    Dev::start(project, &pairs)
+}
+
+/// The marker and the pid a PHP answer carries (`php:<marker>:<pid>`).
+#[cfg(feature = "php")]
+fn php_answer(response: &Response) -> Option<(&str, u32)> {
+    let rest = response.body.split("php:").nth(1)?;
+    let (marker, rest) = rest.split_once(':')?;
+    Some((marker, rest.split_whitespace().next()?.parse().ok()?))
+}
+
+/// Asserts one `200` per response, each carrying its **own** marker, and returns
+/// the pids that served them in request order: a swapped or shared answer fails.
+#[cfg(feature = "php")]
+fn assert_php_burst(what: &str, responses: &[Response]) -> Vec<u32> {
+    assert_eq!(
+        responses.len(),
+        views::WIDTH,
+        "{what}: one response per request"
+    );
+    let mut pids = Vec::with_capacity(responses.len());
+    for (index, response) in responses.iter().enumerate() {
+        assert_200(what, response);
+        let (marker, pid) = php_answer(response).unwrap_or_else(|| {
+            panic!(
+                "{what}: request {index} carried no page body: {:?}",
+                response.body
+            )
+        });
+        let expected = format!("p{index}");
+        assert_eq!(
+            marker, expected,
+            "{what}: request {index} answered for someone else: {:?}",
+            response.body
+        );
+        pids.push(pid);
+    }
+    pids
+}
+
+/// The distinct pids of a burst, sorted.
+#[cfg(feature = "php")]
+fn worker_set(pids: &[u32]) -> Vec<u32> {
+    let mut set = pids.to_vec();
+    set.sort_unstable();
+    set.dedup();
+    set
+}
+
+/// Everything a PHP worker wrote to its own stderr, read back out of the JSON
+/// `app.output` events (`logs::fail` emits each line as one event, with the
+/// quotes of `route "app"` JSON-escaped — so the sentence is never greppable in
+/// the encoded line).
+#[cfg(feature = "php")]
+fn worker_output(dev: &Dev) -> String {
+    dev.events()
+        .into_iter()
+        .filter(|event| event["event"] == "app.output")
+        .filter_map(|event| event["line"].as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Whether `pid` still has a `/proc` entry: the external witness that a retired
+/// worker is gone and not merely quiet.
+#[cfg(feature = "php")]
+fn in_proc(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// A PSR-style project: a front controller under `public/`, a static mount of
+/// the same directory, and two views with **distinct** PostgreSQL rights.
+///
+/// The store is the URL form; `a_php_split_store_renders_the_laravel_slots`
+/// covers `docs/frameworks/php/laravel.md`'s split `DB_*` form. The
+/// Laravel/Symfony `$_SERVER` shape itself is `e2e/php2shell.py`'s story.
+#[cfg(feature = "php")]
+const PHP_GRANT_MANIFEST: &str = "\
+entrypoint php \"public/index.php\"
+
+postgres $DATABASE_URL
+
+static \"/\" {
+    root \"public\"
+}
+
+view public GET \"/read\", \"/read/*\" {
+    postgres {
+        select products(id, name)
+    }
+}
+
+view admin POST \"/admin/write\" {
+    postgres {
+        select products(id, name)
+        insert products(id, name)
+    }
+}
+";
+
+/// The static asset the mount answers without a `libphp` request.
+#[cfg(feature = "php")]
+const PHP_ASSET: &str = "body{color:#0b0}\n";
+
+/// The front controller: a PSR-style router over a real PostgreSQL v3 client on
+/// the route's own dbproxy socket.
+///
+/// The wire client is deliberate, not an accident: this host and every
+/// `e2e/php-sapi` leg image ship no `pdo_pgsql`, so a PDO leg here would be
+/// unexecuted code (`RESULT.md` records the measurement). What the fixture does
+/// keep is the shape the grants are learned and matched in: every statement is a
+/// **prepared** statement with `$1` binds and never an inlined literal, so the
+/// proxy sees `$?` and never a value.
+#[cfg(feature = "php")]
+const PHP_GRANT_APP: &str = r#"<?php
+function pg_params() {
+    $url = (string) getenv('DATABASE_URL');
+    $query = str_contains($url, '?') ? substr($url, strpos($url, '?') + 1) : '';
+    $params = [];
+    foreach (explode('&', $query) as $part) {
+        if (!str_contains($part, '=')) { continue; }
+        [$name, $value] = explode('=', $part, 2);
+        $params[$name] = urldecode($value);
+    }
+    return [$params['host'] ?? '/proc/self/cwd', $params['port'] ?? '5432'];
+}
+
+function pg_read($sock, $count) {
+    $body = '';
+    while (strlen($body) < $count) {
+        $chunk = fread($sock, $count - strlen($body));
+        if ($chunk === false || $chunk === '') { throw new RuntimeException('pg: closed'); }
+        $body .= $chunk;
+    }
+    return $body;
+}
+
+function pg_until_ready($sock) {
+    while (true) {
+        $tag = pg_read($sock, 1);
+        $length = unpack('N', pg_read($sock, 4))[1];
+        $body = pg_read($sock, $length - 4);
+        if ($tag === 'E') { throw new RuntimeException('pg: ' . $body); }
+        if ($tag === 'Z') { return; }
+    }
+}
+
+function pg_connect() {
+    [$host, $port] = pg_params();
+    $sock = stream_socket_client('unix://' . $host . '/.s.PGSQL.' . $port, $errno, $errstr, 10);
+    if ($sock === false) { throw new RuntimeException('pg: ' . $errstr); }
+    $startup = pack('N', 196608) . "user\0blastit\0database\0app\0\0";
+    fwrite($sock, pack('N', strlen($startup) + 4) . $startup);
+    pg_until_ready($sock);
+    return $sock;
+}
+
+function pg($sql, ...$values) {
+    $sock = pg_connect();
+    try {
+        $body = "\0" . $sql . "\0" . pack('n', 0);
+        fwrite($sock, 'P' . pack('N', strlen($body) + 4) . $body);
+        $body = "\0\0" . pack('nn', 0, count($values));
+        foreach ($values as $value) { $body .= pack('N', strlen($value)) . $value; }
+        $body .= pack('n', 0);
+        fwrite($sock, 'B' . pack('N', strlen($body) + 4) . $body);
+        fwrite($sock, 'D' . pack('N', 6) . "P\0");
+        $body = "\0" . pack('N', 0);
+        fwrite($sock, 'E' . pack('N', strlen($body) + 4) . $body);
+        fwrite($sock, 'S' . pack('N', 4));
+        pg_until_ready($sock);
+    } finally {
+        fclose($sock);
+    }
+}
+
+$segment = basename((string) ($_SERVER['PATH_INFO'] ?? '/'));
+$status = 200;
+try {
+    if ($segment === 'read') {
+        pg('SELECT id, name FROM products WHERE id = $1', '7');
+        $payload = ['ok' => true];
+    } elseif ($segment === 'orders') {
+        pg('SELECT id, name FROM orders WHERE id = $1', '7');
+        $payload = ['ok' => true];
+    } elseif ($segment === 'columns') {
+        pg('SELECT id, name, cost FROM products WHERE id = $1', '7');
+        $payload = ['ok' => true];
+    } elseif ($segment === 'insert') {
+        pg('INSERT INTO orders (id, name) VALUES ($1, $2)', '7', 'leak');
+        $payload = ['ok' => true];
+    } elseif ($segment === 'update') {
+        pg('UPDATE products SET name = $1 WHERE id = $2', 'leak', '7');
+        $payload = ['ok' => true];
+    } elseif ($segment === 'write') {
+        pg('INSERT INTO products (id, name) VALUES ($1, $2)', '7', 'widget');
+        $payload = ['ok' => true];
+    } elseif ($segment === 'env') {
+        $payload = ['url' => (string) getenv('DATABASE_URL')];
+    } else {
+        $payload = ['app' => 'blastit-php-ok'];
+    }
+} catch (Throwable $err) {
+    $status = 500;
+    $payload = ['error' => $err->getMessage()];
+}
+http_response_code($status);
+header('Content-Type: application/json');
+echo json_encode($payload);
+"#;
+
+/// §2: the PSR front controller serves its static mount, and each view runs only
+/// its own PostgreSQL grants — a compromised public view is refused on another
+/// table's columns and on `INSERT`, and never reaches the upstream with either.
+#[cfg(feature = "php")]
+#[test]
+fn a_multi_view_php_front_controller_serves_assets_and_only_its_view_grants() {
+    use pg_upstream::PgUpstream;
+
+    let Some(host) = host_php_or_skip("PHP per-view grants") else {
+        return;
+    };
+    let server = PgUpstream::start();
+    let secret = format!("php-secret-{}", std::process::id());
+    let url = format!(
+        "postgresql://real-user:{secret}@127.0.0.1:{}/shop?sslmode=disable",
+        server.port()
+    );
+    let project = Project::new("php-grants");
+    project.write("Blastfile", PHP_GRANT_MANIFEST);
+    project.write("public/index.php", PHP_GRANT_APP);
+    project.write("public/assets/app.css", PHP_ASSET);
+
+    let mut dev = start_php(&project, &host, &[("DATABASE_URL", &url)]);
+    let dev = StopOnDrop(&mut dev);
+
+    // The static mount answers from disk: waiting on the asset is also the
+    // readiness wait, and a `libphp` request would be the bug it proves against.
+    dev.0.wait_ready("/assets/app.css");
+    let asset = dev.0.get("/assets/app.css");
+    assert_200("the static mount", &asset);
+    assert!(
+        asset.body.contains("body{color:#0b0}"),
+        "the mount must answer the file's own bytes: {:?}\n{}",
+        asset.body,
+        dev.0.text()
+    );
+    // A `.php` source under the static root is never served (`docs/frameworks/
+    // php.md`: sources are `404`), and neither static answer cost a worker.
+    let source = dev.0.get("/index.php");
+    assert_eq!(
+        source.status,
+        404,
+        "a source file under the mount's root must be refused: {:?}\n{}",
+        source.body,
+        dev.0.text()
+    );
+    // The other two PHP source spellings the static responder must never stream.
+    for name in ["/index.phtml", "/index.phar"] {
+        assert_eq!(
+            dev.0.get(name).status,
+            404,
+            "{name} is a PHP source and must be refused:\n{}",
+            dev.0.text()
+        );
+    }
+    assert!(
+        dev.0.spawned_pids("public").is_empty() && dev.0.spawned_pids("admin").is_empty(),
+        "a static answer must not fork a PHP worker:\n{}",
+        dev.0.text()
+    );
+
+    // The grant: the public view's prepared read and the admin view's insert.
+    let read = dev.0.get("/read");
+    assert_200("the public read", &read);
+    assert!(
+        read.body.contains("\"ok\":true"),
+        "the granted read must succeed: {:?}\n{}",
+        read.body,
+        dev.0.text()
+    );
+    let write = dev.0.request("POST", "/admin/write");
+    assert_200("the admin write", &write);
+    assert!(
+        write.body.contains("\"ok\":true"),
+        "the granted write must succeed: {:?}\n{}",
+        write.body,
+        dev.0.text()
+    );
+
+    // Zero credentials (§2): the rendered URL reaches the worker, the real one
+    // does not.
+    let env = dev.0.get("/read/env");
+    assert_200("the environment probe", &env);
+    assert!(
+        !env.body.contains(&secret),
+        "the view can read the real database password: {:?}",
+        env.body
+    );
+    assert!(
+        !env.body.contains("real-user"),
+        "the proxy's real user reached the view: {:?}",
+        env.body
+    );
+
+    // A compromised public view: an ungranted statement, an ungranted column, an
+    // ungranted `INSERT` and an ungranted `UPDATE` are refused at runtime, each a
+    // `500` with the documented normalised line naming this view and the proxy.
+    for (path, needle, what) in [
+        (
+            "/read/orders",
+            "FROM orders WHERE id = $?",
+            "another table's columns",
+        ),
+        (
+            "/read/columns",
+            "cost FROM products WHERE id = $?",
+            "an ungranted column",
+        ),
+        (
+            "/read/insert",
+            "INSERT INTO orders",
+            "an ungranted `INSERT`",
+        ),
+        ("/read/update", "UPDATE products", "an ungranted `UPDATE`"),
+    ] {
+        let refused = dev.0.get(path);
+        assert_eq!(
+            refused.status,
+            500,
+            "{what} must fail the request: {:?}\n{}",
+            refused.body,
+            dev.0.text()
+        );
+        // The SQLSTATE reaches the app in its error text: that is a proxy→app
+        // passthrough oracle (the page echoes `$err->getMessage()`), not a
+        // sentence any page promises — the `sql.denied` line below is the
+        // documented one.
+        assert!(
+            refused.body.contains("42501") || refused.body.contains("denied"),
+            "{what} is refused by the proxy, not by the fixture: {:?}",
+            refused.body
+        );
+        // `sql.denied …  public  db  parse  … = $?` (or the JSON stream's
+        // `"route":"public" … "proxy":"db","kind":"parse"`): the view, the proxy
+        // and the statement normalised with `$?` — never a parameter value.
+        let line = wait_for_denial(dev.0, needle, "public");
+        assert!(
+            line.contains("\"proxy\":\"db\"") && line.contains("\"kind\":\"parse\""),
+            "the denial names the proxy and the parse kind: {line}"
+        );
+        assert!(
+            !line.contains("= 7") && !line.contains("'widget'"),
+            "a parameter value reached the log: {line}"
+        );
+    }
+
+    // The denied view keeps serving its own grant and the sibling view is
+    // untouched (`docs/local.md`: "every other view is untouched").
+    assert_200("the denied view", &dev.0.get("/read"));
+    assert_200("the sibling view", &dev.0.request("POST", "/admin/write"));
+
+    // The proxy really reached a database — the granted statements forwarded,
+    // the denied ones never sent — and authenticated as the operator's user.
+    let statements = server.statements();
+    assert!(
+        statements
+            .iter()
+            .any(|statement| statement.contains("FROM products")),
+        "the read reached the upstream: {statements:?}\n{}",
+        dev.0.text()
+    );
+    assert!(
+        statements
+            .iter()
+            .any(|statement| statement.contains("INSERT INTO products")),
+        "the admin view's insert reached the upstream: {statements:?}"
+    );
+    // The public view contributed **none**: each forbidden statement carries a
+    // table or verb only it names (`orders`, `cost`, `UPDATE`), so its absence is
+    // the assertion and no literal count depends on the test's own request order.
+    assert!(
+        !statements
+            .iter()
+            .any(|statement| statement.contains("orders")
+                || statement.contains("cost")
+                || statement.contains("UPDATE")),
+        "a statement only the public view sent reached the upstream: {statements:?}"
+    );
+    assert!(
+        server
+            .startups()
+            .iter()
+            .any(|startup| startup.user == "real-user"),
+        "dbproxy authenticated with the proxy's own credential: {:?}",
+        server.startups()
+    );
+
+    // `served: HTTP/1.1 200 OK` plus the library path is the evidence line
+    // `make rs-test-php-image` and `e2e/php-sapi/run-two-package.sh` grep: a leg
+    // that skipped prints no `served:` line, so it can never be a witness.
+    println!(
+        "served: HTTP/1.1 200 OK (libphp {}) — the mount answered the asset and refused the \
+         source, `public` ran only its `$1` read, `admin` its insert, four denials were logged \
+         normalised, and no credential reached a worker",
+        host.libphp.display()
+    );
+}
+
+/// The fault-isolation route: `prefork` warms the pool's one slot, so a crash has
+/// a worker to retire and the next request has a slot to be served by.
+#[cfg(feature = "php")]
+const PHP_FAULT_MANIFEST: &str = "\
+entrypoint php \"public/index.php\"
+
+view app regex '.*' {
+    prefork
+}
+";
+
+/// The fault page: `/crash-exit` and `/crash-fatal` bail out of their own
+/// request; everything else answers. One page for both legs, because a contained
+/// bailout must not require rewriting the pinned entry between requests.
+///
+/// The busy loop is deliberate: `CLOCK_PROCESS_CPUTIME_ID` reports whole ticks,
+/// and a script that returns immediately can measure `0`.
+#[cfg(feature = "php")]
+const PHP_FAULT_APP: &str = r#"<?php
+$segment = basename((string) ($_SERVER['PATH_INFO'] ?? '/'));
+header('Content-Type: text/plain');
+if ($segment === 'crash-exit') {
+    for ($i = 0; $i < 500000; $i++) { $x = $i * $i; }
+    exit(0);
+}
+if ($segment === 'crash-fatal') {
+    for ($i = 0; $i < 500000; $i++) { $x = $i * $i; }
+    trigger_error('blastit fatal', E_USER_ERROR);
+}
+echo "blastit-php-ok\n";
+"#;
+
+/// §2: `exit()` and a fatal are contained in their own request — a `bailed`
+/// outcome, never a `200`, a `502` or a `view_died` — the pool keeps its one
+/// slot, and the next request is served by a fresh worker.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_exit_and_a_fatal_recover_without_dropping_the_pool() {
+    let Some(host) = host_php_or_skip("PHP fault isolation") else {
+        return;
+    };
+    let project = Project::new("php-faults");
+    project.write("Blastfile", PHP_FAULT_MANIFEST);
+    project.write("public/index.php", PHP_FAULT_APP);
+    // One request slot, named explicitly: the pool's size is the premise this leg
+    // reads, so it must not be whatever the default happens to be.
+    let mut dev = start_php(&project, &host, &[("BLASTIT_MAX_WORKERS", "1")]);
+    let dev = StopOnDrop(&mut dev);
+    dev.0.wait_ready("/");
+    let warmed = dev.0.settled_spawned("app");
+    assert_eq!(
+        warmed.len(),
+        1,
+        "`prefork` warms exactly the pool's one slot: {warmed:?}"
+    );
+    let mut respawned: Vec<(u32, u32)> = Vec::new();
+
+    for (path, what) in [("/crash-exit", "exit()"), ("/crash-fatal", "a fatal")] {
+        // The pool's one live slot *before* the crash: the pid to retire, read
+        // from init's own spawn/exit events rather than from the request event.
+        let before = dev.0.live_view_pids();
+        assert_eq!(
+            before.len(),
+            1,
+            "{what}: one live pool slot before the crash: {before:?}"
+        );
+        let crashed_pid = before[0];
+        let crashed = dev.0.get(path);
+        assert!(
+            crashed.status >= 500,
+            "{what}: a contained bailout is never a `2xx`: {:?}\n{}",
+            crashed.body,
+            dev.0.text()
+        );
+        assert!(
+            !crashed.body.contains("view_died"),
+            "{what}: a contained bailout leaves the worker alive, so it is not `view_died`: {:?}",
+            crashed.body
+        );
+        let event = dev.0.request_event(path);
+        assert_eq!(
+            event["status"], crashed.status,
+            "{what}: the event agrees with the wire: {event}"
+        );
+        assert!(
+            event["outcome"] == "bailed",
+            "{what}: a handler that never returned is reported as `bailed`: {event}"
+        );
+        // The slot still serves, and it is one slot: the bailed pid is gone from
+        // `/proc` and exactly one worker of this route is live. Which event names
+        // its retirement (`exited` for a clean self-retire, `retired` when the
+        // supervisor reaps it) is the scheduler's business — the live set is what
+        // "the pool kept its slot" means.
+        let after = dev.0.get("/");
+        assert_eq!(
+            after.status,
+            200,
+            "{what}: the next request must be served: {:?}\n{}",
+            after.body,
+            dev.0.text()
+        );
+        assert!(
+            after.body.contains("blastit-php-ok"),
+            "{what}: the served page is the pinned one: {:?}",
+            after.body
+        );
+        let deadline = Instant::now() + BOOT_TIMEOUT;
+        while in_proc(crashed_pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !in_proc(crashed_pid),
+            "{what}: the crashed worker {crashed_pid} is still in `/proc`, so the pool never \
+             retired it:\n{}",
+            dev.0.text()
+        );
+        let live = dev.0.live_view_pids();
+        assert_eq!(
+            live.len(),
+            1,
+            "{what}: the pool keeps exactly its one slot, live {live:?}:\n{}",
+            dev.0.text()
+        );
+        assert_ne!(
+            live[0], crashed_pid,
+            "{what}: the slot must be a fresh worker: {live:?}"
+        );
+        respawned.push((crashed_pid, live[0]));
+    }
+
+    let spawned = dev.0.settled_spawned("app").len();
+    assert!(
+        spawned >= 3,
+        "`prefork` plus one worker per crash is at least three spawns, saw {spawned}:\n{}",
+        dev.0.text()
+    );
+    // `retired pid … respawned pid …` is the second evidence line CI greps: only a
+    // leg that really crashed and really grew the slot back prints it.
+    for (retired, fresh) in &respawned {
+        println!(
+            "php faults: retired pid {retired} respawned pid {fresh} after a contained bailout"
+        );
+    }
+    println!(
+        "php faults: two contained bailouts, each answered `5xx` as `bailed`, and the next \
+         request served"
+    );
+}
+
+/// The `php2shell`/CGI route: a GET endpoint and a `form` POST endpoint, so a
+/// body that reaches `$_POST` can be told apart from one that reaches PHP's
+/// interpreter settings.
+#[cfg(feature = "php")]
+const PHP_INJECTION_MANIFEST: &str = "\
+entrypoint php \"public/index.php\"
+
+view app {
+    GET \"/*\"
+    POST \"/*\" {
+        body form
+    }
+}
+";
+
+/// What the front controller reports: the interpreter settings a CGI argument
+/// injection would rewrite, the proxy variables, and the form value it received.
+///
+/// `allow_url_include` is deliberately absent: PHP 8.0 removed the setting, so
+/// `ini_get` on it is falsy on every supported minor whatever a payload does.
+#[cfg(feature = "php")]
+const PHP_INJECTION_APP: &str = r#"<?php
+$post = $_POST;
+echo json_encode([
+    'argv' => $_SERVER['argv'] ?? [],
+    'query' => (string) ($_SERVER['QUERY_STRING'] ?? ''),
+    'proxy' => (string) getenv('HTTP_PROXY') . (string) getenv('http_proxy'),
+    'auto_prepend_file' => (string) ini_get('auto_prepend_file'),
+    'auto_append_file' => (string) ini_get('auto_append_file'),
+    'post_x' => isset($post['x']) ? $post['x'] : 'absent',
+]);
+"#;
+
+/// §2: `php2shell`'s class is request data reaching PHP's interpreter, and the
+/// embedded SAPI has no CGI argument surface at all — so a query string, headers
+/// and a form body stay data over the real SAPI.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_request_cannot_become_interpreter_arguments_or_a_proxy() {
+    let Some(host) = host_php_or_skip("PHP php2shell immunity") else {
+        return;
+    };
+    let project = Project::new("php2shell");
+    project.write("Blastfile", PHP_INJECTION_MANIFEST);
+    project.write("public/index.php", PHP_INJECTION_APP);
+    // The canary a prepend would run: the payload names this **existing** file, so
+    // a hit prints its marker before the page's own output.
+    project.write("public/prelude.php", "<?php echo \"PREPENDED-RAN\\n\";\n");
+    let prelude = project.path("public/prelude.php").display().to_string();
+    let mut dev = start_php(&project, &host, &[]);
+    let dev = StopOnDrop(&mut dev);
+    dev.0.wait_ready("/");
+
+    // The CVE-2024-4577 shape (`%AD` is a soft hyphen on Windows code pages, the
+    // byte that made a CGI query string into `-d` flags), a plain `-d` string,
+    // and the proxy/header vectors. Both `-d` vectors point `auto_prepend_file` at
+    // a file that exists, so "it never ran" is a witness and not a tautology.
+    let vectors: Vec<(String, &str)> = vec![
+        (format!("/?%ADd+-d+auto_prepend_file%3D{prelude}"), ""),
+        (format!("/?-d+auto_prepend_file%3D{prelude}"), ""),
+        (
+            "/".to_owned(),
+            "Proxy: http://127.0.0.1:1\r\nProxy-Authorization: Basic Zm9vOmJhcg==",
+        ),
+    ];
+    for (target, extra) in &vectors {
+        let headers: Vec<(&str, &str)> = if extra.is_empty() {
+            Vec::new()
+        } else {
+            extra
+                .split("\r\n")
+                .filter_map(|line| line.split_once(": "))
+                .collect()
+        };
+        let response = views::request_with(dev.0.port, "GET", target, &headers, None)
+            .unwrap_or_else(|| panic!("no answer to GET {target}:\n{}", dev.0.text()));
+        assert_200(&format!("GET {target}"), &response);
+        assert_injection_free(&response.body, target, dev.0);
+    }
+
+    // The same payload in a form body: it must arrive as `$_POST` data and never
+    // as an interpreter setting (this is also the `form` codec's proof that a
+    // buffered body reaches the front controller).
+    let form = format!("x=-d+auto_prepend_file%3D{prelude}");
+    let response = views::request_with(
+        dev.0.port,
+        "POST",
+        "/post",
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+        Some(&form),
+    )
+    .unwrap_or_else(|| panic!("no answer to the form post:\n{}", dev.0.text()));
+    assert_200("the form post", &response);
+    assert!(
+        response.body.contains("-d auto_prepend_file="),
+        "the body must reach `$_POST` as data: {:?}",
+        response.body
+    );
+    assert_injection_free(&response.body, "the form body", dev.0);
+    println!("php2shell: query string, headers and a form body stayed data over the real SAPI");
+}
+
+/// Asserts one `php2shell` answer: no `-d` argument surface, no proxy variable,
+/// and the planted prepend file never ran.
+#[cfg(feature = "php")]
+fn assert_injection_free(body: &str, what: &str, dev: &Dev) {
+    for (field, expected) in [
+        ("\"argv\":[]", "the SAPI passes no argv"),
+        ("\"proxy\":\"\"", "no `HTTP_PROXY` reaches the worker"),
+        ("\"auto_prepend_file\":\"\"", "no `auto_prepend_file`"),
+        ("\"auto_append_file\":\"\"", "no `auto_append_file`"),
+    ] {
+        assert!(
+            body.contains(field),
+            "{what}: {expected} ({field} missing): {body:?}\n{}",
+            dev.text()
+        );
+    }
+    assert!(
+        !body.contains("PREPENDED-RAN"),
+        "{what}: the payload named a file that exists and it ran: {body:?}"
+    );
+}
+
+/// The entry-pin route: a `regex` view, so every path reaches the one page.
+#[cfg(feature = "php")]
+const PHP_PLAIN_MANIFEST: &str = "\
+entrypoint php \"public/index.php\"
+
+view app regex '.*' {}
+";
+
+/// The pinned front controller's body.
+#[cfg(feature = "php")]
+const PHP_PLAIN_APP: &str = "\
+<?php
+header('Content-Type: text/plain');
+echo \"blastit-php-ok\\n\";
+";
+
+/// §6: an entry script rewritten **in place** (the same inode: `cp`, `tar -x`, a
+/// deploy script) keeps its size but moves `st_ctime`, so the boot's record is
+/// gone — the route refuses with the documented sentence until a restart records
+/// what is there now.
+///
+/// The decoy is the same length as the page it replaces, so `st_size` alone
+/// cannot catch it and `st_ctime` is what must. The `O_PATH` descriptor that
+/// makes a freed inode number un-reusable has its own witness in
+/// `blastit-view-php`'s unit tests.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_entry_rewritten_in_place_is_refused_until_a_restart() {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(host) = host_php_or_skip("PHP entry pin") else {
+        return;
+    };
+    let project = Project::new("php-entry-pin");
+    project.write("Blastfile", PHP_PLAIN_MANIFEST);
+    let entry = project.write("public/index.php", PHP_PLAIN_APP);
+    let pinned = std::fs::metadata(&entry).expect("the entry's metadata");
+    let mut dev = start_php(&project, &host, &[]);
+    let dev = StopOnDrop(&mut dev);
+    dev.0.wait_ready("/users/42");
+    let served = dev.0.get("/users/42");
+    assert_200("an untouched entry", &served);
+    assert!(
+        served.body.contains("blastit-php-ok"),
+        "an untouched tree serves its own entry: {:?}",
+        served.body
+    );
+
+    // The rewrite: the **same** inode, the same size, another script. `cp` and
+    // `tar -x` write through the existing file; nothing is renamed.
+    let original = std::fs::read(&entry).expect("the recorded page");
+    let mut decoy = String::from("<?php echo \"IN-PLACE-DECOY-RAN\\n\"; //");
+    while decoy.len() < original.len() {
+        decoy.push('x');
+    }
+    assert_eq!(
+        decoy.len(),
+        original.len(),
+        "the decoy must be the same length, or st_size alone would catch it"
+    );
+    // Cross the kernel's coarse timestamp tick before rewriting: `st_ctime`
+    // advances one tick at a time, so a same-size rewrite inside the tick the
+    // boot stamped would be invisible to any metadata record.
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&entry, &decoy).expect("rewriting the entry in place");
+    let rewritten = std::fs::metadata(&entry).expect("the rewritten entry's metadata");
+    assert_eq!(
+        (rewritten.dev(), rewritten.ino()),
+        (pinned.dev(), pinned.ino()),
+        "a write in place must keep the inode"
+    );
+    assert_eq!(
+        rewritten.len(),
+        pinned.len(),
+        "and it must keep st_size, so only st_ctime can catch it"
+    );
+    // The premise the refusal rests on, stated rather than inferred from a `500`.
+    assert_ne!(
+        (rewritten.ctime(), rewritten.ctime_nsec()),
+        (pinned.ctime(), pinned.ctime_nsec()),
+        "a write in place must move st_ctime, or this leg measures the clock tick"
+    );
+
+    let refused = dev.0.get("/users/42");
+    assert!(
+        refused.status >= 500,
+        "an entry rewritten in place must be refused, not served: {:?}\n{}",
+        refused.body,
+        dev.0.text()
+    );
+    assert!(
+        !refused.body.contains("IN-PLACE-DECOY-RAN"),
+        "the in-place decoy ran: the pin compared identity only, not size/ctime: {:?}",
+        refused.body
+    );
+    assert!(
+        !refused.body.contains("blastit-php-ok"),
+        "the refusal answered with the app's own body: {:?}",
+        refused.body
+    );
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    loop {
+        let logged = worker_output(dev.0);
+        if logged.contains(&entry.display().to_string())
+            && logged.contains("changed since this boot recorded it")
+            && logged.contains("restart blastit to run the file as it is now")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the worker never named the entry that moved and the fix: {logged:?}\n{}",
+            dev.0.text()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // The fix the sentence names: put the page back (in place) and restart, so
+    // the boot records what is there now. That is the deploy/restore path.
+    std::fs::write(&entry, PHP_PLAIN_APP).expect("restoring the page in place");
+    dev.0.stop();
+    let mut fresh = start_php(&project, &host, &[]);
+    let fresh = StopOnDrop(&mut fresh);
+    fresh.0.wait_ready("/users/42");
+    let again = fresh.0.get("/users/42");
+    assert_200("the restored page", &again);
+    assert!(
+        again.body.contains("blastit-php-ok"),
+        "a restart must serve the file as it is now: {:?}\n{}",
+        again.body,
+        fresh.0.text()
+    );
+    println!(
+        "php entry pin: served, refused in place with the documented sentence, and served again \
+         after a restart"
+    );
+}
+
+/// The concurrency route: `prefork` warms a worker, so the measured window has
+/// nothing cold inside it.
+#[cfg(feature = "php")]
+const PHP_PARALLEL_MANIFEST: &str = "\
+entrypoint php \"public/index.php\"
+
+view app regex '.*' {
+    prefork
+}
+";
+
+/// 200 ms in `usleep`, then this request's own marker and the pid that served it
+/// — so a swapped response and a shared process are both detectable from the
+/// body alone.
+#[cfg(feature = "php")]
+const PHP_PARALLEL_APP: &str = r#"<?php
+$marker = $_GET['m'] ?? 'none';
+usleep(200000);
+header('Content-Type: text/plain');
+echo 'php:' . $marker . ':' . getmypid() . "\n";
+"#;
+
+/// §2/§4: four concurrent 200 ms requests to one PHP route finish under the
+/// serialized control's own floor, one process each — and the warm workers are
+/// reused, so no fork, `dlopen` or `php_module_startup` hides inside the window.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_pool_serves_four_requests_at_once() {
+    let Some(host) = host_php_or_skip("PHP concurrency") else {
+        return;
+    };
+    let project = Project::new("php-parallel");
+    project.write("Blastfile", PHP_PARALLEL_MANIFEST);
+    project.write("public/index.php", PHP_PARALLEL_APP);
+    let paths: Vec<String> = (0..views::WIDTH)
+        .map(|index| format!("/php?m=p{index}"))
+        .collect();
+
+    // The control: one live request slot, four requests one at a time.
+    let mut control = start_php(&project, &host, &[("BLASTIT_MAX_WORKERS", "1")]);
+    let control = StopOnDrop(&mut control);
+    control.0.wait_event("ready");
+    let started = Instant::now();
+    let mut control_bodies = Vec::with_capacity(views::WIDTH);
+    for path in &paths {
+        control_bodies.push(control.0.get(path));
+    }
+    let control_wall = started.elapsed();
+    let control_pids = assert_php_burst("php control", &control_bodies);
+    assert_eq!(
+        worker_set(&control_pids).len(),
+        1,
+        "with BLASTIT_MAX_WORKERS=1 one worker serves all four serially, saw {control_pids:?}"
+    );
+    assert!(
+        control_wall >= views::CONTROL_FLOOR,
+        "the serialized control took {control_wall:?}, below the {:?} floor the fixture's own \
+         sleeps set — the parallel leg would prove nothing",
+        views::CONTROL_FLOOR
+    );
+    // Stopping the control hands the one-boot-at-a-time slot to the measured
+    // leg: `StopOnDrop` calls `Dev::stop`, which releases it.
+    drop(control);
+
+    // The measured boot: four workers, one of them warm.
+    let mut boot = start_php(
+        &project,
+        &host,
+        &[
+            ("BLASTIT_MAX_WORKERS", "4"),
+            ("BLASTIT_MAX_VIEW_PROCESSES", "8"),
+        ],
+    );
+    let boot = StopOnDrop(&mut boot);
+    boot.0.wait_event("ready");
+
+    // The warm-up burst: every worker's `dlopen` + `php_module_startup` is paid
+    // here, not inside the measured window.
+    let (_warm_wall, warm_bodies) = burst(boot.0.client(), &paths);
+    let warm_workers = worker_set(&assert_php_burst("php warm-up", &warm_bodies));
+    assert_eq!(
+        warm_workers.len(),
+        views::WIDTH,
+        "the warm-up burst is four wide: it must have used four processes, saw {warm_workers:?}"
+    );
+    let spawned_before = boot.0.settled_spawned("app");
+
+    let (wall, bodies) = burst(boot.0.client(), &paths);
+    let pids = assert_php_burst("php measured", &bodies);
+    assert_eq!(
+        worker_set(&pids),
+        warm_workers,
+        "the measured window must reuse the four warm workers {warm_workers:?}, saw {pids:?}"
+    );
+    assert_eq!(
+        boot.0.settled_spawned("app"),
+        spawned_before,
+        "no `process.spawned` may appear inside the measured window"
+    );
+    assert!(
+        wall + views::CONTROL_MARGIN <= control_wall,
+        "the parallel leg took {wall:?} against a serialized control of {control_wall:?}: it must \
+         be at least {:?} faster (an absolute millisecond ceiling is deliberately not asserted: \
+         it caps the host, not the pool)",
+        views::CONTROL_MARGIN
+    );
+    println!(
+        "php: serialized control {control_wall:?} (BLASTIT_MAX_WORKERS=1), parallel {wall:?} \
+         over {} warm process(es)",
+        spawned_before.len()
+    );
+}
+
+/// §6 sizing: `BLASTIT_MAX_VIEW_PROCESSES` really bounds one view's live
+/// processes — four concurrent 200 ms requests under a cap of two run on exactly
+/// two processes, in two waves, and no fifth worker is hidden by the fan-in.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_view_process_cap_bounds_the_pool() {
+    let Some(host) = host_php_or_skip("PHP view-process cap") else {
+        return;
+    };
+    let project = Project::new("php-view-cap");
+    project.write("Blastfile", PHP_PARALLEL_MANIFEST);
+    project.write("public/index.php", PHP_PARALLEL_APP);
+    let paths: Vec<String> = (0..views::WIDTH)
+        .map(|index| format!("/php?m=p{index}"))
+        .collect();
+    let mut dev = start_php(
+        &project,
+        &host,
+        &[
+            ("BLASTIT_MAX_WORKERS", "4"),
+            ("BLASTIT_MAX_VIEW_PROCESSES", "2"),
+        ],
+    );
+    let dev = StopOnDrop(&mut dev);
+    dev.0.wait_event("ready");
+
+    let (wall, bodies) = burst(dev.0.client(), &paths);
+    let workers = worker_set(&assert_php_burst("php cap", &bodies));
+    assert_eq!(
+        workers.len(),
+        2,
+        "BLASTIT_MAX_VIEW_PROCESSES=2 must bound the pool to two processes, saw {workers:?}"
+    );
+    assert_eq!(
+        dev.0.settled_spawned("app"),
+        workers,
+        "init must have forked exactly the two workers that answered, no more"
+    );
+    // The fixture's own sleep makes the cap visible in time as well as in pids:
+    // two processes cannot answer four 200 ms requests in one wave.
+    assert!(
+        wall >= Duration::from_millis(400),
+        "four 200 ms requests over a two-process cap took {wall:?}, inside one wave"
+    );
+    println!(
+        "php cap: BLASTIT_MAX_VIEW_PROCESSES=2 served four concurrent requests over {workers:?} \
+         in {wall:?}"
+    );
+}
+
+/// `docs/frameworks/php/laravel.md`'s split store: the framework reads `DB_*`,
+/// not a URL, so the slots are what has to render.
+#[cfg(feature = "php")]
+const PHP_SPLIT_MANIFEST: &str = "\
+entrypoint php \"public/index.php\"
+
+postgres {
+    host $DB_HOST
+    port $DB_PORT
+    user $DB_USERNAME
+    password $DB_PASSWORD
+    database $DB_DATABASE
+}
+
+view app GET \"/read\" {
+    postgres {
+        select products(id, name)
+    }
+}
+";
+
+/// A Laravel-shaped reader: it parses what the store rendered — no URL, no
+/// `pdo_pgsql` — and asks the proxy one granted, unparameterized statement.
+#[cfg(feature = "php")]
+const PHP_SPLIT_APP: &str = r#"<?php
+function slot($name) { return (string) getenv($name); }
+function drain($sock, &$payload) {
+    while (($tag = fread($sock, 1)) !== false && $tag !== '') {
+        $length = unpack('N', fread($sock, 4))[1];
+        $body = $length > 4 ? fread($sock, $length - 4) : '';
+        if ($tag === 'E') { $payload['error'] = $body; }
+        if ($tag === 'Z') { return; }
+        $payload['tags'] .= $tag;
+    }
+}
+$payload = [
+    'host' => slot('DB_HOST'),
+    'port' => slot('DB_PORT'),
+    'database' => slot('DB_DATABASE'),
+    'user' => slot('DB_USERNAME'),
+    'password' => slot('DB_PASSWORD'),
+];
+$sock = @stream_socket_client(
+    'unix://' . slot('DB_HOST') . '/.s.PGSQL.' . slot('DB_PORT'), $errno, $errstr, 10);
+if ($sock === false) {
+    $payload['error'] = $errstr;
+} else {
+    $startup = pack('N', 196608) . "user\0" . slot('DB_USERNAME')
+        . "\0database\0" . slot('DB_DATABASE') . "\0\0";
+    fwrite($sock, pack('N', strlen($startup) + 4) . $startup);
+    $payload['tags'] = '';
+    drain($sock, $payload);
+    $payload['tags'] = '';
+    $sql = 'SELECT id, name FROM products';
+    fwrite($sock, 'Q' . pack('N', strlen($sql) + 5) . $sql . "\0");
+    drain($sock, $payload);
+    $payload['query_ok'] = str_contains($payload['tags'], 'T')
+        && str_contains($payload['tags'], 'C') ? 'yes' : 'no';
+    fclose($sock);
+}
+header('Content-Type: application/json');
+echo json_encode($payload);
+"#;
+
+/// §2: the split `DB_*` store renders the local endpoint and a scoped credential,
+/// and one granted statement runs through those slots — the runtime witness for
+/// `docs/frameworks/php/laravel.md`'s store block.
+#[cfg(feature = "php")]
+#[test]
+fn a_php_split_store_renders_the_laravel_slots() {
+    use pg_upstream::PgUpstream;
+
+    let Some(host) = host_php_or_skip("PHP split store") else {
+        return;
+    };
+    let server = PgUpstream::start();
+    let secret = format!("split-secret-{}", std::process::id());
+    let project = Project::new("php-split-store");
+    project.write("Blastfile", PHP_SPLIT_MANIFEST);
+    project.write("public/index.php", PHP_SPLIT_APP);
+    let port = server.port().to_string();
+    let mut dev = start_php(
+        &project,
+        &host,
+        &[
+            ("DB_HOST", "127.0.0.1"),
+            ("DB_PORT", &port),
+            ("DB_USERNAME", "real-user"),
+            ("DB_PASSWORD", &secret),
+            ("DB_DATABASE", "shop"),
+        ],
+    );
+    let dev = StopOnDrop(&mut dev);
+    dev.0.wait_ready("/read");
+
+    let answer = dev.0.get("/read");
+    assert_200("the split-store read", &answer);
+    // The slots a framework reads: the socket directory, the proxy's port, the
+    // configured database — and no operator credential (json_encode escapes `/`).
+    assert!(
+        answer.body.contains("\"host\":\"\\/proc\\/self\\/cwd\""),
+        "`DB_HOST` is the route's socket directory: {:?}\n{}",
+        answer.body,
+        dev.0.text()
+    );
+    assert!(
+        answer.body.contains("\"database\":\"shop\""),
+        "`DB_DATABASE` is the store's database: {:?}",
+        answer.body
+    );
+    assert!(
+        !answer.body.contains(&secret) && !answer.body.contains("real-user"),
+        "the real credential reached the view: {:?}",
+        answer.body
+    );
+    assert!(
+        answer.body.contains("\"query_ok\":\"yes\"") && !answer.body.contains("\"error\""),
+        "the granted statement ran through the rendered slots: {:?}\n{}",
+        answer.body,
+        dev.0.text()
+    );
+    // It ran on the upstream this fixture declared, so the slots were the route's.
+    assert!(
+        server
+            .statements()
+            .iter()
+            .any(|statement| statement.contains("FROM products")),
+        "the split-store statement reached the upstream: {:?}",
+        server.statements()
+    );
+    println!(
+        "php split store: DB_HOST=/proc/self/cwd, DB_DATABASE=shop, a scoped credential, and one \
+         granted statement through the rendered slots"
     );
 }

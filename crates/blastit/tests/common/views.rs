@@ -1,10 +1,9 @@
-//! One loopback HTTP client, one request burst and the calibration both
-//! concurrency suites read, kept once.
+//! One loopback HTTP client, one request burst and the calibration the
+//! concurrency legs read, kept once.
 //!
-//! `crates/blastit/tests/e2e_dev.rs` (the threaded WSGI leg) and
-//! `crates/blastit/tests/critical_parallel_views.rs` (the PHP legs) measure the
-//! same promise — four 200 ms requests at once against a serialized control
-//! measured in the same function — so the numbers and the client live here
+//! `crates/blastit/tests/e2e_dev.rs` measures the same promise for both
+//! runtimes — four 200 ms requests at once against a serialized control measured
+//! in the same function — so the numbers, the client and its parsing live here
 //! instead of in two copies that drift. No mock: every request is a real
 //! `TcpStream` to a real boot, and a response only counts when its status line
 //! parses.
@@ -45,13 +44,44 @@ pub struct Response {
 /// mid-body, both stay `None` so a wait retries instead of grading a status the
 /// server never sent.
 pub fn request(port: u16, method: &str, path: &str) -> Option<Response> {
+    request_with(port, method, path, &[], None)
+}
+
+/// One request that also carries `headers` and an optional body, or `None` while
+/// the boot does not answer.
+///
+/// The adversarial legs (`php2shell`, header smuggling) need to put bytes where
+/// a CGI handler might mistake them for arguments, so the client — not the case —
+/// owns the framing: `Host`, `Content-Length` and `Connection: close` are written
+/// here, and everything else is the caller's.
+///
+/// A body the scheduler refuses past its cap is answered before the client has
+/// finished writing, so a write error is that answer arriving early and not a
+/// harness failure: the response is read either way.
+pub fn request_with(
+    port: u16,
+    method: &str,
+    target: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> Option<Response> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(REQUEST_TIMEOUT)).ok()?;
-    write!(
-        stream,
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-    )
-    .ok()?;
+    let mut head = format!("{method} {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+    for (name, value) in headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    if let Some(body) = body {
+        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    if let Some(body) = body {
+        let _ = stream.write_all(body.as_bytes());
+    }
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).ok()?;
     parse(&String::from_utf8_lossy(&raw))

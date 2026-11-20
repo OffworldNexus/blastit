@@ -292,9 +292,9 @@ fn app_output(stdout: &str) -> String {
 /// Init emits `ready` after `bind_tcp` and the forks, so it is the boot
 /// answering for itself: a boot that refuses at a gate never writes it, whereas
 /// `!listening(port)` measured after the child exited is also satisfied by a
-/// boot that bound and *then* exited (`MB.3.48`'s `ready`-partition —
-/// `critical_php_embed`'s `Boot::await_boot` — is the same rule, and the same
-/// reason a foreign listener on an ephemeral port cannot be trusted).
+/// boot that bound and *then* exited (`MB.3.48`'s `ready`-partition, which the
+/// PHP legs of `e2e_dev.rs` follow too, and the same reason a foreign listener
+/// on an ephemeral port cannot be trusted).
 ///
 /// Both formats are read: JSON records it as `"event":"ready"`, and pretty
 /// spells it in the event-name column (`… INFO  ready       …`) with no JSON at

@@ -100,6 +100,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `REMOTE_ADDR` carries a port | it is a bare IP; the peer's port is `REMOTE_PORT` |
 | `request.is_secure()` is false behind TLS | `BLASTIT_TRUSTED_PROXIES` does not name the edge |
 | a variable the app expected is gone | `BLASTIT_*`, the proxy inputs and `BLASTIT_ENV_STRIP` are removed |
+| every request is a `500` naming an entry script | the file changed after the boot pinned it — `… changed since this boot recorded it …` then `restart blastit to run the file as it is now`: a save in place (or a restore) is not enough, restart Blastit so it records the file as it is now ([PHP](frameworks/php/index.md)) |
 
 ## Rootless and memory
 

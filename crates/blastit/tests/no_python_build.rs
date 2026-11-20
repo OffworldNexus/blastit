@@ -195,7 +195,7 @@ fn a_manifest_asking_for_the_retired_external_php_pool_is_refused_by_name() {
 /// back would name the wrong artifact, and `app_rule` would send a PHP developer
 /// to set `BLASTIT_APP`. The WSGI case above stays the denied twin: same
 /// harness, same held port, capability gate's sentence. The served case — a host
-/// with a usable library — is `critical_php_backend.rs`'s.
+/// with a usable library — is the PHP legs of `e2e_dev.rs`.
 #[test]
 fn a_php_only_manifest_is_refused_by_the_php_discovery_gate() {
     let scratch = Scratch::new("php", PHP_ONLY);

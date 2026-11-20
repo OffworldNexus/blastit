@@ -1,11 +1,11 @@
 //! The `LIBPHP_PROBES` drift check (`MB.3.62`).
 //!
-//! Both PHP suites probe for a usable `libphp` **themselves** — independent of
-//! the code under test, which is what lets them tell "this host has no PHP" from
-//! "the boot lost the PHP it has" — and that independence is a copy: each suite
+//! The PHP legs probe for a usable `libphp` **themselves** — independent of the
+//! code under test, which is what lets them tell "this host has no PHP" from
+//! "the boot lost the PHP it has" — and that independence is a copy: the leg
 //! carries `stage0.rs`'s discovery order as its own table. A copy is a claim that
-//! can drift, so both suites read `stage0.rs`'s source at compile time and
-//! compare the two tables entry by entry: a change to either side then fails the
+//! can drift, so `e2e_dev.rs` reads the boot's source at compile time and
+//! compares the two tables entry by entry: a change to either side then fails the
 //! suite that would otherwise probe a host differently from the boot.
 //!
 //! The parser is deliberately small and deliberately loud. It reads the
@@ -123,129 +123,4 @@ pub fn assert_matches(probes: &[(&str, Option<&str>)], source: &str) -> Result<(
         "the suite's probe table has drifted from stage0.rs's `{DECLARATION}`: {detail}\n  \
          stage0.rs: {declared:?}\n  suite:     {copied:?}"
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{assert_matches, probes_in};
-
-    /// The declaration the suites' tables are copies of, read at compile time.
-    const STAGE0: &str = include_str!("../../../blastit-view-php/src/discovery.rs");
-
-    /// The table `critical_php_embed.rs` and `critical_php_backend.rs` both
-    /// carry, written out here so this module's own tests have an oracle that is
-    /// not read out of `stage0.rs`: 17 entries, minor-major, each minor's own
-    /// spellings before the next minor's, and the unversioned `libphp.so` last
-    /// with no directory constraint.
-    const EXPECTED: [(&str, Option<&str>); 17] = [
-        ("libphp8.6.so", None),
-        ("libphp-8.6.so", None),
-        ("libphp86.so", None),
-        ("libphp.so", Some("php86")),
-        ("libphp8.5.so", None),
-        ("libphp-8.5.so", None),
-        ("libphp85.so", None),
-        ("libphp.so", Some("php85")),
-        ("libphp8.4.so", None),
-        ("libphp-8.4.so", None),
-        ("libphp84.so", None),
-        ("libphp.so", Some("php84")),
-        ("libphp8.3.so", None),
-        ("libphp-8.3.so", None),
-        ("libphp83.so", None),
-        ("libphp.so", Some("php83")),
-        ("libphp.so", None),
-    ];
-
-    /// The reader finds every entry, the per-minor constraints included, and the
-    /// final unconstrained `libphp.so` stays unconstrained.
-    #[test]
-    fn the_declaration_reads_as_seventeen_ordered_probes() {
-        let declared = probes_in(STAGE0).expect("stage0.rs's LIBPHP_PROBES reads");
-        assert_eq!(declared.len(), EXPECTED.len(), "{declared:?}");
-        assert_eq!(
-            declared.last().map(|step| step.1.as_deref()),
-            Some(None),
-            "the final entry is the unconstrained `libphp.so` fallback: {declared:?}"
-        );
-        assert_matches(&EXPECTED, STAGE0).expect("stage0.rs's order");
-    }
-
-    /// The reader is a reader, not a rubber stamp: a declaration it cannot parse
-    /// is an error, never an empty list that matches an empty table.
-    #[test]
-    fn an_unreadable_declaration_is_an_error() {
-        assert!(probes_in("fn nothing_here() {}").is_err());
-        assert!(probes_in("const LIBPHP_PROBES: [Probe; 0] = [];").is_err());
-        assert!(
-            probes_in("const LIBPHP_PROBES: [P; 1] = [\n    P { name: \"libphp.so\" },\n];")
-                .is_err(),
-            "a probe with no `per_minor_dir` must not read as `None`"
-        );
-    }
-
-    /// The green assertion above is only worth anything if a change goes red, so
-    /// each class of drift is proved on the **real** declaration, mutated: a
-    /// dropped per-minor constraint, the fallback turned into a constraint, and
-    /// two entries out of order.
-    #[test]
-    fn a_changed_entry_is_reported_at_its_index() {
-        let dropped_constraint = STAGE0.replacen(CONSTRAINT_SOME_86, CONSTRAINT_NONE, 1);
-        assert_ne!(
-            dropped_constraint, STAGE0,
-            "the source states `Some(\"php86\")`"
-        );
-        assert!(
-            assert_matches(&EXPECTED, &dropped_constraint)
-                .is_err_and(|drift| drift.contains("entry 3")),
-            "`libphp.so` outside `/usr/lib/php86` must be entry 3's difference"
-        );
-
-        let fallback_constrained = constrain_the_fallback(STAGE0);
-        assert_ne!(
-            fallback_constrained, STAGE0,
-            "the fallback is unconstrained"
-        );
-        assert!(
-            assert_matches(&EXPECTED, &fallback_constrained)
-                .is_err_and(|drift| drift.contains("entry 16")),
-            "a constraint on the final `libphp.so` must be entry 16's difference"
-        );
-
-        let reordered = STAGE0
-            .replacen("name: \"libphp8.6.so\",", "name: \"libphp86.so\",", 1)
-            .replacen("name: \"libphp-8.6.so\",", "name: \"libphp8.6.so\",", 1);
-        assert_ne!(
-            reordered, STAGE0,
-            "the first two entries are dotted then hyphenated"
-        );
-        assert!(
-            assert_matches(&EXPECTED, &reordered).is_err_and(|drift| drift.contains("entry 0")),
-            "a swapped pair must be reported at its first index"
-        );
-    }
-
-    /// The `per_minor_dir` field of the newest per-minor entry, as `stage0.rs`
-    /// spells it.
-    const CONSTRAINT_SOME_86: &str = "per_minor_dir: Some(\"php86\")";
-
-    /// The same field unconstrained.
-    const CONSTRAINT_NONE: &str = "per_minor_dir: None";
-
-    /// `source` with the constraint on its **last** `name: "libphp.so"` turned
-    /// into a per-minor one — the fallback entry, changed but still readable.
-    fn constrain_the_fallback(source: &str) -> String {
-        let at = source
-            .rfind("name: \"libphp.so\"")
-            .expect("the last probe is the unversioned `libphp.so`");
-        let tail = &source[at..];
-        let field = tail
-            .find(CONSTRAINT_NONE)
-            .expect("the fallback states its constraint");
-        let mut out = String::with_capacity(source.len());
-        out.push_str(&source[..at + field]);
-        out.push_str("per_minor_dir: Some(\"php83\")");
-        out.push_str(&source[at + field + CONSTRAINT_NONE.len()..]);
-        out
-    }
 }

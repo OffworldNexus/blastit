@@ -164,13 +164,13 @@ RUN extra=""; \
 #   (required by target/debug/blastit)
 #
 # — and raising the leg's base would prove nothing about the distros the shim is
-# shipped for. The musl legs compile and run the same suites inside
+# shipped for. The musl legs compile and run the same PHP legs inside
 # `alpine` (`MB.3.59`): `BLASTIT_LIBPHP` in this image names the distro's own
 # package path, so the served half of all of them is re-proved where the musl
 # shim is built.
 #
 # `PHP_SAPI_SUITES=0` (`matrix.suites == "false"`) skips the build altogether:
-# a leg whose pair the boot refuses cannot serve, so its suites would only take
+# a leg whose pair the boot refuses cannot serve, so its legs would only take
 # their refusal branch.
 #
 # A musl Rust binary defaults to static-pie, and a static musl binary cannot
@@ -182,7 +182,7 @@ RUN extra=""; \
 # RUN would report a green leg with no binaries.
 RUN bash -euo pipefail -c '\
         if [ "${PHP_SAPI_SUITES:-1}" != "1" ]; then \
-            echo "PHP_SAPI_SUITES=${PHP_SAPI_SUITES}: this leg does not build the protected suites (MB.3.58)"; \
+            echo "PHP_SAPI_SUITES=${PHP_SAPI_SUITES}: this leg does not build the PHP legs (MB.3.58)"; \
             : > /src/target/php-suite-executables; \
             exit 0; \
         fi; \
@@ -196,19 +196,19 @@ RUN bash -euo pipefail -c '\
             fi; \
             export LIBCLANG_PATH=$(dirname "$clang_lib"); \
         fi; \
-        RUSTFLAGS="$extra" cargo test --locked -p blastit --test critical_php_backend --test critical_php_embed --no-run \
+        RUSTFLAGS="$extra" cargo test --locked -p blastit --test e2e_dev --no-default-features --features php,static --no-run \
             2>&1 | tee /dev/stderr \
             | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\\1/p" \
             > /src/target/php-suite-executables; \
         count=$(wc -l < /src/target/php-suite-executables); \
-        if [ "$count" -ne 2 ]; then \
-            echo "expected 2 suite executables, recorded $count:" >&2; \
+        if [ "$count" -ne 1 ]; then \
+            echo "expected 1 suite executable (e2e_dev), recorded $count:" >&2; \
             cat /src/target/php-suite-executables >&2; \
             exit 1; \
         fi' \
  && chmod -R a+rX /src/target/php-suite-executables /src/target/php-sapi
 
-# What `make rs-test-php-image` runs the suites against: this image's own pair —
+# What `make rs-test-php-image` runs the PHP legs against: this image's own pair —
 # the NTS `libphp` its package installed and the shim `make php-sapi` left at
 # `/src/target/php-sapi`. They are the same two files the probe just loaded, so a
 # leg cannot prove one pair and run the suites against another.

@@ -4280,3 +4280,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T19:34 [MB.56.3.2.1] (lead) REVIEW FIX 2 (ux): (F1) docs/reference/log-events.md:104 environment cell contradicts what the test proves; (F2) settings.md has no BLASTIT_PYTHON row + trouble
 - 2026-11-20T19:34 [MB.56.3.2.1] (lead) REVIEW FIX 2 (ux): (F1) docs/reference/log-events.md:104 environment cell contradicts the test; (F2) settings.md lacks a BLASTIT_PYTHON row and troubleshooting 
 - 2026-11-20T19:43 [MB.56.3.2.1] (lead) status active -> done
+- 2026-11-20T19:43 [MB.56.3.2.1] (lead) commit ec0e19c
+- 2026-11-20T19:43 [MB.56.3.2.2] (lead) status ready -> active
+- 2026-11-20T19:43 [MB.56.3.2.2] (lead) attempt 1/3 started
+- 2026-11-20T19:43 [MB.56.3.2.2] (lead) base ec0e19c3dc34b0084b6d9c53d3d933caa924b1dc
+- 2026-11-20T19:50 [MB.56.3.5] (lead) ALSO (from MB.56.3.2.2): Makefile PHP_SUITE_ARGS/rs-test-php*, e2e/php-sapi/*, .github/workflows/php-sapi.yml and scripts/platform_matrix.py still name the dele
+- 2026-11-20T19:50 [MB.56.3.2.3] (lead) CAP: e2e_dev.rs may reach <=3,000 LOC (final tests/ total <=6,000, documented as a deliberate overage in MB.56.3/RESULT.md).
+- 2026-11-20T19:52 [MB.56.3.2.2] (lead) edited fields
+- 2026-11-20T19:52 [MB.56.3.4] (lead) MUST COVER (from MB.56.3.2.2 review): PHP boot refusals that lost their only tests - unsupported minor (Debian 12 ships 8.2; sentence names the supported set), 
+- 2026-11-20T19:52 [MB.56.3.3] (lead) MUST COVER (from MB.56.3.2.2 review): 'blastit check validates the libphp gate/preflight' promised by docs/frameworks/php/{index,laravel,symfony}.md - the old c
+- 2026-11-20T19:52 [MB.56.3.3] (lead) ALSO (from MB.56.3.2.2 arch review): critical_dev_reload.rs:2473-2545 keeps its own drifting host-PHP probe (walks only [85,84,83], no libphp8.6) - when absorbi
+- 2026-11-20T19:52 [MB.56.3.4] (lead) EXTENDED MUST-COVER list (arch, MB.56.3.2.2): libphp not-a-library/package sentence; ZTS refusal (static .dynsym, zero stage-0 dlopen canary); unsupported-minor
+- 2026-11-20T19:59 [MB.56.3.2.2] (lead) status active -> done

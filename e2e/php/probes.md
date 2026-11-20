@@ -16,13 +16,18 @@ as a claim about `blastit-php-sapi`.
 
 ### 4.7 The binary refusal matrix
 
-**R8 single-owner rule:** Every row has **exactly one** authoritative Rust test
-(`Owner file::fn`) that asserts its binary outcome; `E` names the supporting
-`e2e/php2shell.py` probe (`E1`–`E17`, `E19`–`E25`: 24 client-reachable probes; row 18 is
-an internal builder-API `500` guard with no client HTTP path and is marked `—`, excluded
-from `PROBES`).
+**R8 single-owner rule, as it stands after `ADR-0010`:** the authoritative
+executable witness of every row is the `e2e/php2shell.py` probe named in its `E`
+column (`E1`–`E17`, `E19`–`E25`: 24 client-reachable probes; row 18 is an internal
+builder-API `500` guard with no client HTTP path and is marked `—`, excluded from
+`PROBES`). The `Owner` column is **historical**: it names the FastCGI-era Rust
+test that asserted the same observable, and that suite
+(`critical_fastcgi_lockdown`) was deleted with the FastCGI param channel
+(`MB.3.17`, swept again by `MB.56`). No `critical_fastcgi_lockdown::` test exists
+today — a row's owner is its probe, and `--self-test` keeps the matrix and
+`PROBES` in step.
 
-| # | E | Attack (`php2shell` #) | Bytes where | Blastit handling | Outcome | Owner `file::fn` | P |
+| # | E | Attack (`php2shell` #) | Bytes where | Blastit handling | Outcome | Design-era test (deleted) | P |
 |---|---|---|---|---|---|---|---|
 | 1 | E1 | `SCRIPT_FILENAME` override (1) | path `/app/elsewhere/evil`; header `SCRIPT_FILENAME` | path → `PATH_INFO`/`REQUEST_URI`; param pinned | `200` (`script_filename` == entry) | `critical_fastcgi_lockdown::script_filename_is_pinned_ignoring_path_and_header` | P1 |
 | 2 | E2 | `SCRIPT_FILENAME` traversal (2, 5) | `../`, `/%2e%2e/`, `..` after script | static head gate → `400`; param pinned | `400` | `conformance_static::malformed_path` (dispatch-level 400; `critical_static_resolve` asserts `StaticOutcome`, not HTTP codes) | P1 |

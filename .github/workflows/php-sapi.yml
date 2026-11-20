@@ -22,17 +22,16 @@
 # request, and a `readelf -d` check that the shim carries no `DT_NEEDED` on
 # libphp.
 #
-# The two protected PHP suites (`MB.3.39`) then run against that leg's pair:
-# `crates/blastit/tests/critical_php_backend.rs` and
-# `crates/blastit/tests/critical_php_embed.rs` boot `blastit` for real, which the
-# shim-level probe above cannot (no view fork, no `view.chan`, no scheduler
-# `cpu_ns`, no respawn). They are also where the security checklist is evinced
-# per leg — the worker's environment (M-1), the per-route uid and the real
-# `SeccompRole::View` (M-2/M-3), `CLOCK_PROCESS_CPUTIME_ID` reaching `cpu_ns`
-# (M-4), `dlopen` of a distro-signed libphp with no compatibility shim (M-5) and
-# the effective INI values read back with `ini_get` (M-6). The guard step after
-# them fails this job if they take their no-PHP refusal branch instead of
-# serving, so a runner without a pair can never report green.
+# The PHP legs (`MB.56.3.2.2`) then run against that leg's pair:
+# `crates/blastit/tests/e2e_dev.rs` boots `blastit` for real — the PSR front
+# controller with per-view PostgreSQL grants, the fault legs, the `php2shell`
+# vectors and the entry pin — which the shim-level probe above cannot (no view
+# fork, no `view.chan`, no scheduler, no respawn). The guard step after them
+# fails this job if a PHP leg prints `SKIP` instead of serving, so a runner
+# without a pair can never report green; that image is the only boot-level
+# witness of the docs' 8.3–8.6 support statement. The per-leg security
+# checklist (M-1 worker environment, M-2/M-3 per-route uid and `SeccompRole::View`,
+# M-6 INI values) is evinced by the same boots.
 #
 # Kept out of `make check` (Docker + a PHP image + a Rust toolchain in the
 # image), exactly like `e2e/`, so the shim cannot rot unnoticed between gates.
@@ -108,8 +107,8 @@ jobs:
       matrix: ${{ fromJSON(needs.matrix.outputs.legs) }}
     runs-on: ${{ matrix.runs_on }}
     # The image installs PHP + rustup and builds the workspace's one crate:
-    # ~8 minutes cold, ~2 cached, plus the two protected PHP suites. Those suites
-    # are compiled **inside** the image too (`MB.3.58`), which is a cold `blastit`
+    # ~8 minutes cold, ~2 cached, plus the PHP legs. Those legs are compiled
+    # **inside** the image too (`MB.3.58`), which is a cold `blastit`
     # build of its own (~6-8 minutes on a 4-core runner): 40 is the outer bound,
     # not a promise.
     timeout-minutes: 40
@@ -117,7 +116,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
       # No Rust toolchain on the runner: every binary this leg executes — the
-      # shim, the probe, and the two protected suites — is compiled inside the
+      # shim, the probe, and the PHP legs — is compiled inside the
       # leg image (`MB.3.58`). A toolchain here would only invite a host build
       # whose glibc the leg cannot satisfy.
       # One image per leg: build the shim against this distro's headers and probe
@@ -126,23 +125,23 @@ jobs:
         run: >-
           make php-sapi-e2e PHP_MINOR=${{ matrix.minor }} PHP_SAPI_LIBC=${{ matrix.libc }}
           PHP_SAPI_KEEP=1 PHP_SAPI_IMAGE=blastit-php-sapi-e2e:${{ matrix.name }}
-      # `MB.3.39`: the real-pair half of the two protected suites, against the
-      # image the probe just proved. **Both halves happen in the image**: it
-      # installs libclang and compiles `critical_php_backend` +
-      # `critical_php_embed` itself, and `make rs-test-php-image` runs the two
-      # executables it recorded. A runner-built binary cannot be executed here
+      # `MB.56.3.2.2`: the real-pair half, against the image the probe just
+      # proved. **Both halves happen in the image**: it installs libclang and
+      # compiles `e2e_dev`'s PHP legs itself, and `make rs-test-php-image` runs
+      # the one executable it recorded, as root and as a normal uid. A
+      # runner-built binary cannot be executed here
       # (`MB.3.58`): the runner is Ubuntu 24.04 (glibc 2.39) and a leg whose base
       # is older (Debian trixie, 2.41, is newer; the Alpine legs have no glibc at
       # all) would die at `execve` with
       # `weak version 'GLIBC_2.39' not found` — and raising the leg's base would
       # prove nothing about the distros the shim ships to.
       #
-      # **Suites only where the leg's own image can carry them.** `matrix.suites`
+      # **Legs only where the leg's own image can carry them.** `matrix.suites`
       # is a fact from `scripts/platform_matrix.py` (`--leg shims`), not a step
       # condition invented here: a leg whose pair the boot refuses, or whose
       # image cannot build `blastit`, says so where the leg is declared and is
       # limited to the shim-level probe above, which is what `PROVEN` records.
-      - name: make rs-test-php-image (critical_php_backend + critical_php_embed on the real pair)
+      - name: make rs-test-php-image (e2e_dev PHP legs on the real pair)
         if: matrix.suites == 'true'
         timeout-minutes: 15
         run: |
@@ -163,35 +162,33 @@ jobs:
             echo "| libphp | \`${{ matrix.libphp }}\` (in the image) |"
             echo "| shim | \`target/php-sapi/${{ matrix.shim }}\` |"
             echo "| wall time of this step | **${seconds} s** (job bound: 40 min) |"
-            echo "| suites | \`critical_php_backend\`, \`critical_php_embed\` |"
+            echo "| suite | \`e2e_dev\` (the PHP legs) |"
           } >> "$GITHUB_STEP_SUMMARY"
-      # A runner that silently has no PHP must never report green: both suites
+      # A runner that silently has no PHP must never report green: the PHP legs
       # pick their branch from their own `host_php()` probe, so a missing pair is
-      # a *passing* test run that prints these lines. The served evidence is
-      # required as well, so "the markers changed wording" fails closed too.
+      # a *passing* test run that prints a `SKIP …` line. The served and
+      # crash-recovery evidence is required as well, so "the markers changed
+      # wording" fails closed too.
       #
-      # The refusal pattern is anchored on the **suites' own printout**
-      # (`refused (no usable …` / `refused: …`), never on a bare boot sentence:
-      # `no usable NTS libphp was found`, `no shim libblastit_php…` and
-      # `install the PHP embed package` are all stage-0 text that a *healthy*
-      # leg's captured output can contain (the ZTS, not-a-library, another-minor,
-      # inode-pin and probe-timeout legs refuse on purpose and print it), so
-      # grepping those would false-fail a good run.
-      - name: 'guard: the pair legs must serve, not refuse'
+      # The skip pattern is anchored on the **legs' own printout** (`^SKIP `),
+      # never on a bare boot sentence: `no usable NTS libphp was found`,
+      # `no shim libblastit_php…` and `install the PHP embed package` are all
+      # stage-0 text that a *healthy* leg cannot contain now (no leg boots a
+      # missing pair), but anchoring on the sentinel keeps the guard reading the
+      # run's own verdict rather than prose.
+      - name: 'guard: the PHP legs must serve, not skip'
         if: matrix.suites == 'true'
         run: |
           log="$RUNNER_TEMP/php-pair.log"
           status=0
-          if refuses=$(grep -nE \
-                '^refused( \(no usable libphp \+ shim on this host|: .*no usable NTS libphp was found)' \
-                "$log"); then
-            echo "::error::the PHP pair legs took the refusal branch: this runner has no usable libphp + shim, so nothing was proved"
-            echo "$refuses"
+          if skipped=$(grep -nE '^SKIP ' "$log"); then
+            echo "::error::the PHP legs skipped instead of serving: this runner has no usable libphp + shim, so nothing was proved"
+            echo "$skipped"
             status=1
           fi
           for evidence in 'served: HTTP/1\.1 200 OK' 'retired pid .* respawned pid'; do
             if ! grep -qE "$evidence" "$log"; then
-              echo "::error::the real-pair evidence is missing from the suites' output: $evidence"
+              echo "::error::the real-pair evidence is missing from the PHP legs' output: $evidence"
               status=1
             fi
           done
@@ -200,7 +197,7 @@ jobs:
             tail -n 60 "$log"
             exit 1
           fi
-          echo "the pair legs served: $(grep -cE 'served: HTTP/1\.1 200 OK' "$log") 200(s), $(grep -cE 'respawned pid' "$log") respawn(s)"
+          echo "the PHP legs served: $(grep -cE 'served: HTTP/1\.1 200 OK' "$log") 200(s), $(grep -cE 'respawned pid' "$log") respawn(s)"
       # Built *and* probed is the release bar: the shim leaves the image under
       # the name this leg owes, and the publish pipeline ships that same file.
       - name: take the probed shim out of its image

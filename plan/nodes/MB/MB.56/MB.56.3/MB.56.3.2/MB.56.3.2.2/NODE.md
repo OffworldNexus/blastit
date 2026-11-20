@@ -2,16 +2,24 @@
 id: MB.56.3.2.2
 title: "e2e_dev.rs part 2: embedded PHP front controller, per-view grants, php2shell, pinning"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.3.2.1]
-paths: ["crates/blastit/tests/**"]
-attempts: 0
+paths:
+  - "crates/blastit/tests/**"
+  - "crates/blastit-py-sapi/src/**"
+  - docs/troubleshooting.md
+  - Makefile
+  - ".github/workflows/php-sapi.yml"
+  - scripts/platform_matrix.py
+  - "e2e/php-sapi/**"
+  - "e2e/php/**"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:54"
-updated: "2026-11-20T18:54"
+updated: "2026-11-20T19:59"
 ---
 
 # Goal

@@ -2477,7 +2477,7 @@ struct HostPhp {
     shim: PathBuf,
 }
 
-/// The host probe `crates/blastit/tests/critical_php_embed.rs` established,
+/// The host probe the PHP legs of `crates/blastit/tests/e2e_dev.rs` established,
 /// copied small: raw `std` file access and the `ADR-0010` §4.1 names, never the
 /// code under test. The library's bytes must name `executor_globals` and
 /// `php_version\0` and must not name `tsrm_startup` (a ZTS build, which the boot
