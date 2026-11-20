@@ -4420,3 +4420,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T00:17 [MB.58] (lead) status active -> done
 - 2026-11-21T00:17 [MB.58] (lead) commit 425bd05
 - 2026-11-21T00:17 [MB.58] (lead) commit 2398428 (amended: JOURNAL + LOG)
+- 2026-11-21T00:17 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
