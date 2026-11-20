@@ -4399,3 +4399,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T23:17 [MB.56.5.2] (lead) status active -> done
 - 2026-11-20T23:17 [MB.56.5] (lead) status ready -> done: dead symbols pruned; 295 citations removed; make check + all three Docker suites green
 - 2026-11-20T23:20 [MB.56] (lead) status ready -> done: make check + zed/docs-check + run_apps 10 + run_prod 7 + run_packaging 4/3SKIP all green; prod 144,007->94,879 LOC, tests 83,472->19,238
+- 2026-11-20T23:21 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0 and H-017/H-018 review
