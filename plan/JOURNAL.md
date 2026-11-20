@@ -4110,3 +4110,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T13:13 [MB.53] (lead) review-arch APPROVE (0 blockers/majors, 5 MINOR follow-ups only). Lead re-proved the job command independently: fresh /opt/blastit-tests venv + wheel in modelw/
 - 2026-11-20T13:13 [MB.53] (lead) status active -> done
 - 2026-11-20T13:13 [MB.53] (lead) commit c3fbfe5
+- 2026-11-20T13:15 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
