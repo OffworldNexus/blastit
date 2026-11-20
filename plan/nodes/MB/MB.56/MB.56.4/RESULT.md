@@ -28,4 +28,4 @@ five packaging call sites could exit 0 having proved nothing (`--require-legs` n
 on a skip); and the R42 skip ban plus the root-only assertion had vanished from CI.
 
 Documented concession: a local stack cannot hold a cluster CA, so `verify-full` + the
-255061 pool of the DigitalOcean recipe are recorded, not mirrored.
+the 25061 pool of the DigitalOcean recipe are recorded, not mirrored.
