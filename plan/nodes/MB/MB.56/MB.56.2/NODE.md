@@ -2,7 +2,7 @@
 id: MB.56.2
 title: "Delete all non-§7 unit/component micro-tests and consolidate the 4 focused TESTING_PLAN.md §7 suites"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.56.1]
 paths: ["crates/**", "editors/**", Makefile]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:02"
-updated: "2026-11-20T17:15"
+updated: "2026-11-20T18:42"
 ---
 
 # Goal

@@ -4240,3 +4240,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T18:33 [MB.56.4] (lead) From MB.56.2.5 review: no workflow runs cargo test -p blastit-lsp; ci.yml:690-757 lsp legs only run scripts/lsp_smoke.py, so didChange/hover/formatting/quickfix
 - 2026-11-20T18:39 [MB.56.2.5] (lead) edited fields
 - 2026-11-20T18:42 [MB.56.2.5] (lead) status active -> done
+- 2026-11-20T18:42 [MB.56.2.5] (lead) commit 48cf668
+- 2026-11-20T18:42 [MB.56.2] (lead) status ready -> done: all 5 slices done; full make check runs at the MB.56.2 gate

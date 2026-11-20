@@ -7,3 +7,7 @@ created (task) Delete all non-§7 unit/component micro-tests and consolidate the
 ## 2026-11-20T17:15 [lead]
 
 edited fields
+
+## 2026-11-20T18:42 [lead]
+
+status ready -> done: all 5 slices done; full make check runs at the MB.56.2 gate
