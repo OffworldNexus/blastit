@@ -39,7 +39,7 @@
 #
 # Everything is staged under `$TMPDIR/opencode` (or `--out`), the archive is
 # written with `dpkg-deb --root-owner-group`, and nothing is ever installed on the
-# host: the proof is `scripts/test_packages.sh` inside `debian:trixie`.
+# host: the proof is `e2e/run_packaging.py --leg deb` inside `debian:trixie`.
 set -euo pipefail
 
 # One timestamp for the ar members and the clamp, so two hosts produce the same

@@ -13,7 +13,7 @@
 # buildroot. `rpmbuild` runs on the host when it exists; otherwise the same spec is
 # built inside a `rockylinux:9` container (the builder distribution, not the
 # supported floor). The RPM's payload is never installed on the host — the proof is
-# `scripts/test_packages.sh` inside a container.
+# `e2e/run_packaging.py --leg rpm` inside a container.
 #
 # The staged tree is asserted against §6.1 before anything is written
 # (`scripts/check-bundle-layout.sh`: 2 Python shims, 4 PHP shims, the 7 modules, no

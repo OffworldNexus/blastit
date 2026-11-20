@@ -710,8 +710,10 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # `e2e/venv-smoke.sh` boots the wheel's WSGI path, so the wheel must carry
-      # both CPython shims (`MB.47.2`).
+      # `e2e/run_packaging.py --leg wheel` installs the wheel into
+      # `python:3.12/3.13/3.14-slim`, drives the CLI there and serves a WSGI view
+      # through the shipped shim, so the wheel must carry both CPython shims
+      # (`MB.47.2`).
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the CPython minors the shims need
         run: uv python install 3.13 3.14
@@ -721,7 +723,7 @@ jobs:
         run: pipx install maturin && scripts/build-wheel.sh --require-shims py
         env:
           MATURIN: maturin
-      - run: e2e/venv-smoke.sh
+      - run: uv run --no-project e2e/run_packaging.py --leg wheel --wheel "$(ls dist/blastit-*.whl | head -n 1)"
 
   # `make check` runs the docs gate and the package's offline suites; this job is
   # what runs them on a pull request. Nothing else here calls `make`

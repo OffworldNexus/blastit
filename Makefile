@@ -13,11 +13,12 @@
 #   make coverage         # instrumented line/region % + uncovered lines (TESTS="…" FILES="…")
 #   make e2e              # build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
 #   make e2e-prod         # both deployment presets in real containers: uids, caps, /proc, fair queue, drain
+#   make e2e-packaging    # install stories (§3): deb/rpm, install.sh --user + Alpine musl, wheel, composer
 #   make e2e-universal    # one staged bundle, four runtimes: CPython 3.13/3.14, PHP 8.4, static, handoff (slow)
 #   make install          # stage a self-contained release bundle under PREFIX (default ~/.local)
 #   make uninstall        # remove the bundle `make install` staged under PREFIX
 #   make packages         # build blastit_<ver>_<arch>.deb + blastit-<ver>-<rel>.<arch>.rpm (slow)
-#   make packages-test    # install those packages in debian:trixie-slim / rockylinux:9 (slow, Docker)
+#   make packages-test    # the deb/rpm legs of `make e2e-packaging` for the packages under PACKAGES_OUT
 #   make php-sapi         # build the per-minor C SAPI shims this host has headers for
 #   make php-sapi-e2e     # Docker: build one shim and prove it with the real-load probe
 #   make rs-test-php      # real-pair PHP suites against host libphp + shim
@@ -101,7 +102,8 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help fast-check check clean guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default coverage \
-        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-prod e2e-universal \
+        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-prod e2e-packaging \
+        e2e-universal \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image python-runtime standalone standalone-glibc \
         zed-check \
@@ -278,7 +280,7 @@ packages: py-sapi php-sapi ## Build the .deb + .rpm from a manylinux bundle (slo
 		--bundle "$(PACKAGES_PREFIX)" --out "$(PACKAGES_OUT)" \
 		--max-glibc "$(PACKAGES_SHIM_FLOOR)"
 
-packages-test: ## Install the built .deb/.rpm in debian:trixie (WSGI), debian:bookworm-slim and rockylinux:9 (slow, Docker; not in `check`)
+packages-test: ## The deb/rpm legs of `make e2e-packaging` for the packages under $(PACKAGES_OUT) (Docker, slow)
 	@set -eu; \
 	newest() { \
 		find "$(PACKAGES_OUT)" -maxdepth 1 -name "$$1" -type f 2>/dev/null \
@@ -291,7 +293,8 @@ packages-test: ## Install the built .deb/.rpm in debian:trixie (WSGI), debian:bo
 		exit 1; \
 	fi; \
 	echo "packages-test: deb=$${deb:-none} rpm=$${rpm:-none}"; \
-	BLASTIT_DEB="$$deb" BLASTIT_RPM="$$rpm" scripts/test_packages.sh
+	$(UV) run --no-project e2e/run_packaging.py \
+		$(if $(deb),--leg deb --deb "$(deb)") $(if $(rpm),--leg rpm --rpm "$(rpm)")
 
 rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite standalone
 	@set -e; found=0; for file in crates/*/tests/critical_*.rs; do \
@@ -510,6 +513,18 @@ e2e-prod: ## Both production presets in containers (uids, caps, /proc, fair queu
 	$(CARGO) build -p blastit --release --locked
 	$(UV) run --no-project e2e/run_prod.py
 
+# `TESTING_PLAN.md` §3 (`MB.56.4.3`): one leg per install story, and each leg
+# installs the artifact it names and then runs the story's own commands inside
+# the target (`blastit --version`, `fmt`, `check`, `blastit-lsp --version`).
+# An artifact that has not been built is a loud SKIP naming the command that
+# builds it (`make packages`, `make wheel-manylinux`); `install --user`,
+# `alpine` and `composer` need only a binary and Docker. Not in `check`: it
+# pulls distribution images and is slow by nature.
+E2E_PACKAGING_ARGS ?=
+
+e2e-packaging: ## Install stories (§3): deb, rpm, install.sh --user, Alpine musl, wheel, composer (Docker)
+	$(UV) run --no-project e2e/run_packaging.py $(E2E_PACKAGING_ARGS)
+
 # One artifact, four runtimes (`MB.42.2.4`). Slow: it stages a release bundle,
 # builds a venv per interpreter and boots a real `blastit dev` per leg, so it is
 # not in `fast-check`; `make check` (the epic/release gate) and this target run it.
@@ -724,7 +739,7 @@ wheel-smoke: ## Install the built wheel in python:3.12/3.13/3.14-slim and drive 
 	scripts/wheel_container_smoke.sh "$(WHEEL_OUT)"
 
 composer-smoke: ## Prove packages/composer-blastit in composer:2 from a local fixture (Docker, slow)
-	scripts/composer_smoke.sh
+	$(UV) run --no-project e2e/run_packaging.py --leg composer
 
 # The wrapper's SHA-256 table is generated, never typed (`MB.42.3.3` review: all
 # four rows sat `pending`, so a real `composer require` always refused). `stamp`

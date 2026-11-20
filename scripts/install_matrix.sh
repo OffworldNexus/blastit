@@ -8,8 +8,9 @@
 # distributions the signed repositories advertise, expanded over the two
 # architectures the release ships. This script never chooses an image — it reads
 # `image`, `format`, `modes` and `package_arch` from the table and hands them to
-# `scripts/test_packages.sh`, which installs the **file** in a clean container and
-# drives `blastit --version`, `blastit check` and `blastit dev` there.
+# `e2e/run_packaging.py --leg deb|rpm`, which installs the **file** in a clean
+# container and drives `blastit --version`, `blastit fmt`, `blastit check`,
+# `blastit-lsp --version` and a served page there.
 #
 # CI runs one leg per job (`--leg <name>`) so the six distributions are six logs
 # and one red leg names itself; `--matrix` is the same survey for a developer.
@@ -107,8 +108,8 @@ run_leg() {
             [ -n "$file" ] ||
                 die "no $package_arch .deb under $dir: pass --deb, or build it with \`make packages\`"
             [ -f "$file" ] || die "$file does not exist"
-            BLASTIT_PACKAGE_MODES="$modes" BLASTIT_DEB="$file" BLASTIT_DEB_IMAGE="$image" \
-                "$root/scripts/test_packages.sh"
+            uv run --no-project "$root/e2e/run_packaging.py" \
+                --leg deb --deb "$file" --image "$image" --modes "$modes"
             ;;
         rpm)
             file=$rpm
@@ -116,8 +117,8 @@ run_leg() {
             [ -n "$file" ] ||
                 die "no $package_arch .rpm under $dir: pass --rpm, or build it with \`make packages\`"
             [ -f "$file" ] || die "$file does not exist"
-            BLASTIT_PACKAGE_MODES="$modes" BLASTIT_RPM="$file" BLASTIT_RPM_IMAGE="$image" \
-                "$root/scripts/test_packages.sh"
+            uv run --no-project "$root/e2e/run_packaging.py" \
+                --leg rpm --rpm "$file" --image "$image" --modes "$modes"
             ;;
         *)
             die "$name: the matrix names package format '$format', which is neither deb nor rpm"

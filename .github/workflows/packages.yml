@@ -264,8 +264,9 @@ jobs:
           path: dist
           merge-multiple: true
       # One leg per (distribution, architecture): the image, the package format
-      # and the phases are the matrix's, and `scripts/test_packages.sh` installs
-      # the file and drives `--version`, `check` and `dev` inside it.
+      # and the phases are the matrix's, and `e2e/run_packaging.py --leg deb|rpm`
+      # installs the file and drives `--version`, `fmt`, `check`,
+      # `blastit-lsp --version` and a served page inside it.
       - name: install in ${{ matrix.image }} and drive it
         run: scripts/install_matrix.sh --leg "${{ matrix.name }}" --dir dist
 

@@ -14,7 +14,7 @@ from blastit import _check_pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hello import application  # noqa: E402  (the fixture's app, one directory up)
+from hello import application
 
 gated = _check_pytest.wrap(application)
 

@@ -125,17 +125,48 @@ Three harness facts worth knowing before reading a failure:
   `100` the watermark is effectively disabled — deliberate here, because the
   runner's page cache is not "memory in use" (see `docs/knowledge/LESSONS.md`).
 
+## The packaging suite
+
+`run_packaging.py` is `TESTING_PLAN.md` §3: one leg per install story, and each
+leg installs the artifact the story names and then runs the story's own commands
+*inside the target* (`blastit --version`, `blastit fmt`, `blastit check`, and
+`blastit-lsp --version` where the artifact ships it).
+
+```console
+$ make e2e-packaging                                 # every leg
+$ uv run --no-project e2e/run_packaging.py --leg composer
+$ uv run --no-project e2e/run_packaging.py \
+    --deb dist/blastit_0.2.0_amd64.deb --rpm dist/blastit-0.2.0-1.x86_64.rpm \
+    --wheel dist/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl
+```
+
+| Leg | What it installs | What it proves |
+|---|---|---|
+| `install` | `docs/install.sh --user` on this host (zero `sudo`) from a release archive served over `file://` | `$prefix/bin` symlinks into `share/blastit/lib`; `blastit --version`, `fmt`, `fmt --check`, `check` and `blastit-lsp --version`; a tampered archive (`sha256 mismatch … refusing to install it`) and an overridden origin with no digest install nothing and answer with a sentence |
+| `alpine` | the same installer in `alpine:3.21` as a non-root uid, fetching the musl archive over HTTP | the musl target is selected, the prefix layout holds, and the tampered archive is refused. A host with no musl build runs a stand-in archive and says so (`--musl-binary`/`--musl-archive` serve the real one) |
+| `deb` / `rpm` | `docs/install.sh` with `BLASTIT_DEB`/`BLASTIT_RPM` in `debian:trixie` / `rockylinux:9` | §6.1's payload (two entry points, 13 paths under `/usr/share/blastit`, `root:root`), the four CLI commands, a served page — and with `--modes "install static wsgi"` the WSGI fixture imported and served through the package's own `python/blastit` |
+| `wheel` | the universal `py3-none` wheel with `pip` into `python:3.12-slim`, `3.13-slim` and `3.14-slim` | `--version`, `fmt` and `check` in all three, plus a WSGI view served through the shipped shim on 3.13 and 3.14 |
+| `composer` | `packages/composer-blastit` in `composer:2` | `composer install` puts `vendor/bin/blastit` on the project's PATH; the embedded digest table verifies the default origin (a warm run is silent); a tampered archive, an origin with no digest and an unstamped `pending` table are all refused |
+
+A leg whose artifact has not been built is a loud `SKIP` naming the command that
+builds it — `make packages` for the `.deb`/`.rpm`, `make wheel-manylinux` for the
+wheel — never a silent pass. Artifacts are discovered under `target/packages/`
+and `dist/`, or named with `--deb`/`--rpm`/`--wheel`. The fixtures are
+`e2e/packaging/fixture` (a static site) and `e2e/packaging/fixture-wsgi` (one
+WSGI view and the packaged-gate test). Every container is `blastit-pkg-*`, every
+port comes from `28080`, the scratch tree is
+`${TMPDIR:-/tmp/opencode}/blastit-pkg`, and one `finally` removes it.
+
 ## Other harnesses
 
 These stay beside the app suite for the slices that own them:
 
 | File | What |
 |---|---|
-| `universal_binary.py` | One staged bundle, four runtimes (`make e2e-universal`). |
+| `universal_binary.py` | One staged bundle, four runtimes (`make e2e-universal`); also the `Skip`/`LegFailure`/`http` helpers the other drivers share. |
 | `php2shell.py` | The CGI/FastCGI refusal matrix; replayed by the PHP leg and on its own. |
 | `php_sapi_probe.py` | The shim's real-load probe (`make php-sapi-e2e`). |
 | `docs_deploy.py` | The deploy pages' pooler promises; a leg of `run_apps.py`. |
-| `venv-smoke*`, `prebuilt_wheel.py`, `packages/` | Packaging and wheel checks. |
 
 The `php2shell` driver is stdlib-only and takes the fixture, probe matrix, docs
 page and port explicitly; the PHP leg runs it inside the `libphp` container so

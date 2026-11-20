@@ -129,7 +129,7 @@ PY_MINORS = {"3.14": "314", "3.13": "313"}
 
 # The two native package formats (`MB.42.3.1`), one artifact family each. The
 # `pattern` is the filename `scripts/build-{deb,rpm}.sh` writes, with the placeholders
-# a caller substitutes; `image` is where `scripts/test_packages.sh` installs it.
+# a caller substitutes; `image` is where `e2e/run_packaging.py` installs it.
 PACKAGE_FORMATS = {
     "deb": {
         "arch": {"x86_64": "amd64", "aarch64": "arm64"},
@@ -147,7 +147,7 @@ PACKAGE_FORMATS = {
 # repositories advertise, and the package a machine of that distribution
 # installs. One leg per distribution — a machine has one package manager and
 # installs one of the four packages — and `format` says which. `modes` is what
-# `scripts/test_packages.sh` drives in that image: every leg installs the package
+# `e2e/run_packaging.py` drives in that image: every leg installs the package
 # and serves a static route, and only `debian:trixie` also runs the WSGI gate,
 # because the other five ship no CPython 3.13/3.14 (Rocky 9 has 3.9, Ubuntu 22.04
 # has 3.10) and a WSGI leg there would test an interpreter the product never
@@ -538,7 +538,7 @@ def wheel_legs() -> list[dict]:
     The keys are the ones the two consumers actually read: `wheel_tag` is the
     platform half of the file name,
     `smoke_pythons`/`runtime_images` are the interpreters one wheel is installed
-    into (`e2e/prebuilt_wheel.py` takes the default from `E2E_PYTHON_VERSION`).
+    into (`e2e/run_packaging.py --leg wheel` installs it into each of the three).
     """
     legs = []
     for leg in enabled_legs():

@@ -27,3 +27,7 @@ REVIEW FIX 2 (ux): (B) the two legs prove the OTHER page's store: root leg must 
 ## 2026-11-20T22:27 [lead]
 
 status active -> done
+
+## 2026-11-20T22:27 [lead]
+
+commit 8384cfd; tmpfs /run/blastit documented 0711 (was 0700, which blocks view-uid traversal of their per-uid leaves)

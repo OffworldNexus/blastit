@@ -381,8 +381,8 @@ DOCKER
     fi
     mkdir -p "$out_dir" "target/manylinux_${manylinux_ver}" python/blastit/_bin
     out_abs=$(cd "$out_dir" && pwd)
-    # Clean older wheels from `$out_dir` so prebuilt e2e consumers (`e2e/prebuilt_wheel.py`)
-    # never see both an old host `2_39` wheel and the new `manylinux_2_28` wheel.
+    # Clean older wheels from `$out_dir` so an e2e consumer (`e2e/run_packaging.py --wheel`)
+    # never sees both an old host `2_39` wheel and the new `manylinux_2_28` wheel.
     rm -f "$out_abs"/blastit-*.whl
 
     offline_env=(-e CARGO_NET_OFFLINE=false )

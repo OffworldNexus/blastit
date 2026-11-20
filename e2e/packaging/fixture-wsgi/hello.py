@@ -1,9 +1,9 @@
-"""The WSGI view `e2e/packages/fixture-wsgi` serves through the shipped shim.
+"""The WSGI view `e2e/packaging/fixture-wsgi` serves through the shipped shim.
 
 Importing this module is the gate: `blastit check` imports `hello:application`
-using the *bundle's* `python/blastit` package (no `PYTHONPATH`), and `blastit dev`
-serves it through `libblastit_py3<mm>`, which only exists in the installed
-package.
+using the *installed* package's `python/blastit` (no `PYTHONPATH`), and
+`blastit dev` serves it through `libblastit_py3<mm>`, which only exists in an
+installed package or wheel.
 """
 
 

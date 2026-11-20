@@ -4354,3 +4354,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T22:21 [MB.56.4.2] (lead) edited fields
 - 2026-11-20T22:21 [MB.56.4.2] (lead) REVIEW FIX 2 (ux): (B) the two legs prove the OTHER page's store: root leg must use the DO block (host/port/user/password/database/sslmode/ca_cert, no DATABASE_
 - 2026-11-20T22:27 [MB.56.4.2] (lead) status active -> done
+- 2026-11-20T22:27 [MB.56.4.2] (lead) commit 8384cfd; tmpfs /run/blastit documented 0711 (was 0700, which blocks view-uid traversal of their per-uid leaves)
+- 2026-11-20T22:27 [MB.56.4.3] (lead) status ready -> active
+- 2026-11-20T22:27 [MB.56.4.3] (lead) attempt 1/3 started
+- 2026-11-20T22:27 [MB.56.4.3] (lead) base 8384cfd36e5a9b1ad600cb2edfcf3c98b6df1a65
+- 2026-11-20T22:45 [MB.56.4.3] (lead) status active -> done

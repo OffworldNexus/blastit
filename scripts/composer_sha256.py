@@ -25,7 +25,7 @@ while any row is still `pending`, because a `pending` row is a `vendor/bin/blast
 that refuses to run — the wrapper fails closed rather than trusting an origin, and
 shipping that on purpose is a broken `composer require`. The default-origin path
 is the only one a real `composer require` takes, so a table nobody stamped is a
-package nobody can use (`scripts/composer_smoke.sh` runs it that way).
+package nobody can use (`e2e/run_packaging.py --leg composer` runs it that way).
 
 Exit status: 0 when the file is up to date (or was updated) and, with
 `--require-complete`, every row carries a digest; 1 on an archive whose name is
