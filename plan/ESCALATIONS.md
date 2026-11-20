@@ -21,3 +21,4 @@ Every call to an expensive-tier agent (`strategist`, `architect`, `expert`) is r
 | 2026-11-19T00:16 | MB.40.1 | expert | conductor | Install GEPA G4 agentic bundle, Makefile fast-check split, regex guard cleanup & MB.26 consolidation |
 | 2026-11-19T14:30 | MB.42.1 | architect | conductor | Core distribution & runtime-loading architecture shift (ADR-0017: universal libpython-free binary, local CLI handoff, .deb/.rpm + install.sh, py3-none wheels & Composer wrapper) |
 | 2026-11-19T17:20 | MB.42.2.0 | architect | lead | fork/zygote/GIL ownership invariant for the pyo3-free supervisor cut-over is a core runtime architecture crossroads: who forks relative to dlopen, where the Py<PyAny> zygote and LoadedTracker live, GIL discipline per vtable entry, Adoption.py_fds across dev re-exec |
+| 2026-11-20T13:23 | MB.54 | architect | conductor | Owner requested TESTING_PLAN.md mapping all user stories to E2E tests and planning drastic test + code reduction |
