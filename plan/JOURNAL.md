@@ -4373,3 +4373,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T22:57 [MB.56.4.3] (implementer) status active -> done
 - 2026-11-20T22:57 [MB.56.4.3] (lead) status done -> done
 - 2026-11-20T22:57 [MB.56.4.3] (lead) GATE FIX: universal_binary php leg repointed at e2e/apps/php (BLASTIT_MANIFEST=Blastfile.php2shell, store-less); make e2e-universal 6/6; make check EXIT=0
+- 2026-11-20T22:57 [MB.56.4] (lead) GATE: make check EXIT=0; run_apps 10, run_prod 7, run_packaging 4 PASS/3 SKIP, e2e-universal 6/6; commit bfb65fa
+- 2026-11-20T22:57 [MB.56.5] (lead) edited fields
+- 2026-11-20T22:57 [MB.56.5.1] (lead) created (task) Coverage-driven dead-code prune + split the god-files
+- 2026-11-20T22:57 [MB.56.5.2] (lead) created (task) Strip diary comments and stale tool references; land the final gates

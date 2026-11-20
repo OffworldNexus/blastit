@@ -1,17 +1,23 @@
 ---
 id: MB.56.5
 title: "Run make coverage to delete uncovered dead Rust code, strip historical diary comments & pass full E2E gates"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 1
 depends_on: [MB.56.4.4]
-paths: ["crates/**", "python/**", "scripts/**", Makefile, ARCHITECTURE.md]
+paths:
+  - "crates/**"
+  - "python/**"
+  - "scripts/**"
+  - "e2e/**"
+  - Makefile
+  - ARCHITECTURE.md
+  - docs/knowledge/LESSONS.md
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:02"
-updated: "2026-11-20T21:07"
+updated: "2026-11-20T22:57"
 ---
 
 # Goal
