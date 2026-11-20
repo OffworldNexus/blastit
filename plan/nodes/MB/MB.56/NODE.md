@@ -2,7 +2,7 @@
 id: MB.56
 title: "Execute TESTING_PLAN.md test & codebase cleanup: E2E-first consolidation, multi-platform GHA stories & dead-code removal"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths:
@@ -27,7 +27,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:02"
-updated: "2026-11-20T16:02"
+updated: "2026-11-20T23:20"
 ---
 
 # Goal
