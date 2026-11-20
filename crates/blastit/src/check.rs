@@ -989,21 +989,23 @@ fn run_pytest(spawn: PytestSpawn<'_>) -> Result<i32, String> {
     }
     // `MB.40.8`: the bundle `make install` stages carries the gate itself at
     // `<exe_dir>/../python`, so `-p blastit._check_pytest` imports even when
-    // `blastit` was never installed into the application's own venv. An existing
-    // `PYTHONPATH` keeps its entries, after the bundle's.
+    // `blastit` was never installed into the application's own venv. The caller's
+    // explicit `PYTHONPATH` stays first and the bundle's directory follows it
+    // (`MB.53`): Python keeps `PYTHONPATH` in order and searches it before the
+    // interpreter's own `site-packages`, so the caller's entry wins a name
+    // collision — `blastit check`'s contract hands the child a project
+    // `stub/pytest` that must shadow the real one — while the bundle still
+    // precedes the child interpreter's stdlib and `site-packages`, which is what
+    // makes the gate importable under a wheel/`.deb`/`uv tool` install that has
+    // no venv of its own.
     if let Some(directory) = bundled_python() {
         let existing = prepared
             .app_env()
             .get("PYTHONPATH")
+            .map(String::as_str)
             .filter(|value| !value.is_empty())
-            .cloned()
             .unwrap_or_default();
-        let joined = if existing.is_empty() {
-            directory
-        } else {
-            format!("{directory}:{existing}")
-        };
-        command.env("PYTHONPATH", joined);
+        command.env("PYTHONPATH", pythonpath_with_bundle(existing, &directory));
     }
     command.env(HTTP_OBS, http_path);
     // A store-less app runs no dbproxy, so there is no channel to push a target
@@ -1129,6 +1131,23 @@ fn path_python() -> Option<PathBuf> {
 fn bundled_python() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     bundle_root(exe.parent()?)
+}
+
+/// The `PYTHONPATH` a `pytest` child receives: the caller's entries first, the
+/// bundle's package root last (`MB.53`).
+///
+/// Python searches `PYTHONPATH` in order and ahead of the interpreter's own
+/// stdlib and `site-packages`, so the caller's explicit directory keeps the
+/// precedence it was given — a project `stub/pytest` shadows the real package —
+/// and [`bundled_python`]'s directory only ever shadows what the child
+/// interpreter found by itself. Pure and argument-driven, so the order is
+/// testable without reading this process's environment.
+fn pythonpath_with_bundle(existing: &str, directory: &str) -> String {
+    if existing.is_empty() {
+        directory.to_string()
+    } else {
+        format!("{existing}:{directory}")
+    }
 }
 
 /// The `blastit` package root beside `exe_dir` that carries the staged gate.
@@ -1474,6 +1493,23 @@ view fallback regex '.*' {}
             sql,
         )
         .expect("observations")
+    }
+
+    #[test]
+    fn a_callers_pythonpath_precedes_the_bundle_directory() {
+        // The bundle alone when the caller named nothing to keep.
+        assert_eq!(
+            pythonpath_with_bundle("", "/bundle/site-packages"),
+            "/bundle/site-packages"
+        );
+        // The caller's entry is FIRST: Python keeps `PYTHONPATH` order, so the
+        // contract's `stub/pytest` shadows the real one (`MB.53`).
+        let joined = pythonpath_with_bundle("/project/stub:/opt/pkg", "/bundle/site-packages");
+        assert_eq!(joined, "/project/stub:/opt/pkg:/bundle/site-packages");
+        assert!(
+            joined.starts_with("/project/stub:"),
+            "the caller's entry must lead: {joined}"
+        );
     }
 
     #[test]

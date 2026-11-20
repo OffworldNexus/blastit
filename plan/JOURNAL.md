@@ -4102,3 +4102,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T12:49 [MB.52] (lead) OUT OF SCOPE (python/blastit/** not in paths, needs its own node): pytest_plugin._serveable_project copies a non-traversable $HOME project to /tmp/blastit-live-
 - 2026-11-20T12:55 [MB.52] (lead) status active -> done
 - 2026-11-20T12:55 [MB.52] (lead) commit 297061e
+- 2026-11-20T12:58 [MB.53] (conductor) created (task) Preserve caller PYTHONPATH precedence in check.rs and prove full pytest-plugin suite green in Docker
+- 2026-11-20T12:58 AUTOPILOT on by conductor fixing check.rs PYTHONPATH order for pytest-plugin in MB.53
+- 2026-11-20T12:58 [MB.53] (lead) status ready -> active
+- 2026-11-20T12:58 [MB.53] (lead) attempt 1/3 started
+- 2026-11-20T12:58 [MB.53] (lead) base 32d781b39bfdfb096f4c28a27086658fb39230d7
+- 2026-11-20T13:13 [MB.53] (lead) review-arch APPROVE (0 blockers/majors, 5 MINOR follow-ups only). Lead re-proved the job command independently: fresh /opt/blastit-tests venv + wheel in modelw/
+- 2026-11-20T13:13 [MB.53] (lead) status active -> done
+- 2026-11-20T13:13 [MB.53] (lead) commit c3fbfe5
