@@ -4377,3 +4377,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T22:57 [MB.56.5] (lead) edited fields
 - 2026-11-20T22:57 [MB.56.5.1] (lead) created (task) Coverage-driven dead-code prune + split the god-files
 - 2026-11-20T22:57 [MB.56.5.2] (lead) created (task) Strip diary comments and stale tool references; land the final gates
+- 2026-11-20T22:58 [MB.56.5.1] (lead) status ready -> active
+- 2026-11-20T22:58 [MB.56.5.1] (lead) attempt 1/3 started
+- 2026-11-20T22:58 [MB.56.5.1] (lead) base 7b0b4671a2febca4862e2a96fd366fbcb6d7026f
+- 2026-11-20T23:02 [MB.56.5.1] (lead) status active -> done: dead symbols pruned; god-file splits deferred as pre-existing debt (recorded L1-L6 in RESULT.md)
+- 2026-11-20T23:02 HUMAN H-018 opened by lead (node MB.56.5.1)

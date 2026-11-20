@@ -2,16 +2,16 @@
 id: MB.56.5.1
 title: "Coverage-driven dead-code prune + split the god-files"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
 paths: ["crates/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T22:57"
-updated: "2026-11-20T22:57"
+updated: "2026-11-20T23:02"
 ---
 
 # Goal

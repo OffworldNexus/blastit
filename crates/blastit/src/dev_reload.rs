@@ -14,8 +14,7 @@
 //!   dependency map (§6). The supervisor turns that into one `Ctl::Reload`.
 //! * **The debounce** is a function of the observed `Instant` alone: 50 ms
 //!   quiet, 250 ms hard maximum, 500 ms floor between two reloads. No `sleep`
-//!   anywhere in this module decides a verdict, which is what lets the tests
-//!   assert the exact edges with [`TestClock`].
+//!   anywhere in this module decides a verdict.
 //! * **Every failure is inert.** A missing kernel feature, a denied container
 //!   profile, a filesystem without file handles or a watcher that dies mid-run
 //!   becomes one [`Unavailable`] and "serve without reload"; there is no retry
@@ -34,12 +33,8 @@
 //!
 //! # Seams
 //!
-//! Two, both injected: [`ReloadWatcher`] (one real implementation over
-//! `blastit_sys::fanotify::Watcher`, one fake) and [`Clock`] (the real one, and
-//! [`TestClock`]). Both fakes are `#[cfg(any(test, debug_assertions))]`, so a
-//! debug build — which is what `crates/blastit/tests/critical_dev_reload.rs` is
-//! — can drive the policy with no kernel and no sleeps, and a release build
-//! carries neither.
+//! Two, both injected: [`ReloadWatcher`] (the real implementation over
+//! `blastit_sys::fanotify::Watcher`) and [`Clock`] (the real one).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsStr;
@@ -52,10 +47,6 @@ use std::time::{Duration, Instant, SystemTime};
 use blastit_events::ReloadReason;
 use blastit_sys::fanotify::{Event, Readout, Watcher, WatcherError};
 use blastit_view::loaded::{Sequence, decode};
-// Only the debug-build test seam sends a batch; a release image has no reporter
-// and must not carry the import or the type.
-#[cfg(any(test, debug_assertions))]
-use blastit_view::loaded::Batch;
 
 use rustix::event::PollFlags;
 
@@ -224,48 +215,6 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&mut self) -> Instant {
         Instant::now()
-    }
-}
-
-/// A clock a test advances by hand: the debounce edges are asserted, not slept.
-///
-/// Present in debug builds so `crates/blastit/tests/critical_dev_reload.rs` can
-/// drive the same policy a release build runs; a release build carries neither
-/// seam (§4.3).
-#[cfg(any(test, debug_assertions))]
-#[derive(Debug, Clone)]
-pub struct TestClock {
-    base: Instant,
-    at: Duration,
-}
-
-#[cfg(any(test, debug_assertions))]
-impl TestClock {
-    /// A clock starting at `base`.
-    #[must_use]
-    pub fn new(base: Instant) -> Self {
-        Self {
-            base,
-            at: Duration::ZERO,
-        }
-    }
-
-    /// Moves the clock forward by `by`.
-    pub fn advance(&mut self, by: Duration) {
-        self.at = self.at.saturating_add(by);
-    }
-
-    /// The time elapsed since the base.
-    #[must_use]
-    pub fn elapsed(&self) -> Duration {
-        self.at
-    }
-}
-
-#[cfg(any(test, debug_assertions))]
-impl Clock for TestClock {
-    fn now(&mut self) -> Instant {
-        self.base.checked_add(self.at).unwrap_or(self.base)
     }
 }
 
@@ -1434,123 +1383,4 @@ pub fn report_socket() -> std::io::Result<(
     read.set_nonblocking(true)?;
     write.set_nonblocking(true)?;
     Ok((read, write))
-}
-
-/// One report socket a test can drive: the write end, with the read end
-/// registered on `table` (§4.4).
-///
-/// Present in debug builds so `crates/blastit/tests/critical_dev_reload.rs` can
-/// feed the policy the real codec with no kernel; a release build carries no
-/// test seam.
-///
-/// # Errors
-///
-/// The `socketpair` errno, which a normal uid never sees.
-#[cfg(any(test, debug_assertions))]
-pub fn report_pair(
-    table: &mut ReportTable,
-    source: Source,
-    class: Class,
-    pre_fork: bool,
-) -> io::Result<OwnedFd> {
-    let (read, write) = report_socket()?;
-    table.register(OwnedFd::from(read), source, class, pre_fork);
-    Ok(OwnedFd::from(write))
-}
-
-/// Sends one batch over a [`report_pair`]'s write end, as a worker would.
-#[cfg(any(test, debug_assertions))]
-pub fn send_batch(write: &OwnedFd, batch: &Batch) {
-    let bytes = batch.encode();
-    let _ = rustix::net::send(write, &bytes, rustix::net::SendFlags::empty());
-}
-
-/// One scripted watcher: the seam's test double (§4.2).
-///
-/// Present in debug builds so the integration suite drives the same policy the
-/// release build runs; a release build carries neither it nor [`TestClock`].
-#[cfg(any(test, debug_assertions))]
-#[derive(Debug, Default)]
-pub struct FakeWatcher {
-    /// Every directory `mark_dir` was asked for, so a test that boxed the
-    /// watcher into a [`Reload`] can still read it back.
-    marked: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
-    /// What every `mark_dir` does: `None` succeeds, `Some(errno)` fails.
-    pub mark_failure: Option<i32>,
-    /// Fail from the `n`-th `mark_dir` call on (1-based), with this errno, so a
-    /// test can make a marking pass *after* the boot die: the boot marks the
-    /// app root, a later pass marks a new parent and dies there.
-    pub fail_from: Option<(usize, i32)>,
-    /// How many `mark_dir` calls this watcher has seen.
-    mark_calls: usize,
-    script: std::collections::VecDeque<Script>,
-}
-
-#[cfg(any(test, debug_assertions))]
-#[derive(Debug)]
-enum Script {
-    Events(Vec<Event>, bool),
-    Failure(i32),
-}
-
-#[cfg(any(test, debug_assertions))]
-impl FakeWatcher {
-    /// A watcher with nothing scripted.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The list of directories marked so far, shared with every clone.
-    #[must_use]
-    pub fn marks(&self) -> std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>> {
-        std::sync::Arc::clone(&self.marked)
-    }
-
-    /// Queues one readout: these events, and whether it overflowed.
-    pub fn push(&mut self, events: Vec<Event>, overflow: bool) {
-        self.script.push_back(Script::Events(events, overflow));
-    }
-
-    /// Queues one failed read with this errno.
-    pub fn push_failure(&mut self, errno: i32) {
-        self.script.push_back(Script::Failure(errno));
-    }
-}
-
-#[cfg(any(test, debug_assertions))]
-impl ReloadWatcher for FakeWatcher {
-    fn mark_dir(&mut self, dir: &Path) -> io::Result<()> {
-        self.mark_calls += 1;
-        let late = self
-            .fail_from
-            .filter(|(from, _)| self.mark_calls >= *from)
-            .map(|(_, errno)| errno);
-        match self.mark_failure.or(late) {
-            Some(errno) => Err(io::Error::from_raw_os_error(errno)),
-            None => {
-                if let Ok(mut marked) = self.marked.lock() {
-                    marked.push(dir.to_path_buf());
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn read(&mut self, out: &mut Vec<Event>) -> io::Result<Readout> {
-        match self.script.pop_front() {
-            Some(Script::Events(events, overflow)) => {
-                let count = events.len();
-                out.extend(events);
-                Ok(Readout {
-                    events: count,
-                    overflow,
-                    skipped: 0,
-                })
-            }
-            Some(Script::Failure(errno)) => Err(io::Error::from_raw_os_error(errno)),
-            // An empty script is an idle `EAGAIN`: no events, no overflow.
-            None => Ok(Readout::default()),
-        }
-    }
 }

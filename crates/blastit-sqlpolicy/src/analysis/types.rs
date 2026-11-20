@@ -78,11 +78,6 @@ impl StatementClass {
             Self::Other => "other",
         }
     }
-
-    /// Whether the four plain kinds a table grant covers include this one.
-    pub const fn is_plain(self) -> bool {
-        !matches!(self, Self::Other)
-    }
 }
 
 impl fmt::Display for StatementClass {
@@ -103,15 +98,6 @@ impl Classified {
     /// The kind, in the words a grant and a report use.
     pub const fn class(&self) -> StatementClass {
         self.class
-    }
-
-    /// Whether a `queries` entry — and a table grant — may hold this statement.
-    ///
-    /// False for everything a grant is not an allowlist for, and false for a
-    /// text that holds more than one statement: a grant is one statement, so a
-    /// caller has to split the text rather than write it (§6, D3c).
-    pub const fn is_plain(&self) -> bool {
-        self.class.is_plain() && self.statements == 1
     }
 
     /// How many statements the text holds. One for everything a grant can hold.

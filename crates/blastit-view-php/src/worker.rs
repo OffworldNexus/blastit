@@ -1602,10 +1602,3 @@ fn header<'a>(head: &'a ReqHead, name: &[u8]) -> Option<&'a [u8]> {
 fn c_string(text: &str, what: &str) -> Result<CString, String> {
     CString::new(text).map_err(|_| format!("{what} holds a NUL byte"))
 }
-
-/// Whether `path` is an existing absolute file (used by the spawn path's
-/// boot-time check).
-#[must_use]
-pub fn is_serveable_entry(path: &Path) -> bool {
-    path.is_absolute() && path.is_file()
-}
