@@ -14,19 +14,22 @@ blastit runs what they forward and splits it into one sandbox per route: each
 `view` gets its own process, its own Unix user and its own SQL allowlist, so a bug
 in the least important page is worth that page, not the app.
 
-Linux. Python (WSGI), PHP (front controllers on the host's NTS `libphp` 8.3, 8.4,
-8.5) or static files. `blastit-lsp` runs natively on Linux, macOS and Windows; on a
-macOS or Windows laptop, run `blastit` in Docker/Compose or a Linux VM.
-
 ```console
-$ uv init --app && uv add blastit     # Python (WSGI)
-$ uv run blastit dev                  # your machine, no root
-$ uv run blastit check                # CI: proves nothing was forgotten
-
-$ curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz
-$ tar -xzf blastit-*.tar.gz && export PATH="$PWD/blastit-x86_64-unknown-linux-gnu:$PATH"
-$ blastit dev                         # PHP (host libphp) and static
+$ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
+$ blastit dev
+$ blastit check
 ```
+
+The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM
+(Fedora/RHEL/Rocky/Alma) repository and installs `blastit`; where it cannot use a
+system package manager it puts the release archive in `~/.local/bin` instead
+([install reference](https://offworldnexus.github.io/blastit/install/)).
+
+One binary serves all three interfaces. Python (WSGI) is a callable on CPython
+3.13/3.14, PHP runs a front controller on the host's embedded NTS `libphp` (8.3,
+8.4, 8.5 and 8.6), or a `static` mount serves files with no interpreter at all.
+`blastit-lsp` runs natively on Linux, macOS and Windows; on a macOS or Windows
+laptop, run `blastit` in Docker/Compose or a Linux VM.
 
 ```mermaid
 flowchart LR
@@ -60,7 +63,7 @@ view hello GET "/*" {
 ```
 
 ```console
-$ uv run blastit dev
+$ blastit dev
   blastit dev · single-uid simulation · http://127.0.0.1:8080
   Not a sandbox. Production `blastit` refuses to run like this.
   http · scheduler · dbproxy · 1 route
@@ -118,6 +121,7 @@ This documentation site is served the same way: `make docs-serve` builds it with
 Zensical and hands it to a freshly built `blastit dev` (`PORT=8080`).
 
 **Read the documentation →**
+[Install](https://offworldnexus.github.io/blastit/install/) ·
 [Local](https://offworldnexus.github.io/blastit/local/) ·
 [CI/CD](https://offworldnexus.github.io/blastit/ci/) ·
 [Deployments](https://offworldnexus.github.io/blastit/deploy/) ·

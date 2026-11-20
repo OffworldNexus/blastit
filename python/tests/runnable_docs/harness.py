@@ -294,28 +294,36 @@ def assert_provenance() -> str:
     return planned
 
 
-def _wheel_python(name: str) -> str:
-    """`blastit-0.1.0-cp314-…whl` -> `3.14`; the ABI tag names the interpreter."""
-    match = re.search(r"-cp3(\d+)-", name)
-    if match is None:
-        raise Failure(
-            f"{name} carries no `cp3NN` ABI tag, so the interpreter to install it "
-            "into cannot be chosen"
-        )
-    return "3." + match.group(1)
-
-
 HOST_PYTHON = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def _wheel_python(name: str) -> str:
+    """The CPython a wheel installs into: its `cp3NN` tag, or this harness's own.
+
+    `MB.42.3.3` ships one `py3-none-<platform>` wheel that serves CPython 3.12,
+    3.13 and 3.14, so such a wheel names no interpreter and the gate installs it
+    into the CPython it is running (`HOST_PYTHON`); a legacy `cp3NN` wheel still
+    names its own.
+    """
+    match = re.search(r"-cp3(\d+)-", name)
+    if match is not None:
+        return "3." + match.group(1)
+    if "-py3-none-" in name:
+        return HOST_PYTHON
+    raise Failure(
+        f"{name} carries neither a `cp3NN` ABI tag nor a `py3-none` tag, so the "
+        "interpreter to install it into cannot be chosen"
+    )
 
 
 def wheel_path() -> Path:
     """The one wheel for the workspace version that this host can install.
 
-    `dist/` is a build directory: it may hold one wheel per CPython minor (CI
-    builds 3.13 and 3.14), and it may hold a wheel of an older release. Neither
-    the newest mtime nor the alphabet decides what is tested — the workspace
-    version does, and two wheels competing for the host's interpreter are a
-    failure rather than a guess.
+    `dist/` is a build directory: it may hold one wheel per platform (CI builds
+    x86_64 and aarch64), and it may hold a wheel of an older release. Neither the
+    newest mtime nor the alphabet decides what is tested — the workspace version
+    does, and two wheels competing for the host's interpreter are a failure
+    rather than a guess.
     """
     version = planned_version()
     candidates = sorted(DIST.glob(f"blastit-{version}-*.whl"))
@@ -340,7 +348,7 @@ def wheel_path() -> Path:
 
 
 def interpreter_for(wheel: Path) -> str:
-    """The CPython the wheel's ABI tag names, through uv or else `PATH`."""
+    """The CPython the wheel installs into: its tag, or this harness's own."""
     wanted = _wheel_python(wheel.name)
     try:
         return subprocess.check_output(
@@ -565,9 +573,11 @@ class Harness:
         self.wheel = wheel_path()
         self.wheel_sha256 = hashlib.sha256(self.wheel.read_bytes()).hexdigest()
         self.python = interpreter_for(self.wheel)
-        # The wheel's `cp3NN` tag names the interpreter it was built for, and the
-        # resolved path is what `uv venv --python` gets: no discovery, so the venv
-        # does not depend on the caller's HOME holding a uv-managed interpreter.
+        # The wheel's tag names the interpreter to install it for (`cp3NN`)
+        # unless it is one `py3-none` wheel, which is installed into the CPython
+        # this harness runs; the resolved path is what `uv venv --python` gets,
+        # so the venv does not depend on the caller's HOME holding a uv-managed
+        # interpreter.
         self.version = _wheel_python(self.wheel.name)
         # `pytest` comes from a cache this gate did not create (offline);
         # everything that installs the wheel uses a cache this run created empty,

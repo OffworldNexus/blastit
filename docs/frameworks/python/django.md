@@ -91,8 +91,8 @@ copies beside the hashed ones, so that line pins both; to cache hashed names onl
 
 ## Learn the grants
 
-`uv run blastit dev --learn` records what the admin and your routes really send; click through the
-pages, stop with ++ctrl+c++, read `git diff Blastfile`, then run `uv run blastit fmt`. The admin's
+`blastit dev --learn` records what the admin and your routes really send; click through the
+pages, stop with ++ctrl+c++, read `git diff Blastfile`, then run `blastit fmt`. The admin's
 grants are the long lines above, so split a view whose paths need different grants.
 
 ## Check in CI
@@ -102,12 +102,12 @@ handshake `check` uses for `test_<database>`; `check` exits `3` when the suite c
 write one test per route.
 
 ```console
-$ uv run blastit check
+$ blastit check
 ```
 
 ## Deploy
 
-`uv run blastit --preset digitalocean-paas` — or `compose-traefik` — runs the same file under real
+`blastit --preset digitalocean-paas` — or `compose-traefik` — runs the same file under real
 uids. `DATABASE_URL` names the pool, migrations name the database
 ([the rule](../../deploy/anything-else.md#migrations)).
 

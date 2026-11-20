@@ -79,44 +79,26 @@ and `DATABASE_DATABASE` — never the password — and no `DATABASE_URL`, so `se
 `DATABASES` from those four (`sslmode` is `disable` there) while the `migrate` job keeps its own
 `DATABASE_URL`. `settings.py` also reads the host: `ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]`.
 
-Deploy only a file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)); one image per runtime:
+Deploy only a file `blastit check` passes ([CI/CD](../ci.md#what-it-fails-on)); one image for every interface:
 
-=== "Python (WSGI)"
-    ```dockerfile title="Dockerfile"
-    FROM python:3.13-slim
-    WORKDIR /app
-    COPY . .
-    RUN pip install --no-cache-dir -r requirements.txt blastit
-    CMD ["blastit"]
-    ```
+```dockerfile title="Dockerfile"
+# One image serves every interface: the package brings `blastit` and its shims,
+# `python3.13` runs a WSGI view, and the distro's NTS `libphp` runs a front
+# controller. A static-only app drops the python and libphp packages below.
+FROM debian:trixie-slim
 
-=== "PHP"
-    ```dockerfile title="Dockerfile"
-    FROM debian:trixie-slim
-    RUN apt-get update && apt-get install -y --no-install-recommends \
-            ca-certificates curl libphp-embed php-pgsql \
-        && rm -rf /var/lib/apt/lists/*
-    WORKDIR /app
-    COPY . .
-    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
-        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
-        && rm blastit-*.tar.gz
-    CMD ["blastit"]
-    ```
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libphp-embed php-pgsql python3.13 python3.13-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
 
-=== "Static & SPA"
-    ```dockerfile title="Dockerfile"
-    FROM debian:trixie-slim
-    RUN apt-get update && apt-get install -y --no-install-recommends \
-            ca-certificates curl \
-        && rm -rf /var/lib/apt/lists/*
-    WORKDIR /app
-    COPY . .
-    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
-        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
-        && rm blastit-*.tar.gz
-    CMD ["blastit"]
-    ```
+WORKDIR /app
+COPY requirements.txt .
+RUN python3.13 -m venv .venv && .venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+CMD ["blastit"]
+```
 
 ```console
 $ doctl registry login   # once: doctl auth init, doctl registry create <name>
@@ -166,8 +148,8 @@ Transaction mode drops the session after each transaction: migrations and any `S
 direct port, and prepared statements, advisory locks or `LISTEN` want **Session** mode, fixed at
 creation. Django sets `prepare_threshold=None`.
 
-**Databases → myshop-db → Connection Pools → Create pool**: `shop-pool` (every `${db.shop-pool.*}`
-in the spec is this name), user `app`, db `defaultdb`, size `18`, mode **Transaction**.
+**Databases → myshop-db → Connection Pools → Create pool**: name `shop-pool` (every
+`${db.shop-pool.*}` in the spec), user `app`, db `defaultdb`, size `18`, mode **Transaction**.
 
 ```console
 $ doctl databases pool create "$CLUSTER_ID" shop-pool --db defaultdb --size 18 --user app --mode transaction
@@ -178,7 +160,7 @@ $ doctl databases pool create "$CLUSTER_ID" shop-pool --db defaultdb --size 18 -
 The web service's host, port, user, password and database are the pool's bindables (25061), so it
 logs in as `app` through the pool; `DATABASE_SSLMODE` is the literal `verify-full` and
 `DATABASE_CA_CERT` is the cluster's `${db.CA_CERT}`. `migrate.DATABASE_URL` is the cluster's direct
-port (25060), as `migrator`. `REPLACE_WITH_YOUR_TAG` is this `$GIT_SHA`;
+port (25060), as `migrator`. `REPLACE_WITH_YOUR_TAG` below is this `$GIT_SHA`;
 `REPLACE_WITH_MIGRATOR_PASSWORD` is the hex from step 3, pasted literally (YAML does not expand it);
 the two keys are `openssl rand -base64 50`. Keep `app.yaml` out of git.
 

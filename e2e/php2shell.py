@@ -157,6 +157,8 @@ def console_commands(text: str) -> list[tuple[str, list[str]]]:
 def command_kind(command: str) -> str | None:
     if command in ("uv tool install blastit", "uv add blastit"):
         return "install"
+    if command.startswith("curl -fsSL ") and "/install.sh" in command:
+        return "install"
     if command in ("blastit dev --learn", "uv run blastit dev --learn"):
         return "dev-learn"
     if command in ("blastit fmt --check", "uv run blastit fmt --check"):
@@ -1207,12 +1209,12 @@ def self_test(page: Path, matrix: Path) -> int:
         f"every `$ ` command on the page is replayed or explained ({kinds})",
     )
     checks.that(
-        kinds == ["dev-learn", "fmt-check"],
-        f"the page's console commands are the two this leg replays ({kinds})",
+        kinds == ["install", "dev-learn", "fmt-check"],
+        f"the page's console commands are the install line and the two this leg replays ({kinds})",
     )
     checks.that(
-        "unknown-linux" in text and "PyPI wheel ships none" in text,
-        "the page still says where the binary comes from: a release tarball, not the wheel",
+        "install.sh" in text and "signed repository" in text,
+        "the page still says where the binary comes from: the signed repository's one-liner",
     )
     checks.that(
         "blastit check" in text and "pytest" in text,

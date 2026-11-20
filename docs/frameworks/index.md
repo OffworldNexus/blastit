@@ -24,9 +24,9 @@ names and which files it may read.
 
 | Interface | What the file says | Install | Pages |
 |---|---|---|---|
-| **Python (WSGI)** | `entrypoint python "module:attr"` | `uv add blastit` | [Connector](python/index.md) · [Django](python/django.md) · [Flask, SQLAlchemy and raw WSGI](python/flask.md) |
-| **PHP (PSR-7/PSR-15, front controller)** | `entrypoint php "public/index.php"`, on the host's NTS `libphp` (8.3, 8.4, 8.5) | release archive + `libphp` | [Connector](php/index.md) · [Symfony](php/symfony.md) · [Laravel](php/laravel.md) |
-| **Static & SPA** | `static "/"` with a `root`, and no `entrypoint` | release archive | [Static sites and SPAs](static-and-spa.md) |
+| **Python (WSGI)** | `entrypoint python "module:attr"` | `blastit` + CPython 3.13 or 3.14 | [Connector](python/index.md) · [Django](python/django.md) · [Flask, SQLAlchemy and raw WSGI](python/flask.md) |
+| **PHP (PSR-7/PSR-15, front controller)** | `entrypoint php "public/index.php"`, on the host's NTS `libphp` (8.3, 8.4, 8.5 and 8.6) | `blastit` + `libphp` | [Connector](php/index.md) · [Symfony](php/symfony.md) · [Laravel](php/laravel.md) |
+| **Static & SPA** | `static "/"` with a `root`, and no `entrypoint` | `blastit` | [Static sites and SPAs](static-and-spa.md) |
 
 ## What each interface answers
 
@@ -37,9 +37,9 @@ names and which files it may read.
 | Static assets | `static "/static"` with `root "staticfiles"`, beside the views | `static "/"` with `root "public"`; `.php` sources are `404` | the mount is the whole app |
 | PostgreSQL | `postgres $DATABASE_URL`, grants per view | the same store, or a split `DB_*` block | none — a mount reads no store |
 | A request body | `body json`, `form`, `none` or `raw unvalidated` on the view | the same directive on the view | a `GET` carrying a body is `413` |
-| Filling the grants | `uv run blastit check --learn` | `blastit dev --learn`, then `blastit fmt` | nothing to learn |
-| The CI gate | `uv run blastit check` runs `pytest` and the audit | `blastit fmt --check` plus an HTTP smoke run | `blastit check` audits every `root` |
-| Production | `uv run blastit --preset …` under real uids | `blastit --preset …` | `blastit --preset …` |
+| Filling the grants | `blastit check --learn` | `blastit dev --learn`, then `blastit fmt` | nothing to learn |
+| The CI gate | `blastit check` runs `pytest` and the audit | `blastit fmt --check` plus an HTTP smoke run | `blastit check` audits every `root` |
+| Production | `blastit --preset …` under real uids | `blastit --preset …` | `blastit --preset …` |
 
 !!! note "`--learn` covers what the audit cannot"
 

@@ -17,18 +17,24 @@ SQL allowlist — so a bug in the least important page is worth that page.
 [How it works](how-it-works.md){ .md-button }
 
 ```console
-$ uv init --app && uv add blastit     # Python; PHP and static use the archive
-$ uv run blastit dev                  # your machine, no root
-$ uv run blastit check                # CI: proves nothing was forgotten
+$ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
+$ blastit dev
+$ blastit check
 ```
+
+The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM
+(Fedora/RHEL/Rocky/Alma) repository and installs `blastit`; where it cannot use a
+system package manager it puts the release archive in `~/.local/bin` instead
+([install reference](install.md)).
 
 !!! note "Linux, and one file for every interface"
 
     `entrypoint python "module:attr"` starts a WSGI callable; `entrypoint php
     "public/index.php"` runs a PSR-7/PSR-15 front controller on the host's embedded
-    NTS `libphp` (8.3, 8.4, 8.5); no `entrypoint` plus a `static` mount serves a
-    built front end. `blastit-lsp` runs natively on Linux, macOS and Windows; on a
-    macOS or Windows laptop, run the server in Docker/Compose or a Linux VM.
+    NTS `libphp` (8.3, 8.4, 8.5 and 8.6); no `entrypoint` plus a `static` mount
+    serves a built front end. One `blastit` binary serves all three. `blastit-lsp`
+    runs natively on Linux, macOS and Windows; on a macOS or Windows laptop, run
+    the server in Docker/Compose or a Linux VM.
 
 ## One file, no code changes
 
@@ -45,12 +51,6 @@ $ uv run blastit check                # CI: proves nothing was forgotten
             select products(id, name, price)
         }
     }
-    ```
-
-    ```console
-    $ uv run blastit dev                   # your laptop, no root
-    $ uv run blastit check                 # CI: nothing forgotten
-    $ uv run blastit --preset digitalocean-paas   # production: real uids
     ```
 
 === "PHP"
@@ -72,11 +72,6 @@ $ uv run blastit check                # CI: proves nothing was forgotten
     }
     ```
 
-    ```console
-    $ blastit dev                          # archive + host libphp
-    $ blastit --preset digitalocean-paas
-    ```
-
 === "Static & SPA"
     ```text title="Blastfile"
     static "/" {
@@ -86,15 +81,11 @@ $ uv run blastit check                # CI: proves nothing was forgotten
     }
     ```
 
-    ```console
-    $ blastit dev                          # the release archive: no language runtime
-    $ blastit check                        # audits every root
-    ```
-
 Views, grants and the entry point live in one file; your framework keeps its own
 routing, and views are tried in the order written. Every served file carries an
-`ETag`, so a deploy invalidates cached copies. [Getting started](getting-started.md)
-is the small one.
+`ETag`, so a deploy invalidates cached copies. The three commands above do not
+change: `blastit dev` on your machine, `blastit check` in CI, and
+`blastit --preset digitalocean-paas` under real uids in production.
 
 ## The trust boundary
 
@@ -120,11 +111,14 @@ block says so. [Security model](security.md) has the argument.
 
 ??? note "Platforms"
 
-    Linux x86_64 and aarch64, glibc and musl: wheels for CPython 3.13 and 3.14, and
-    standalone archives with the PHP SAPI shim beside the binary. Static sites need no
-    language runtime.
+    Linux x86_64 and aarch64, glibc and musl: one `py3-none` wheel per platform
+    runs `blastit check`, `fmt` and `fold` on any CPython 3.12+, and serving WSGI
+    views needs CPython 3.13 or 3.14 on the host. PHP is the distro's NTS
+    `libphp` 8.3–8.6. Static sites need no language runtime. On musl,
+    `apk add libgcc`.
 
 ## Where next
 
 * [Getting started](getting-started.md) · [The Blastfile](blastfile.md)
-* [Local](local.md) · [CI/CD](ci.md) · [Deployments](deploy/index.md) · [Security](security.md)
+* [Install](install.md) · [Local](local.md) · [CI/CD](ci.md)
+* [Deployments](deploy/index.md) · [Security](security.md)

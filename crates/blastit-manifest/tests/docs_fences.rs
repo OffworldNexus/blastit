@@ -80,14 +80,14 @@ const THE_RETIRED_OPENING_IS_GONE: bool = true;
 /// illustration".
 const PAGES: [(&str, Counts); 13] = [
     ("README.md", Counts::new(1, 6)),
-    ("docs/index.md", Counts::new(3, 5)),
-    ("docs/getting-started.md", Counts::new(3, 10)),
+    ("docs/index.md", Counts::new(3, 2)),
+    ("docs/getting-started.md", Counts::new(3, 8)),
     ("docs/local.md", Counts::new(0, 13)),
     ("docs/frameworks/index.md", Counts::new(0, 1)),
     ("docs/frameworks/python/index.md", Counts::new(1, 1)),
     ("docs/frameworks/python/django.md", Counts::new(1, 3)),
     ("docs/frameworks/python/flask.md", Counts::new(1, 3)),
-    ("docs/frameworks/php/index.md", Counts::new(1, 4)),
+    ("docs/frameworks/php/index.md", Counts::new(1, 5)),
     ("docs/frameworks/php/symfony.md", Counts::new(1, 1)),
     ("docs/frameworks/php/laravel.md", Counts::new(1, 1)),
     ("docs/frameworks/static-and-spa.md", Counts::new(1, 7)),
@@ -96,8 +96,11 @@ const PAGES: [(&str, Counts); 13] = [
 
 /// The whole pinned set: seventeen `text title="Blastfile"` documents (three
 /// spine pages carry one per content tab) and every illustration on those
-/// thirteen pages (measured 2026-11-19, `MB.41.3`).
-const TOTAL: Counts = Counts::new(17, 63);
+/// thirteen pages (re-measured 2026-11-20 by `MB.42.4`: the universal
+/// `install.sh` hero replaced the per-runtime snippets on `docs/index.md` and
+/// `docs/getting-started.md`, and the PHP page's install line became a
+/// `console` fence).
+const TOTAL: Counts = Counts::new(17, 59);
 
 /// Pages whose plain `text` fences are statement lists: syntax, not documents
 /// and not illustrations (§16.1). `docs/reference/blastfile.md` is deliberately

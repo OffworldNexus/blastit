@@ -17,11 +17,15 @@ flowchart LR
 
 ## Install
 
-Download `blastit-<arch>-unknown-linux-<libc>.tar.gz` from
-`github.com/OffworldNexus/blastit/releases`, extract it, and put the directory it creates on `PATH`.
-The shim must sit beside the binary, and the PyPI wheel ships none, so `entrypoint php` is the
-standalone archive's job. Then install the distro's NTS `libphp` for a supported minor (8.3, 8.4,
-8.5) and the PDO driver, on the host or in the CI runner:
+The same one-liner installs everything — `blastit`, `blastit-lsp` and the PHP shims —
+from the signed repository ([install](../../install.md)):
+
+```console
+$ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
+```
+
+Then install the distro's NTS `libphp` (8.3, 8.4, 8.5 or 8.6) and the PDO driver on the host
+or in the CI runner:
 
 ```text
 sudo apt install libphp-embed php-pgsql                 # Debian 13, Ubuntu 24.04+
@@ -29,10 +33,10 @@ sudo apk add php84-embed php84-pdo_pgsql                # Alpine
 sudo dnf install php-embedded php-pgsql                 # Fedora / RHEL
 ```
 
-That is the one privileged step: Blastit needs no `sudo` and writes nothing under `/etc`. Debian 12
-and Ubuntu 22.04 ship 8.2 or older, which the boot refuses by design. `BLASTIT_LIBPHP` must be an
-absolute path; an image you build adds the same library and the shim; a boot without one names the
-package.
+That is the only privileged step for a PHP app; Blastit needs no `sudo` and writes nothing
+under `/etc`. Debian 12 and Ubuntu 22.04 ship 8.2 or older, which the boot refuses by
+design — a newer minor comes from the distro's backports or a signed third-party repository.
+`BLASTIT_LIBPHP` must be an absolute path; an image you build adds the same library.
 
 ## The Blastfile
 
@@ -79,9 +83,8 @@ worker and carries an `ETag`; a `.env` never ships inside `public/`. Vite's hash
 
 ## Learn the grants
 
-`blastit dev` refuses at boot, naming the root, the `libphp` or the shim. Start
-`blastit dev --learn`, send every route with your client or a `curl` list, stop it with ++ctrl+c++,
-read `git diff`, and run `blastit fmt`.
+`blastit dev` refuses at boot, naming the root, the `libphp` or the shim. Start `blastit dev --learn`,
+send every route, stop it with ++ctrl+c++, read `git diff`, and run `blastit fmt`.
 
 ```console
 $ blastit dev --learn

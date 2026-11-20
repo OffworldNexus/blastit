@@ -174,13 +174,22 @@ path = "docs/frameworks/index.md"
 [[page]]
 path = "docs/frameworks/php/index.md"
 
+# The install line comes first: it is the universal `curl | sh`, which this gate
+# never fetches (it writes the host's signed apt/rpm repository), so it is
+# accounted with a reason instead of executed. The two `console` fences below it
+# are the page's own commands.
 [[page.fence]]
 index = 1
+mode = "example"
+reason = "Pipes the published installer into a shell, and that installer writes the host's signed APT/RPM repository or `~/.local/bin`; this offline gate fetches neither. README fence 1 and Getting started fence 1 account the same line, and docs/install.md documents the package-manager result."
+
+[[page.fence]]
+index = 2
 mode = "static"
 reason = "The gate builds no PHP project fixture: an `entrypoint php` file needs a `public/index.php` app and a host NTS `libphp`, and this offline gate installs neither. It checks the documented `blastit dev --learn` command and its flags against the installed CLI, and parses the page's Blastfile block."
 
 [[page.fence]]
-index = 2
+index = 3
 mode = "static"
 reason = "The gate builds no PHP project fixture to format, so it checks `fmt --check`'s executable and flag against the installed CLI (docs/blastfile.md's Python tab runs the same `fmt --check` for real) and parses this page's Blastfile with docs_fences."
 
@@ -244,34 +253,28 @@ mode = "presets"
 [[page]]
 path = "docs/getting-started.md"
 
+# Four `console` fences, in the page's order: the install line, the two lockfile
+# pins and the boot banner. Fence 1 is accounted (this gate never fetches the
+# installer); fence 2 installs the wheel under test for real; fence 4 boots the
+# `hello` project the banner belongs to.
 [[page.fence]]
 index = 1
-mode = "install"
+mode = "example"
+reason = "Pipes the published installer into a shell: it adds the host's signed APT/RPM repository (`main`/`nightly`) or unpacks the archive in `~/.local/bin`, and this offline gate does neither. README fence 1 accounts the same line, docs/install.md documents the package-manager result, and the wheel it installs is proved by fence 2."
 
 [[page.fence]]
 index = 2
-mode = "example"
-reason = "The PHP tab installs the standalone release archive, which this offline gate does not fetch; `scripts/build-standalone.sh` builds that archive and `make install` stages the same layout, so the download and `PATH` commands are accounted rather than run."
+mode = "install"
 
 [[page.fence]]
 index = 3
 mode = "example"
-reason = "The static tab installs the standalone release archive, which this offline gate does not fetch; `scripts/build-standalone.sh` builds that archive and `make install` stages the same layout, so the download and `PATH` commands are accounted rather than run."
+reason = "`composer require --dev` needs Packagist and a PHP `vendor/` tree this offline gate cannot create; fence 2 installs the wheel for real, and docs/reference/cli.md documents the `vendor/bin/blastit` handoff."
 
 [[page.fence]]
 index = 4
 mode = "dev"
 fixture = "hello"
-
-[[page.fence]]
-index = 5
-mode = "static"
-reason = "The PHP tab's `blastit dev` is not executed: it needs a PHP project fixture and a bootable host NTS `libphp`, and this offline gate has neither. `mode_static` checks the command's executable and every flag against the installed CLI, and the tab's Blastfile is parsed by docs_fences; e2e/php_sapi_probe.py boots the same launcher in its image."
-
-[[page.fence]]
-index = 6
-mode = "dev"
-fixture = "static-site"
 
 [[page]]
 path = "docs/how-it-works.md"
@@ -279,25 +282,37 @@ path = "docs/how-it-works.md"
 [[page]]
 path = "docs/index.md"
 
+# The landing page carries one `console` fence now: the universal three lines.
 [[page.fence]]
 index = 1
-mode = "summary"
-fixture = "shop"
+mode = "example"
+reason = "The hero's three lines are the installer and the two commands a new reader meets first: `curl | sh` writes the host's signed repository, which this offline gate never fetches, and neither `blastit dev` nor `blastit check` has a project beside it here. README fence 2 runs the same dev banner on `hello`, fence 3 its request, and Getting started fence 4 boots the same server; `check` runs for real in docs/ci.md."
+
+[[page]]
+path = "docs/install.md"
+
+# `install.sh`, then the package manager's own commands: the installer needs a
+# host repository this gate never writes, and apt/dnf need the host's package
+# database, so the four fences are accounted with the command each one names.
+[[page.fence]]
+index = 1
+mode = "example"
+reason = "Opens with the installer, whose only job is to write the host's signed repository, then names `blastit --version` and `blastit dev`; reference/cli.md documents which binary answers the first and Getting started fence 4 boots the second on a real project."
 
 [[page.fence]]
 index = 2
-mode = "summary"
-fixture = "shop"
+mode = "example"
+reason = "`apt-get install/upgrade/remove blastit` runs against the repository fence 1 adds on a Debian or Ubuntu host; this gate is unprivileged and has no apt database, so it accounts the documented package-manager result instead of executing it."
 
 [[page.fence]]
 index = 3
-mode = "static"
-reason = "The PHP tab's `blastit dev` and `blastit --preset digitalocean-paas` are not executed: a PHP project fixture and the host's NTS `libphp` are both absent here. `mode_static` checks each executable, subcommand, flag and preset against the installed CLI, and the tab's Blastfile is parsed by docs_fences."
+mode = "example"
+reason = "`dnf install/upgrade/remove blastit` runs against the same repository on Fedora, RHEL, Rocky or Alma; this gate has no dnf and no repository, so the identical command set is accounted rather than executed."
 
 [[page.fence]]
 index = 4
-mode = "dev-roots"
-fixture = "static-site"
+mode = "example"
+reason = "Installs a downloaded `.deb`/`.rpm` with the local package manager and then reads the installer's own `--help`, which needs a release artifact and root; the page states that this path adds no repository, and the flags are the installer's own `sh -s -- --help`."
 
 [[page]]
 path = "docs/local.md"

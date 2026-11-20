@@ -342,6 +342,14 @@ class WheelTest(HarnessTest):
         ):
             harness.wheel_path()
 
+    def test_a_py3_none_wheel_is_the_one_for_this_interpreter(self) -> None:
+        """One universal wheel (`MB.42.3.3`) serves every CPython, so it is chosen."""
+        version = harness.planned_version()
+        name = f"blastit-{version}-py3-none-linux_x86_64.whl"
+        with tree({name: ""}) as root, wheel_directory(root):
+            self.assertEqual(harness.wheel_path(), root / name)
+            self.assertEqual(harness._wheel_python(name), harness.HOST_PYTHON)
+
     def test_two_wheels_for_the_host_are_refused(self) -> None:
         version = harness.planned_version()
         first = wheel_name(version)

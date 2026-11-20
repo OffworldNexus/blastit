@@ -13,9 +13,12 @@
 `dev`, `check`, `fmt` and `blastit` read `./Blastfile` here; `BLASTIT_MANIFEST`
 names another file, the only way to move it. There is no upward search.
 
-Every example below writes `blastit`, because the release archive and `make install` put that name
-on `PATH`. In a Python project it is `uv run blastit` — the same binary from the wheel, reading the
-same file — and that is the one form PHP and static sites do not have.
+Every example below writes `blastit`. One binary serves Python, PHP and static, and the
+installer's package — or a `uv add --dev blastit` pin — puts that name on `PATH`. A project
+that pinned its own copy still runs it: `dev`, `check`, `fmt` and `lsp` hand off to
+`./.venv/bin/blastit`, `./vendor/bin/blastit` or `./node_modules/.bin/blastit` when one is
+present and safe, and `BLASTIT_NO_LOCAL_HANDOFF=1` keeps the global binary for every command
+([which binary answers](#blastit)).
 
 ## `blastit dev`
 
@@ -100,10 +103,12 @@ portable [`blastit-lsp`](#blastit-lsp).
 ## `blastit-lsp`
 
 The same server as [`blastit lsp`](#blastit-lsp-linux), packaged as its own binary
-for Linux, macOS and Windows. An editor starts it with no arguments —
-`<path>/blastit-lsp` — on stdin/stdout, and registers the extensionless name
-`Blastfile`; there is no `--help` and no `--version`, and an argument is ignored
-while it waits on stdin, so started by hand it exits `1` when the input ends. It
+for Linux, macOS and Windows. It is a console script of the `blastit` package (and of the
+`py3-none` wheel), so `blastit-lsp --version` prints one line and exits `0` — the probe a
+package manager or an editor extension makes before it spawns anything. An editor starts
+it with no arguments — `<path>/blastit-lsp` — on stdin/stdout, and registers the
+extensionless name `Blastfile`; any other argument is one sentence on stderr and exit `2`,
+so started by hand it waits on stdin and exits `1` when the input ends. It
 reads no `./Blastfile`, no `BLASTIT_*` variable and no configuration, opens no
 socket, serves no application and holds no privilege. `blastit` itself stays the
 Linux-only server: macOS and Windows get the **editor** only, because serving an app
@@ -176,6 +181,7 @@ $ blastit --help
 | *(none)* | runs the server, configuration from the environment |
 | `--preset NAME`, `--preset=NAME` | one platform's defaults; a set `BLASTIT_*` or `PORT` still wins |
 | `--help`, `-h` | prints the usage and the preset list |
+| `-V`, `--version` | prints this binary's version; `--help` and `--version` always answer from the global `blastit` |
 
 There is no `--port` here: the listener is a [setting](settings.md) (`PORT` or
 `BLASTIT_*`), and `blastit --port 8080` exits `1` with the usage.
@@ -183,8 +189,20 @@ There is no `--port` here: the listener is a [setting](settings.md) (`PORT` or
 Production **fails closed**: without root or the capability set in
 [the settings](settings.md#privileges-and-the-uid-layout), and without seccomp,
 it exits `1` and points at `blastit dev`. `--preset` belongs to stage 0;
-`--stage=1` and `--role=…` are internal and refuse it. There is no `--version`:
-the [`preload` event](log-events.md#the-three-boot-lines) carries `build`.
+`--stage=1` and `--role=…` are internal and refuse it.
+
+### Which binary answers { #which-binary }
+
+`dev`, `check`, `fmt` and `lsp` run the project's own `blastit` when
+`./.venv/bin/blastit`, `./vendor/bin/blastit` or `./node_modules/.bin/blastit` is present
+and safe; the `boot` event names the build that actually ran. A candidate that fails a
+safety check is skipped with one warning line — an unusual checkout or a third-party
+`node_modules` never bricks the command — and `BLASTIT_NO_LOCAL_HANDOFF` keeps the global
+binary for every command. `Serve` never hands off: `--version` and `--help` answer from
+the binary you typed.
+
+`blastit --internal-json` is not a command: it is the NDJSON bridge the Python package
+speaks to this binary, and it says so instead of waiting on input.
 
 ## `blastit-manifest fold`
 

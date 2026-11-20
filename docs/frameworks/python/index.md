@@ -14,9 +14,11 @@ flowchart LR
 
 ## Install
 
-Blastit is a Linux application server. `uv add blastit` pins it in the project, and `uv run` then
-finds it beside your code; the wheel covers CPython 3.13 and 3.14 on x86_64 and aarch64, glibc and
-musl. Nothing is installed outside the project, and nothing needs `sudo`.
+Blastit is a Linux application server. `uv add --dev blastit` pins it in the project, and the
+global `blastit` hands `dev`, `check`, `fmt` and `lsp` to that copy automatically. One `py3-none`
+wheel covers every CPython 3.12+ on x86_64 and aarch64, glibc and musl; serving WSGI views needs
+CPython 3.13 or 3.14 on the host. Nothing is installed outside the project, and nothing needs
+`sudo`.
 
 ## The Blastfile
 
@@ -51,22 +53,22 @@ mount is a directive like any other, so it lives in the file, not in the deploym
 
 ## Learn the grants
 
-`uv run blastit dev --learn` writes the views and exact `query` lines the run exercised, including
-new statements on existing views. For a suite, `uv run blastit check --learn --dry-run` prints the
-proposal and `uv run blastit check --learn` writes newly discovered views with their statements.
+`blastit dev --learn` writes the views and exact `query` lines the run exercised, including
+new statements on existing views. For a suite, `blastit check --learn --dry-run` prints the
+proposal and `blastit check --learn` writes newly discovered views with their statements.
 `--learn` never writes `body`, `use` or `transactions`, so declare those yourself. Read `git diff`,
-split a view whose paths need different grants, then run `uv run blastit fmt`.
+split a view whose paths need different grants, then run `blastit fmt`.
 
 ## Check in CI
 
-`uv run blastit check` runs `pytest -q` from the project root and fails on a statement the suite
+`blastit check` runs `pytest -q` from the project root and fails on a statement the suite
 reached that the file does not grant, on a grant the suite never used, on a view it never reached
 and on a request no view matched. `--json` prints one finding per problem, each with a `fix.action`
 ([what each finding means](../../ci.md#what-it-fails-on)).
 
 ## Deploy
 
-`uv run blastit --preset digitalocean-paas` boots the same file under real uids and capabilities;
+`blastit --preset digitalocean-paas` boots the same file under real uids and capabilities;
 without root or the capability set it exits `1` and points at `blastit dev`
 ([deployments](../../deploy/index.md)).
 

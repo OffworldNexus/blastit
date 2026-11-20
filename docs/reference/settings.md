@@ -2,9 +2,8 @@
 
 Everything is environment variables, plus the `Blastfile`. A set `BLASTIT_*` variable wins over the
 `Blastfile` and over a preset, even when empty, and `PORT` counts the same. `--preset` is a flag;
-`--port` belongs to `blastit dev`. The same variables reach both invocations: `uv run blastit` in a
-Python project, and the standalone `blastit` that the release archive or `make install` puts on
-`PATH` for PHP and static sites.
+`--port` belongs to `blastit dev`. One binary reads them: the `blastit` on `PATH`, whether it came
+from a package, the release archive, or a `uv add --dev blastit` pin in the project.
 
 ## The app and the file
 
@@ -19,7 +18,7 @@ Python project, and the standalone `blastit` that the release archive or `make i
 
 `app`, `preload`, `BLASTIT_APP`, `BLASTIT_WARMUP` and `BLASTIT_PRELOAD` must be
 importable in Blastit's own environment: the project's virtualenv. Blastit reads
-the process environment only; `uv run --env-file .env blastit dev` loads a file.
+the process environment only; `set -a; . ./.env; set +a` before `blastit dev` loads a file.
 
 ## Backends
 
@@ -36,6 +35,7 @@ the process environment only; `uv run --env-file .env blastit dev` loads a file.
 | `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler itself, without a view process |
 | `BLASTIT_BACKLOG` | `1024` | the TCP listen backlog |
 | `BLASTIT_DEV_EXPOSE` | — | `1` is the second acknowledgement `blastit dev --host` needs before it binds a non-loopback address |
+| `BLASTIT_NO_LOCAL_HANDOFF` | — | any value but `0`/empty stops `dev`, `check`, `fmt` and `lsp` from handing off to the project's own `blastit` |
 
 The health path takes no worker slot: traffic cannot starve a health check.
 

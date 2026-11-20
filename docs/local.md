@@ -4,7 +4,7 @@ Blastit runs on **Linux**: `blastit dev` starts your app the way production does
 without root, so a misconfiguration fails here instead of in production.
 
 ```console
-$ blastit dev        # or `uv run blastit dev` in a Python project
+$ blastit dev        # your machine, no root
 $ blastit dev --learn
 ```
 
@@ -25,7 +25,7 @@ $ blastit dev --learn
 
 === "Python (WSGI)"
     ```console
-    $ uv run blastit dev
+    $ blastit dev
       blastit dev · single-uid simulation · http://127.0.0.1:8080
     ```
 
@@ -53,14 +53,14 @@ flowchart LR
 
 `DATABASE_URL` is the app's normal libpq URL; a throwaway store is `docker run --rm -d
 -p 127.0.0.1:5432:5432 -e POSTGRES_USER=shop -e POSTGRES_PASSWORD=secret -e
-POSTGRES_DB=shop postgres:18`. Blastit reads the process environment only (`uv run
---env-file .env blastit dev`; `set -a; . ./.env; set +a` for the archive), hands the app
-a local URL, and connects upstream itself, so the password never enters the app.
+POSTGRES_DB=shop postgres:18`. Blastit reads the process environment only (`set -a; . ./.env;
+set +a` before it starts), hands the app a local URL, and connects upstream itself, so the
+password never enters the app.
 
 === "Python (WSGI)"
     ```console
     $ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
-    $ uv run blastit dev
+    $ blastit dev
     ```
 
 === "PHP"
@@ -80,7 +80,7 @@ Your app keeps reading `DATABASE_URL`, and the `Blastfile` stays safe to commit.
 
 === "Python (WSGI)"
     ```console
-    $ uv run blastit check --learn
+    $ blastit check --learn
     learn: 1 route, 1 query added → /home/you/shop/Blastfile
     ```
 

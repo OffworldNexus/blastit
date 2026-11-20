@@ -127,88 +127,44 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE O
 ### 4. The image { #rootless }
 
 Docker's `cap_add` only sets the container's *bounding* set: a non-root `user:` process gets **no**
-capabilities from it, so each image puts file capabilities on a dedicated copy of what init starts
-from. One complete image per runtime:
+capabilities from it, so the image puts file capabilities on a dedicated copy of what init starts
+from. One image serves every interface:
 
-=== "Python (WSGI)"
-    ```dockerfile title="Dockerfile"
-    FROM python:3.13-slim
+```dockerfile title="Dockerfile"
+# One image serves every interface: the package brings `blastit` and its shims,
+# `python3.13` runs a WSGI view, and the distro's NTS `libphp` runs a front
+# controller. A static-only app drops the python and libphp packages below.
+FROM debian:trixie-slim
 
-    WORKDIR /app
-    COPY requirements.txt .
-    RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
-        && rm -rf /var/lib/apt/lists/*
-    RUN pip install --no-cache-dir -r requirements.txt blastit
-    COPY . .
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libcap2-bin libphp-embed php-pgsql python3.13 python3.13-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
 
-    ENV PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY requirements.txt .
+RUN python3.13 -m venv .venv && .venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY . .
 
-    # `chown` clears a file capability, so nothing re-owns the file after `setcap`.
-    ARG BLASTIT_UID=10000
-    RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
-        && interpreter="$(readlink -f /usr/local/bin/python3.13)" \
-        && cp "$interpreter" "${interpreter%/*}/python3.13-init" \
-        && chown "$BLASTIT_UID:$BLASTIT_UID" "${interpreter%/*}/python3.13-init" \
-        && chmod 0500 "${interpreter%/*}/python3.13-init" \
-        && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-             "${interpreter%/*}/python3.13-init"
+# `chown` clears a file capability, so nothing re-owns the file after `setcap`.
+ARG BLASTIT_UID=10000
+RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
+    && lib=/usr/share/blastit/lib \
+    && cp "$lib/blastit" "$lib/blastit-init" \
+    && chown "$BLASTIT_UID:$BLASTIT_UID" "$lib/blastit-init" \
+    && chmod 0500 "$lib/blastit-init" \
+    && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+         "$lib/blastit-init"
 
-    EXPOSE 8080
-    ```
-
-=== "PHP"
-    ```dockerfile title="Dockerfile"
-    FROM debian:trixie-slim
-
-    RUN apt-get update && apt-get install -y --no-install-recommends \
-            ca-certificates curl libcap2-bin libphp-embed php-pgsql \
-        && rm -rf /var/lib/apt/lists/*
-    WORKDIR /app
-    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
-        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
-        && rm blastit-*.tar.gz
-
-    # The copy sits beside the shims, which is where a boot finds them.
-    ARG BLASTIT_UID=10000
-    RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
-        && cp /usr/local/share/blastit/lib/blastit /usr/local/share/blastit/lib/blastit-init \
-        && chown "$BLASTIT_UID:$BLASTIT_UID" /usr/local/share/blastit/lib/blastit-init \
-        && chmod 0500 /usr/local/share/blastit/lib/blastit-init \
-        && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-             /usr/local/share/blastit/lib/blastit-init
-
-    COPY . .
-    EXPOSE 8080
-    ```
-
-=== "Static & SPA"
-    ```dockerfile title="Dockerfile"
-    FROM debian:trixie-slim
-
-    RUN apt-get update && apt-get install -y --no-install-recommends \
-            ca-certificates curl libcap2-bin \
-        && rm -rf /var/lib/apt/lists/*
-    WORKDIR /app
-    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
-        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
-        && rm blastit-*.tar.gz
-
-    ARG BLASTIT_UID=10000
-    RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
-        && cp /usr/local/share/blastit/lib/blastit /usr/local/share/blastit/lib/blastit-init \
-        && chown "$BLASTIT_UID:$BLASTIT_UID" /usr/local/share/blastit/lib/blastit-init \
-        && chmod 0500 /usr/local/share/blastit/lib/blastit-init \
-        && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-             /usr/local/share/blastit/lib/blastit-init
-
-    COPY . .
-    EXPOSE 8080
-    ```
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8080
+```
 
 A file with capabilities turns any process of that uid into init: Blastit refuses a deployment
 where a *shared* interpreter carries them ([security model](../security.md#the-mechanisms)). The
-non-Python tabs copy the archive's `blastit` to `blastit-init` in the directory that holds its
-shims, so the copy is the only capable file and `entrypoint php` still finds them.
+copy sits beside the installed shims in `/usr/share/blastit/lib`, so it is the only capable file
+and `entrypoint php` still finds them. `python3.13` is there for a WSGI view; a static-only app
+drops it and `libphp` from the `apt-get` line and the rest is unchanged.
 
 ### 5. Compose
 
@@ -293,7 +249,7 @@ services:
       # /run belongs to root; this is the runtime directory, owned by init's uid.
       - /run/blastit:mode=0700,uid=10000,gid=10000
     environment: *app-env
-    command: ["/usr/local/bin/python3.13-init", "-m", "blastit"]
+    command: ["/usr/share/blastit/lib/blastit-init"]
     expose: ["8080"]
     depends_on:
       grant: { condition: service_completed_successfully }
@@ -314,9 +270,8 @@ volumes:
   pgdata:
 ```
 
-`user:` is the dedicated uid that can run the capable copy, and `command:` names that copy:
-`["/usr/local/bin/python3.13-init", "-m", "blastit"]` for the Python image,
-`["/usr/local/share/blastit/lib/blastit-init"]` for the PHP and static ones. The app's
+`user:` is the dedicated uid that can run the capable copy, and `command:` names that copy —
+`["/usr/share/blastit/lib/blastit-init"]` for every interface. The app's
 `DATABASE_URL` names `pgbouncer`; `migrate` and `grant` name `db` — never swap the two.
 
 ### 6. Build and start

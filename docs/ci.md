@@ -41,13 +41,15 @@ One command per runtime below; each job is a copy-paste workflow.
           - uses: actions/checkout@v4
           - uses: astral-sh/setup-uv@v10.3.2
           - run: uv sync --frozen
-          - run: uv run blastit check --json
+          - run: blastit check --json
             env:
               DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/shop
     ```
 
-    `check` puts Blastit in front of your store and runs `pytest -q` itself (`uv add
-    --dev pytest` if the project has none); a clean run means every view was observed.
+    The runner installs Blastit once (`curl -fsSL …/install.sh | sh`), and `blastit` then hands
+    `check` to the `.venv/bin/blastit` this project pinned. `check` puts Blastit in front of your
+    store and runs `pytest -q` itself (`uv add --dev pytest` if the project has none); a clean run
+    means every view was observed.
 
 === "PHP"
     ```yaml title=".github/workflows/check.yml"

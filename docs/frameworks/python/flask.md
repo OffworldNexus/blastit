@@ -65,19 +65,19 @@ names. A built front end goes the same way with `root "public"` and a `fallback`
 
 ## Learn the grants
 
-`uv run blastit dev --learn` records every view and statement the run exercised; click through the
-app, stop with ++ctrl+c++, read `git diff Blastfile`, then run `uv run blastit fmt`. It never writes
+`blastit dev --learn` records every view and statement the run exercised; click through the
+app, stop with ++ctrl+c++, read `git diff Blastfile`, then run `blastit fmt`. It never writes
 `body`, `use` or `transactions`, so this file's trait stays yours to keep.
 
 ## Check in CI
 
-`uv run blastit check` runs `pytest` from the project root, so the suite must import the same
+`blastit check` runs `pytest` from the project root, so the suite must import the same
 callable the file names — `app:app` here. A statement the suite reached and the file does not grant
 is one finding with the `query` that closes it ([the list](../../ci.md#what-it-fails-on)).
 
 ## Deploy
 
-`uv run blastit --preset compose-traefik` runs the same file under real uids and capabilities
+`blastit --preset compose-traefik` runs the same file under real uids and capabilities
 ([deployments](../../deploy/index.md)).
 
 ## The callable you name

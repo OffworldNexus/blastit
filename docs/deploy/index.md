@@ -7,7 +7,8 @@ the app.
 ## What you are deploying
 
 **One container.** `blastit` is PID 1 and your app runs inside it: one view process per route
-namespace, forked from `blastit` on demand, under that route's uid.
+namespace, forked from `blastit` on demand, under that route's uid. One image serves every
+interface — Python, PHP and static — because one binary does.
 
 **Blastit's ingress role is the app's front door.** It takes the connection and decodes the body,
 the scheduler admits the request and owns the worker budget, and only then does the view run your
@@ -18,7 +19,7 @@ holds the real role, the password and the allowlist of what the route may run. Y
 `DATABASE_URL` points at a local socket, not at the database.
 
 **Three interfaces, one file.** `entrypoint python` runs a WSGI callable, `entrypoint php` a front
-controller on the host's embedded NTS `libphp` (8.3, 8.4, 8.5), and a `static` mount serves a built
+controller on the host's embedded NTS `libphp` (8.3, 8.4, 8.5 and 8.6), and a `static` mount serves a built
 front end with no interpreter at all ([frameworks](../frameworks/index.md)).
 
 ## A pooler in front of the database { #pooler }

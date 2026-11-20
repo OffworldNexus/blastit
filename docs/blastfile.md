@@ -5,9 +5,9 @@ file, no `version` header, no `=` between a keyword and its value. It is read fr
 the working directory (`BLASTIT_MANIFEST` names another path; no upward search).
 
 ```console
-$ uv run blastit dev        # Python (WSGI); `blastit dev` from the archive
-$ uv run blastit check
-$ uv run blastit fmt --check
+$ blastit dev        # your machine, no root
+$ blastit check
+$ blastit fmt --check
 ```
 
 ## The file
@@ -77,7 +77,7 @@ which hands the app a local socket URL ([Local development](local.md)).
 === "Python (WSGI)"
     ```console
     $ uv add blastit
-    $ uv run blastit dev
+    $ blastit dev
     ```
 
 === "PHP"
@@ -101,7 +101,7 @@ One unprivileged command proves nothing your suite exercised was left out:
 
 === "Python (WSGI)"
     ```console
-    $ uv run blastit check
+    $ blastit check
     ```
 
 === "PHP"

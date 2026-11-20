@@ -21,6 +21,7 @@ site_dir = "site"
 nav = [
   { "Home" = "index.md" },
   { "Getting started" = "getting-started.md" },
+  { "Install" = "install.md" },
   { "The Blastfile" = "blastfile.md" },
   { "Local development" = "local.md" },
   { "CI/CD" = "ci.md" },

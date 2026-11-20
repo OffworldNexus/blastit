@@ -150,48 +150,28 @@ Every health check goes to `BLASTIT_HEALTH_PATH`: the scheduler answers it, from
 
 ## Plain Docker
 
-One image per runtime, each with its own `HEALTHCHECK`; the `docker run` below is the same for all
-three:
+One image for every interface, with its own `HEALTHCHECK`; the `docker run` below is the same for
+all three:
 
-=== "Python (WSGI)"
-    ```dockerfile
-    FROM python:3.13-slim
-    WORKDIR /app
-    COPY . .
-    RUN pip install --no-cache-dir -r requirements.txt blastit
-    HEALTHCHECK CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/_blastit/health')"
-    CMD ["blastit"]
-    ```
+```dockerfile
+# One image serves every interface: the package brings `blastit` and its shims,
+# `python3.13` runs a WSGI view, and the distro's NTS `libphp` runs a front
+# controller. A static-only app drops the python and libphp packages below.
+FROM debian:trixie-slim
 
-=== "PHP"
-    ```dockerfile
-    FROM debian:trixie-slim
-    RUN apt-get update && apt-get install -y --no-install-recommends \
-            ca-certificates curl libphp-embed php-pgsql \
-        && rm -rf /var/lib/apt/lists/*
-    WORKDIR /app
-    COPY . .
-    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
-        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
-        && rm blastit-*.tar.gz
-    HEALTHCHECK CMD curl -fsS http://127.0.0.1:8080/_blastit/health
-    CMD ["blastit"]
-    ```
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libphp-embed php-pgsql python3.13 python3.13-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
 
-=== "Static & SPA"
-    ```dockerfile
-    FROM debian:trixie-slim
-    RUN apt-get update && apt-get install -y --no-install-recommends \
-            ca-certificates curl \
-        && rm -rf /var/lib/apt/lists/*
-    WORKDIR /app
-    COPY . .
-    RUN curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz \
-        && tar -xzf blastit-*.tar.gz -C /usr/local --strip-components=1 \
-        && rm blastit-*.tar.gz
-    HEALTHCHECK CMD curl -fsS http://127.0.0.1:8080/_blastit/health
-    CMD ["blastit"]
-    ```
+WORKDIR /app
+COPY requirements.txt .
+RUN python3.13 -m venv .venv && .venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+HEALTHCHECK CMD curl -fsS http://127.0.0.1:8080/_blastit/health
+CMD ["blastit"]
+```
 
 ```console
 $ docker run -d --name shop --env-file .env \
@@ -199,7 +179,7 @@ $ docker run -d --name shop --env-file .env \
     registry.example.com/shop:1.2.3
 ```
 
-No `--health-cmd`: each image carries its own `HEALTHCHECK`, so the runtime it probes never matters
+No `--health-cmd`: the image carries its own `HEALTHCHECK`, so the runtime it probes never matters
 to the command line. No `--user` either: Docker's default set is what root mode needs. `.env` holds
 `DATABASE_URL` and `BLASTIT_TRUSTED_PROXIES=172.18.0.2` (the address your ingress connects from), so
 neither is in your shell history. `-p 127.0.0.1:` keeps the *only* listener on loopback, behind your
