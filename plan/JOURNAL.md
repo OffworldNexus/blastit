@@ -4092,3 +4092,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T11:33 [MB.51] (lead) REVIEW FIX 2 (4 min): 1) split OSError ('cannot read <path>') from TypeError/ValueError ('not valid project metadata') in declared_requires_python. 2) path=None
 - 2026-11-20T11:38 [MB.51] (lead) status active -> done
 - 2026-11-20T11:38 [MB.51] (lead) commit 6a94156
+- 2026-11-20T11:39 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
