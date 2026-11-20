@@ -80,15 +80,20 @@ release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
      into `develop`.
 2. **Pre-merge rehearsal on the PR**:
    * `CI` (`.github/workflows/ci.yml`), `Docs` (`.github/workflows/docs.yml`),
-     `PHP SAPI` (`.github/workflows/php-sapi.yml`), and `Publish`
+     `PHP SAPI` (`.github/workflows/php-sapi.yml`), `Python SAPI`
+     (`.github/workflows/py-sapi.yml`), and `Publish`
      (`.github/workflows/publish-pypi.yml`) run on the PR.
    * `Publish`'s `guard` and `matrix` jobs check that the branch matches
      `release/<version>`, the changelog entry is dated, tag `v<version>` does
      not exist yet, and `scripts/platform_matrix.py --check` passes; then
-     `wheels` + `wheels_musl` (8 wheels across `x86_64`/`aarch64` ×
-     `manylinux_2_28`/`musllinux_1_2` × CPython 3.13/3.14), `sdist`, `shims`
-     (12 probed PHP 8.3/8.4/8.5 SAPI shims), `binaries_gnu` + `binaries_musl`
-     (4 standalone Linux archives), `lsp` (5 `blastit-lsp` archives across
+     `wheels_gnu` + `wheels_musl` (`4` universal
+     `py3-none-{manylinux_2_28,musllinux_1_2}_{x86_64,aarch64}` wheels,
+     `manylinux` wheels smoke-tested on CPython `3.12`/`3.13`/`3.14`,
+     `musllinux` on `3.13`, built by `scripts/build-wheel.sh`
+     (`maturin build --bindings bin` + `scripts/repack_universal_wheel.py` — no
+     extension module compiled any more), `sdist`, `shims`
+     (`16` probed PHP `8.3`–`8.6` legs), `binaries_gnu` + `binaries_musl`
+     (`4` standalone Linux archives), `lsp` (`5` `blastit-lsp` archives across
      Linux, macOS, and Windows), and `verify` (`scripts/check-long-description.py`)
      rehearse the full distribution build.
 3. **Human validation & merge**:
@@ -103,6 +108,20 @@ release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
      creates and pushes the annotated `v<version>` git tag, and creates the
      **GitHub Release** with all archives, shims, `SHA256SUMS`, and
      `CHANGELOG.md` notes attached.
+   * That tag push then runs **Packages** (`.github/workflows/packages.yml`) in
+     the same `release-${{ github.ref }}` concurrency group as `Publish`, so the
+     two can never overlap: it builds the `4` `.deb`/`.rpm` packages from the
+     §6.1 bundle, installs each package on the legs of its own format (`8` `deb`
+     + `4` `rpm`, from `scripts/platform_matrix.py --matrix install`; `6`
+     distributions × `2` architectures), publishes to the signed Cloudsmith
+     `main` component, mirrors to Forgejo
+     (skips with one `::notice::` when `FORGEJO_PACKAGES_TOKEN` is unset), waits
+     for that `Publish` run, then reseals one `SHA256SUMS` over archives +
+     packages + shims. A `workflow_dispatch` rehearses (`--dry-run`, printing
+     every command) unless `publish: true`.
+   * **Nightly** (`.github/workflows/nightly.yml`, `03:17 UTC`) stamps
+     `0.2.0~nightly20261120.r<run>+g<sha>` / `0.2.0-0.nightly.…`, publishes to
+     the `nightly` component and keeps the newest seven.
    * Ordinary non-release PRs merged into `develop` (where `v<version>` already
      exists) skip the release jobs in a few seconds.
 4. **Check the result**:
@@ -170,11 +189,13 @@ $ uv run --no-project scripts/check-long-description.py dist/*
 artifacts (`make platform-matrix-check` and `make workflow-check` verify the
 workflows against it offline):
 
-* **Linux serving artifacts** (`blastit` wheels, standalone archives, and PHP
-  8.3/8.4/8.5 C SAPI shims) target `{x86_64, aarch64} × {gnu (manylinux_2_28),
-  musl (musllinux_1_2 / Alpine)}`. Every `x86_64` wheel, standalone archive, and
-  shim is built and smoked locally on Linux `x86_64`; the `aarch64` legs build
-  and run natively in GitHub Actions on `ubuntu-24.04-arm`.
+* **Linux serving artifacts** (the `4` universal `blastit` wheels, `4` standalone
+  archives, the `16` PHP `8.3`–`8.6` C SAPI shims, and the `8` CPython
+  `3.13`/`3.14` Python SAPI shims) target `{x86_64, aarch64} × {gnu
+  (manylinux_2_28), musl (musllinux_1_2 / Alpine)}`. Every `x86_64` wheel,
+  standalone archive, and shim is built and smoked locally on Linux `x86_64`;
+  the `aarch64` legs build and run natively in GitHub Actions on
+  `ubuntu-24.04-arm`.
 * **Portable `blastit-lsp` editor archives** target five native triples:
   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
   `aarch64-apple-darwin` (`macos-latest`), `x86_64-apple-darwin`

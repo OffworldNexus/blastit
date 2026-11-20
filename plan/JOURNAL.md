@@ -4006,3 +4006,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T06:22 [MB.42.8] (lead) status proposed -> superseded
 - 2026-11-20T06:22 [MB.42.8] (lead) superseded -> MB.43 (proposed): deferred out of MB.42 so the release gate can close; the seccomp fork-in-libtest class is already fixed (MB.42.7), this is the l
 - 2026-11-20T06:22 [MB.42] (lead) status active -> done
+- 2026-11-20T06:23 [MB.44] (conductor) created (task) Sync CHANGELOG.md (0.2.0) and RELEASING.md for universal binary, PHP 8.6, Cloudsmith/Forgejo repos, py3-none wheels & Composer wrapper
+- 2026-11-20T06:23 [MB.44] (lead) status ready -> active
+- 2026-11-20T06:23 [MB.44] (lead) attempt 1/3 started
+- 2026-11-20T06:23 [MB.44] (lead) base d6710816c274efc3f5d78f4f9353706bb711cc67
+- 2026-11-20T06:26 [MB.44] (lead) REVIEW FIX: (1) RELEASING wheel line must not claim PHP shims travel in the wheel — publish-pypi.yml wheels_* pass require-shims=py and stage no shim-* artifact
+- 2026-11-20T06:26 [MB.45] (lead) created (task) Stage the four PHP SAPI shims into the universal wheels (publish-pypi.yml)
+- 2026-11-20T06:27 [MB.44] (lead) status active -> done
+- 2026-11-20T06:27 [MB.44] (lead) commit bb74e50

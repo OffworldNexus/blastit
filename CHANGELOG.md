@@ -5,22 +5,23 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
-## 0.2.0 (2026-11-18)
+## 0.2.0 (2026-11-20)
 
 Blastit now reads a purpose-built `Blastfile`, serves static sites and SPAs with
 no interpreter at all, runs Symfony and Laravel front controllers inside
-parallel per-route workers via embedded NTS `libphp` (PHP 8.3, 8.4 and 8.5),
-reloads changed files in `blastit dev` over `fanotify`, and ships a native
+parallel per-route workers via embedded NTS `libphp` (PHP 8.3, 8.4, 8.5 and
+8.6), reloads changed files in `blastit dev` over `fanotify`, and ships a native
 language server (`blastit-lsp`) and Zed extension with SQL template validation.
 
 - **One manifest format: `Blastfile` and `blastit fmt`.** `./Blastfile` replaces
-  `blastit.toml` everywhere — zero TOML dependency, `app`, `entrypoint python`
-  or `entrypoint php`, `postgres $DATABASE_URL` or a split store block,
-  reusable `trait` blocks (`use`), typed path patterns (`"/products/{id:int}"`,
-  `"/assets/*"`, `regex '…'`), `static` mounts, `body json|form|none|raw`,
-  `egress any` and `prefork`, with lossless comment-preserving formatting via
-  `blastit fmt` (`--check` in CI) and syntax highlighting on the documentation
-  site ([Blastfile](https://offworldnexus.github.io/blastit/blastfile/)).
+  the retired TOML manifest everywhere — zero TOML dependency, `app`,
+  `entrypoint python` or `entrypoint php`, `postgres $DATABASE_URL` or a split
+  store block, reusable `trait` blocks (`use`), typed path patterns
+  (`"/products/{id:int}"`, `"/assets/*"`, `regex '…'`), `static` mounts,
+  `body json|form|none|raw`, `egress any` and `prefork`, with lossless
+  comment-preserving formatting via `blastit fmt` (`--check` in CI) and syntax
+  highlighting on the documentation site
+  ([Blastfile](https://offworldnexus.github.io/blastit/blastfile/)).
 - **Static mounts and SPA / front-controller routing.** A `static "<prefix>"`
   mount with `root` serves regular files and directory `index` files directly
   from the scheduler via `blastit-view-static` — no nginx, no extra worker —
@@ -34,11 +35,14 @@ language server (`blastit-lsp`) and Zed extension with SQL template validation.
   matched files while keeping `fallback` answers `no-cache` with `ETag`/`304`.
   An all-static `Blastfile` runs `blastit dev` and `blastit check [--json]` with
   no `entrypoint` and no `pytest`.
-- **Embedded PHP 8.3, 8.4 and 8.5 in parallel per-route workers.** `entrypoint
-  php "public/index.php"` loads the host's NTS `libphp` (`libphp-embed` on
-  Debian/Ubuntu, `php85-embed` on Alpine, `php-embedded` on Fedora/RHEL, or
-  `BLASTIT_LIBPHP`; PHP 8.2 and older are refused at boot) through per-minor
-  C SAPI shims shipped in the standalone Linux release archives
+- **Embedded PHP 8.3, 8.4, 8.5 and 8.6 in parallel per-route workers.**
+  `entrypoint php "public/index.php"` loads the host's NTS `libphp`
+  (`libphp8.3`–`libphp8.6`-embed, or the stock `libphp-embed` on Debian,
+  `php83`–`php86`-embed on Alpine, `php-embedded` on Fedora/RHEL, or
+  `BLASTIT_LIBPHP`; PHP 8.2 and older are refused at boot)
+  through per-minor C SAPI shims shipped in the standalone Linux release
+  archives — `16` of them, `libblastit_php{83,84,85,86}-<arch>-<libc>.so` across
+  `x86_64`/`aarch64` × `gnu`/`musl`
   ([PHP](https://offworldnexus.github.io/blastit/frameworks/php/)). Each route
   forks on-demand unprivileged `blastit-view-php` processes up to
   `BLASTIT_MAX_WORKERS`, with `$_SERVER` built in C, `SCRIPT_FILENAME`,
@@ -64,10 +68,26 @@ language server (`blastit-lsp`) and Zed extension with SQL template validation.
   GitHub Releases without `uv` — with Tree-sitter `Blastfile` + inner SQL
   highlighting, `$?`/`...` hover, formatting, and the **Parameterize SQL for
   Blastfile ($?)** Quick Fix.
-- **Four view crates, portable standalone builds, raw-body gate, and poolers.**
-  `blastit-view` is now a pure-`std` `view.chan` transport with per-backend
-  `blastit-view-{static,python,php}` crates gated by Cargo features, so
-  `cargo build -p blastit` links neither `libpython` nor a build-host `RUNPATH`.
+- **One universal `blastit` binary and signed repositories (`ADR-0017`).** A
+  single `blastit` executable (`DT_NEEDED` = `libc`/`libm`/`libgcc_s` only: zero
+  `libpython`, zero `libphp`, zero `RUNPATH`) serves Python WSGI — CPython 3.13
+  and 3.14 through the per-minor `libblastit_py3{13,14}-<arch>-<libc>.so` shims,
+  `dlopen`ed from `(st_dev, st_ino)`-pinned fds — PHP 8.3–8.6, static mounts,
+  `dbproxy`, and `lsp`, so one install snippet replaces the separate `# Python`
+  and `# PHP and static` ones. It ships as `4` universal
+  `py3-none-{manylinux_2_28,musllinux_1_2}_{x86_64,aarch64}` wheels that run on
+  CPython `>=3.12` for `check`/`fmt`/`fold` through the pure-stdlib
+  `blastit --internal-json` NDJSON bridge (serving WSGI still needs 3.13/3.14),
+  replacing the 8 `cp3NN` wheels. GPG-signed Cloudsmith APT and RPM repositories
+  (`main` + `nightly`, mirrored to Forgejo) install a machine in one command —
+  `curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh`,
+  `/dev/tty` for prompts, `.tar.gz` `--user` fallback — while a project pins
+  `uv add --dev blastit` or `composer require --dev offworldnexus/blastit`.
+  `dev`, `check`, `test`, `fmt` and `lsp` hand off to a local CLI with zero
+  TOCTOU (`$VIRTUAL_ENV/bin/blastit` **or** `./.venv/bin/blastit` →
+  `./vendor/bin/blastit` → `./node_modules/.bin/blastit` → `$BLASTIT_BIN`,
+  `O_NOFOLLOW` plus a `(st_dev, st_ino)` compare before `execveat`, unsafe
+  auto-discovered candidates skipped with one warning, never on `serve`).
   `blastit dev --learn` writes PHP and Python grants into `./Blastfile`
   (`blastit fmt --check` gates PHP formatting in CI while suite-driven request
   auditing remains Python-only in `0.2.0`). Production refuses `body raw`
