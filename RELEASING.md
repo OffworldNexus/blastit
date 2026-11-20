@@ -89,7 +89,10 @@ release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
      `wheels_gnu` + `wheels_musl` (`4` universal
      `py3-none-{manylinux_2_28,musllinux_1_2}_{x86_64,aarch64}` wheels,
      `manylinux` wheels smoke-tested on CPython `3.12`/`3.13`/`3.14`,
-     `musllinux` on `3.13`, built by `scripts/build-wheel.sh`
+     `musllinux` on `3.13`, each carrying the four PHP shims of its own
+     `<arch>`/`<libc>` beside the CPython ones — a short shim leg fails its own
+     leg and skips the wheels rather than publishing a wheel without PHP — built
+     by `scripts/build-wheel.sh`
      (`maturin build --bindings bin` + `scripts/repack_universal_wheel.py` — no
      extension module compiled any more), `sdist`, `shims`
      (`16` probed PHP `8.3`–`8.6` legs), `binaries_gnu` + `binaries_musl`
@@ -164,7 +167,10 @@ same commit. Nothing publishes
 them, and nothing outside the run can install from them — they exist to catch a
 broken wheel on the commit that broke it, and for whoever wants to try the
 current tree. The two workflows build with the same action,
-`.github/actions/build-wheel`.
+`.github/actions/build-wheel`. A `develop` wheel carries the two CPython shims
+only (`require-shims: py`) — that workflow has no shim legs — so PHP is a
+release-wheel capability: only `publish-pypi.yml`'s wheels carry the four PHP
+shims, and its `verify` job proves it on every libc before anything reaches PyPI.
 
 ## The description PyPI shows
 

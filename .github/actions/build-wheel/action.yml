@@ -17,9 +17,10 @@ description: >
 
   A wheel this action builds carries the two CPython shims the builder image can
   compile. The four PHP shims need a distro's `php_config.h`, so they only travel
-  when a caller stages them (`shims-from:`, the `shim-*` artifacts of
-  `php-sapi.yml`, or `target/php-sapi` on a release machine); `require-shims: all`
-  fails closed when six are not there.
+  when a caller stages them (`shims-from:`); `publish-pypi.yml` is that caller —
+  its wheel legs download the `shim-*` artifacts and pass `require-shims: all`,
+  which fails closed when six are not there. `wheels.yml` has no shim legs and
+  keeps the default `py` promise.
 
 inputs:
   artifact:
@@ -51,8 +52,9 @@ inputs:
   shims-from:
     description: >
       Directory holding PHP shims a previous job built (the `shim-*` artifacts of
-      `.github/workflows/php-sapi.yml`). Empty when there are none: no PHP headers
-      exist in the wheel builder, so this is the only way a wheel carries them.
+      `.github/workflows/php-sapi.yml`, or of `publish-pypi.yml`'s `shims` job).
+      Empty when there are none: no PHP headers exist in the wheel builder, so
+      this is the only way a wheel carries them.
     required: false
     default: ""
 
@@ -117,6 +119,19 @@ runs:
             fi
             echo "$wheel ok"
         done
+    # `MB.45`: the promise has to be a fact about the **wheel**, not about the
+    # staging directory `scripts/build-wheel.sh` checked before the repack. The
+    # check lives in `scripts/check_wheel_shims.py`, so the same proof runs here
+    # and in `publish-pypi.yml`'s `verify` over both libcs. A `manylinux` wheel is
+    # a `gnu` wheel, so its shims are asserted to be this wheel's own tuple.
+    - name: The wheel carries the shims it promised
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 scripts/check_wheel_shims.py \
+            --require "${{ inputs.require-shims }}" \
+            --libc gnu \
+            dist/*-py3-none-*.whl
     # One wheel, three interpreters — the promise a `py3-none` tag makes. Every
     # leg runs the same three images, so a wheel that loads on 3.13 and not on
     # 3.12 fails on the commit that built it (`scripts/wheel_container_smoke.sh`

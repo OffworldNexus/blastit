@@ -2,7 +2,7 @@
 id: MB.45
 title: "Stage the four PHP SAPI shims into the universal wheels (publish-pypi.yml)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -11,11 +11,15 @@ paths:
   - ".github/actions/build-wheel/action.yml"
   - scripts/check_workflows.py
   - scripts/test_packaging_gates.py
-attempts: 0
+  - "scripts/build-musl-wheel.sh"
+  - scripts/check_wheel_shims.py
+  - CHANGELOG.md
+  - RELEASING.md
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T06:26"
-updated: "2026-11-20T06:26"
+updated: "2026-11-20T06:50"
 ---
 
 # Goal

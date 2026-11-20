@@ -496,7 +496,12 @@ jobs:
 
   wheels_gnu:
     name: wheel (${{ matrix.name }})
-    needs: [guard, matrix]
+    # `MB.45`: the four PHP shims are built by the `shims` legs (only a distro
+    # ships `php_config.h`, and no manylinux image does), so the wheel leg stages
+    # its own `(arch, libc)`'s `shim-*` artifacts — and rule 9 of
+    # `scripts/check_workflows.py` is what keeps `shims` in `needs:` for a step
+    # that downloads them.
+    needs: [guard, matrix, shims]
     if: needs.guard.outputs.should_build == 'true'
     runs-on: ${{ matrix.runs_on }}
     strategy:
@@ -507,6 +512,14 @@ jobs:
       # `uvx` for the README rewrite. Pinned to a release tag rather than to a
       # major one: `astral-sh/setup-uv` stopped publishing major tags after `v7`.
       - uses: astral-sh/setup-uv@v10.3.2
+      # The same shape `binaries_gnu` uses: every `shim-*` of this leg's
+      # `(arch, libc)`, which `--require-shims all` then insists on finding in
+      # the wheel (`ADR-0017` decision 4: `4` PHP shims, `83`-`86`).
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.name }}-*
+          path: dist/shims
+          merge-multiple: true
       # Before the build: the README is the wheel's long description, and PyPI
       # renders it with no repository around it.
       - name: README links, as PyPI needs them
@@ -518,10 +531,14 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           platform: manylinux_${{ matrix.manylinux }}
           artifact: wheel-${{ matrix.name }}
+          require-shims: all
+          shims-from: dist/shims
 
   wheels_musl:
     name: wheel (${{ matrix.name }})
-    needs: [guard, matrix]
+    # `MB.45`: as for `wheels_gnu`, the four PHP shims are a `shims` leg's, and
+    # this job stages its own `(arch, libc)`'s artifacts beside the wheel.
+    needs: [guard, matrix, shims]
     if: needs.guard.outputs.should_build == 'true'
     runs-on: ${{ matrix.runs_on }}
     # musllinux has no manylinux container to borrow: the wheel must be linked by
@@ -535,6 +552,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
+      # `dist/shims` is relative to `$PWD`, which the build below mounts as
+      # `/src`, so the same path resolves inside Alpine.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.name }}-*
+          path: dist/shims
+          merge-multiple: true
       - name: README links, as PyPI needs them
         env:
           LINK_REF: ${{ needs.guard.outputs.ref_for_links }}
@@ -556,7 +580,8 @@ jobs:
                   }
                   trap cleanup_owner EXIT
                   apk add --no-cache bash >/dev/null
-                  bash scripts/build-musl-wheel.sh "$PY_VER"
+                  bash scripts/build-musl-wheel.sh "$PY_VER" \
+                      --require-shims all --shims-from dist/shims
                   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
                   interpreter=$(uv python find "$PY_VER")
                   bash scripts/wheel-smoke.sh --python "$interpreter" \
@@ -626,12 +651,21 @@ jobs:
           path: dist
           merge-multiple: true
           pattern: wheel-*
+      # `uv` before the step that runs it: every `uv run` in this job comes after
+      # this setup step, and a runner's preinstalled `uv` is nobody's promise.
+      - uses: astral-sh/setup-uv@v10.3.2
+      # `MB.45`: the one place all four wheels are seen at once. Both libcs must
+      # have their four PHP shims beside the two CPython ones before anything is
+      # uploaded — the legs' own action steps prove each wheel as it is built, and
+      # this proves the artifact that travels. No extra download: the shims are
+      # *inside* the wheels.
+      - name: Every wheel carries the shims it promised
+        run: uv run --no-project scripts/check_wheel_shims.py --require all dist/*.whl
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
           pattern: sdist
-      - uses: astral-sh/setup-uv@v10.3.2
       # Every file that will be uploaded: the exact wheel count from the matrix
       # and the one sdist, nothing missing and nothing extra.
       - name: Every file that goes to PyPI

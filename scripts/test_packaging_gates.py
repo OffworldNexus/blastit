@@ -27,10 +27,12 @@ REPO = Path(__file__).resolve().parent.parent
 CHECK_WORKFLOWS = REPO / "scripts" / "check_workflows.py"
 PLATFORM_MATRIX = REPO / "scripts" / "platform_matrix.py"
 CHECK_WHEEL_TAG = REPO / "scripts" / "check_wheel_tag.py"
+CHECK_WHEEL_SHIMS = REPO / "scripts" / "check_wheel_shims.py"
 CHECK_EXEC_ENV = REPO / "scripts" / "check-exec-env.sh"
 CHECK_NO_TEST_SEAM = REPO / "scripts" / "check-no-test-seam.sh"
 CHECK_PORTABLE_ELF = REPO / "scripts" / "check-portable-elf.sh"
 BUILD_WHEEL = REPO / "scripts" / "build-wheel.sh"
+BUILD_MUSL_WHEEL = REPO / "scripts" / "build-musl-wheel.sh"
 
 # Recorded verbatim from the shipped `aarch64-unknown-linux-musl` artifact of
 # `0.2.0` (`readelf --version-info blastit/_blastit.cpython-314-aarch64-linux-musl.so`):
@@ -587,6 +589,100 @@ def test_workflow_auditor_cases() -> int:
         _expect(
             res.returncode == 1 and "second copy of the table" in res.stdout,
             "auditor must reject an editor target spelled outside platform_matrix.py",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 20. `MB.45`: a wheel leg stages the `shim-*` artifacts but drops `shims`
+        #     from `needs:`. This proves the download <-> `needs:` coupling (rule 9)
+        #     and nothing else: the `require-shims`/`shims-from` agreement is rule
+        #     22's, and case 21 below is that rule's negative.
+        case_dir = Path(tmp) / "wheel-shims-without-needs"
+        shutil.copytree(base, case_dir)
+        pub = case_dir / ".github" / "workflows" / "publish-pypi.yml"
+        text = pub.read_text(encoding="utf-8")
+        header = "  wheels_gnu:\n"
+        needs_line = "    needs: [guard, matrix, shims]\n"
+        _expect(header in text, "the publish fixture no longer has a wheels_gnu job")
+        start = text.index(header)
+        needs_at = text.find(needs_line, start)
+        _expect(
+            needs_at != -1 and "  wheels_musl:" not in text[start:needs_at],
+            "the publish fixture no longer needs shims in wheels_gnu",
+        )
+        pub.write_text(
+            text[:needs_at]
+            + "    needs: [guard, matrix]\n"
+            + text[needs_at + len(needs_line) :],
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1
+            and "job wheels_gnu downloads pattern 'shim-${{ matrix.name }}-*'"
+            in res.stdout
+            and "missing from its transitive needs: ['shims']" in res.stdout,
+            "auditor must require `shims` in `needs:` for a wheel leg that stages "
+            "the shim-* artifacts",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 21. `MB.45` / rule 22: the `shim-*` download stays, but the build stops
+        #     demanding them (`require-shims` falls back to the action's `py`). The
+        #     staged PHP shims then enter the staging directory uncounted, and a
+        #     repack that dropped one ships — the exact shape rule 22 refuses.
+        case_dir = Path(tmp) / "wheel-shims-not-demanded"
+        shutil.copytree(base, case_dir)
+        pub = case_dir / ".github" / "workflows" / "publish-pypi.yml"
+        text = pub.read_text(encoding="utf-8")
+        call = (
+            "      - uses: ./.github/actions/build-wheel\n"
+            "        with:\n"
+            "          manylinux: ${{ matrix.manylinux }}\n"
+            "          platform: manylinux_${{ matrix.manylinux }}\n"
+            "          artifact: wheel-${{ matrix.name }}\n"
+            "          require-shims: all\n"
+            "          shims-from: dist/shims\n"
+        )
+        _expect(
+            call in text,
+            "the publish fixture no longer promises `require-shims: all` for a "
+            "wheel leg",
+        )
+        pub.write_text(
+            text.replace(call, call.replace("          require-shims: all\n", ""), 1),
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1
+            and "stages `shims-from` (dist/shims) but promises `require-shims: py`"
+            in res.stdout,
+            "auditor (rule 22) must refuse a wheel leg that stages shims it does "
+            "not demand",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        # 22. `MB.45` review / rule 22: the promise counts shims, so the action's
+        #     wheel check also has to say *which* ones. Dropping `--libc gnu` leaves
+        #     the tuple unpinned — another arch's or libc's shim is a foreign ABI —
+        #     and every rule above it stays green.
+        case_dir = Path(tmp) / "wheel-shims-tuple-unpinned"
+        shutil.copytree(base, case_dir)
+        act = case_dir / ".github" / "actions" / "build-wheel" / "action.yml"
+        text = act.read_text(encoding="utf-8")
+        libc_line = "            --libc gnu \\\n"
+        _expect(
+            libc_line in text,
+            "the build-wheel fixture no longer pins `--libc gnu` in its wheel check",
+        )
+        act.write_text(text.replace(libc_line, "", 1), encoding="utf-8")
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "passes no `--libc`" in res.stdout,
+            "auditor (rule 22) must refuse a wheel check whose shim tuple is unpinned",
             res.stdout + res.stderr,
         )
         cases_run += 1
@@ -2412,10 +2508,200 @@ def test_wheel_floor_cases() -> int:
     return cases_run
 
 
+#: The six shims a release `(x86_64, gnu)` wheel carries (`ADR-0017` decision 4).
+SHIM_WHEEL_ENTRIES = (
+    "libblastit_py314-x86_64-gnu.so",
+    "libblastit_py313-x86_64-gnu.so",
+    "libblastit_php86-x86_64-gnu.so",
+    "libblastit_php85-x86_64-gnu.so",
+    "libblastit_php84-x86_64-gnu.so",
+    "libblastit_php83-x86_64-gnu.so",
+)
+
+
+def _write_shim_wheel(directory: Path, filename: str, entries: tuple[str, ...]) -> Path:
+    """A minimal `py3-none` wheel carrying `entries` under `blastit/_bin/`."""
+    path = directory / filename
+    wheel_meta = (
+        "Wheel-Version: 1.0\n"
+        "Generator: maturin (1.16.0)\n"
+        "Root-Is-Purelib: false\n"
+        "Tag: py3-none-manylinux_2_28_x86_64\n"
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("blastit-0.2.0.dist-info/WHEEL", wheel_meta)
+        for entry in entries:
+            archive.writestr(f"blastit/_bin/{entry}", b"")
+    return path
+
+
+def _run_wheel_shims(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(CHECK_WHEEL_SHIMS), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_wheel_shims_cases() -> int:
+    """`MB.45`: the wheel's own shim gate, exercised on real zip archives.
+
+    `scripts/check_wheel_shims.py` is the only proof that reads the **finished**
+    wheel — `scripts/build-wheel.sh` measures the staging directory before the
+    repack — so its five verdicts are pinned here rather than assumed:
+
+    * all six shims of the wheel's tuple pass (`--require all --libc gnu`);
+    * a wheel missing `php85` fails naming the shim and the PHP remedy
+      (`--shims-from`), which a `py*` miss must *not* name;
+    * another arch's shim is a foreign ABI: the tuple pin refuses it;
+    * `--require py` passes a wheel with only the two CPython shims;
+    * a nonexistent path, and a filename naming no arch this release ships while
+      `--libc` is given, both fail closed rather than pass by default.
+    """
+    cases_run = 0
+    wheel_name = "blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl"
+    with tempfile.TemporaryDirectory(prefix="blastit-shim-gate-") as tmp:
+        td = Path(tmp)
+        six = _write_shim_wheel(td, wheel_name, SHIM_WHEEL_ENTRIES)
+        res = _run_wheel_shims("--require", "all", "--libc", "gnu", str(six))
+        _expect(
+            res.returncode == 0 and "libblastit_php86-x86_64-gnu.so" in res.stdout,
+            "a release wheel carrying the six shims of its tuple must pass",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        short = _write_shim_wheel(
+            td,
+            wheel_name,
+            tuple(entry for entry in SHIM_WHEEL_ENTRIES if "php85" not in entry),
+        )
+        res = _run_wheel_shims("--require", "all", "--libc", "gnu", str(short))
+        _expect(
+            res.returncode == 1
+            and "php85" in res.stderr
+            and "--shims-from" in res.stderr,
+            "a wheel missing php85 must fail naming the shim and the PHP remedy",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        foreign = _write_shim_wheel(
+            td,
+            wheel_name,
+            tuple(
+                entry.replace("-x86_64-gnu.so", "-aarch64-gnu.so")
+                if "php85" in entry
+                else entry
+                for entry in SHIM_WHEEL_ENTRIES
+            ),
+        )
+        res = _run_wheel_shims("--require", "all", "--libc", "gnu", str(foreign))
+        _expect(
+            res.returncode == 1
+            and "for this wheel's tuple" in res.stderr
+            and "aarch64-gnu" in res.stderr,
+            "another arch's shim is a foreign ABI: the tuple pin must refuse it",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        py_only = _write_shim_wheel(
+            td,
+            wheel_name,
+            ("libblastit_py314-x86_64-gnu.so", "libblastit_py313-x86_64-gnu.so"),
+        )
+        res = _run_wheel_shims("--require", "py", "--libc", "gnu", str(py_only))
+        _expect(
+            res.returncode == 0,
+            "a `--require py` wheel needs the two CPython shims and nothing else",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        res = _run_wheel_shims(str(td / "absent.whl"))
+        _expect(
+            res.returncode == 1 and "does not exist" in res.stderr,
+            "a nonexistent wheel path must fail closed",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        unknown = _write_shim_wheel(
+            td,
+            "blastit-0.2.0-py3-none-musllinux_1_2_riscv64.whl",
+            SHIM_WHEEL_ENTRIES,
+        )
+        res = _run_wheel_shims("--require", "py", "--libc", "musl", str(unknown))
+        _expect(
+            res.returncode == 1
+            and "musllinux_1_2_riscv64.whl" in res.stderr
+            and "names none of the arches" in res.stderr,
+            "`--libc` with a filename that names no shipped arch must be refused, "
+            "not guessed at",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+    return cases_run
+
+
+def test_musl_wheel_args_cases() -> int:
+    """`MB.45`: the musl leg's argument translation is the shipped one, proven.
+
+    `scripts/build-musl-wheel.sh` used to spell `--require-shims py` itself and
+    hand every other argument through `"$@"`, so the release leg's
+    `--require-shims all` worked only because the *later* occurrence wins in the
+    downstream parser. The two promises are now one vector built in one place, and
+    `--print-build-wheel-args` — the hook, mirroring `build-wheel.sh
+    --print-glibc-floor` — prints that command on a host with no `apk` and no
+    toolchain: the requested minor stands in for the interpreter it would resolve.
+    It is the same array the build path executes, so deleting the execution (or a
+    flag from the array) fails the case rather than passing it.
+    """
+    cases_run = 0
+    bare = _musl_wheel_args("3.13")
+    _expect(
+        bare.returncode == 0
+        and bare.stdout.strip()
+        == "bash scripts/build-wheel.sh --interpreter 3.13 --compatibility "
+        "musllinux_1_2 --require-shims py",
+        "a bare leg must promise the two CPython shims and stage no --shims-from",
+        bare.stdout + bare.stderr,
+    )
+    cases_run += 1
+
+    staged = _musl_wheel_args(
+        "3.13", "--require-shims=all", "--shims-from", "dist/shims"
+    )
+    _expect(
+        staged.returncode == 0
+        and staged.stdout.strip()
+        == "bash scripts/build-wheel.sh --interpreter 3.13 --compatibility "
+        "musllinux_1_2 --require-shims all --shims-from dist/shims",
+        "the release leg's --require-shims all / --shims-from must survive the "
+        "translation unchanged",
+        staged.stdout + staged.stderr,
+    )
+    cases_run += 1
+    return cases_run
+
+
+def _musl_wheel_args(*args: str) -> subprocess.CompletedProcess[str]:
+    """`build-musl-wheel.sh --print-build-wheel-args`: run the shipped parser."""
+    return subprocess.run(
+        ["bash", str(BUILD_MUSL_WHEEL), *args, "--print-build-wheel-args"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
     wt = test_wheel_tag_guard_cases()
+    ws = test_wheel_shims_cases()
     ee = test_exec_env_cases()
     ts = test_test_seam_cases()
     pe = test_portable_elf_shim_cases()
@@ -2424,6 +2710,7 @@ def main() -> int:
     mp = test_matrix_producer_cases()
     pk = test_package_workflow_cases()
     wfl = test_wheel_floor_cases()
+    ba = test_musl_wheel_args_cases()
     # The publishing suite lives in its own module (a 2 700-line gate is where a
     # case hides); this file stays its entry point, so one command still runs all.
     sys.path.insert(0, str(REPO / "scripts"))
@@ -2432,12 +2719,13 @@ def main() -> int:
     finally:
         sys.path.remove(str(REPO / "scripts"))
     pub = test_publish_gates.cases()
-    total = wf + pm + wt + ee + ts + pe + pg + rp + mp + pk + wfl + pub
+    total = wf + pm + wt + ws + ee + ts + pe + pg + rp + mp + pk + wfl + ba + pub
     print(
         f"packaging-gates-test: ok — {total} cases passed "
-        f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts}, "
+        f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, wheel-shims={ws}, "
+        f"exec-env={ee}, test-seam={ts}, "
         f"portable-elf={pe}, max-glibc={pg}, repack={rp}, matrix-producer={mp}, "
-        f"package-workflow={pk}, wheel-floor={wfl}, publish={pub})"
+        f"package-workflow={pk}, wheel-floor={wfl}, build-args={ba}, publish={pub})"
     )
     return 0
 

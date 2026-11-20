@@ -40,9 +40,9 @@ language server (`blastit-lsp`) and Zed extension with SQL template validation.
   (`libphp8.3`–`libphp8.6`-embed, or the stock `libphp-embed` on Debian,
   `php83`–`php86`-embed on Alpine, `php-embedded` on Fedora/RHEL, or
   `BLASTIT_LIBPHP`; PHP 8.2 and older are refused at boot)
-  through per-minor C SAPI shims shipped in the standalone Linux release
-  archives — `16` of them, `libblastit_php{83,84,85,86}-<arch>-<libc>.so` across
-  `x86_64`/`aarch64` × `gnu`/`musl`
+  through per-minor C SAPI shims: a PyPI wheel carries the four PHP shims of its
+  own `<arch>`/`<libc>` beside the CPython ones, and the standalone Linux release
+  archives carry all `16` across `x86_64`/`aarch64` × `gnu`/`musl`
   ([PHP](https://offworldnexus.github.io/blastit/frameworks/php/)). Each route
   forks on-demand unprivileged `blastit-view-php` processes up to
   `BLASTIT_MAX_WORKERS`, with `$_SERVER` built in C, `SCRIPT_FILENAME`,

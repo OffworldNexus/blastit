@@ -35,7 +35,9 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
     jobs in a workflow upload the same literal artifact name;
 9.  every `actions/download-artifact` step (by `name`, `pattern`, or unfiltered)
     matches at least one upload in *that same workflow*, and **every** matching
-    producer job in that workflow is in the consumer's transitive `needs`;
+    producer job in that workflow is in the consumer's transitive `needs` (this is
+    what makes a wheel leg's `shim-*` download fail closed — `MB.45`: a wheel that
+    stages the PHP shims must need the job that builds them);
 10. for every `download-artifact` with `merge-multiple: true`, expanding matched
     producers across their concrete matrix entries produces no colliding literal
     file basenames (such as two legs both uploading `dist/SHA256SUMS`);
@@ -125,6 +127,14 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
     artifacts inside one file, so this is the only place a one-sided edit — a
     bumped `--max-glibc`, a dropped `--arch` — becomes visible (`MB.42.3.4`
     review). Self-tested first.
+
+22. a step calling the local `build-wheel` action makes one shim promise, spelled
+    three ways that must agree: a non-empty `shims-from:` requires
+    `require-shims: all` (a staged shim the build never counts is one a repack can
+    drop), `require-shims: all` requires a `shims-from:` (no builder image has
+    `php_config.h`), and the action's own `scripts/check_wheel_shims.py` step — the
+    only thing that reads the **finished zip** — must receive the same promise,
+    expanded from the call site (`MB.45`).
 """
 
 from __future__ import annotations
@@ -778,6 +788,115 @@ def check_lsp_build(
                     f"{scope}: {entry['target']} declares {field} {value or '<none>'!r} in "
                     f"scripts/platform_matrix.py, but this step never passes it as "
                     f"`--{field}`: the artifact would not be the one the matrix names",
+                )
+
+
+# `MB.45`: a wheel leg's shim promise is three values that have to agree —
+# `shims-from` (what it stages), `require-shims` (what the build demands) and the
+# composite action's own `scripts/check_wheel_shims.py` step (what is read back
+# out of the finished wheel). Rule 22 refuses the shapes where two of them
+# disagree, and it expands the action's step from the call site
+# (`expand_action_inputs`), so the action's text is judged as **this** caller runs
+# it rather than as the file's prose reads.
+SHIM_CHECK = "scripts/check_wheel_shims.py"
+REQUIRE_FLAG = re.compile(r"--require\s+\"?(?P<value>[^\"\s]+)")
+LIBC_FLAG = re.compile(r"--libc\s+\"?(?P<value>[^\"\s]+)")
+
+
+def check_wheel_shim_promise(
+    workflow: str,
+    job_name: str,
+    job: dict,
+    action_by_ref: dict[str, dict],
+    report: Report,
+) -> None:
+    """Rule 22: the shims a wheel leg stages are the shims it demands and checks.
+
+    `MB.45` gave `publish-pypi.yml`'s wheel legs the four PHP shims, and each of
+    the three values is a way to lose them again without any other rule noticing:
+
+    * `shims-from:` staged but `require-shims: py` — the shims travel into the
+      staging directory and `scripts/build-wheel.sh` never counts them, so a
+      repack that dropped one still ships;
+    * `require-shims: all` with no `shims-from:` — no builder image has
+      `php_config.h`, so the build fails closed on the CPython shims alone and the
+      leg is a promise nobody can keep;
+    * a promise the action's `scripts/check_wheel_shims.py` step does not receive —
+      the wheel itself is then never read, and only the pre-repack directory is.
+
+    What this cannot see: whether the shims staged are the *right* tuple (that is
+    `check_wheel_shims.py --libc` at run time, over the finished zip).
+    """
+    for idx, step in enumerate(job.get("steps") or [], 1):
+        uses = str(step.get("uses") or "")
+        if "build-wheel" not in uses or uses not in action_by_ref:
+            continue
+        scope = f"{workflow}: job {job_name} step {idx}"
+        action_doc = action_by_ref[uses]
+        declared = action_doc.get("inputs") or {}
+        effective = {
+            key: spec.get("default", "")
+            for key, spec in declared.items()
+            if isinstance(spec, dict)
+        }
+        effective.update(dict(step.get("with") or {}))
+        shims_from = str(effective.get("shims-from") or "").strip()
+        promise = str(effective.get("require-shims") or "").strip() or "py"
+        report.check(
+            not shims_from or promise == "all",
+            f"{scope}: stages `shims-from` ({shims_from}) but promises "
+            f"`require-shims: {promise}`: the PHP shims travel and are never "
+            "demanded, so a repack that dropped one would pass — pass "
+            "`require-shims: all`",
+        )
+        report.check(
+            promise != "all" or bool(shims_from),
+            f"{scope}: promises `require-shims: all` but stages no `shims-from`: "
+            "the four PHP shims cannot be compiled in the builder image, so the "
+            "build fails closed on the two CPython shims alone — stage the "
+            "`shim-*` artifacts or ask for `py`",
+        )
+        demanded = None
+        shim_run = ""
+        for a_step in (action_doc.get("runs") or {}).get("steps") or []:
+            run = str(a_step.get("run") or "")
+            if SHIM_CHECK not in run:
+                continue
+            shim_run = expand_action_inputs(run, effective)
+            match = REQUIRE_FLAG.search(shim_run)
+            demanded = match.group("value") if match else ""
+            break
+        report.check(
+            demanded is not None,
+            f"{scope}: {uses} runs no `{SHIM_CHECK}` step: the wheel's payload is "
+            "measured only in the staging directory before the repack, so nothing "
+            "reads the finished zip",
+        )
+        if demanded is not None:
+            report.check(
+                demanded == promise,
+                f"{scope}: passes `require-shims: {promise}` but the action's "
+                f"`{SHIM_CHECK}` step demands {demanded!r}: the promise has to "
+                "reach the wheel check, or the caller's input is a comment",
+            )
+            # `MB.45` review: the promise counts shims; the tuple pin is what says
+            # *which*. Without it a wheel with the other arch's or libc's shim is
+            # green here and a foreign ABI at `dlopen`.
+            libc_match = LIBC_FLAG.search(shim_run)
+            libc_value = libc_match.group("value") if libc_match else ""
+            report.check(
+                bool(libc_value),
+                f"{scope}: the action's `{SHIM_CHECK}` step passes no `--libc`: the "
+                "shim tuple is then unpinned, and another target's shim in the wheel "
+                "is a foreign ABI — name the leg's libc (`gnu` for a manylinux wheel)",
+            )
+            manylinux = str(effective.get("manylinux") or "").strip()
+            if libc_value:
+                report.check(
+                    not manylinux or libc_value == "gnu",
+                    f"{scope}: builds in manylinux {manylinux}, which is a gnu wheel, "
+                    f"but the action's `{SHIM_CHECK}` step demands libc {libc_value!r}: "
+                    "the tuple pin and the wheel tag must agree",
                 )
 
 
@@ -1797,6 +1916,10 @@ def main(argv: list[str] | None = None) -> int:
                     "both versions and the fix), or build inside the image",
                 )
 
+            # Rule 22 (`MB.45`): the shim promise a wheel leg makes has to reach
+            # both the build and the wheel check. Every workflow, not only the
+            # shipping one — `wheels.yml` builds the same wheel.
+            check_wheel_shim_promise(path.name, job_name, job, action_by_ref, report)
             upstream = transitive_needs(job_name, jobs_needing)
             if path.name in SHIPPING_WORKFLOWS:
                 check_standalone_build(path.name, job_name, job, entries, report)
