@@ -37,7 +37,6 @@ shift || true
 # asks for the six-shim release wheel.
 require_shims=py
 shims_from=
-print_build_wheel_args=
 build_args=()
 while (($#)); do
     case "$1" in
@@ -57,10 +56,6 @@ while (($#)); do
             shims_from=${1#--shims-from=}
             shift
             ;;
-        --print-build-wheel-args)
-            print_build_wheel_args=1
-            shift
-            ;;
         *)
             build_args+=("$1")
             shift
@@ -71,8 +66,6 @@ done
 # The command this script runs, assembled in one place: `$1` is the interpreter it
 # resolved. Each flag is spelled once, so a caller's `--require-shims all` cannot
 # depend on which of two occurrences the downstream parser happens to assign last.
-# The array is what `--print-build-wheel-args` prints **and** what the build path
-# below executes, so the asserted vector is the vector that runs.
 build_wheel_command() {
     wheel_cmd=(bash scripts/build-wheel.sh
                --interpreter "$1" --compatibility musllinux_1_2
@@ -83,16 +76,18 @@ build_wheel_command() {
     wheel_cmd+=(${build_args[@]+"${build_args[@]}"})
 }
 
-# `--print-build-wheel-args` is the self-test hook (`scripts/test_packaging_gates.py`),
-# mirroring `scripts/build-wheel.sh --print-glibc-floor`: it runs the shipped
-# parser, prints the command and touches nothing — no `apk`, no toolchain, no
-# build. The requested minor stands in for the interpreter it would resolve,
-# because resolving that needs the `uv` the guard below installs.
-if [[ -n $print_build_wheel_args ]]; then
-    build_wheel_command "$python"
-    printf '%s\n' "${wheel_cmd[*]}"
-    exit 0
-fi
+# This script always ships shims, so a `--require-shims` value it does not know is
+# a caller bug, never a wildcard: `none`/`""` would flow into `build-wheel.sh`'s
+# `assert_shims` and produce a musllinux wheel that installs on Alpine and cannot
+# serve PHP. Refused here, before the `apk` guard, so it fails in seconds.
+case "$require_shims" in
+    py|all) ;;
+    *)
+        echo "error: --require-shims '$require_shims' would ship a wheel whose blastit/_bin/ is unchecked" >&2
+        echo "  pass \`py\` or \`all\`: this script always ships shims, so an unchecked wheel is a caller bug, not a wildcard" >&2
+        exit 2
+        ;;
+esac
 
 if ! command -v apk >/dev/null 2>&1; then
     echo "error: this script builds a musl wheel and must run on Alpine (no apk found)" >&2
@@ -152,27 +147,11 @@ BLASTIT_WHEEL_BUILD_PY_SHIMS=1 PY_MINORS="3.14 3.13" \
 PYO3_PYTHON="$interpreter" MATURIN="uvx maturin" \
     "${wheel_cmd[@]}"
 
-# The tag is the promise: a wheel built on glibc and named musllinux installs and
-# then fails at `import` (that is the whole reason this leg exists). Verify the
-# internal `*.dist-info/WHEEL` `Tag:` lines as well as the filename.
+# `scripts/build-wheel.sh` reads the finished archive back itself: the
+# `*.dist-info/WHEEL` tag must be `py3-none-musllinux_1_2_<arch>`, every staged
+# shim (this wheel's own tuple, the one `--require-shims` counted) must be inside
+# `blastit/_bin/`, and each member's mode is 0755. A wheel built on glibc and
+# named musllinux installs and then fails at `import`; that assertion is what
+# makes this leg's promise about the file rather than about the build host.
 wheel=$(ls -t dist/blastit-*.whl | head -1)
-"$interpreter" scripts/check_wheel_tag.py --platform musllinux_1_2 "$wheel"
-
-# `MB.45`: the shims have to be **in the wheel**, not only in the `_bin/` staging
-# directory `scripts/build-wheel.sh` checked before the repack — the repack is
-# what moves them, and this leg has no composite-action step to read the zip back.
-# `--libc musl` pins the tuple: an `x86_64-gnu` shim in a musllinux wheel is a
-# foreign ABI, not a spare (`target/manylinux_*` and a stale `dist/shims` can both
-# leave one there).
-case "$require_shims" in
-    py|all)
-        "$interpreter" scripts/check_wheel_shims.py --require "$require_shims" \
-            --libc musl "$wheel"
-        ;;
-    *)
-        echo "error: --require-shims '$require_shims' would ship a wheel whose blastit/_bin/ is unchecked" >&2
-        echo "  pass \`py\` or \`all\`: this script always ships shims, so an unchecked wheel is a caller bug, not a wildcard" >&2
-        exit 2
-        ;;
-esac
 echo "build-musl-wheel: $(basename "$wheel")"

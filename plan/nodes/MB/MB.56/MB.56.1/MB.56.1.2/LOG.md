@@ -15,3 +15,7 @@ edited fields
 ## 2026-11-20T16:25 [lead]
 
 edited fields
+
+## 2026-11-20T16:54 [lead]
+
+status ready -> done: both sub-slices green on make fast-check; full make check deferred to the MB.56.1 epic gate (once)

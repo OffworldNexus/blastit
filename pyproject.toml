@@ -13,9 +13,13 @@
 # `{arch} x {libc}`, serve CPython 3.12, 3.13 and 3.14 alike.
 #
 # The backend is maturin's own: `maturin build` is what `scripts/build-wheel.sh`
-# and CI run, and a PEP 517 build (`pip install .`, `uv sync`, and every
-# `pip install blastit` that falls back to the sdist) does exactly the same thing.
-# One program makes that enough — the universal binary plays every role, the
+# and CI run. A PEP 517 build (`pip install .`, `uv sync`) is **not** the shipped
+# artifact: it runs maturin alone, which installs the binary as `bin/blastit`
+# (found through the `blastit._blastit` `sys.executable` fallback), with no
+# `blastit/_bin/` directory, no `blastit-lsp` and no repack. Only
+# `scripts/build-wheel.sh` produces the `py3-none-<platform>` wheel that carries
+# one universal program beside the editor binary and the shims.
+# One program makes the binary enough — it plays every role, the
 # credentials-holding one included (`--role=dbproxy`), so no second artifact has
 # to be built in front of maturin.
 [build-system]
@@ -73,8 +77,8 @@ dependencies = []
 # binary doesn't mix well", checked against `maturin 1.9`), and the bin-binding
 # build is what makes the artifact interpreter-free. The repack is the second
 # stage of the same build, so the two names have exactly one owner
-# (`CONSOLE_SCRIPTS` in that script) and `scripts/test_packaging_gates.py` checks
-# each target is importable.
+# (`CONSOLE_SCRIPTS` in that script) and the repack writes the matching
+# `entry_points.txt` entries, so each target is importable by construction.
 #
 # Until `MB.42.3` a `bindings = "bin"` wheel put the binary in the interpreter's
 # `bin/` and shipped none of them; the repack relocates it to `blastit/_bin/`

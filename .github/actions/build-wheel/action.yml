@@ -10,10 +10,13 @@ description: >
   extension wheel — while `wheels.yml` and `publish-pypi.yml` upload and count
   `py3-none` wheels, so the release published zero of four. The script builds
   `maturin build --bindings bin` inside the manylinux container, repacks the result
-  (`scripts/repack_universal_wheel.py`), checks the tag and measures **every**
-  embedded ELF (`check-portable-elf.sh`, `check-no-test-shim.sh`), so the action is
-  a thin, honest caller: one place builds a wheel, on a developer's machine and in
-  CI alike.
+  (`scripts/repack_universal_wheel.py`), and reads the finished archive back:
+  `*.dist-info/WHEEL` must say `py3-none-<platform>` with `Root-Is-Purelib:
+  false`, every staged shim must be inside `blastit/_bin/` at mode 0755, and every
+  embedded ELF is measured (`check-portable-elf.sh`: no `libpython`/`libphp`, no
+  build-host `RUNPATH`, nothing above the floor, no test-only boot seam). The
+  action is a thin, honest caller: one place builds and proves a wheel, on a
+  developer's machine and in CI alike.
 
   A wheel this action builds carries the two CPython shims the builder image can
   compile. The four PHP shims need a distro's `php_config.h`, so they only travel
@@ -38,8 +41,8 @@ inputs:
     description: >
       The platform tag the leg promises (`manylinux_2_28`), from
       `scripts/platform_matrix.py`. `scripts/build-wheel.sh` refuses a wheel whose
-      own `Tag:` disagrees, and `scripts/check_wheel_tag.py` rejects one above the
-      manylinux floor.
+      own `Tag:` disagrees and one whose tag claims a newer glibc than the
+      builder image.
     required: false
     default: "manylinux_2_28"
   require-shims:
@@ -86,55 +89,9 @@ runs:
             --require-shims "${{ inputs.require-shims }}" \
             "${extra[@]}" \
             --out dist
-    - name: The wheel's tag is the platform this leg promised (and never above manylinux_2_28)
-      shell: bash
-      run: |
-        set -euo pipefail
-        for wheel in dist/*-py3-none-*.whl; do
-            unzip -p "$wheel" '*.dist-info/WHEEL' | grep '^Tag:'
-            unzip -p "$wheel" '*.dist-info/WHEEL' | grep -qx 'Root-Is-Purelib: false'
-        done
-        python3 scripts/check_wheel_tag.py \
-            --max-glibc "${{ inputs.manylinux }}" \
-            --platform "${{ inputs.platform }}" \
-            dist/*-py3-none-*.whl
-
-    - name: The wheel carries one program, executable
-      shell: bash
-      run: |
-        set -euo pipefail
-        for wheel in dist/*-py3-none-*.whl; do
-            # A wheel is a zip and the file name is stored uncompressed, so
-            # finding it needs no tool; the mode lives in the zip's attributes,
-            # which is what `zipinfo -l` prints in its first column. The repack
-            # writes `0100755`, so the file type is `-` and the bits are `rwxr-xr-x`.
-            if ! zipinfo -l "$wheel" | awk '{ print $1, $NF }' | grep -qx -- "-rwxr-xr-x blastit/_bin/blastit"; then
-                echo "::error::the universal blastit binary is not executable in $wheel"
-                zipinfo -l "$wheel" | grep 'blastit/_bin/blastit' || true
-                exit 1
-            fi
-            # One ELF runs every role: the credentials-holding one is that same
-            # program as --role=dbproxy, so a second program in _bin/ is a bundle
-            # that ships an image nobody builds.
-            if grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
-                echo "::error::$wheel ships a second program: one ELF runs every role"
-                exit 1
-            fi
-            echo "$wheel ok"
-        done
-    # `MB.45`: the promise has to be a fact about the **wheel**, not about the
-    # staging directory `scripts/build-wheel.sh` checked before the repack. The
-    # check lives in `scripts/check_wheel_shims.py`, so the same proof runs here
-    # and in `publish-pypi.yml`'s `verify` over both libcs. A `manylinux` wheel is
-    # a `gnu` wheel, so its shims are asserted to be this wheel's own tuple.
-    - name: The wheel carries the shims it promised
-      shell: bash
-      run: |
-        set -euo pipefail
-        python3 scripts/check_wheel_shims.py \
-            --require "${{ inputs.require-shims }}" \
-            --libc gnu \
-            dist/*-py3-none-*.whl
+    # The wheel's tag, its payload modes and the shims it promised are asserted
+    # inside `scripts/build-wheel.sh` (it reads the finished archive back), so a
+    # leg's wheel is proved once, by the script that built it.
     # One wheel, three interpreters — the promise a `py3-none` tag makes. Every
     # leg runs the same three images, so a wheel that loads on 3.13 and not on
     # 3.12 fails on the commit that built it (`scripts/wheel_container_smoke.sh`

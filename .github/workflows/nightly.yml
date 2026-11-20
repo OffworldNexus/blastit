@@ -15,8 +15,7 @@ name: Nightly
 #   .rpm   0.2.0-0.nightly.20261120.r12.gabc1234   (`-0.` release prefix)
 #
 # Every leg — the six distributions × two architectures, the four packages, the
-# shim legs — comes from `scripts/platform_matrix.py`; a literal distribution
-# image in this file is refused by `scripts/check_workflows.py`.
+# shim legs — comes from `scripts/platform_matrix.py`.
 #
 # Secrets: `CLOUDSMITH_API_KEY` (required, never printed) and
 # `FORGEJO_PACKAGES_TOKEN` (optional: the mirror skips with one `::notice::`).

@@ -94,9 +94,8 @@ Spawn `planner` with `<container>` id to create **3–4 coarse vertical slices**
 4. **Once zero genuine `[BLOCKER]`/`[MAJOR]` bugs remain:**
    - Run leaf pre-commit verification **once** on the verified tree:
      1. `make fast-check` (and `make docs-check` if `docs/` or `README.md` changed)
-     2. `uv run --no-project tools/critical_guard.py --base <base> --node <id>`
-     3. `uv run --no-project tools/guard.py`
-     4. `uv run --no-project tools/plan.py validate`
+     2. `uv run --no-project tools/guard.py`
+     3. `uv run --no-project tools/plan.py validate`
    - Mark `<id>` done and refresh state:
      `uv run --no-project tools/plan.py --agent lead set <id> done && uv run --no-project tools/plan.py state`
    - Check `git status --short`, stage **explicit paths** (`git add -- <node paths> plan/nodes/.../<id> plan/JOURNAL.md plan/STATE.md` plus `plan/ESCALATIONS.md` / `docs/knowledge/LESSONS.md` / `docs/research/INDEX.md` if touched — never `git add -A`), commit as `[<id>] <title>`, and log the commit SHA.
@@ -104,7 +103,7 @@ Spawn `planner` with `<container>` id to create **3–4 coarse vertical slices**
 ### `gate <epic>`
 - If `<epic>` is `ROOT` **and** a `milestone`, stop and return to `conductor` (milestone gates belong exclusively to `strategist`).
 - Otherwise:
-  1. Run **full `make check` once** (plus `make e2e` if `crates/blastit`, brokers, or `e2e/` changed, and `make mutants-rust PKG=<crate>` if security-critical policy crates changed).
+  1. Run **full `make check` once** (plus `make e2e` if `crates/blastit`, brokers, or `e2e/` changed, and `TMPDIR=$HOME/.cache/blastit-mutants cargo mutants -p <crate>` if security-critical policy crates changed).
   2. Write `plan/nodes/.../<epic>/RESULT.md` (concise gate evidence), `set <epic> done`, run `plan.py state`, and commit `[<epic>] Gate passed: <title>`.
   3. **Sub-release epics (`0.2.x`, `0.3.x`, `0.4.x`):** If `<epic>` cuts an untagged release `<version>` in `Cargo.toml` + dated `CHANGELOG.md`, verify `scripts/check-release-tag.sh "v<version>"` and `scripts/release-notes.sh --require-dated "v<version>" > /dev/null`, then stop immediately and return `RELEASE_READY: <version>` to `conductor`.
 

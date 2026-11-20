@@ -194,10 +194,10 @@ for d in "$out" "target/$target_subdir"; do
     fi
 done
 
-# The trailing space inside the array is load-bearing: `test_release_scripts.py`
-# scans every `CARGO_NET_OFFLINE=<value>` in the scripts and requires a strict
-# boolean, and its `\S*` capture would otherwise take the closing `)` as part of
-# the value. `scripts/build-wheel.sh` spells the same flag the same way.
+# The trailing space inside the array is load-bearing: `CARGO_NET_OFFLINE` is
+# parsed as a strict boolean downstream (maturin, not cargo), and a value that
+# swallowed the closing `)` would be neither `true` nor `false`.
+# `scripts/build-wheel.sh` spells the same flag the same way.
 offline_env=()
 if [ "${CARGO_NET_OFFLINE:-}" = "true" ]; then
     offline_env=(-e CARGO_NET_OFFLINE=true )

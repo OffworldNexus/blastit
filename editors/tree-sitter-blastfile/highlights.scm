@@ -8,8 +8,9 @@
 ; src/node-types.json sees the same captures. Every capture below is inside
 ; Zed's fifteen-name theme set (docs/design/blastfile-lsp-zed.md §10.1), and
 ; every pattern below also appears in Zed's copy, so the two render identically
-; -- `scripts/check_zed_extension.py`'s `highlights: copies agree` holds them to
-; it, because a second copy is exactly how the two drift apart.
+; -- `make zed-check` asserts that containment (a subset, not an equal copy:
+; Zed's file styles more than the grammar package needs), because a second copy
+; is exactly how the two drift apart.
 
 ; `"..."` -- a quoted pattern (and every other double-quoted value).
 (string) @string

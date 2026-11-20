@@ -16,9 +16,8 @@ name: Packages
 #
 # Everything that names a leg comes from `scripts/platform_matrix.py`:
 # `--matrix install` (the six distributions × two architectures) and
-# `--matrix packages` (the four `.deb`/`.rpm` legs). A literal `debian:...`, a
-# hand-written leg list, or a literal `install_matrix.sh --leg` in this file is
-# refused by `scripts/check_workflows.py`, and `nightly.yml` is this file's
+# `--matrix packages` (the four `.deb`/`.rpm` legs). A literal `debian:...` or a
+# hand-written leg list is the copy that goes stale; `nightly.yml` is this file's
 # sibling — same graph (rule 21 keeps the five shared jobs identical), stamped
 # versions, the `nightly` component and retention.
 #

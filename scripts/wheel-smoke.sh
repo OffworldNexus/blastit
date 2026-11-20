@@ -123,7 +123,6 @@ echo "wheel-smoke: blastit --help ok"
 # 1b/1c. The installed binary carries no test-only boot seam (`MB.3.67`) and is
 # executable — `pip` drops the wheel's modes, so the repack's 0755 is what makes
 # this true, and a `_bin/blastit` installed 0644 would be a wheel that cannot run.
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 binary=$("$python" - <<'PY'
 import pathlib
 import blastit
@@ -136,7 +135,14 @@ if [ ! -x "$binary" ]; then
     echo "  travel at blastit/_bin/blastit with mode 0755" >&2
     exit 1
 fi
-bash "$script_dir/check-no-test-seam.sh" "$binary"
+for seam in BLASTIT_TEST_SWAP_POINT BLASTIT_TEST_RELOAD_FAULT BLASTIT_TEST_RELOAD_PAUSE; do
+    if grep -a -q -F -- "$seam" "$binary"; then
+        echo "error: $binary carries the test-only boot seam $seam: a wheel that ships" >&2
+        echo "  a boot an environment variable can hold open before it binds is a" >&2
+        echo "  denial-of-service surface; build the wheel with \`--release\`" >&2
+        exit 1
+    fi
+done
 echo "wheel-smoke: $binary carries no test seam"
 
 # 2. `_bin/` holds exactly the wheel's payload: the one program `blastit` (every

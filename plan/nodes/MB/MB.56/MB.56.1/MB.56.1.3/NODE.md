@@ -2,7 +2,7 @@
 id: MB.56.1.3
 title: "Delete critical_guard.py, mutants-*.sh and all scripts/ meta-linters; fold concise ELF/wheel-zip assertions inline and rewire Makefile/GHA/AGENTS"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.1.2.2]
@@ -17,11 +17,11 @@ paths:
   - ".opencode/**"
   - "editors/zed/**"
   - crates/blastit/tests/critical_artifacts.rs
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:04"
-updated: "2026-11-20T16:25"
+updated: "2026-11-20T17:12"
 ---
 
 # Goal

@@ -2,7 +2,7 @@
 id: MB.56.1.2
 title: "Inline blastit check grant-diff into crates/blastit/src/check/, delete blastit-audit crate, drop duplicate blastit-dbproxy bin + blastit_build backend"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths:
@@ -31,7 +31,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:04"
-updated: "2026-11-20T16:25"
+updated: "2026-11-20T16:54"
 ---
 
 # Goal

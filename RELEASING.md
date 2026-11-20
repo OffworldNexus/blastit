@@ -85,7 +85,7 @@ release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
      (`.github/workflows/publish-pypi.yml`) run on the PR.
    * `Publish`'s `guard` and `matrix` jobs check that the branch matches
      `release/<version>`, the changelog entry is dated, tag `v<version>` does
-     not exist yet, and `scripts/platform_matrix.py --check` passes; then
+     not exist yet, and every leg comes from `scripts/platform_matrix.py`; then
      `wheels_gnu` + `wheels_musl` (`4` universal
      `py3-none-{manylinux_2_28,musllinux_1_2}_{x86_64,aarch64}` wheels,
      `manylinux` wheels smoke-tested on CPython `3.12`/`3.13`/`3.14`,
@@ -192,8 +192,8 @@ $ uv run --no-project scripts/check-long-description.py dist/*
 ## Multi-platform matrix and CI-only legs
 
 `scripts/platform_matrix.py` is the single source of truth for the release
-artifacts (`make platform-matrix-check` and `make workflow-check` verify the
-workflows against it offline):
+artifacts (`--matrix`/`--count`/`--leg` are what the workflows consume, and
+`--check` validates the matrix itself):
 
 * **Linux serving artifacts** (the `4` universal `blastit` wheels, `4` standalone
   archives, the `16` PHP `8.3`–`8.6` C SAPI shims, and the `8` CPython

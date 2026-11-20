@@ -8,9 +8,7 @@ name: Wheels
 # The legs are **not** listed here: `scripts/platform_matrix.py --matrix wheels`
 # is the one place a leg is declared (`MB.3.18`), so a wheel added there appears
 # in this workflow, in `.github/workflows/publish-pypi.yml` and in the install
-# documentation together, or in none of them. `platform-matrix-check` (part of
-# `make check`) refuses a published page that claims more legs than the matrix
-# builds or more than have been built and exercised. All four legs are enabled:
+# documentation together, or in none of them. All four legs are enabled:
 # the `aarch64` ones run on `ubuntu-24.04-arm` (they are **CI-only** — no arm64
 # machine ran them when the matrix was authored), and the `musl` ones run in an
 # Alpine job container because a musllinux wheel has to be linked by musl.

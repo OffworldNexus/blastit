@@ -2,14 +2,13 @@
 """The `0.2.x` Linux packaging matrix: the one place a leg is declared (MB.3.18).
 
 Every job that builds a distribution artifact — the wheels, the standalone
-archives and the PHP SAPI shims — takes its list of legs from here, and every
-document that states a count is checked against here. A leg is added (or
-re-enabled) once, in `LEGS`, and appears in all of them; nothing is copied per
-job. `ADR-0010` §4 is the table of record for what the artifacts contain; this
-module is the table of record for *which* targets are attempted, and for what
-has actually been built rather than merely declared.
+archives and the PHP SAPI shims — takes its list of legs from here. A leg is
+added (or re-enabled) once, in `LEGS`, and appears in all of them; nothing is
+copied per job. `ADR-0010` §4 is the table of record for what the artifacts
+contain; this module is the table of record for *which* targets are attempted,
+and for what has actually been built rather than merely declared.
 
-Three things make this more than a matrix constant:
+Two things make this more than a matrix constant:
 
 1. **Provenance is data, not prose.** `PROVEN` lists the artifacts that were
    built *and* exercised (a wheel installed and served, an archive executed, a
@@ -18,25 +17,14 @@ Three things make this more than a matrix constant:
    declared leg is one CI builds on the release PR, a proved one is one whose
    artifact has been run.
 
-2. **A count in a document is a claim, and claims are checked — but only in a
-   document a reader can reach.** `--check` reads every page the site publishes
-   *and* the two internal records it pins (the ADR is the table of record a
-   reviewer reads), refusing any `N wheels/archives/shims/lsp assets` above the
-   declared matrix and any `N proven …` above `PROVEN`. The site's own
-   `exclude_docs` list (`zensical.toml`) decides what a page is: a design
-   *review* that quotes a count is working material, not a promise, and letting
-   it red `make check` is how the gate dies on an untracked file (`MB.35.5`).
-   Hits in the two records are listed as notes, so the report says which
-   document states what.
-
-3. **A dropped leg keeps its reason.** `enabled: False` carries
+2. **A dropped leg keeps its reason.** `enabled: False` carries
    `dropped_because` in one sentence, and `--summary` quotes it, so the honest
    count is computed from what is enabled and the reason does not live in a
    commit message.
 
-Usage (stdlib only; `make platform-matrix-check` runs the first):
+Usage (stdlib only):
 
-    scripts/platform_matrix.py --check
+    scripts/platform_matrix.py --check            # validate the matrix itself
     scripts/platform_matrix.py --matrix wheels      # GitHub Actions matrix JSON
     scripts/platform_matrix.py --matrix binaries
     scripts/platform_matrix.py --matrix shims
@@ -59,7 +47,6 @@ import argparse
 import json
 import re
 import sys
-import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -79,10 +66,9 @@ LIBCS = {
         "wheel_tag": "manylinux_2_28",
         "manylinux": "2_28",
         # The glibc floor the gnu artifacts are allowed to need, in the
-        # `<major>_<minor>` spelling `check_wheel_tag.py --max-glibc` and
-        # `build-standalone.sh --max-glibc` both take. These two artifact
-        # families share it on purpose: a wheel tagged `manylinux_2_28` and an
-        # archive that needs glibc 2.39 are two different promises about one
+        # `<major>_<minor>` spelling `build-standalone.sh --max-glibc` takes, and
+        # the one a wheel's own `Tag:` carries. These two artifact families share
+        # it on purpose: a wheel tagged `manylinux_2_28` and an archive that needs glibc 2.39 are two different promises about one
         # program, and only the lower one is true.
         "glibc_floor": "2_28",
         # The ceiling a **package** bundle may measure. It is not the newest base a
@@ -167,12 +153,11 @@ PACKAGE_FORMATS = {
 # has 3.10) and a WSGI leg there would test an interpreter the product never
 # claims. `installer` is the package manager the image has.
 #
-# `packages.yml` and `nightly.yml` take this list with `--matrix install`, and a
-# literal `debian:...`/`fedora:...` in either workflow is refused by
-# `scripts/check_workflows.py`: the second list is the one that goes stale when a
-# distribution is added or dropped. `install_legs()` expands each entry over the
-# two architectures the release ships, so an `aarch64` package is installed
-# natively too rather than being a promise.
+# `packages.yml` and `nightly.yml` take this list with `--matrix install`, so the
+# second list is the one that goes stale when a distribution is added or dropped.
+# `install_legs()` expands each entry over the two architectures the release
+# ships, so an `aarch64` package is installed natively too rather than being a
+# promise.
 INSTALL_LEGS = (
     {
         "name": "debian-12",
@@ -550,7 +535,7 @@ def wheel_legs() -> list[dict]:
     universal binary in it and `scripts/repack_universal_wheel.py` retags it
     `py3-none-<platform>`, so four artifacts serve CPython 3.12, 3.13 and 3.14.
     The keys are the ones the two consumers actually read: `wheel_tag` is the
-    platform half of the file name (`scripts/check_wheel_tag.py`),
+    platform half of the file name,
     `smoke_pythons`/`runtime_images` are the interpreters one wheel is installed
     into (`e2e/prebuilt_wheel.py` takes the default from `E2E_PYTHON_VERSION`).
     """
@@ -897,7 +882,7 @@ def reached_any() -> list[dict]:
 
 
 def reaches_sentence() -> str:
-    """The one sentence `--check`, `--summary` and the release notes print.
+    """The one sentence `--summary` and the release notes print.
 
     `MB.3.58` review: the gate and the summary disagreed in wording, so a number a
     reader quoted could be one no gate printed. One function, one string — the
@@ -924,245 +909,10 @@ def reaches_sentence() -> str:
     return sentence
 
 
-# --- the check --------------------------------------------------------------
+# --- the output --------------------------------------------------------------
 
 
-# Every page that states a count. `docs/` is scanned whole — hand-picking six
-# pages is how the gate went vacuous the first time (the ADR and the design doc
-# are the two documents a reviewer reads, and both were outside the list) — plus
-# `README.md`, which is the wheel's long description.
-#
-# The two internal records get a `note` line either way, so `--check` says which
-# document states what instead of leaving it to be discovered; the published
-# pages are checked the same way.
-def _pages() -> list[tuple[str, Path]]:
-    """Every Markdown page the repository ships, plus the README.
-
-    All of them, not a hand-picked few: the first version of this check looked at
-    six pages and missed the two documents a reviewer reads (`ADR-0010` §4 and
-    `backend-runtimes.md` §4.7, both of whose counts are backticked — see `MARK`),
-    which made the gate vacuous exactly where it mattered. A page added under
-    `docs/` is scanned the day it lands.
-    """
-    pages = [("README.md", REPO / "README.md")]
-    for path in sorted((REPO / "docs").rglob("*.md")):
-        pages.append((path.relative_to(REPO).as_posix(), path))
-    return pages
-
-
-INTERNAL_DOCS = frozenset(
-    {
-        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "docs/design/backend-runtimes.md",
-    }
-)
-
-# The site's exclusion list, read from the site's own configuration. A gate that
-# scans a document nobody can reach is a gate that fails on working material: a
-# design *review* quoting "9 archives" red `make check` once (`MB.35.5`, the
-# untracked `portable-lsp-arch.review-implementability.md`), because `--check`
-# walked `docs/design/`. `zensical.toml` already says which directories are not
-# pages, so that one list decides here too — two lists is how they disagree. The
-# fallback is the list as written when this was added, for a fixture whose copy
-# of the site config is missing.
-SITE_EXCLUSIONS_FALLBACK: tuple[str, ...] = (
-    "/archive/",
-    "/spikes/",
-    "/VISION.md",
-    "/design/",
-    "/decisions/",
-    "/research/",
-    "/knowledge/",
-    "/testing/",
-)
-
-# A review of a document is never a promise: it quotes the numbers it is arguing
-# about, including the ones it says are wrong. Skipped wherever it lives, so
-# moving one out of `docs/design/` cannot re-arm it.
-REVIEW_FILE = re.compile(r"\.review[-.]")
-
-
-def site_exclusions(repo: Path = REPO) -> tuple[str, ...]:
-    """`zensical.toml`'s `exclude_docs` lines (GitHub-style docs ignore patterns)."""
-    config = repo / "zensical.toml"
-    try:
-        with config.open("rb") as handle:
-            document = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError):
-        return SITE_EXCLUSIONS_FALLBACK
-    raw = (document.get("project") or {}).get("exclude_docs") or ""
-    patterns = tuple(
-        line.strip()
-        for line in str(raw).splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    )
-    return patterns or SITE_EXCLUSIONS_FALLBACK
-
-
-def is_page(name: str, patterns: tuple[str, ...]) -> bool:
-    """Whether a repo-relative Markdown path is a document a reader can reach.
-
-    `README.md` is a page (it is the wheel's long description). The two
-    `INTERNAL_DOCS` are checked even though the site excludes them: they are the
-    records the pins below exist for, and they are named, not discovered.
-    """
-    if name in INTERNAL_DOCS:
-        return True
-    if REVIEW_FILE.search(name):
-        return False
-    if not name.startswith("docs/"):
-        return True
-    site_path = name[len("docs") :]
-    for pattern in patterns:
-        if pattern.endswith("/"):
-            if site_path.startswith(pattern):
-                return False
-        elif site_path == pattern:
-            return False
-    return True
-
-
-# `N shims`, "`8` wheels", "**4** proven PHP shims": every live count in the ADR
-# and the design doc is backticked, so the digit is never bare and a pattern that
-# insists on `\d+` matches nothing. `MARK` is the wrapper the Markdown actually
-# uses (backticks, bold, italics), and the qualifier allows the words that sit
-# between the number and the noun ("native PHP", "standalone", "proven").
-MARK = r"[`*_]*"
-# The words that sit between a number and its noun, plus one inline code span:
-# `ADR-0009` says "up to `3` proven `libblastit_php{82,83,84}-…so` shims", where
-# the artifact name separates the count from the noun. `universal` is there for
-# the `py3-none` family's spelling ("`4` universal wheels").
-QUALIFIER = r"(?:proven\s+|PHP\s+|native\s+|standalone\s+|universal\s+|`[^`\n]*`\s+)*"
-# `python shims?` comes first: the per-minor CPython family is a different count
-# from the PHP shims it is always written next to (`MB.42.3.3`), and a regex that
-# read "8 Python shims" as the PHP family would compare it to the wrong number.
-CLAIM = re.compile(
-    r"(?<![A-Za-z0-9._-])"
-    + MARK
-    + r"(?P<count>\d+)"
-    + MARK
-    + r"\s+"
-    + QUALIFIER
-    + r"(?P<family>python\s+shims?|shims?|wheels?|archives?|tarballs?|lsp assets?)",
-    re.IGNORECASE,
-)
-PROVEN_CLAIM = re.compile(
-    r"(?<![A-Za-z0-9._-])"
-    + MARK
-    + r"(?P<count>\d+)"
-    + MARK
-    + r"\s+proven\s+"
-    + QUALIFIER
-    + r"(?P<family>python\s+shims?|shims?|wheels?|archives?|tarballs?|lsp assets?)",
-    re.IGNORECASE,
-)
-
-# A count a page states **above** the matrix, with the node that lowers it.
-#
-# Empty since `MB.42.4`: `MB.42.3.3` replaced eight `cp3NN` wheels with four
-# `py3-none` ones, and the two records that stated the old number (`ADR-0010` §4
-# and `backend-runtimes.md` §4.7) are now rewritten to the `4`-wheel matrix. The
-# mechanism stays because the next matrix change needs it — a page that over-claims
-# is recorded here with the node that fixes it, and an entry is checked in **both**
-# directions: if the page stops making the claim, `--check` refuses the entry, so
-# the list cannot outlive its reason.
-STALE_CLAIMS: dict[tuple[str, str], str] = {}
-
-# The lines the gate must keep matching, quoted from the two records it exists to
-# guard. If a Markdown edit (or a regex change) makes the scanner miss them,
-# `--check` says so instead of quietly checking nothing — a gate that matches no
-# document is worse than no gate, because it reports `ok`.
-PINNED: tuple[tuple[str, str, str], ...] = (
-    (
-        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "`4` wheels",
-        "declared wheel count",
-    ),
-    (
-        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "`4` tarballs",
-        "declared archive count",
-    ),
-    (
-        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "`12` shims",
-        "declared shim count",
-    ),
-    # `MB.35.5` / `R74`: the editor family's one numeric claim. Without this pin a
-    # regex edit could stop seeing it and the `lsp` count would be checked against
-    # nothing, which is the vacuous-gate failure the module's header names.
-    (
-        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "`5` lsp assets",
-        "declared lsp count",
-    ),
-    (
-        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "`3` shims",
-        "per-tuple shim count (8.3/8.4/8.5)",
-    ),
-    (
-        "docs/design/backend-runtimes.md",
-        "`4` wheels",
-        "declared wheel count",
-    ),
-    (
-        "docs/design/backend-runtimes.md",
-        "`16` shims",
-        "declared shim count",
-    ),
-    (
-        "docs/decisions/ADR-0009-runtime-providers-and-capability-gating.md",
-        "`3` proven",
-        "ADR-0009's per-target proven shim count",
-    ),
-)
-
-
-def declared_of(family: str) -> int:
-    """How many artifacts of this family the matrix declares."""
-    family = family.lower().rstrip("s")
-    return {
-        "shim": len(shim_legs()),
-        "wheel": len(wheel_legs()),
-        "archive": len(binary_legs()),
-        "tarball": len(binary_legs()),
-        # `family.lower().rstrip("s")` of the page noun `lsp assets` (`R74`): the
-        # family key is `lsp asset`, or `--count lsp` would `KeyError`.
-        "lsp asset": len(lsp_legs()),
-        # `.deb` + `.rpm` per gnu arch (`MB.42.3.1`).
-        "package": len(package_legs()),
-        # The container install matrix (`MB.42.3.4`): one leg per
-        # (distribution, architecture) the release claims.
-        "install": len(install_legs()),
-        # The per-minor CPython shims (`MB.42.3.3`). Spelled as its own noun so a
-        # page saying "`8` Python shims" is checked against this family and not
-        # against the PHP one it sits beside.
-        "python shim": len(py_shim_legs()),
-        # `images` is not a count any page states yet; 0 refuses the claim.
-        "image": 0,
-    }[family]
-
-
-def proven_of(family: str) -> int:
-    family = family.lower().rstrip("s")
-    return {
-        "shim": proven_count("shims"),
-        "wheel": proven_count("wheels"),
-        "archive": proven_count("archives"),
-        "tarball": proven_count("archives"),
-        "lsp asset": proven_count("lsp"),
-        "package": proven_count("packages"),
-        "python shim": proven_count("py_shims"),
-        # No install leg is "proved" by `PROVEN`: a container install runs in CI
-        # on every release, so there is no artifact to keep a proof of. A page may
-        # therefore not claim a proven install.
-        "install": 0,
-        "image": 0,
-    }[family]
-
-
-def check(problems: list[str], notes: list[str]) -> None:
+def check(problems: list[str]) -> None:
     ids = [leg["id"] for leg in LEGS]
     if len(set(ids)) != len(ids):
         problems.append(f"duplicate leg id in LEGS: {ids}")
@@ -1422,106 +1172,6 @@ def check(problems: list[str], notes: list[str]) -> None:
                 "leg would import through an interpreter the packaged shim never binds to"
             )
 
-    # The pinned lines first: if the scanner no longer sees them, every count
-    # below is being read from a document it does not understand, and an `ok`
-    # would be a lie.
-    texts: dict[str, str] = {}
-    for name, target in _pages():
-        if not target.exists():
-            problems.append(f"{name}: a page named here is missing")
-            continue
-        texts[name] = target.read_text(encoding="utf-8")
-    for name, needle, what in PINNED:
-        text = texts.get(name)
-        if text is None:
-            # A pin whose document moved is a pin that checks nothing.
-            problems.append(
-                f"PINNED names {name}, which this repository does not have: a count "
-                "gate that pins a missing document is not a gate"
-            )
-            continue
-
-        # Markdown wrappers are compared away on both sides: the regex may consume
-        # the opening backtick or the `@` before it, and a pin should fail on the
-        # *count* disappearing, not on which character swallowed the wrapper.
-        def bare(chunk: str) -> str:
-            return chunk.replace("`", "").replace("*", "")
-
-        if not any(
-            bare(needle) in bare(match.group(0)) for match in CLAIM.finditer(text)
-        ):
-            problems.append(
-                f"{name}: the scanner no longer matches {needle!r} ({what}): a "
-                "count gate that sees no count is not a gate"
-            )
-
-    # The proven-count rule, applied to every page that states a count — never to
-    # a document `zensical.toml` keeps out of the site (`MB.35.5`), except the two
-    # records pinned above.
-    patterns = site_exclusions()
-    stale_used: set[tuple[str, str]] = set()
-    for name, text in texts.items():
-        if not is_page(name, patterns):
-            continue
-        internal = name in INTERNAL_DOCS
-        label = "note" if internal else "claim"
-        for match in CLAIM.finditer(text):
-            count = int(match.group("count"))
-            if count == 0:
-                # "zero shims in the wheel" is a true statement about a family
-                # that does not travel there; it is not a claim about the matrix.
-                continue
-            family = match.group("family")
-            ceiling = declared_of(family)
-            line = text[: match.start()].count("\n") + 1
-            if count > ceiling:
-                claim = f"{count} {family}"
-                stale = STALE_CLAIMS.get((name, claim))
-                if stale is not None:
-                    # A recorded over-claim: the page states an older matrix and
-                    # the entry names the node that rewrites it. Printed, never
-                    # silent, and refused below if it stops being true.
-                    stale_used.add((name, claim))
-                    notes.append(
-                        f"{name}:{line}: states {claim}, the matrix declares "
-                        f"{ceiling} — stale claim ({stale})"
-                    )
-                    continue
-                problems.append(
-                    f"{name}:{line}: claims {count} {family}, the matrix declares "
-                    f"{ceiling}: a page may not promise a leg that is not attempted"
-                )
-            notes.append(
-                f"{label} {name}:{line}: {count} {family} "
-                f"(matrix {ceiling}, proved {proven_of(family)})"
-            )
-        for match in PROVEN_CLAIM.finditer(text):
-            count = int(match.group("count"))
-            if count == 0:
-                continue
-            family = match.group("family")
-            ceiling = proven_of(family)
-            line = text[: match.start()].count("\n") + 1
-            if count > ceiling:
-                problems.append(
-                    f"{name}:{line}: claims {count} proven {family}, "
-                    f"{ceiling} are built and exercised (PROVEN)"
-                )
-            notes.append(
-                f"{label} {name}:{line}: {count} proven {family} (proved {ceiling})"
-            )
-
-    # The stale-claim list is checked in the other direction too: an entry whose
-    # page no longer makes the claim is a permission nobody needs, and the next
-    # over-claim would be admitted under it.
-    for (name, claim), owner in STALE_CLAIMS.items():
-        if (name, claim) not in stale_used:
-            problems.append(
-                f"STALE_CLAIMS: {name} no longer states {claim!r} above the matrix: "
-                f"delete this entry ({owner}), because a stale-claim permission that "
-                "outlives its claim admits the next over-claim silently"
-            )
-
 
 # --- the output -------------------------------------------------------------
 
@@ -1742,7 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="validate the matrix and every stated count",
+        help="validate the matrix itself (leg names, declared families, PROVEN keys)",
     )
     parser.add_argument(
         "--matrix",
@@ -1840,17 +1490,15 @@ def main(argv: list[str] | None = None) -> int:
         help="filter by leg name (e.g. `--leg install --name debian-13-x86_64`)",
     )
     parser.add_argument(
-        "--quiet", action="store_true", help="--check without the per-document notes"
+        "--quiet",
+        action="store_true",
+        help="accepted for compatibility; no longer used",
     )
     args = parser.parse_args(argv)
 
     problems: list[str] = []
-    notes: list[str] = []
     if args.check:
-        check(problems, notes)
-    if notes and not args.quiet:
-        for note in notes:
-            print(f"platform-matrix: {note}")
+        check(problems)
     if problems:
         for problem in problems:
             print(f"platform-matrix: {problem}", file=sys.stderr)

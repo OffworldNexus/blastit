@@ -82,11 +82,11 @@ escalation: none
 ## Gates
 
 - **Epic gate (`lead`):**
-  1. Run **full `make check` once** (plus `make e2e` if `crates/blastit`, brokers, or `e2e/` changed, and `make mutants-rust PKG=<crate>` if security-critical policy crates changed).
+  1. Run **full `make check` once** (plus `make e2e` if `crates/blastit`, brokers, or `e2e/` changed, and `TMPDIR=$HOME/.cache/blastit-mutants cargo mutants -p <crate>` if security-critical policy crates changed).
   2. If `docs/` layout/diagrams changed, verify `make docs-check` and run `visual-checker` when visual browser QA is needed.
   3. Write `plan/nodes/.../<epic>/RESULT.md`, mark `<epic>` `done`, regenerate `state`, and commit `[<epic>] Gate passed: <title>`.
 - **Milestone gate (`strategist`, expensive tier):**
-  1. Verify every `plan/ROADMAP.md` exit criterion with evidence (`make check`, `make e2e`, CVE suite, runnable docs, `cargo-mutants` on critical policy crates).
+  1. Verify every `plan/ROADMAP.md` exit criterion with evidence (`make check`, `make e2e`, CVE suite, `make docs-check`, `cargo mutants` on critical policy crates).
   2. Write `plan/nodes/<M>/RESULT.md`, verify `Cargo.toml` version and dated `CHANGELOG.md` entry (`## <version> (YYYY-MM-DD)`), refresh the next milestone's `NODE.md`, mark `<M>` `done`, and return `RELEASE_READY: <version>` so `conductor` pushes `release/<version>` and opens the Release PR into `develop`.
 
 ## Command cheat sheet

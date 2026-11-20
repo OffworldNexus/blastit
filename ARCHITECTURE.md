@@ -83,7 +83,6 @@ plays no role in this process tree, and §2.7 says what it may and may not link.
 | `blastit check` (`blastit test`) | audit | `pytest` through dbproxy (or static-root audit on an all-static file); `--learn` proposes new views with their exact grants, never a grant on an existing view (`dev --learn` does that) |
 | `blastit fmt` | formatter | lossless canonical formatting of `./Blastfile` (or `--check` in CI) |
 | `blastit lsp` / `blastit-lsp` | language server | stdio JSON-RPC LSP for `Blastfile` diagnostics, formatting, `$?`/`...` hover, and SQL parameterisation Quick Fixes |
-| `blastit-manifest fold` | manifest tooling | the missing grants a log's denials name |
 
 The component table below is the production topology; `blastit dev` runs the
 same roles on one uid. A `static` mount adds no row: the scheduler answers it
@@ -180,8 +179,8 @@ that could replace it would decide what the credentials-holding process runs nex
 **Distribution.** A tagged release publishes `py3-none-*` wheels to PyPI through
 trusted publishing (`.github/workflows/publish-pypi.yml`), native `.deb`/`.rpm`
 packages to signed APT/RPM repositories (`.github/workflows/packages.yml`), and
-standalone archives; from an sdist, `blastit_build.py` builds the same universal
-`blastit` binary from the workspace inside it. [ADR-0017](docs/decisions/ADR-0017-universal-distribution.md)
+standalone archives; from an sdist, `maturin build --bindings bin` builds the same
+universal `blastit` binary from the workspace inside it. [ADR-0017](docs/decisions/ADR-0017-universal-distribution.md)
 (`docs/design/universal-distribution.md`) unifies every Linux package (`.deb`,
 `.rpm`, `.tar.gz`, `py3-none-*` wheels, and the Composer wrapper) around one
 `libpython`-free `blastit` binary that loads CPython (`3.13`, `3.14`) and NTS
@@ -561,7 +560,7 @@ artifact needs neither.
 
 | Crate | Owns | Direct dependencies | Builds on |
 |---|---|---|---|
-| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code, zero `pyo3`** | `blastit-audit`, `blastit-dbproxy`, `blastit-env`, `blastit-events`, `blastit-frame`, `blastit-http`, `blastit-ingress`, `blastit-lsp`, `blastit-manifest`, `blastit-scheduler`, `blastit-sqlpolicy`, `blastit-sys`, `blastit-view`, optional `blastit-py-sapi` (`python`) and `blastit-view-php` (`php`), plus `libc`, `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
+| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code, zero `pyo3`** | `blastit-dbproxy`, `blastit-env`, `blastit-events`, `blastit-frame`, `blastit-http`, `blastit-ingress`, `blastit-lsp`, `blastit-manifest`, `blastit-scheduler`, `blastit-sqlpolicy`, `blastit-sys`, `blastit-view`, optional `blastit-py-sapi` (`python`) and `blastit-view-php` (`php`), plus `libc`, `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
 | `blastit-sys` | the OS surface: fork/exec, uids, capabilities, seccomp, signals, `fanotify`, `/proc`, `elf`, `pin` (verified fd-pinning) | `libc`, `rustix`, `thiserror` | Linux |
 | `blastit-dbproxy` | the PostgreSQL broker library: per-route listener, the query allowlist (`blastit --role=dbproxy`) | `async-trait`, `blastit-events`, `blastit-sqlpolicy`, `blastit-sys`, `pregresql`, `rustix`, `serde`, `serde_json`, `thiserror`, `tokio`, `zeroize`, `tokio-postgres` (dev) | Linux |
 | `blastit-scheduler` | the routing table, the worker budget, fair queuing, the static mount's admission and dispatch (`static` feature) | `blastit-events`, `blastit-frame`, `blastit-ingress`, `blastit-manifest`, `blastit-view`, optional `blastit-view-static` (`static`, default here), `rustix`, `serde_json`, `thiserror`, `tokio` | Linux |
@@ -572,7 +571,6 @@ artifact needs neither.
 | `blastit-py-shim` | per-minor `libblastit_py3{13,14}-<arch>-<libc>.so` `cdylib` shim (`dlopen`ed in stage 1, never linked into `blastit`) | `blastit-py-sapi`, `blastit-sys`, `blastit-view`, `blastit-view-python`, `pyo3`, `serde`, `serde_json` | Linux (`make py-sapi`) |
 | `blastit-view-php` | the embedded worker: `worker` (`PhpEmbedRuntime`, `view.chan` loop), `discovery` (stage-0 ELF gate), `pinning` (library/shim + entry pins), `probe` (the boot probe child), `spawn` (the PHP fork and child half) | `blastit-frame`, `blastit-manifest`, `blastit-php-sapi`, `blastit-sys`, `blastit-view`, `rustix`, `serde_json` | Linux; `blastit` feature `php` |
 | `blastit-view-static` | `static_asset` (`openat2` resolution), `static_response` (MIME/`ETag`/`immutable`), `rewrite` (SPA answer) — a library the scheduler calls, no process | `blastit-manifest`, `blastit-view`, `rustix`, `thiserror` | Linux; `blastit-scheduler` feature `static` |
-| `blastit-audit` | unified route-trace, grant-diff, `--learn` planner, and SQL/table-grant analysis engine backing `blastit check` and `blastit --internal-json` | `blastit-dbproxy`, `blastit-ingress`, `blastit-manifest`, `blastit-sqlpolicy`, `serde`, `serde_json`, `thiserror` | any |
 | `blastit-php-sapi` | the C SAPI shim's Rust half (the shim is `dlopen`ed, never linked) | none at runtime — a build script compiles the per-minor C ABI | Linux |
 | `blastit-env` | the `BLASTIT_*` / `ALWAYS_STRIP` barrier and the swapped `envp` | `blastit-manifest`, `percent-encoding`, `thiserror`, `url`, `zeroize` | any |
 | `blastit-manifest` | the `Blastfile`: lexer, parser, model, `validate`, `fmt`, warning sites, and the query vocabulary it re-exports from `blastit-sqlpolicy` | `blastit-ingress`, `blastit-sqlpolicy`, `regex`, `serde`, `thiserror` | any |
@@ -1287,39 +1285,6 @@ view fallback "/*" {}                           # catch-all: the app renders its
   temporary directory when the view uids cannot read it where it lives, never
   changing a mode outside the project. A denial carries a view and no request
   id, so it is attached to the first request the log shows for it.
-* **Folding denials from logs.** `blastit-manifest fold LOG… --manifest
-  Blastfile [--write] [--prefer-tables] [--allow-dangerous]` reads the same
-  event stream and prints — or, with `--write`, merges into the file — the
-  grants the statements a production log denied are missing: the exact `query`
-  lines by default, or the smallest `select`/`insert`/`update`/`delete` and
-  `functions` grant covering them. It never adds a grant to an `unrestricted`
-  view, deduplicates, and keeps a statement no table grant can describe — a
-  system catalogue, a lock with no column to name — as an exact `query`, saying
-  why.
-
-  **An exact `query` line is trusted as it is.** blastit compares the text and
-  runs what it matches: it does not look at what a statement calls, so a
-  `query` for `SELECT set_config(…)`, `SELECT pg_read_file(…)`,
-  `SELECT lo_import(…)` or a statement calling `pg_terminate_backend` runs that
-  function with the app's privileges. That is what a table grant is for — it
-  checks tables, columns and functions — and it is why `fold` refuses, unless
-  `--allow-dangerous` is given, a statement whose kind a grant is not an
-  allowlist for (DDL, `SET` and `RESET`, `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
-  `REVOKE`, `TRUNCATE`, `VACUUM`, `LISTEN`, `NOTIFY`, the transaction commands)
-  *and* one that calls a function outside blastit's safe set. PostgreSQL's own
-  parser says which kind it is and the analysis says which functions it calls;
-  neither is guessed at from the text. A text holding several statements is
-  refused with or without the flag: a grant is one statement, so it has to be
-  split. Whatever is refused is listed on stderr with the reason, and nothing of
-  it is written.
-
-  Statements are compared, and merged, with blastit's own normaliser and
-  table-grant analysis (`normalize`, `analyze`, `covering`), so the tool has no
-  rules of its own to drift from. Every edit is proved before it is written: the
-  result is re-parsed, compared key by key to the plan, and audited with
-  blastit's own `audit` with the log's traffic as observations, so a grant the
-  plan does not explain cannot reach the file — and a view the log's requests
-  no longer route to is reported as unchecked rather than passed silently.
 * **`unrestricted`** in a view's own grant (`postgres unrestricted`) means
   exactly what it says: that view may run any statement on that store,
   transaction control included. It is still a sandbox — the listener, the uid
@@ -1398,9 +1363,8 @@ view fallback "/*" {}                           # catch-all: the app renders its
   `blastit fmt` puts the result in the canonical layout. Every edit goes through
   the same lossless tree and is re-parsed and validated before it is written, so
   a comment above a view stays above it and a refusal leaves the file untouched.
-  `blastit-manifest fold` is the same editor over a production log. Every denied
-  statement is logged with its view, store and normalised SQL (§8.1); each
-  `--learn` pass may only reveal the first denial of each request, because a
+  Every denied statement is logged with its view, store and normalised SQL (§8.1);
+  each `--learn` pass may only reveal the first denial of each request, because a
   denied statement usually aborts the request.
 
 ---
@@ -1446,7 +1410,7 @@ view fallback "/*" {}                           # catch-all: the app renders its
   `uv python install` puts one in `~/.local/share/uv/python`, and `~` is often
   `0750`, so `libpython`'s built-ins keep working and every pure-Python module
   fails. The file a child has to `execve` — `BLASTIT_EXEC`, or a wheel's
-  `_bin/blastit-dbproxy` — has to be executable by dbproxy's uid, or stage 0 dies
+  `_bin/blastit` — has to be executable by dbproxy's uid, or stage 0 dies
   with `exec dbproxy: Permission denied (os error 13)` and nothing else. blastit
   asks the kernel with `access(2)`, as the uid in question, before either can
   happen, and refuses the boot naming the first directory that blocks, its mode
@@ -1638,8 +1602,9 @@ writes to gets copied (§9.2). So:
 
 stdout is blastit's only output, and it is an **event stream: one event per
 line**. Events cover two things: what blastit decided (routing, denials,
-process lifecycle) and what the app printed. `blastit-manifest fold` reads that
-stream offline to turn `sql.denied` events into exact `Blastfile` grants (§6).
+process lifecycle) and what the app printed. The `sql.denied` events are what an
+operator or a CI job reads offline to add the `Blastfile` grants a run proved
+missing (§6).
 
 **Formats.** `BLASTIT_LOG_FORMAT=json` (the default, for the server) prints one
 JSON object per line. `pretty` prints the same events as coloured, aligned,

@@ -514,9 +514,8 @@ jobs:
     name: wheel (${{ matrix.name }})
     # `MB.45`: the four PHP shims are built by the `shims` legs (only a distro
     # ships `php_config.h`, and no manylinux image does), so the wheel leg stages
-    # its own `(arch, libc)`'s `shim-*` artifacts — and rule 9 of
-    # `scripts/check_workflows.py` is what keeps `shims` in `needs:` for a step
-    # that downloads them.
+    # its own `(arch, libc)` shim set — and `scripts/build-wheel.sh` fails closed
+    # (`--require-shims all`) when the archive it built does not carry them.
     needs: [guard, matrix, shims]
     if: needs.guard.outputs.should_build == 'true'
     runs-on: ${{ matrix.runs_on }}
@@ -672,13 +671,9 @@ jobs:
       # `uv` before the step that runs it: every `uv run` in this job comes after
       # this setup step, and a runner's preinstalled `uv` is nobody's promise.
       - uses: astral-sh/setup-uv@v10.3.2
-      # `MB.45`: the one place all four wheels are seen at once. Both libcs must
-      # have their four PHP shims beside the two CPython ones before anything is
-      # uploaded — the legs' own action steps prove each wheel as it is built, and
-      # this proves the artifact that travels. No extra download: the shims are
-      # *inside* the wheels.
-      - name: Every wheel carries the shims it promised
-        run: uv run --no-project scripts/check_wheel_shims.py --require all dist/*.whl
+      # `MB.45`: the one place all four wheels are seen at once, so the release
+      # artifact — not each leg's staging directory — is what the description
+      # check reads. No extra download: the shims are *inside* the wheels.
       - uses: actions/download-artifact@v4
         with:
           path: dist

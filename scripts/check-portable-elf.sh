@@ -43,8 +43,8 @@
 # The refusal this script owes is the *other* shape — a shim or a binary that
 # carries `NEEDED libpython3.x.so` and would therefore only run on a machine with
 # that CPython installed. The distinction is exactly the two `readelf` queries
-# below, and `scripts/test_packaging_gates.py` builds one fixture of each shape to
-# keep them from collapsing into "any mention of Python is refused".
+# below, and refusing on the first one alone would collapse them into "any
+# mention of Python is refused".
 #
 # `--max-glibc <major>_<minor>` measures the C-library floor of everything it is
 # given and refuses a file that needs a newer glibc than the one named. The floor

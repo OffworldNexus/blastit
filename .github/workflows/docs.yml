@@ -12,15 +12,13 @@ name: Docs
 #
 # `--strict` cannot see a page that `docs/` holds but the nav does not name, and
 # it publishes those pages all the same (`site/orphan/index.html`,
-# `docs/testing/AUDIT-MA.3.md` F3). The runnable-docs inventory is the list of
-# pages the gate executes, so the same inventory check `make docs-test` starts
-# with runs here, before the build, together with the assertion that closes the
-# orphan class itself: every Markdown page under `docs/` that `exclude_docs` does
-# not keep out of the build must be named by the nav. A page/nav/inventory drift
-# is then a red Docs check instead of an orphan page on the site. `ci.yml`'s
-# `docs-gate` job runs the whole gate; a job cannot `needs` another workflow's
-# job, so the check is repeated (it needs no wheel and no cargo, only the
-# repository).
+# `docs/testing/AUDIT-MA.3.md` F3). The step below closes that class itself:
+# every Markdown page under `docs/` that `exclude_docs` does not keep out of the
+# build must be named by the nav, so a page/nav drift is a red Docs check instead
+# of an orphan page on the site. It needs no wheel and no cargo, only the
+# repository. `ci.yml`'s `docs-gate` job runs `make docs-check` + `make docs-unit`
+# on a pull request (a job cannot `needs` another workflow's job, so the strict
+# build is repeated there).
 #
 # The installer the README's hero advertises is a *served asset*, not a page:
 # https://offworldnexus.github.io/blastit/install.sh must be the exact bytes this

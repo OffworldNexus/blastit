@@ -28,8 +28,8 @@ Blastit is a developer-first zero-trust application harness and sandbox for mode
 2. **1 Sequential Cargo Writer & Gate Split (`fast-check` vs `check`):**
    - Run **at most 1** Cargo/wheel/Docker writer at a time per worktree (never run parallel builds touching `target/` or `Cargo.lock`).
    - Leaf slices verify with `make fast-check` (or `make docs-check` for doc-only tasks) and record brief command + output-tail evidence in `RESULT.md`.
-   - Full `make check` (including wheel build, runnable-docs harness, standalone ELF matrix, and Zensical build) runs **once** at epic/release gates — never 3x per leaf.
-3. **Protected Critical Tests (`tools/critical_guard.py`):** Existing files in `crates/*/tests/critical_*.rs` and `python/tests/critical/` are protected by `uv run --no-project tools/critical_guard.py --base <sha> --node <id>`. Adding new critical tests is always welcome; never modify, delete, or skip (`#[ignore]`, `skip`) existing critical tests unless explicitly authorized in your node's `paths` and `# Goal`.
+   - Full `make check` (`rs-test` + `test-critical`, `docs-unit`, `docs-check`, `rs-no-python`/`rs-no-default`, `e2e-universal`, `zed-check`, the standalone ELF matrix, and `plan-validate`) runs **once** at epic/release gates — never 3x per leaf.
+3. **Protected Critical Tests & Type-Boundary Enforcement:** Existing files in `crates/*/tests/critical_*.rs` and `python/tests/critical/` are reviewed like any other code: adding new critical or E2E tests is always welcome, and an existing one may only be modified, deleted or skipped when the plan node's `paths` cover it and its `# Goal` says why. Architectural and security invariants live in Rust/Python types, crate dependency boundaries and real end-to-end tests against the real binary — never in `scripts/check_*.py` source-grep scanners.
 4. **Python & Rust Execution (`uv` + `Makefile`):** Never invoke bare `python`, `python3`, or `pip`. Use `uv run --no-project` for standalone scripts (`tools/`, `scripts/`, `e2e/`), `uvx --offline` for cached CLI tools (`ruff`, `zensical`), and `make` targets (which export `PYO3_PYTHON`, `PYTHONHOME`, and `LD_LIBRARY_PATH` automatically). Published `python/blastit/` stays 100% stdlib (`dependencies = []`).
 5. **Git & Release PR Workflow:** Work and commit locally on `release/<version>` branches (`lead` and `conductor` only, staging explicit file paths — never `git add -A`). Leaf subagents never run `git add`, `git commit`, `git push`, `git tag`, or `gh pr`. When a release gate passes, `conductor` pushes `release/<version>` and opens a PR into `develop` for human merge. Never push to `develop`, never force-push, never run `git tag`, and never run `gh pr merge`.
 6. **Autonomy & Confidentiality:** Never ask the human directly unless you are `conductor` and every branch is blocked (open an item via `uv run --no-project tools/plan.py --agent <you> human add "..."` instead). **Never mention external client, proprietary, or sibling private project names** anywhere in code, docs, comments, or commit messages.
@@ -40,10 +40,10 @@ Blastit is a developer-first zero-trust application harness and sandbox for mode
 | Path | What |
 |---|---|
 | `crates/` | Rust workspace (`blastit`, `blastit-http`, `blastit-scheduler`, `blastit-dbproxy`, `blastit-sqlpolicy`, `blastit-manifest`, `blastit-lsp`, `blastit-env`, `blastit-frame`, `blastit-events`, `blastit-view`, `blastit-view-php`, `blastit-view-static`, `blastit-php-sapi`, `blastit-sys`, `blastit-py`) |
-| `python/` | Zero-dependency Python CLI/runtime package (`blastit`) + unit, critical & runnable-docs suites |
+| `python/` | Zero-dependency Python CLI/runtime package (`blastit`) + unit & critical suites |
 | `docs/` & `README.md` | Lean public user documentation site (`zensical.toml` -> `make docs-check`) |
 | `ARCHITECTURE.md` | Technical specification of internals & trust boundaries (`docs/{VISION.md,design/,decisions/,research/,knowledge/LESSONS.md,testing/}` excluded from public build) |
 | `TESTING_PLAN.md` | Pure user-story acceptance plan every test maps to (human-gated before any new feature's tests or code) |
 | `editors/` | Tree-sitter `Blastfile` grammar & Zed extension (`make zed-check`) |
 | `e2e/` & `scripts/` | Docker/rootless/PHP-SAPI/CVE harnesses and packaging/ELF/workflow build scripts |
-| `plan/` & `tools/` | Autonomous plan tree (`STATE.md`, `ROADMAP.md`, `nodes/`) + stdlib tools (`plan.py`, `guard.py`, `critical_guard.py`, `coverage_report.py` — `make coverage`) |
+| `plan/` & `tools/` | Autonomous plan tree (`STATE.md`, `ROADMAP.md`, `nodes/`) + stdlib tools (`plan.py`, `guard.py`, `coverage_report.py` — `make coverage`) |

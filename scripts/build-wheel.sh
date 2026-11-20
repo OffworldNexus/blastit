@@ -33,23 +33,20 @@
 #     (built on a developer host they need `GLIBC_2.34`).
 #
 # `--require-shims py|all` fails closed when the staged set is incomplete (the
-# release legs pass `all`: six shims, design §6.1). `make docs-test` passes `py`
-# — its runnable fences install the wheel and boot a WSGI view, so the target
-# builds the two CPython shims first (`docs-test: py-sapi`) — and the plain host
-# path passes nothing: that wheel is a developer artifact.
+# release legs pass `all`: six shims, design §6.1). A caller that boots the
+# wheel's WSGI path from a bundle passes `py` — it needs the two CPython shims —
+# and the plain host path passes nothing: that wheel is a developer artifact.
 #
 # Platform tag & glibc floor:
 #
 #   * `--manylinux 2_28` (or `BLASTIT_MANYLINUX=2_28`, used by `make e2e`) builds
-#     the wheel inside `quay.io/pypa/manylinux_2_28_<arch>`,
-#     passes `--compatibility manylinux_2_28` to maturin, and enforces `Tag <= 2_28`
-#     on `*.dist-info/WHEEL` via `scripts/check_wheel_tag.py` — so a wheel built on
-#     a glibc 2.41 developer host still installs on glibc >= 2.28.
-#   * Without `--manylinux` (used by `make docs-test` inside `make check`, which
-#     runs offline and without Docker, and inside container builds), both binaries
-#     link against the ambient libc; `scripts/check_wheel_tag.py` still inspects
-#     `*.dist-info/WHEEL` and prints the actual `Tag:`, and the unversioned
-#     `linux_<arch>` developer wheel is the one it accepts with `--allow-host-tag`.
+#     the wheel inside `quay.io/pypa/manylinux_2_28_<arch>` and passes
+#     `--compatibility manylinux_2_28` to maturin; the finished archive's
+#     `*.dist-info/WHEEL` `Tag:` is read back below, so a wheel built on a glibc
+#     2.41 developer host still installs on glibc >= 2.28.
+#   * Without `--manylinux` (the developer path: offline, no Docker, and inside
+#     container builds), both binaries link against the ambient libc and the wheel
+#     is the unversioned `linux_<arch>` developer artifact.
 #   * The glibc floor is **parsed** from the tag, never prefix-stripped
 #     (`MB.42.13`). maturin 1.16 tags a `bindings = "bin"` wheel
 #     `manylinux_2_39_x86_64`, so `${tag#manylinux_}` is `2_39_x86_64` — not a
@@ -57,10 +54,7 @@
 #     shim it had just measured. `manylinux_floor` keeps the first two numeric
 #     components and ignores a trailing `_<arch>` / `_<arch>_<libc>` suffix;
 #     `--manylinux` and `BLASTIT_WHEEL_MAX_GLIBC` win over it, and a platform it
-#     cannot read stops the build naming that platform. `--print-glibc-floor
-#     <platform>` prints the derived floor and exits: the hook
-#     `scripts/test_packaging_gates.py` runs, so the self-test exercises this
-#     parse and not a paraphrase of it.
+#     cannot read stops the build naming that platform.
 #
 # **One platform tag, from one place (`MB.3.58`).** A tag reaches maturin through
 # exactly one route: `--compatibility` here (this script enters
@@ -88,7 +82,6 @@ requested_interp=""
 blob_dir="${BLASTIT_WHEEL_BLOBS:-}"
 require_shims="${BLASTIT_WHEEL_REQUIRE_SHIMS:-}"
 shims_from="${BLASTIT_WHEEL_SHIMS_FROM:-}"
-print_floor=""
 # The glibc floor a wheel claims, derived from its platform (`MB.42.13`).
 #
 # A maturin `bindings = "bin"` wheel is tagged `manylinux_2_39_x86_64`, so the
@@ -127,14 +120,6 @@ manylinux_floor() {
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --print-glibc-floor)
-            print_floor=${2:?--print-glibc-floor requires a platform such as manylinux_2_28_x86_64}
-            shift 2
-            ;;
-        --print-glibc-floor=*)
-            print_floor=${1#--print-glibc-floor=}
-            shift
-            ;;
         --manylinux)
             manylinux_ver=${2:?--manylinux requires a version such as 2_28}
             shift 2
@@ -191,14 +176,6 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
-
-# `--print-glibc-floor` is the self-test hook (`scripts/test_packaging_gates.py`):
-# it runs the shipped parser, prints the floor and touches nothing — no blob
-# directory, no README rewrite, no build.
-if [[ -n $print_floor ]]; then
-    manylinux_floor "$print_floor"
-    exit 0
-fi
 
 # The staged `blastit/_bin/` payload for the repack: `blastit-lsp` and the shims.
 blob_dir=${blob_dir:-target/wheel-blobs}
@@ -515,9 +492,8 @@ if [[ -z ${wheel_platform:-} ]]; then
     fi
 fi
 
-# `python/tests/test_release_scripts.py` copies this script **alone** into a tree
-# of stubs to exercise the README restore, so a sibling script being absent is
-# that fixture and nothing else; say which path ran instead of failing obscurely.
+# A tree with no `scripts/repack_universal_wheel.py` (a stub checkout) has no
+# second build stage: say which path ran instead of failing obscurely.
 if [ ! -f scripts/repack_universal_wheel.py ]; then
     echo "note: scripts/repack_universal_wheel.py is not in this tree; the maturin wheel stays as it is"
     exit 0
@@ -595,72 +571,116 @@ done
 # One ELF per install (`MB.56.1.2.2`): the credentials-holding role is
 # `_bin/blastit --role=dbproxy`, so `_bin/` is an exact allow-list — `blastit`,
 # `blastit-lsp` and the per-ABI shims — and any other member is refused below,
-# by name, once the archive's own member list is read (a name-only `grep` catches
-# the retired `_bin/blastit-dbproxy` and nothing else a caller staged by hand).
-# Every ELF the repacked wheel carries — `blastit`, `blastit-lsp` and each shim,
-# all in `blastit/_bin/` — is measured on the
-# *file in the wheel* (`MB.17`, `MB.42.3.3`): zero `libpython`/`libphp`
-# `DT_NEEDED`, no `RUNPATH` into this machine's uv cache, and (for a `manylinux`
-# wheel) nothing above the floor the tag claims. (The call lives inside the `-s`
-# guard rather than above it: the release-hygiene fixture in
-# `python/tests/test_release_scripts.py` copies this script alone into a tree of
-# stubs where a sibling script may be "No such file" — and its stub wheel is not
-# a zip, so there is no ELF to measure either way.)
+# by name, once the archive's own member list is read. Every ELF the repacked
+# wheel carries is measured on the *file in the wheel* (`MB.17`, `MB.42.3.3`):
+# zero `libpython`/`libphp` `DT_NEEDED`, no `RUNPATH` into this machine's uv
+# cache, and (for a `manylinux` wheel) nothing above the floor the tag claims.
 #
-# A wheel is a zip by definition, and maturin always writes one. The only
-# non-zip `*.whl` in reach is the stub `python/tests/test_release_scripts.py`
-# writes to exercise this script's README restore: there is no `_bin/` inside it,
-# so the note below is that case and nothing else. It is printed (not silent) so a
-# reader of a build log can see which path ran.
-"${link_python[@]}" - "$wheel" "$scratch" <<'PY'
+# The same read proves the rest of the promise, which used to be a second script
+# over the finished zip — every staged shim is *in* the archive, each payload
+# member is mode 0755, and `*.dist-info/WHEEL` says `py3-none-<platform>` and
+# `Root-Is-Purelib: false`. The staging directory `assert_shims` counted is not
+# the artifact a user installs; this is.
+#
+# A wheel is a zip by definition, and maturin always writes one. A tree with no
+# staged payload produces a wheel with no `_bin/`, and the note below says so
+# rather than reading an empty archive as a pass.
+"${link_python[@]}" - "$wheel" "$scratch" "$wheel_platform" "$blob_abs" <<'PY'
 import sys
 import zipfile
 from pathlib import Path
 
 wheel, scratch = Path(sys.argv[1]), Path(sys.argv[2])
+platform, staged = sys.argv[3], Path(sys.argv[4])
 if not zipfile.is_zipfile(wheel):
     print(f"note: {wheel} is not a zip archive (a stub build); no extension to inspect")
     sys.exit(0)
+problems: list[str] = []
 with zipfile.ZipFile(wheel) as archive:
+    infos = {info.filename: info for info in archive.infolist()}
     # Everything the repack relocated into `blastit/_bin/`: the binary, the
-    # editor binary and each shim. One directory, one loop.
+    # editor binary and each shim. One directory, one loop. The allow-list reads
+    # the archive rather than grepping its bytes, so a retired
+    # `_bin/blastit-dbproxy` and a third program a caller staged by hand are both
+    # refused by name — an image nobody builds and nobody proves.
     prefix = "blastit/_bin/"
-    # The allow-list, read from the archive rather than grepped out of its bytes:
-    # one program per role (`blastit` plays every role, the credentials-holding
-    # one as `--role=dbproxy`), the editor binary and the per-ABI shims the
-    # repack relocates. A stale `python/blastit/_bin/` can stage a retired
-    # `blastit-dbproxy`, and a caller can stage a third program: both are an
-    # image nobody builds and nobody proves, so both are refused by name.
     allowed = {"blastit", "blastit-lsp"}
-    strays = []
-    for name in archive.namelist():
+    members = []
+    for name in infos:
         if not name.startswith(prefix) or name.endswith("/"):
             continue
         member = name[len(prefix) :]
         if member in allowed:
+            members.append(name)
             continue
         if member.startswith(("libblastit_py", "libblastit_php")) and member.endswith(
             ".so"
         ):
+            members.append(name)
             continue
-        strays.append(name)
-    if strays:
-        print(
-            f"error: {wheel} carries {', '.join(sorted(strays))}: `{prefix}` holds "
-            "exactly the wheel's payload — `blastit` (every role, the "
-            "credentials-holding one as `--role=dbproxy`), `blastit-lsp` and the "
-            "shims (`libblastit_py*.so`, `libblastit_php*.so`). Remove the stray "
-            "file from python/blastit/_bin/ (a leftover `blastit-dbproxy` from an "
-            "older build is the usual one) and rebuild"
+        problems.append(
+            f"{name}: `{prefix}` holds exactly the wheel's payload — `blastit` (every "
+            "role, the credentials-holding one as `--role=dbproxy`), `blastit-lsp` "
+            "and the shims (`libblastit_py*.so`, `libblastit_php*.so`)"
         )
-        sys.exit(1)
-    members = [
-        name
-        for name in archive.namelist()
-        if name.startswith(prefix) and "/" not in name[len(prefix) :]
-    ]
     if not members:
-        print(f"error: {wheel} carries nothing under {prefix}")
+        problems.append(f"{wheel} carries nothing under {prefix}")
+    # A `.so` outside the two payload directories is never part of this wheel: the
+    # retired per-minor extension (`blastit/_blastit.cpython-31x-*.so`) is the one
+    # that used to live here, and a stale copy staged by hand would keep
+    # `blastit._blastit`'s `sys.executable` fallback green while shipping a second
+    # image the wheel does not prove. Only the repacked payload travels.
+    for name in infos:
+        if not name.endswith(".so"):
+            continue
+        if name.startswith(prefix) or name.startswith("blastit.libs/"):
+            continue
+        problems.append(
+            f"{name}: a shared object outside `{prefix}`/`blastit.libs/` — a wheel "
+            "carries only the repacked payload, never a stale per-minor extension"
+        )
+
+    # The staged set is what `--require-shims` counted and what the repack was
+    # handed: a shim that never reaches the zip is a wheel a user installs and
+    # then cannot load PHP/CPython from.
+    wanted = {prefix + "blastit", prefix + "blastit-lsp"}
+    if staged.is_dir():
+        wanted |= {prefix + path.name for path in staged.glob("libblastit_*.so")}
+    for name in sorted(wanted):
+        info = infos.get(name)
+        if info is None:
+            problems.append(f"{name}: staged for the repack, and this wheel does not carry it")
+            continue
+        mode = (info.external_attr >> 16) & 0o777
+        if mode != 0o755:
+            problems.append(
+                f"{name}: mode {mode:o}, not 755 — pip drops a wheel's modes, so a "
+                "program or shim that travels 644 cannot run"
+            )
+
+    # The tag of the *repacked* wheel: `py3-none-<platform>`, the promise that one
+    # artifact serves CPython 3.12, 3.13 and 3.14. The repack names the file from
+    # this platform, so a disagreement is a repack bug caught here rather than at
+    # `pip install`.
+    wheel_meta = next((name for name in infos if name.endswith(".dist-info/WHEEL")), "")
+    if not wheel_meta:
+        problems.append("no *.dist-info/WHEEL in the archive")
+    else:
+        lines = archive.read(wheel_meta).decode("utf-8").splitlines()
+        tags = [line.split(":", 1)[1].strip() for line in lines if line.startswith("Tag:")]
+        if tags != [f"py3-none-{platform}"]:
+            problems.append(
+                f"*.dist-info/WHEEL tags {tags or 'nothing'}, this build promised "
+                f"py3-none-{platform}"
+            )
+        if "Root-Is-Purelib: false" not in lines:
+            problems.append("*.dist-info/WHEEL has no `Root-Is-Purelib: false`: the binary is not purelib")
+    if not wheel.name.endswith(f"-py3-none-{platform}.whl"):
+        problems.append(f"{wheel.name}: not named for the py3-none-{platform} tag it carries")
+
+    if problems:
+        for problem in problems:
+            print(f"error: {problem}", file=sys.stderr)
         sys.exit(1)
     with (scratch / "members").open("w", encoding="utf-8") as members_file:
         for index, name in enumerate(members):
@@ -672,24 +692,6 @@ PY
 # `members` is written only by the zip path above, so an empty or absent file
 # means the note already said why there is nothing to check.
 if [ -s "$scratch/members" ]; then
-    # The tag of the *repacked* wheel: `py3-none-<platform>`. A release leg hands
-    # the platform it built in; the host path asks for its unversioned
-    # `linux_<arch>` tag to be allowed, which is how a developer wheel is
-    # distinguishable from a shippable one.
-    if [[ $wheel_platform == manylinux_* ]]; then
-        "${link_python[@]}" scripts/check_wheel_tag.py \
-            --max-glibc "$wheel_floor" \
-            --platform "manylinux_${wheel_floor}" \
-            "$wheel"
-    elif [[ $wheel_platform == musllinux_* ]]; then
-        # `${wheel_platform%_*}` strips the arch: `musllinux_1_2_x86_64` becomes
-        # `musllinux_1_2`, which is the prefix `--platform` takes.
-        "${link_python[@]}" scripts/check_wheel_tag.py \
-            --platform "${wheel_platform%_*}" \
-            "$wheel"
-    else
-        "${link_python[@]}" scripts/check_wheel_tag.py --allow-host-tag "$wheel"
-    fi
     while IFS=$'\t' read -r member extracted; do
         echo "wheel: $member"
         # `$ORIGIN`-relative search paths are how a musllinux wheel carries its
@@ -707,6 +709,13 @@ if [ -s "$scratch/members" ]; then
         # assertion just read. A release binary that an environment variable can
         # pause before it binds is the denial-of-service surface the archive's
         # binary is checked for in `scripts/build-standalone.sh`.
-        scripts/check-no-test-seam.sh "$extracted"
+        for seam in BLASTIT_TEST_SWAP_POINT BLASTIT_TEST_RELOAD_FAULT BLASTIT_TEST_RELOAD_PAUSE; do
+            if grep -a -q -F -- "$seam" "$extracted"; then
+                echo "error: $member carries the test-only seam $seam: this wheel ships" >&2
+                echo "  a boot an environment variable can hold open before it binds" >&2
+                exit 1
+            fi
+        done
     done < "$scratch/members"
 fi
+

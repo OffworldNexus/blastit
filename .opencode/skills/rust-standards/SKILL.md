@@ -29,5 +29,5 @@ Rust powers Blastit's supervisor, HTTP ingress, WASM validation gate, fair sched
 
 ## 2. Verification
 
-- **Leaf slice verification (single combined run):** `cargo fmt --all && make fast-check` (runs `guard`, `critical-guard`, `rs-fmt`, `rs-lint`, `rs-test`, `py-lint`, `plan-validate` with `PYO3_PYTHON` and `PYTHONHOME` configured automatically).
-- **Epic / release gate verification:** `make check` (adds `rs-doc`, Python `test-critical`, `docs-check`, wheel + `docs-test`, `rs-no-python`, `rs-no-default`, `seam-check`, and packaging/workflow/Zed checks).
+- **Leaf slice verification (single combined run):** `cargo fmt --all && make fast-check` (runs `guard`, `rs-fmt`, `rs-lint`, `rs-doc`, `rs-test`, `py-lint`, `plan-validate` and `universal-smoke` with `PYO3_PYTHON` and `PYTHONHOME` configured automatically).
+- **Epic / release gate verification:** `make check` (adds `test-critical`, `docs-check`, `docs-unit`, `rs-no-python`, `rs-no-default`, `e2e-universal` and `zed-check`).

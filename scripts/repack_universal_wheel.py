@@ -34,7 +34,7 @@ required:
    must not install it into the purelib tree unconditionally) and
    `Tag: py3-none-<platform>`, which is what makes one artifact valid for three
    CPython minors. The filename is renamed to match: a wheel whose filename and
-   `WHEEL` disagree is refused by `scripts/check_wheel_tag.py` and by `pip`.
+   `WHEEL` disagree is refused by `scripts/build-wheel.sh` and by `pip`.
 
 4. **Recomputes `RECORD`.** Every file a wheel carries is listed with its
    SHA-256 and size; `pip` verifies them on install, so a repacked wheel with a

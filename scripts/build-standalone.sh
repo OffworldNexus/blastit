@@ -75,8 +75,8 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# `<major>_<minor>` (the manylinux spelling, as `check_wheel_tag.py --max-glibc`
-# takes it) and `<major>.<minor>` (the glibc spelling) are the same number here.
+# `<major>_<minor>` (the manylinux spelling, as `--max-glibc` takes it) and
+# `<major>.<minor>` (the glibc spelling) are the same number here.
 if [ -n "$max_glibc" ]; then
     max_glibc=${max_glibc//_/.}
     if ! printf '%s' "$max_glibc" | grep -Eq '^[0-9]+\.[0-9]+$'; then
@@ -158,12 +158,27 @@ if [ ! -x "$binary" ]; then
     exit 1
 fi
 scripts/check-portable-elf.sh "$binary"
-# The test-only boot seam must not be in what this archive ships (`MB.3.64`):
+# The test-only boot seams must not be in what this archive ships (`MB.3.64`):
 # `BLASTIT_TEST_SWAP_POINT` pauses a boot before the listener binds, which is a
-# denial-of-service surface for a production binary. The seam is compiled under
+# denial-of-service surface for a production binary. The seams are compiled under
 # `debug_assertions` alone; this measures the artifact instead of trusting it,
 # and fails if `RUSTFLAGS` turned debug assertions back on for a release build.
-scripts/check-no-test-seam.sh "$binary"
+# A file this cannot read has no verdict, so the readability is checked first.
+if [ ! -r "$binary" ]; then
+    echo "error: cannot read $binary, so whether it carries the test seams is unknown" >&2
+    exit 2
+fi
+for seam in BLASTIT_TEST_SWAP_POINT BLASTIT_TEST_RELOAD_FAULT BLASTIT_TEST_RELOAD_PAUSE; do
+    if grep -a -q -F -- "$seam" "$binary"; then
+        echo "error: $binary contains $seam, so a shipped boot could be paused by an" >&2
+        echo "  environment variable before it binds a listener — a denial-of-service" >&2
+        echo "  surface that must exist only in a test build." >&2
+        echo "  the seam is compiled under \`debug_assertions\` alone: build with \`--release\`" >&2
+        echo "  and never with \`-C debug-assertions=yes\` or RUSTFLAGS that turns it back on." >&2
+        exit 1
+    fi
+done
+echo "build-standalone: no test-only boot seam in $binary"
 
 # The floor, measured once and used twice: `--max-glibc` refuses a build that
 # outgrew the image it is shipped for, and the same number goes into the

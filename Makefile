@@ -1,8 +1,8 @@
 # Blastit root Makefile: unified quality gates for Rust crates, Python tooling, docs, and the plan tree.
 #
 #   make help             # list targets
-#   make fast-check       # fast per-slice check: guard + critical-guard + rs-fmt + rs-lint + rs-doc + rs-test + py-lint + workflow-check + plan-validate
-#   make check            # full unprivileged epic/release gate (fast-check + docs + wheel + standalone ELF + packaging gates)
+#   make fast-check       # fast per-slice check: guard + rs-fmt + rs-lint + rs-doc + rs-test + py-lint + plan-validate + install-test
+#   make check            # full unprivileged epic/release gate (fast-check + docs + wheel + standalone ELF + E2E)
 #   make clean            # format Rust and Python harness tools, then run lints
 #   make docs-check       # build Zensical documentation site with --strict (zero broken links/anchors)
 #   make docs-unit        # run the package's offline Python suites (no wheel build)
@@ -21,8 +21,6 @@
 #   make php-sapi-e2e     # Docker: build one shim and prove it with the real-load probe
 #   make rs-test-php      # real-pair PHP suites against host libphp + shim
 #   make rs-test-php-image # real-pair PHP suites inside the php-sapi-e2e image
-#   make mutants-rust     # run cargo-mutants on critical crates (PKG=blastit-sqlpolicy), disk scratch + memory cap
-#   make mutants-clean    # delete mutants.out and cargo-mutants scratch copies
 
 UV ?= uv
 UVX ?= uvx --offline
@@ -78,17 +76,6 @@ PACKAGES_SHIM_FLOOR ?= $(shell $(UV) run --no-project scripts/platform_matrix.py
 BLASTIT_VERSION  ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 BLASTIT_RELEASE  ?= 1
 
-# cargo-mutants scratch on disk (never tmpfs /tmp) with a 12 GiB cgroup v2 cap and 5 GiB free-space preflight.
-MUTANTS_TMP ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/blastit-mutants
-MUTANTS_JOBS ?= 2
-MUTANTS_TIMEOUT ?= 90
-MUTANTS_MEMORY_MAX ?= 12G
-MUTANTS_MIN_FREE_GB ?= 5
-MUTANTS_KEEP_SCRATCH ?= 2
-MUTANTS_STALE_MIN ?= 240
-# Enable `--features python` when mutating `blastit` so WSGI/learn paths are compiled and exercised.
-MUTANTS_FEATURE_ARGS := $(if $(filter blastit,$(PKG)),--features python)
-
 # Dogfood static serving of the built Zensical site via standalone `blastit dev`.
 PORT ?= 8080
 DOCS_SERVE_STAGE ?= $(CURDIR)/target/docs-serve
@@ -111,12 +98,12 @@ endif
 CRITICAL_STAGE ?= $(CURDIR)/target/python-critical
 CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytest\.mark\.skip|pytest\.skip[[:space:]]*\(|importorskip[[:space:]]*\(|unittest\.skip
 
-.PHONY: help fast-check check clean guard critical-guard critical-skip-check plan-validate \
-        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check coverage \
-        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-universal mutants-rust \
+.PHONY: help fast-check check clean guard critical-skip-check plan-validate \
+        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default coverage \
+        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-universal \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
-        rs-test-php rs-test-php-image python-runtime platform-matrix-check standalone standalone-glibc workflow-check \
-        packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp \
+        rs-test-php rs-test-php-image python-runtime standalone standalone-glibc \
+        zed-check \
         packages packages-test
 
 help: ## Show available Make targets
@@ -127,24 +114,16 @@ clean: rs-format py-format rs-lint py-lint ## Format Rust + Python tools, then l
 guard: ## Refuse >5 MiB files, .env secrets, or stray binary artefacts
 	$(UV) run --no-project tools/guard.py
 
-critical-guard: ## Protect critical tests (report by default; pass BASE=<rev> NODE=<id> to enforce)
-	$(UV) run --no-project tools/critical_guard.py --base $(or $(BASE),HEAD) $(if $(NODE),--node $(NODE))
-
 plan-validate: ## Validate plan/nodes consistency
 	$(UV) run --no-project tools/plan.py validate
 
-platform-matrix-check: ## Verify published docs match scripts/platform_matrix.py claims
-	$(UV) run --no-project scripts/platform_matrix.py --check
-
-workflow-check: ## Audit GitHub Actions workflow graphs and matrices (offline, locked)
-	UV_OFFLINE=1 $(UV) run --no-project --locked scripts/check_workflows.py
-
-packaging-gates-test: ## Run positive + negative self-tests for workflow, matrix, wheel-tag, and exec-env gates
-	UV_OFFLINE=1 $(UV) run --no-project scripts/test_packaging_gates.py
-
-zed-check: ## Static checks + negative self-tests for editors/** (Zed extension + tree-sitter grammar)
-	$(UV) run --no-project scripts/check_zed_extension.py
-	UV_OFFLINE=1 $(UV) run --no-project scripts/test_check_zed_extension.py
+# The extension is compiled and unit-tested here; those tests are the grammar
+# guard: `editors/zed/src/lib.rs` parses both committed `highlights.scm` files
+# (the grammar package's must be a **subset** of Zed's, never an equal copy),
+# checks every query against `node-types.json` and `test/corpus`/`test/fixtures`,
+# and rejects a capture no bundled theme styles.
+zed-check: ## Compile the Zed extension; its tests guard the grammar and query fixtures
+	cd editors/zed && $(CARGO) test --locked
 
 rs-format: ## Format Rust workspace
 	$(CARGO) fmt --all
@@ -194,8 +173,7 @@ coverage: ## Per-file line/region % + uncovered lines (TESTS="-p <crate> --tests
 # promise is a claim about a *compiler image*, so it belongs to `standalone-glibc`,
 # which builds inside `quay.io/pypa/manylinux_2_28_<arch>` and hands the ceiling to
 # `scripts/build-standalone.sh` / `scripts/build-lsp.sh` there. This leg keeps that
-# owner honest (it refuses to let the ceiling disappear) and `packaging-gates-test`
-# proves the ceiling itself still refuses an ELF above it.
+# owner honest: it refuses to let the ceiling disappear.
 rs-no-python: ## Build + inspect the universal binary: zero libpython, zero libphp, zero RUNPATH
 	@echo "cargo build -p blastit --locked            # default universal artifact"
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
@@ -264,24 +242,11 @@ rs-no-default: ## Build feature-less binary and prove static mount refusal when 
 # `rs-no-python` do **not** already carry: the debug `blastit` is still the
 # portable universal artifact (the portable-ELF gate on a release binary runs in
 # `check`), and the §4 handoff suite runs on its own so a regression names
-# handoff instead of hiding inside `rs-test`'s 74 s output. `blastit-audit`'s
-# suites are left to `rs-test`, which already runs them.
+# handoff instead of hiding inside `rs-test`'s 74 s output.
 universal-smoke: ## Debug binary + portable-ELF and the handoff suite (in fast-check)
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
 	scripts/check-portable-elf.sh "$(CURDIR)/target/debug/blastit"
 	$(RUST_ENV) $(CARGO) test -p blastit --locked --features python --test critical_handoff
-
-# Verify debug-only boot swap seam is present in debug builds and compiled out of release builds.
-seam-check: ## Verify debug-only test seam presence in debug and absence in release
-	@if [ ! -x "$(CURDIR)/target/debug/blastit" ]; then \
-		$(STANDALONE_ENV) $(CARGO) build -p blastit --locked; \
-	fi
-	scripts/check-no-test-seam.sh --present-all "$(CURDIR)/target/debug/blastit"
-	@if [ -x "$(CURDIR)/target/release/blastit" ]; then \
-		scripts/check-no-test-seam.sh "$(CURDIR)/target/release/blastit"; \
-	else \
-		echo "note: no target/release/blastit; scripts/build-standalone.sh checks release artifacts"; \
-	fi
 
 standalone: py-sapi ## Package host standalone archive (release binary + both shim families + checksum)
 	scripts/build-standalone.sh
@@ -861,39 +826,9 @@ rs-test-php-image: ## Docker: run image-built PHP suites as root + unprivileged 
 	fi; \
 	echo "rs-test-php-image: PR_SET_DUMPABLE(0) witness — $$denied role(s) denied (EACCES) to uid $$(id -u)"
 
-mutants-rust: ## Run cargo-mutants with disk scratch + cgroup memory cap (PKG=<crate> to scope)
-	@mkdir -p "$(MUTANTS_TMP)"
-	MUTANTS_KEEP_SCRATCH="$(MUTANTS_KEEP_SCRATCH)" MUTANTS_STALE_MIN="$(MUTANTS_STALE_MIN)" scripts/mutants-scratch.sh prune "$(MUTANTS_TMP)"
-	MUTANTS_MIN_FREE_GB="$(MUTANTS_MIN_FREE_GB)" scripts/mutants-scratch.sh preflight "$(MUTANTS_TMP)"
-	@set -eu; \
-	run() { \
-		$(RUST_ENV) TMPDIR="$(MUTANTS_TMP)" MUTANTS_JOBS="$(MUTANTS_JOBS)" \
-			MUTANTS_TIMEOUT="$(MUTANTS_TIMEOUT)" MUTANTS_MEMORY_MAX="$(MUTANTS_MEMORY_MAX)" \
-			CARGO="$(CARGO)" scripts/mutants-run.sh "$$@"; \
-	}; \
-	if [ -n "$(PKG)" ]; then \
-		run -p "$(PKG)" $(MUTANTS_FEATURE_ARGS); \
-	else \
-		others="$$($(CARGO) metadata --no-deps --format-version 1 \
-			| $(UV) run --no-project python -c 'import json, sys; print(" ".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"] if p["name"] != "blastit")))')"; \
-		set --; \
-		for package in $$others; do set -- "$$@" -p "$$package"; done; \
-		run "$$@"; \
-		run -p blastit --features python; \
-	fi
+fast-check: guard rs-fmt rs-lint rs-doc rs-test py-lint plan-validate universal-smoke ## Fast per-slice Rust + Python + plan check
 
-mutants-clean: ## Delete mutants.out and every cargo-mutants scratch copy (report bytes freed)
-	scripts/mutants-scratch.sh clean "$(MUTANTS_TMP)"
-
-mutants-scope-probe: ## Show the cgroup and memory.max a cargo-mutants campaign would run under
-	TMPDIR="$(MUTANTS_TMP)" scripts/mutants-run.sh --probe --memory-max "$(MUTANTS_MEMORY_MAX)"
-
-print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
-	@echo "$(MUTANTS_TMP)"
-
-fast-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test py-lint workflow-check plan-validate universal-smoke ## Fast per-slice Rust + Python + plan + workflow check
-
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check rs-no-python rs-no-default seam-check e2e-universal platform-matrix-check workflow-check packaging-gates-test zed-check plan-validate ## Full unprivileged epic/release gate
+check: guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check rs-no-python rs-no-default e2e-universal zed-check plan-validate ## Full unprivileged epic/release gate
 
 # `make install` stages the §6.1 bundle: one universal `blastit` (the default
 # `python,php,static` features), its `blastit-lsp`, every shim this host built,

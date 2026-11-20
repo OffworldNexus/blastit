@@ -20,10 +20,9 @@
 Why a script instead of four shell lines in the YAML: the same code has to be
 **provable without publishing anything**, and a step that only exists inside a
 workflow can only be proved by publishing. Every mode has a `--dry-run` that
-prints the exact command or request it would issue and touches no network, and
-`scripts/test_packaging_gates.py` drives all of them — including a real
-`POST`/`DELETE` against a loopback HTTP server — so "the token is unset" and
-"the seventh-newest nightly is deleted" are measured, not asserted in prose.
+prints the exact command or request it would issue and touches no network, so
+"the token is unset" and "the seventh-newest nightly is deleted" are reviewable
+before a tag runs them.
 
 # The two repositories (design §6.1)
 
@@ -41,8 +40,8 @@ prints the exact command or request it would issue and touches no network, and
   credential never leaves this process: nothing third-party runs beside the
   secret, and nothing has to be installed on a tag or a nightly. The endpoint is
   the one `cloudsmith push` itself calls; `CLOUDSMITH_UPLOAD_URL` overrides it for
-  the loopback proof in `scripts/test_publish_gates.py`. A shape the service
-  rejects is a loud HTTP status naming the file — never a silent skip.
+  a rehearsal against a local endpoint. A shape the service rejects is a loud HTTP
+  status naming the file — never a silent skip.
   `CLOUDSMITH_CLI` (e.g. `uvx --from cloudsmith-cli==1.12.0 cloudsmith`) is an
   opt-in fallback that runs the pinned CLI instead, with a **minimal** environment
   (only `PATH`, `HOME` and the three Cloudsmith variables: the Forgejo token is
@@ -108,8 +107,8 @@ REPO = Path(__file__).resolve().parent.parent
 CLOUDSMITH_OWNER = "offworld-nexus"
 DEFAULT_APT_REPO = "apt"
 DEFAULT_RPM_REPO = "rpm"
-#: Where the API lives. Overridable so the retention path can be driven against a
-#: loopback server (`scripts/test_publish_gates.py`) instead of the real one.
+#: Where the API lives. Overridable so retention can be rehearsed against a local
+#: endpoint instead of the real one.
 DEFAULT_API_URL = "https://api.cloudsmith.io/v1"
 
 #: Where a package is uploaded: the endpoint `cloudsmith push` calls. Overridable

@@ -21,11 +21,10 @@ description: Blastit autonomous git conventions. Covers working on `release/<ver
 - **Pre-commit gates (`lead`):**
   - **Per leaf slice:**
     1. `make fast-check` (plus `make docs-check` when `docs/` or `README.md` changed)
-    2. `uv run --no-project tools/critical_guard.py --base <base> --node <id>`
-    3. `uv run --no-project tools/guard.py`
-    4. `uv run --no-project tools/plan.py validate`
+    2. `uv run --no-project tools/guard.py`
+    3. `uv run --no-project tools/plan.py validate`
   - **At epic/release gates (`gate <epic>` & Release PRs):**
-    Run full `make check` **once** (covering `rs-doc`, Python critical staging, wheel build + `docs-test`, `rs-no-python` / `rs-no-default`, packaging/workflow/Zed gates, and `zensical build --strict`).
+    Run full `make check` **once** (covering `rs-doc`, Python critical staging, `rs-no-python` / `rs-no-default`, `e2e-universal`, `zed-check`, and `zensical build --strict`).
 - **Commit message format:**
 
   ```text

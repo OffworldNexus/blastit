@@ -4169,3 +4169,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T16:54 [MB.56.1.3] (lead) ALSO: ARCHITECTURE.md:183 still mentions blastit_build.py; docs/knowledge/LESSONS.md:7 too
 - 2026-11-20T16:54 [MB.56.1.2.2] (lead) status active -> done
 - 2026-11-20T16:54 [MB.56.1.2.2] (lead) edited fields
+- 2026-11-20T16:54 [MB.56.1.2.2] (lead) commit 6713910
+- 2026-11-20T16:54 [MB.56.1.2] (lead) status ready -> done: both sub-slices green on make fast-check; full make check deferred to the MB.56.1 epic gate (once)
+- 2026-11-20T16:54 [MB.56.1.3] (lead) status ready -> active
+- 2026-11-20T16:54 [MB.56.1.3] (lead) attempt 1/3 started
+- 2026-11-20T16:54 [MB.56.1.3] (lead) base 67139108ee74b59d94e397ab6c4d94e94c7bd00f
+- 2026-11-20T17:08 [MB.56.1.3] (lead) REVIEW FIX: (1) .opencode/skills/testing/SKILL.md:22 tier table still promises make docs-test; (2) AGENTS.md:31 false 'runnable-docs harness' in make check; (3)
+- 2026-11-20T17:09 [MB.56.1.3] (lead) REVIEW-ARCH FIX: (B) zed-check diff is red: editors/tree-sitter-blastfile/highlights.scm (39) vs editors/zed/.../highlights.scm (54) are different BY DESIGN -> 
+- 2026-11-20T17:09 [MB.56.5] (lead) DEFERRED COMMENTS: crates/blastit/src/stage0/gates.rs:272 + crates/blastit-view-php/src/pinning.rs:268 still name the deleted scripts/check-no-test-seam.sh (now
+- 2026-11-20T17:12 [MB.56.1.3] (lead) status active -> done

@@ -120,7 +120,7 @@ Load skills `dx-first`, `plan-system`, `dispatch`, and `git-workflow` at the sta
 ## Main loop (repeat until done or truly blocked)
 
 1. Run `uv run --no-project tools/plan.py next --limit 20` and map the top actionable item(s):
-   - **`gate` on a milestone (`MA`, `MB`, `MC`, `MD`, `ME`):** escalate (`uv run --no-project tools/plan.py --agent conductor escalate <M> --to strategist --reason "milestone gate"`), then spawn `strategist` in Milestone Gate mode (verify ROADMAP exit criteria, DX leanness, runnable docs, CVE proofs, `cargo-mutants` critical coverage, `Cargo.toml` version + dated `CHANGELOG.md` entry, refresh next milestone body, set `done`, and report `RELEASE_READY: <version>`).
+   - **`gate` on a milestone (`MA`, `MB`, `MC`, `MD`, `ME`):** escalate (`uv run --no-project tools/plan.py --agent conductor escalate <M> --to strategist --reason "milestone gate"`), then spawn `strategist` in Milestone Gate mode (verify ROADMAP exit criteria, DX leanness, `make docs-check`, CVE proofs, `cargo-mutants` critical coverage, `Cargo.toml` version + dated `CHANGELOG.md` entry, refresh next milestone body, set `done`, and report `RELEASE_READY: <version>`).
    - **`decompose` on a milestone:** spawn `planner` for that milestone (foreground) to decompose into coarse vertical slices starting with lean user-facing DX documentation (`writer`: `local`, `CI/CD`, `deployments` + Mermaid diagrams) reviewed by `review-ux` and `review-arch` before internal code!
    - **Anything inside a milestone (`execute`, `review`, `decompose` on epic, `gate` on epic):** spawn a `lead` with `ROOT=<milestone id>` (foreground).
 2. When `lead` or `strategist` returns, read its <= 25-line report, then:

@@ -43,8 +43,8 @@ You are the Blastit **strategist** (expensive tier). You own `plan/ROADMAP.md` a
 
 ### 1. Milestone gate `<M>` (`MA`, `MB`, `MC`, `MD`, `ME`)
 
-1. **DX & Visual Docs check:** Inspect the user-facing documentation in `docs/` and `README.md` (with `review-ux` / `visual-checker`). Confirm immediate 3-step zero-`sudo` quickstarts, Mermaid diagrams + admonitions on every guide, `<130`-line lean pages, non-empty `Blastfile` grants, and 100% green `make docs-check` + `make docs-test`.
-2. **Exit criteria, Architecture & Security/CVE check:** Verify every exit criterion for `<M>` in `plan/ROADMAP.md` against concrete evidence (`make check`, `make e2e` when applicable, CVE regression suite, and `make mutants-rust PKG=<crate>` on critical policy/ingress/proxy crates).
+1. **DX & Visual Docs check:** Inspect the user-facing documentation in `docs/` and `README.md` (with `review-ux` / `visual-checker`). Confirm immediate 3-step zero-`sudo` quickstarts, Mermaid diagrams + admonitions on every guide, `<130`-line lean pages, non-empty `Blastfile` grants, and 100% green `make docs-check`.
+2. **Exit criteria, Architecture & Security/CVE check:** Verify every exit criterion for `<M>` in `plan/ROADMAP.md` against concrete evidence (`make check`, `make e2e` when applicable, CVE regression suite, and `TMPDIR=$HOME/.cache/blastit-mutants cargo mutants -p <crate>` on critical policy/ingress/proxy crates).
 3. **If genuine gaps remain:** Create **coarse, grouped** child slices under `<M>` (NEVER 20+ single-mutant micro-nodes!) and return without closing `<M>`.
 4. **If the gate passes:**
    - Write `plan/nodes/<M>/RESULT.md`.
