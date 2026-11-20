@@ -2,16 +2,16 @@
 id: MB.42.3.4
 title: "Signed-repo publishing: packages.yml (main) + nightly.yml (stamps, prune 7) + Forgejo mirror"
 kind: task
-status: ready
+status: active
 owner: implementer
 priority: 1
 depends_on: [MB.42.3.3]
 paths: [".github/workflows/**", "scripts/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T01:33"
-updated: "2026-11-20T01:33"
+updated: "2026-11-20T04:23"
 ---
 
 # Goal

@@ -3963,3 +3963,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T03:39 [MB.42.4] (unknown) edited fields
 - 2026-11-20T03:39 [MB.42.4] (lead) paths extended (lead): STALE_CLAIMS in scripts/platform_matrix.py fails once the docs are fixed, and MB.42.4 must be able to clear it - delete both STALE_CLAIMS
 - 2026-11-20T04:23 [MB.42.3.3] (lead) status review -> done
+- 2026-11-20T04:23 [MB.42.3.4] (lead) status ready -> active
+- 2026-11-20T04:23 [MB.42.3.4] (lead) attempt 1/3 started
+- 2026-11-20T04:23 [MB.42.3.4] (lead) base 7537f48652fffac7801efc2b807cb1bdbf662012
