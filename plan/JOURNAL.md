@@ -4021,3 +4021,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T06:35 [MB.45] (lead) edited fields
 - 2026-11-20T06:35 [MB.45] (lead) REVIEW FIX: (1) no post-repack/publish shim proof for musl -> scripts/check_wheel_shims.py called from action + verify job; (2) no rule gates require-shims: all
 - 2026-11-20T06:50 [MB.45] (lead) status active -> done
+- 2026-11-20T06:50 [MB.45] (lead) commit 6051af2

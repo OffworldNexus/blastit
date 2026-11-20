@@ -31,3 +31,7 @@ REVIEW FIX: (1) no post-repack/publish shim proof for musl -> scripts/check_whee
 ## 2026-11-20T06:50 [lead]
 
 status active -> done
+
+## 2026-11-20T06:50 [lead]
+
+commit 6051af2
