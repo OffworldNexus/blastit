@@ -39,3 +39,11 @@ writer blocked (honest report): (1) REAL BUG in MB.42.3.3's build-wheel.sh - flo
 ## 2026-11-20T05:48 [lead]
 
 status active -> review
+
+## 2026-11-20T06:01 [lead]
+
+status review -> done
+
+## 2026-11-20T06:01 [lead]
+
+visual-checker PASS on all 7 items (hero 3 lines above the fold, no uv run on user pages, install page + Cloudsmith attribution, Mermaid renders in dark, 298 links 0 broken, mobile 390x844 no horizontal scroll, contrast >12:1). Its 'v0.1.2 badge' observation is the zensical generator meta, not Blastit's version - no bug.

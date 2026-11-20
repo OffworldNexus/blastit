@@ -3994,3 +3994,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T05:48 [MB.42.14] (lead) status active -> done
 - 2026-11-20T05:48 [MB.42.4] (lead) status active -> review
 - 2026-11-20T05:52 [MB.42] (lead) GATE EVIDENCE (host): make check exit 0 (incl. e2e-universal 6/6 + zed-check + plan); make rs-test-php-image pass (PR_SET_DUMPABLE witness, 2 roles denied EACCE
+- 2026-11-20T06:01 [MB.42.4] (lead) status review -> done
+- 2026-11-20T06:01 [MB.42.4] (lead) visual-checker PASS on all 7 items (hero 3 lines above the fold, no uv run on user pages, install page + Cloudsmith attribution, Mermaid renders in dark, 298 li

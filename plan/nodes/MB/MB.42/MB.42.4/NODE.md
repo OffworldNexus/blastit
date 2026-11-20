@@ -2,7 +2,7 @@
 id: MB.42.4
 title: "Rewrite hero & docs around zero-decision install.sh (signed APT/RPM repos) + bare blastit CLI + lockfile wrappers, and pass full make check + make e2e"
 kind: task
-status: review
+status: done
 owner: writer
 priority: 1
 depends_on: [MB.42.3]
@@ -18,7 +18,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T14:30"
-updated: "2026-11-20T05:48"
+updated: "2026-11-20T06:01"
 ---
 
 # Goal
