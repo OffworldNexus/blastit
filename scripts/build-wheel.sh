@@ -351,9 +351,22 @@ if [[ -n $manylinux_ver ]]; then
     if [[ -n $probe_py ]] && command -v "$probe_py" >/dev/null 2>&1; then
         py_minor=$("$probe_py" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
     elif command -v uv >/dev/null 2>&1; then
-        py_bin=$(uv python find --no-project '>=3.13')
-        py_minor=$("$py_bin" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+        # The host probe is a *preference*, not a requirement: the wheel is
+        # compiled inside the manylinux image, which has `/opt/python/cp313-cp313`
+        # whatever the host runs. `uv python find '>=3.13'` exits 2 on a runner
+        # that only has the system 3.12 (`ubuntu-24.04`), and under `set -e` that
+        # killed the build before the container started (`MB.49`).
+        py_bin=$(uv python find --no-project '>=3.13' 2>/dev/null || true)
+        if [[ -n $py_bin ]]; then
+            py_minor=$("$py_bin" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+        else
+            # Named, not silent: the caller asked for a minor (or left it to uv)
+            # and is getting 3.13's wheel, so a build log says which one ran.
+            echo "build-wheel: no host CPython >=3.13 to probe; assuming 3.13 (the image's /opt/python/cp313-cp313)" >&2
+            py_minor="3.13"
+        fi
     else
+        echo "build-wheel: no uv and no --interpreter/PYO3_PYTHON; assuming 3.13 (the image's /opt/python/cp313-cp313)" >&2
         py_minor="3.13"
     fi
     py_digits=${py_minor//./}

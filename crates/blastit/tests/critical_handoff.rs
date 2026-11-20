@@ -168,6 +168,15 @@ fn is_root() -> bool {
     fs::metadata("/proc/self").is_ok_and(|meta| meta.uid() == 0)
 }
 
+/// A TCP port nothing is listening on: bound once, then released.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a probe port");
+    listener
+        .local_addr()
+        .expect("the probe port's address")
+        .port()
+}
+
 /// §4: the four commands a project's own `blastit` answers, with the command
 /// line, working directory, environment and marker intact.
 #[test]
@@ -318,12 +327,19 @@ fn a_candidate_that_is_this_image_does_not_hand_off() {
 
     let source = include_str!("../src/cli/handoff.rs");
     let identity = source
-        .find("is_this_image(&verified)")
-        .expect("the identity check");
+        .find("if verified.is_self")
+        .expect("the identity answer `verify` carries");
     let exec = source.find("exec_verified(&verified").expect("the exec");
     assert!(
         identity < exec,
         "the identity check must precede the exec in handoff.rs"
+    );
+    // One `/proc/self/exe` stat, and it is `verify`'s: re-deriving the answer in
+    // `attempt` could fail transiently and `execve` the running image for nothing.
+    assert_eq!(
+        source.matches("blastit_sys::exe_path()").count(),
+        1,
+        "the running image is identified once, in `verify`, and carried on `Verified`"
     );
 }
 
@@ -746,4 +762,133 @@ fn the_exec_never_reopens_the_verified_path() {
             "the exec must not touch the path again (`{forbidden}`)"
         );
     }
+}
+
+/// §4: an explicit `$BLASTIT_BIN` that **is** `/proc/self/exe` is not refused,
+/// **and** the image that serves the run is the one that was started (`MB.49`).
+///
+/// `ci.yml`'s `standalone` job runs the binary as
+/// `docker run -v "$PWD/target/debug/blastit:/usr/local/bin/blastit:ro" -e
+/// BLASTIT_BIN=/usr/local/bin/blastit …`, so the explicitly named candidate has
+/// the same `(st_dev, st_ino)` as `/proc/self/exe`. Before `MB.49` the ownership,
+/// mode and tree checks ran first and refused it — an `exit 1` on the artifact
+/// that was already running. The identity answer comes first now, and the
+/// candidate is not `exec`ed either: there is nothing to hand off to.
+///
+/// The output alone cannot show that second half — a silent self-`execve` prints
+/// exactly what a refusal-free run prints — so the case serves a real `dev` (a
+/// static manifest, so the process outlives the handoff decision) and reads
+/// `/proc/<pid>/exe`, the file the serving image was `exec`ed from. A handoff
+/// `exec`s the candidate, and the kernel then reports the candidate's path.
+#[test]
+fn an_explicit_blastit_bin_that_is_this_image_is_not_refused() {
+    let project = Project::new("self-explicit");
+    let real = Path::new(env!("CARGO_BIN_EXE_blastit"));
+    let dir = project.path("usr/local/bin");
+    fs::create_dir_all(&dir).expect("create the candidate's directory");
+    // The parent a real `docker run -v` mount has: `0777` under
+    // `debian:trixie-slim`, which is exactly what the tree rule refuses.
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o777))
+        .expect("make the candidate's parent world-writable");
+    let named = dir.join("blastit");
+    // The same inode as the running image, which is what `handoff` compares. The
+    // copy is the `EXDEV` fallback only (the fixture and `target/` can sit on
+    // different filesystems), and it is the file this run starts, so
+    // `/proc/self/exe` names it.
+    let runnable = match fs::hard_link(real, &named) {
+        Ok(()) => real.to_path_buf(),
+        Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {
+            let image = project.path("global/blastit");
+            fs::create_dir_all(image.parent().expect("the image's directory"))
+                .expect("create global");
+            fs::copy(real, &image).expect("copy the running image");
+            fs::hard_link(&image, &named)
+                .expect("cannot hard-link the copied image for the explicit self fixture");
+            image
+        }
+        Err(err) => {
+            panic!("cannot hard-link the running image for the explicit self fixture: {err}")
+        }
+    };
+
+    // A manifest that serves, so the process is still there to be inspected once
+    // the handoff decision is behind it (that decision is made before a listener
+    // binds). `dev` needs no privileges: it is the single-uid simulation.
+    fs::write(
+        project.path("Blastfile"),
+        "static \"/\" {\n    root \"site\"\n}\n",
+    )
+    .expect("write the manifest");
+    fs::create_dir_all(project.path("site")).expect("create the static root");
+    fs::write(project.path("site/index.html"), "hello from the fixture\n").expect("write the page");
+    let port = free_port();
+
+    let mut child = Command::new(&runnable)
+        .args(["dev", "--port", &port.to_string()])
+        .current_dir(&project.dir)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin:/usr/local/bin")
+        .env("BLASTIT_BIN", &named)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the running image");
+    let mut serving = false;
+    for _ in 0..400 {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            serving = true;
+            break;
+        }
+        if child.try_wait().expect("poll the run").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let pid = child.id();
+    // The file the serving image was `exec`ed from. A handoff would have exec'd
+    // the candidate, and the kernel reports the path the image was opened by —
+    // measured under `MB.49` with a handoff to a *copy* of this binary:
+    // `/proc/<pid>/exe` then read the candidate's path, not the copy's.
+    //
+    // `argv[0]` cannot serve here: `dev` re-execs itself (`--stage=1 …`) with
+    // `/proc/self/exe` as `argv[0]`, so every `dev` image names that literal
+    // string, whichever file it came from.
+    let image = fs::read_link(format!("/proc/{pid}/exe")).ok();
+    let _ = child.kill();
+    let output = child.wait_with_output().expect("collect the run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let started = fs::canonicalize(&runnable).ok();
+
+    assert!(
+        serving,
+        "the started image must answer on 127.0.0.1:{port}: {stderr}"
+    );
+    if let Some(image) = image {
+        assert_eq!(
+            fs::canonicalize(&image).ok(),
+            started,
+            "the image that served the run is not the one that was started: \
+             /proc/{pid}/exe names the candidate ({}) instead of {}\n{stderr}",
+            named.display(),
+            runnable.display()
+        );
+    }
+    assert!(
+        !stderr.contains("refusing local handoff"),
+        "an explicit $BLASTIT_BIN that IS this image must not be refused: {stderr}"
+    );
+    assert!(
+        !stderr.contains("skipping local binary"),
+        "it is not skipped either — it is answered as the running image: {stderr}"
+    );
+    assert!(
+        !stderr.contains("0777"),
+        "no mode refusal may name the parent's mode: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("usage: blastit"),
+        "the run is not a CLI usage error: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

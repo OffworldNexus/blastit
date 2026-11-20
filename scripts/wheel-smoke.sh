@@ -101,6 +101,32 @@ if [ ! -x "$blastit_bin" ]; then
 fi
 echo "wheel-smoke: console scripts on PATH: blastit, blastit-lsp, blastit-manifest"
 
+# 1b. The installed wheel's `entry_points.txt` carries the console scripts
+# **and** the sections `maturin` wrote from `[project.entry-points.*]`: the
+# repack used to rewrite that file with only `[console_scripts]`, which silently
+# deleted the pytest plugin from every released wheel (`MB.49`). Read it out of
+# the installed metadata, because that is what `pytest` reads.
+"$python" - <<'PY'
+import importlib.metadata
+import sys
+
+problems = []
+entry_points = importlib.metadata.distribution("blastit").read_text(
+    "entry_points.txt"
+) or ""
+for section in ("[console_scripts]", "[pytest11]"):
+    if section not in entry_points:
+        problems.append(f"entry_points.txt has no {section}")
+if "blastit = blastit.pytest_plugin" not in entry_points:
+    problems.append("entry_points.txt has no `blastit = blastit.pytest_plugin` (pytest11)")
+if problems:
+    for problem in problems:
+        print(f"FAIL {problem}", file=sys.stderr)
+    print(entry_points, file=sys.stderr)
+    sys.exit(1)
+print("wheel-smoke: entry_points.txt carries [console_scripts] and [pytest11]")
+PY
+
 # 1a. `--version` and `--help` come from the binary the repack put in
 # `blastit/_bin/`; a wheel whose console script cannot find it dies here.
 version_line=$("$blastit_bin" --version)

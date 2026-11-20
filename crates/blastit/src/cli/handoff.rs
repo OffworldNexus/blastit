@@ -37,6 +37,17 @@
 //! `$VIRTUAL_ENV` belongs to that set — an activated venv is *ambient*, a shell
 //! that happens to have one did not point at a binary. Only `$BLASTIT_BIN` fails
 //! closed (`exit 1`), because that one really does name a path.
+//!
+//! # The image itself
+//!
+//! One candidate is answered *before* any of those checks: the one whose
+//! `(st_dev, st_ino)` is `/proc/self/exe`'s. It is already running, so there is
+//! nothing to hand off to (no refusal, no exec — `attempt` returns `None`), and
+//! the checks — ownership, mode, the tree rule — exist to stop *another* binary
+//! from being executed. CI names the running image that way on purpose
+//! (`docker run -v …/blastit:/usr/local/bin/blastit -e
+//! BLASTIT_BIN=/usr/local/bin/blastit`), and a refusal there would refuse the
+//! artifact the operator installed.
 
 use std::env;
 use std::ffi::{CString, OsStr};
@@ -90,8 +101,12 @@ struct Verified {
     /// The canonical binary itself, `O_RDONLY|O_CLOEXEC|O_NOFOLLOW`.
     bin: File,
     path: PathBuf,
-    dev: u64,
-    ino: u64,
+    /// Whether the pair [`verify`] compared is `/proc/self/exe`'s — the answer it
+    /// already computed. Carried rather than re-derived: a second `stat` of
+    /// `/proc/self/exe` in [`attempt`] could fail transiently (`/proc` hidden by a
+    /// sandbox) and `execve` the image that is already running for no reason
+    /// (`MB.49` review).
+    is_self: bool,
 }
 
 /// Hands `command` to the project's `blastit`, or answers why this image keeps
@@ -126,10 +141,11 @@ pub(super) fn attempt(command: Command, argv: &[String]) -> Option<u8> {
                 continue;
             }
         };
-        if is_this_image(&verified) {
+        if verified.is_self {
             // The project's `blastit` *is* this image (a console script linked
             // to it): handing off would loop, and the global binary is exactly
-            // what it would run.
+            // what it would run. The answer is the one `verify` computed from the
+            // opened descriptor — `/proc/self/exe` is not stat'ed a second time.
             return None;
         }
         // Never returns on success. A file that cannot be started is the same
@@ -232,6 +248,27 @@ fn verify(path: &Path) -> Result<Verified, String> {
     let meta = bin
         .metadata()
         .map_err(|err| format!("cannot stat the binary: {err}"))?;
+    // §4: the running image is never a handoff target, so it is answered before
+    // any of the refusals below. `ci.yml` runs the standalone suite as
+    // `docker run -v "$PWD/target/debug/blastit:/usr/local/bin/blastit:ro"
+    // -e BLASTIT_BIN=/usr/local/bin/blastit`, where the named candidate **is**
+    // `/proc/self/exe` — same `(st_dev, st_ino)` — so the file is already
+    // running: there is nothing to hand off to, and refusing it for "owned by uid
+    // …" or a writable ancestor would refuse the very image the operator
+    // installed. Every *other* binary still meets every check below.
+    //
+    // The comparison is made once, here, and its answer travels on `Verified`: a
+    // second `stat` in `attempt` could fail and `execve` the image that is
+    // already running for nothing (`MB.49` review).
+    let is_self = is_running_image(meta.dev(), meta.ino());
+    if is_self {
+        return Ok(Verified {
+            parent,
+            bin,
+            path: resolved,
+            is_self: true,
+        });
+    }
     if !meta.is_file() {
         return Err("it is not a regular file".to_string());
     }
@@ -241,10 +278,14 @@ fn verify(path: &Path) -> Result<Verified, String> {
     }
     let euid = geteuid().as_raw();
     if meta.uid() != euid && meta.uid() != 0 {
-        return Err(format!(
-            "it is owned by uid {}, not {euid} or 0",
-            meta.uid()
-        ));
+        return Err(if euid == 0 {
+            format!(
+                "it is owned by uid {}, and only root may own it here",
+                meta.uid()
+            )
+        } else {
+            format!("it is owned by uid {}, not {euid} or 0", meta.uid())
+        });
     }
     if mode & 0o022 != 0 {
         return Err(format!(
@@ -256,8 +297,7 @@ fn verify(path: &Path) -> Result<Verified, String> {
         parent,
         bin,
         path: resolved,
-        dev: meta.dev(),
-        ino: meta.ino(),
+        is_self: false,
     })
 }
 
@@ -304,10 +344,12 @@ fn check_dir(meta: &Metadata, dir: &Path, child_uid: u32) -> Result<(), String> 
     ))
 }
 
-/// Is `verified` the running image? (`/proc/self/exe`'s own `(dev, ino)`.)
-fn is_this_image(verified: &Verified) -> bool {
+/// Is `(dev, ino)` the running image? (`/proc/self/exe`'s own pair.)
+///
+/// Called once per candidate, in [`verify`]; the answer travels on [`Verified`].
+fn is_running_image(dev: u64, ino: u64) -> bool {
     match std::fs::metadata(blastit_sys::exe_path()) {
-        Ok(meta) => meta.dev() == verified.dev && meta.ino() == verified.ino,
+        Ok(meta) => meta.dev() == dev && meta.ino() == ino,
         Err(_) => false,
     }
 }

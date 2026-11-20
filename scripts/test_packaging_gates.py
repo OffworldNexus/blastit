@@ -2055,6 +2055,17 @@ def test_repack_cases() -> int:
             archive.writestr("blastit-0.2.0.data/scripts/blastit", b"#!/bin/sh\n")
             archive.writestr("blastit-0.2.0.dist-info/WHEEL", metadata)
             archive.writestr("blastit-0.2.0.dist-info/METADATA", "Name: blastit\n")
+            # What `maturin` writes from `[project.entry-points.pytest11]`: the
+            # repack must keep it or `pip install blastit` ships no pytest plugin
+            # (`MB.49`). The header carries a **trailing annotation** on purpose:
+            # a header matched by `startswith("[") and endswith("]")` silently
+            # dropped this whole section, which is the regression, and only the
+            # leading `[name]` token is a section.
+            archive.writestr(
+                "blastit-0.2.0.dist-info/entry_points.txt",
+                "[pytest11]  # plugins: pytest finds blastit by itself\n"
+                "blastit = blastit.pytest_plugin\n",
+            )
             archive.writestr("blastit-0.2.0.dist-info/RECORD", "")
         blobs = case / "blobs"
         blobs.mkdir()
@@ -2151,6 +2162,42 @@ def test_repack_cases() -> int:
             all(f"{name} = " in entry_points for name in sorted(expected_scripts)),
             "entry_points.txt must carry the three console scripts (design §6.1)",
             entry_points,
+        )
+        cases_run += 1
+        # `MB.49`: the repacked wheel is what `pip install blastit` gets, so
+        # dropping maturin's own sections removes the pytest plugin from every
+        # installed wheel (`pyproject.toml`'s `[project.entry-points.pytest11]`).
+        _expect(
+            "[pytest11]" in entry_points
+            and "blastit = blastit.pytest_plugin" in entry_points,
+            "entry_points.txt must preserve `[pytest11] blastit = blastit.pytest_plugin`",
+            entry_points,
+        )
+        cases_run += 1
+        _expect(
+            entry_points.index("[console_scripts]") < entry_points.index("[pytest11]"),
+            "the console scripts are written first and the preserved sections follow",
+            entry_points,
+        )
+        cases_run += 1
+        # The parser itself, on the shapes a header can arrive in: the annotation
+        # is stripped rather than the section dropped, `[console_scripts]` is not
+        # this function's to write, and a name that appears twice is one section
+        # (`configparser`, which `importlib.metadata` uses, raises on a duplicate).
+        sections = repack.preserved_entry_point_sections(
+            "[console_scripts]\nblastit = blastit:main\n"
+            "[pytest11]  # plugin\nblastit = blastit.pytest_plugin\n"
+            "[pytest11]\nblastit-lsp = blastit.lsp_plugin\n"
+        )
+        merged = (
+            "[pytest11]\nblastit = blastit.pytest_plugin\n"
+            "blastit-lsp = blastit.lsp_plugin"
+        )
+        _expect(
+            sections == [merged],
+            "an annotated header must be parsed by its leading `[name]` token, and a "
+            "repeated name must be one section",
+            repr(sections),
         )
         cases_run += 1
         rows = {

@@ -780,15 +780,22 @@ class Harness:
         if not checked:
             raise Failure(f"{self.wheel.name} holds no installable files")
 
-    def _pytest_argv(self, python: str) -> list[str]:
-        return [
-            "uv",
-            "pip",
-            "install",
-            "--python",
-            python,
-            f"pytest=={PYTEST_VERSION}",
-        ]
+    def _pytest_argv(self, python: str, *, managed: bool = False) -> list[str]:
+        """The `uv pip install` that reads (never reaches) the uv cache.
+
+        `managed` is for the probe that runs against a *base* interpreter: a
+        distribution-packaged system CPython (Debian, Ubuntu) and every
+        `uv python install` build are marked `EXTERNALLY-MANAGED` — Arch's and
+        Alpine's are not — and `--dry-run` still refuses a managed one.
+        `--break-system-packages` says "this is a probe of a throwaway
+        interpreter", exactly as `scripts/wheel-smoke.sh` does for its install
+        leg; `--system` alone does not lift the marker (`MB.49`).
+        """
+        argv = ["uv", "pip", "install", "--python", python]
+        if managed:
+            argv.append("--break-system-packages")
+        argv.append(f"pytest=={PYTEST_VERSION}")
+        return argv
 
     def _pytest_env(self) -> dict[str, str]:
         return {
@@ -810,7 +817,7 @@ class Harness:
 
     def _require_cached_pytest(self) -> None:
         """Fail in a second, with the fix, instead of after the wheel install."""
-        argv = [*self._pytest_argv(self.python), "--dry-run"]
+        argv = [*self._pytest_argv(self.python, managed=True), "--dry-run"]
         try:
             self._tool(self.work, self._pytest_env(), argv, quiet=True)
         except Failure as failure:

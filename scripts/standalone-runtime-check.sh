@@ -97,7 +97,16 @@ if [ -z "$port" ]; then
 fi
 
 echo "standalone-runtime-check: $binary dev --port $port"
-BLASTIT_MANIFEST="$work/Blastfile" "$binary" dev --port "$port" > "$log" 2>&1 &
+# The check must drive the binary it was handed, and nothing else.
+#
+# `env -u BLASTIT_BIN` removes the one variable that would point elsewhere. The
+# *auto-discovered* candidates (`.venv/bin/blastit`, `vendor/bin/blastit`,
+# `node_modules/.bin/blastit`) are still live, though, and this script never
+# `cd`s: a run from a checkout would hand `dev` off to `.venv/bin/blastit` and
+# the checks would be about a binary that was never started.
+# `BLASTIT_NO_LOCAL_HANDOFF=1` is the documented switch that turns the whole
+# handoff off, so what answers here is the artifact CI built (`MB.49`).
+env -u BLASTIT_BIN BLASTIT_NO_LOCAL_HANDOFF=1 BLASTIT_MANIFEST="$work/Blastfile" "$binary" dev --port "$port" > "$log" 2>&1 &
 pid=$!
 
 waited=0
@@ -199,7 +208,9 @@ fi
 # In the background, not in the foreground: a build that *did* serve a WSGI route
 # on a host with no interpreter is the leak this proves absent, and a blocked
 # foreground call would look like a hung check instead of a failure.
-BLASTIT_MANIFEST="$work/wsgi/Blastfile" BLASTIT_APP=app:application \
+# `BLASTIT_NO_LOCAL_HANDOFF=1` for the same reason as the first launch: the
+# artifact this run was handed is the only program allowed to answer.
+env -u BLASTIT_BIN BLASTIT_NO_LOCAL_HANDOFF=1 BLASTIT_MANIFEST="$work/wsgi/Blastfile" BLASTIT_APP=app:application \
     "$binary" dev --port "$wsgi_port" > "$work/wsgi.out" 2> "$work/wsgi.err" &
 wsgi_pid=$!
 

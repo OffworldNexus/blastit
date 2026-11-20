@@ -20,8 +20,8 @@
 # argv and no INI channel a request can reach (the C shim builds `$_SERVER` and
 # the `ZEND_INI_SYSTEM` blob itself).
 #
-# It does **not** claim "even an unpatched runtime". `8.4.27-1~deb13u1` is
-# Debian's current package, and no distribution ships an unpatched `libphp`
+# It does **not** claim "even an unpatched runtime". The package below is
+# Debian's current `libphp8.4`, and no distribution ships an unpatched `libphp`
 # that an 8.4 shim could load, so that claim is neither made nor testable here.
 # What *is* tested is `P4b` in `e2e/php2shell.py`: the same interpreter, the same
 # canary file, `php -d auto_prepend_file=…` — its canary is present, so the
@@ -46,10 +46,16 @@ ENV DEBIAN_FRONTEND=noninteractive
 # `libphp8.4-embed`: the NTS `libphp` the worker embeds.
 # `php8.4-dev`: `php-config8.4` and the headers the shim is compiled against.
 # `cc`/`libc6-dev`: the shim is C; there is no Rust in this image.
+#
+# No `=8.4.27-1~deb13u1` point pin: `trixie-security` superseded that exact
+# version, and `apt-get install libphp8.4-embed=8.4.27-1~deb13u1` then fails with
+# `Version '…' for 'libphp8.4-embed' was not found`. The base image's digest is
+# the pin this file can keep; the package is whatever `trixie` currently ships
+# (`MB.49`).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      libphp8.4-embed=8.4.27-1~deb13u1 \
-      php8.4-dev=8.4.27-1~deb13u1 \
+      libphp8.4-embed \
+      php8.4-dev \
       gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/*
 

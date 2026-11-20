@@ -16,6 +16,12 @@ use blastit_sys::child::panic_message;
 use serde::Serialize;
 
 /// The refusal a boundary answers when its own body panicked (`70`).
+///
+/// Read by `lib.rs`'s `mod surface`, which is absent from a test build that
+/// enabled `extension-module` (there is no `libpython` to link the `Py*`
+/// references against), so `the_two_refusal_codes_are_the_frozen_ones` in the
+/// tests below reads both here as well: a constant only a feature-gated module
+/// uses is `-D dead-code` in the other target.
 pub(crate) const PANIC: i32 = 70;
 
 /// The refusal a boundary answers when it refused the request (`1`).
@@ -216,5 +222,17 @@ mod tests {
         assert_eq!(input(std::ptr::null(), 9), b"", "a null pointer wins");
         let bytes = [1u8, 2, 3];
         assert_eq!(input(bytes.as_ptr(), 2), &[1, 2]);
+    }
+
+    #[test]
+    fn the_two_refusal_codes_are_the_frozen_ones() {
+        // `mod surface` answers these (`serve_view` is `guarded(err, PANIC, …)`
+        // and returns `REFUSED`), and that module is compiled out of a test build
+        // that enabled `extension-module`: without a reader in this target the
+        // pair is dead code under `-D dead-code`. The numbers are the frozen ABI
+        // (`1` an ordinary refusal, `70` a panic), so they are asserted, not just
+        // touched.
+        assert_eq!(PANIC, 70, "the panic code is the frozen 70");
+        assert_eq!(REFUSED, 1, "an ordinary refusal is the frozen 1");
     }
 }

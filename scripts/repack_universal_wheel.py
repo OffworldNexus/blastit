@@ -97,18 +97,77 @@ KNOWN_ARCHES = ("x86_64", "aarch64")
 MANYLINUX_REST = re.compile(r"^(?P<major>\d+)_(?P<minor>\d+)_(?P<arch>x86_64|aarch64)$")
 
 
+#: A section header is its **leading** `[name]` token: anything after the closing
+#: bracket is an annotation, not part of the name. `startswith("[") and
+#: endswith("]")` silently dropped a whole section whose header carried a trailing
+#: comment (`[pytest11]  # plugin`) — the exact user-visible regression this
+#: script exists to stop, quietly back.
+ENTRY_POINT_SECTION = re.compile(r"^\[(?P<name>[^\]]+)\]")
+
+#: The sections this script does **not** own: `CONSOLE_SCRIPTS` is their single
+#: owner, and maturin refuses to declare the two together anyway.
+OWNED_SECTION = "console_scripts"
+
+
 def record_hash(data: bytes) -> str:
     """The `RECORD` digest `pip` verifies: `sha256=` + urlsafe-b64, no padding."""
     digest = hashlib.sha256(data).digest()
     return "sha256=" + base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def entry_points_text(scripts: dict[str, str] | None = None) -> str:
-    """The `*.dist-info/entry_points.txt` body for the console scripts."""
-    lines = ["[console_scripts]"]
+def preserved_entry_point_sections(existing: str) -> list[str]:
+    """Every section of maturin's `entry_points.txt` except `[console_scripts]`.
+
+    `maturin` writes that file from `[project.entry-points.*]`, and
+    `[pytest11] blastit = blastit.pytest_plugin` is one of them (D3b: `pytest`
+    finds the plugin by itself, with no conftest and no `-p`). Writing only the
+    console scripts therefore *deleted* a user-facing feature from every repacked
+    wheel — the plugin simply stopped existing for `pip install blastit`. The
+    sections this script does not own are copied through, in their original
+    order; `[console_scripts]` is dropped because `CONSOLE_SCRIPTS` is its single
+    owner.
+
+    A header is matched by its leading `[name]` token and the rest of the line is
+    discarded, so a trailing annotation (`[pytest11]  # plugin`) cannot lose the
+    section. A name that appears twice is merged into one block at its first
+    position: `configparser` (what `importlib.metadata` and `pip` read this file
+    with) raises on a duplicated section, so a wheel that repeated one would be a
+    wheel nobody can install.
+    """
+    entries: dict[str, list[str]] = {}
+    order: list[str] = []
+    name: str | None = None
+    for line in existing.splitlines():
+        stripped = line.strip()
+        header = ENTRY_POINT_SECTION.match(stripped)
+        if header is not None:
+            name = header["name"].strip()
+            if name not in entries:
+                entries[name] = []
+                order.append(name)
+            continue
+        if name is None or not stripped:
+            continue
+        entries[name].append(stripped)
+    return [
+        "\n".join([f"[{name}]", *entries[name]])
+        for name in order
+        if name != OWNED_SECTION and entries[name]
+    ]
+
+
+def entry_points_text(scripts: dict[str, str] | None = None, existing: str = "") -> str:
+    """The `*.dist-info/entry_points.txt` body: the console scripts, then maturin's.
+
+    `existing` is the file the wheel arrived with (empty for a `maturin` build
+    that declared no entry points at all); its non-`[console_scripts]` sections —
+    `[pytest11]` today — are preserved by [`preserved_entry_point_sections`].
+    """
+    blocks = ["[console_scripts]"]
     for name, target in (scripts or CONSOLE_SCRIPTS).items():
-        lines.append(f"{name} = {target}")
-    return "\n".join(lines) + "\n"
+        blocks.append(f"{name} = {target}")
+    blocks.extend(preserved_entry_point_sections(existing))
+    return "\n".join(blocks) + "\n"
 
 
 def wheel_metadata(text: str, platform: str) -> str:
@@ -264,7 +323,15 @@ def repack(
     relocated[f"{dist_info}/WHEEL"] = wheel_metadata(
         relocated[f"{dist_info}/WHEEL"].decode("utf-8"), platform
     ).encode()
-    relocated[f"{dist_info}/entry_points.txt"] = entry_points_text(scripts).encode()
+    # The wheel's own `entry_points.txt` (maturin's `[project.entry-points.*]`) is
+    # read *before* it is overwritten: the console scripts are written here, every
+    # other section (`[pytest11]`) is carried through untouched.
+    arrived_entry_points = relocated.get(f"{dist_info}/entry_points.txt", b"").decode(
+        "utf-8", "replace"
+    )
+    relocated[f"{dist_info}/entry_points.txt"] = entry_points_text(
+        scripts, arrived_entry_points
+    ).encode()
     record = f"{dist_info}/RECORD"
     relocated[record] = b""
     rows = []

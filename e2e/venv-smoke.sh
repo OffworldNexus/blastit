@@ -46,11 +46,44 @@ echo "python: $python"
 # the server, as PID 1 is root on the platform), and gets two read-only mounts:
 # the wheel, and this directory's fixtures. The work directory is writable and
 # outside both.
+#
+# **Not `mktemp -d` under `/tmp`.** `/tmp` is `1777` and owned by root, so
+# production `sudo .venv/bin/blastit` refuses a venv it finds there: the child is
+# root, and a directory above the venv is writable by another uid. The work
+# directory therefore lives under a root-owned `0755` parent outside `/tmp`.
+#
+# **Created by root, owned by the invoking user.** The parent is `root:root`, so
+# the container `user` cannot create anything in it (`mkdir as user: DENIED` —
+# the first shape of `MB.49`'s failure). Root makes the run directory with
+# `mktemp -d` — not `run-$$`, which a stale, killed run can collide with — and
+# hands it to the container user, because every `>"$work/*.log"` in `run.sh` is
+# opened by that user's shell. Root's own tree inside it (`$work/app`, after
+# `run.sh`'s `chown`) is removed with `sudo` on the way out.
 docker run --rm \
     --volume "$(dirname "$wheel"):/wheels:ro" \
     --volume "$here/venv-smoke:/fixture:ro" \
     "$image" \
     bash -euo pipefail -c '
-        work=$(mktemp -d)
+        sudo -n true 2>/dev/null || {
+            echo "venv-smoke: IMAGE=$3 must provide sudo with passwordless escalation (modelw/base does); the server leg boots as root" >&2
+            exit 1
+        }
+        parent=/var/lib/blastit-venv-smoke
+        sudo --non-interactive mkdir -p "$parent"
+        sudo --non-interactive chmod 0755 "$parent"
+        sudo --non-interactive chown root:root "$parent"
+        work=$(sudo --non-interactive mktemp -d "$parent/run.XXXXXX")
+        sudo --non-interactive chown "$(id -u):$(id -g)" "$work"
+        cleanup() {
+            # `|| echo` keeps a failed `rm` from becoming the exit status: without
+            # it a green run under `trap cleanup EXIT` exits 1 with no output.
+            # The `INT`/`TERM` traps `exit` through this same `EXIT` trap, so they
+            # keep their 130/143 for the same reason.
+            sudo --non-interactive rm -rf "$work" \
+                || echo "venv-smoke: could not remove $work" >&2
+        }
+        trap cleanup EXIT
+        trap "exit 130" INT
+        trap "exit 143" TERM
         bash /fixture/run.sh "/wheels/$(basename "$1")" "$2" "$work"
-    ' -- "$wheel" "$python"
+    ' -- "$wheel" "$python" "$image"

@@ -135,6 +135,25 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
     `php_config.h`), and the action's own `scripts/check_wheel_shims.py` step — the
     only thing that reads the **finished zip** — must receive the same promise,
     expanded from the call site (`MB.45`).
+
+23. every `run:` block that GitHub would hand to bash **parses as shell**. Each
+    block is extracted from the YAML (that part is structural already), its
+    `${{ … }}` expressions are masked with a brace-balanced scan, and the rest is
+    given to `bash -n`: nothing is executed, only parsed. This is what sees the
+    shape that reached the runner in `MB.49` — inside a single-quoted `sh -c '…'`
+    word nothing escapes a `'`, so an apostrophe on a `#` comment line ends the
+    word there, and every line after it runs on the **runner** instead of in the
+    container (`uv python install 3.14` and `arch=${TARGET%%-*}` with `TARGET`
+    unbound), leaving the quote unbalanced. Self-tested first
+    (`self_test_rule23`), including an expression whose JSON object nests its
+    own braces.
+
+    **What this cannot see**, stated so nobody trusts it further than it goes: a
+    block whose step declares a non-bash `shell:` (`pwsh`, `powershell`, `cmd`)
+    is skipped — `bash -n` would judge another grammar — and a quote *pair* closed
+    early and reopened later balances, so `bash -n` accepts it although the host
+    still ran the middle lines. The unbalanced shape (the one that occurred) and
+    every other bash syntax error are refused.
 """
 
 from __future__ import annotations
@@ -908,6 +927,15 @@ def check_step_scripts(step: dict, scope: str, report: Report) -> None:
                 f"{scope}: a `#` comment inside a `\\` continuation "
                 f"({line[:60]!r}) ends the command there"
             )
+        for problem in shell_syntax_problems(run, str(step.get("shell") or "")):
+            report.fail(
+                f"{scope}: the `run:` block does not parse as a shell script "
+                f"({problem}): `bash -n` names what unbalanced. An apostrophe in "
+                "a `#` comment inside a single-quoted `sh -c '…'` word is the "
+                "shape `MB.49` shipped — it ends the word there, and every line "
+                "after it runs on the runner instead of in the container. Fix the "
+                "quote `bash -n` names"
+            )
         check_platform_matrix_calls(run, scope, report)
         env_map = step.get("env") or {}
         combined = run
@@ -1109,6 +1137,160 @@ def self_test_rule18() -> list[str]:
             problems.append(
                 f"rule 18 refused a matrix reference: {shape.strip()!r} -> {found}"
             )
+    return problems
+
+
+# `MB.49`: `sh -c '…'` is one single-quoted shell word, and nothing inside it
+# escapes a `'` — not even a `#` comment. An apostrophe on a comment line
+# therefore ends the word there, and every line after it runs on the *runner*
+# rather than in the container. That is how `publish-pypi.yml`'s musl leg came to
+# run `uv python install` and `arch=${TARGET%%-*}` on `ubuntu-24.04` with `TARGET`
+# unbound, while the same script passed inside the Alpine image when run by hand.
+#
+# A quote-counting scan cannot state that honestly: it has to guess which `'` is
+# a closing one, and a non-comment line, a double-quoted word or a quote on the
+# next line all slip through (probed in the `MB.49` review). So the rule is the
+# parser's: mask the GitHub expressions and `bash -n` the block. Nothing runs.
+GITHUB_EXPRESSION_START = re.compile(r"\$\{\{")
+MASKED_EXPRESSION = "gha-expression"
+
+
+def mask_github_expressions(text: str) -> str:
+    """Replace every `${{ … }}` with `MASKED_EXPRESSION`, balancing braces.
+
+    A `[^}]*}}` pattern stops at the first `}` after the expression's body
+    starts, so `${{ fromJSON('{"a":{"b":1}}') }}` was cut inside its own JSON
+    object: the remainder stayed in the text and `bash -n` reported the stray
+    apostrophe as the fault. Braces nest inside the expression, so this counts
+    `{`/`}` from the two the opening `${{` contributes and ends only when they
+    balance.
+
+    What this cannot see: a literal `}}` inside a quoted string in the
+    expression still closes the mask early, which is the same shape as the
+    artifact-glob `TEMPLATE` pattern and only matters for a hand-written
+    expression, never for a matrix reference.
+    """
+    out: list[str] = []
+    index = 0
+    while True:
+        match = GITHUB_EXPRESSION_START.search(text, index)
+        if match is None:
+            out.append(text[index:])
+            return "".join(out)
+        out.append(text[index : match.start()])
+        depth = 2  # the `{{` of `${{`
+        cursor = match.end()
+        while cursor < len(text) and depth:
+            char = text[cursor]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+            cursor += 1
+        if depth:
+            # An unterminated `${{` is a template typo, not a shell word: leave
+            # the text as it is so `bash -n` reports it rather than masking it.
+            out.append(text[match.start() :])
+            return "".join(out)
+        out.append(MASKED_EXPRESSION)
+        index = cursor
+
+
+#: The shells `bash -n` speaks. A step that names another (`pwsh`, `cmd`) is
+#: skipped: its text is a different grammar, and refusing it would be a lie.
+BASH_SHELLS = frozenset({"", "bash", "sh"})
+
+
+def shell_syntax_problems(run_text: str, shell: str = "") -> list[str]:
+    """Why `bash -n` refuses this `run:` block, or `[]` when it parses.
+
+    `bash -n` reads the script and executes nothing, so this is the structural
+    form of rule 23: the block is judged by the shell that will run it rather
+    than by a heuristic over its quotes. `${{ … }}` is masked first — it is a
+    template, not shell syntax, and a brace-balanced scan keeps an expression
+    like `fromJSON('{"a":{"b":1}}')` in one piece — and the masked text, not the
+    raw text, is what the verdict is about.
+
+    What this cannot see: a block whose `shell:` names another shell (skipped,
+    see `BASH_SHELLS`), and a quote closed early and reopened later, which
+    balances and therefore parses.
+    """
+    first = shell.split()[0] if shell.split() else ""
+    if first not in BASH_SHELLS:
+        return []
+    masked = mask_github_expressions(run_text)
+    try:
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=masked,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        missing = (
+            "`bash` is not on PATH, so this block cannot be parsed: the rule "
+            "refuses to report a pass it did not check"
+        )
+        return [missing]
+    if result.returncode == 0:
+        return []
+    detail = " / ".join(
+        line.strip() for line in (result.stderr or "").splitlines() if line.strip()
+    )
+    return [detail or f"bash -n exited {result.returncode}"]
+
+
+def self_test_rule23() -> list[str]:
+    """Prove rule 23 refuses the `sh -c '…'` shape `MB.49` shipped.
+
+    The negative is the defect verbatim (an apostrophe in a comment inside the
+    word, which leaves the quote unbalanced); the positives are the same comment
+    reworded, a block carrying a `${{ … }}` expression, an expression whose JSON
+    object nests its own braces (the mask must not cut it), and a plain comment
+    holding an apostrophe, so the rule cannot pass by refusing everything or by
+    mistaking a template for shell syntax.
+    """
+    problems: list[str] = []
+    buggy = (
+        "docker run --rm img sh -eu -c '\n"
+        "    # against `uv`'s musl CPython\n"
+        "    uv python install 3.14\n"
+        "'\n"
+    )
+    fixed = (
+        "docker run --rm img sh -eu -c '\n"
+        "    # against the musl CPython that uv installs\n"
+        "    uv python install 3.14\n"
+        "'\n"
+    )
+    template = (
+        "set -euo pipefail\n"
+        'args=(--target "${{ matrix.target }}" --out dist)\n'
+        'bash scripts/build-lsp.sh "${args[@]}"\n'
+    )
+    nested = (
+        "set -euo pipefail\n"
+        "value='${{ fromJSON('{\"a\":{\"b\":1}}') }}'\n"
+        'if [ -n "$value" ]; then :; fi\n'
+    )
+    prose = "# an apostrophe here is prose, not a shell word: it's a plain comment\n"
+    if not shell_syntax_problems(buggy):
+        problems.append(
+            "rule 23 no longer sees the unbalanced quote an apostrophe leaves in "
+            "`sh -c '…'`"
+        )
+    for shape, what in (
+        (fixed, "the same comment without one"),
+        (template, "a `${{ … }}` expression"),
+        (nested, "a `${{ … }}` expression with a nested JSON object"),
+        # A lone `'` on a plain comment line cannot end a word: one more positive,
+        # so the rule cannot pass by refusing every apostrophe.
+        (prose, "an apostrophe in a plain comment"),
+    ):
+        found = shell_syntax_problems(shape)
+        if found:
+            problems.append(f"rule 23 refused {what}: {found}")
     return problems
 
 
@@ -1610,6 +1792,23 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         print(
             "workflow-check: rule 18 self-test ok — an editor target triple outside the table is a copy"
+        )
+
+    apostrophe_self_test = self_test_rule23()
+    if apostrophe_self_test:
+        for problem in apostrophe_self_test:
+            print(f"FAIL {problem}")
+        print(
+            f"workflow-check: FAIL — rule 23's own self-test is broken "
+            f"({len(apostrophe_self_test)} problem(s)); the shell parse below it "
+            "would not be worth anything",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.quiet:
+        print(
+            "workflow-check: rule 23 self-test ok — every bash `run:` block is "
+            "parsed with `bash -n` after masking `${{ … }}`"
         )
 
     package_problems = self_test_rule20()

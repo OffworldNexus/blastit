@@ -23,19 +23,23 @@ e2e/php/
 
 `libphp` is not in upstream's `php` docker images (they are built without
 `--enable-embed`), so the runtime comes from **Debian trixie's
-`libphp8.4-embed` 8.4.27**, exactly what a host installs with
+`libphp8.4-embed`**, exactly what a host installs with
 `apt install libphp-embed` (`docs/frameworks/php/index.md` § Install the host
-library). The base image is
-pinned by digest (`python:3.14-slim-trixie@sha256:9aaa…`, the CPython the
-prebuilt wheel targets) and the package by version, so the run is reproducible.
+library). The base image is pinned by digest
+(`python:3.14-slim-trixie@sha256:9aaa…`, the CPython the prebuilt wheel targets);
+the `libphp8.4` package is **not** point-pinned: Debian supersedes a point
+version in `trixie-security` on its own schedule, so a pin that names one breaks
+the image build the day it moves. The rule is that the digest pins the base
+image, which this file can keep, and the package follows the Debian suite
+(`MB.49`).
 
 **The claim is that the surface is absent by construction, not that an
 unpatched runtime would be safe.** There is no `php-cgi` binary, no FastCGI
 parameter stream, no argv, and no INI channel a request can reach: the C shim
-builds `$_SERVER` and the `ZEND_INI_SYSTEM` blob itself. `8.4.27` is Debian's
-current package and this suite does not pretend otherwise — no distribution
-ships an unpatched `libphp` an 8.4 shim could load, so "even an unpatched
-runtime" is neither claimed nor testable here.
+builds `$_SERVER` and the `ZEND_INI_SYSTEM` blob itself. The package is whatever
+`trixie` ships on the day the image is built, and this suite does not pretend
+otherwise — no distribution ships an unpatched `libphp` an 8.4 shim could load,
+so "even an unpatched runtime" is neither claimed nor testable here.
 
 What *is* tested about the runtime is `P4b`: the same interpreter, the same
 canary file `canaries/prepend.php` that row 7 names, `php -d

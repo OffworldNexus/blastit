@@ -4064,3 +4064,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T08:45 [MB.48] (lead) commit 6b169cf
 - 2026-11-20T08:45 [MB.48] (lead) commit 6b169cf
 - 2026-11-20T08:46 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
+- 2026-11-20T09:10 [MB.49] (conductor) created (task) Fix all 9 PR #64 GitHub Actions failures (py-shim clippy, self-handoff, CI uv python PATH, php Dockerfile, venv-smoke chown, pytest11 entry_point
+- 2026-11-20T09:10 AUTOPILOT on by conductor fixing 9 PR #64 CI failures in MB.49
+- 2026-11-20T09:12 [MB.49] (lead) status ready -> active
+- 2026-11-20T09:12 [MB.49] (lead) attempt 1/3 started
+- 2026-11-20T09:12 [MB.49] (lead) edited fields
+- 2026-11-20T09:12 [MB.49] (lead) base ca3d5beb3406de06e82af6bb42a24ff46b608533
+- 2026-11-20T10:09 [MB.49] (lead) status active -> done
+- 2026-11-20T10:09 [MB.49] (lead) commit 4d3f4c5
