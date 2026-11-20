@@ -2,7 +2,7 @@
 id: MB.42.3.1
 title: "Native packages: build-deb.sh + build-rpm.sh + BLASTIT_DEB/BLASTIT_RPM container smoke"
 kind: task
-status: active
+status: review
 owner: implementer
 priority: 1
 depends_on: []
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T01:33"
-updated: "2026-11-20T01:33"
+updated: "2026-11-20T01:49"
 ---
 
 # Goal

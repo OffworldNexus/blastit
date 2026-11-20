@@ -3938,3 +3938,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T01:33 [MB.42.3.1] (lead) status ready -> active
 - 2026-11-20T01:33 [MB.42.3.1] (lead) attempt 1/3 started
 - 2026-11-20T01:33 [MB.42.3.1] (lead) base 107ab5c9a1c59ebc73522770c5a4d54cbb81713f
+- 2026-11-20T01:49 [MB.42.3.1] (lead) status active -> review
+- 2026-11-20T01:51 [MB.42.11] (unknown) created (task) blastit check from a package/bundle: bundled_python() demands _bin, which no bundle ships (check exits 3)
+- 2026-11-20T01:51 [MB.42.3.1] (lead) REVIEW FIX (filtered) - the top finding is a FUNCTIONAL bug, split to MB.42.11: bundled_python() demands _bin/blastit-dbproxy which no bundle ships, so blastit 
+- 2026-11-20T01:51 [MB.42.11] (lead) status ready -> active
+- 2026-11-20T01:51 [MB.42.11] (lead) attempt 1/3 started
+- 2026-11-20T01:51 [MB.42.11] (lead) base 2176a531f079a6696bfbe29068d0719686a7969b
+- 2026-11-20T01:59 [MB.42.11] (lead) status active -> done
+- 2026-11-20T01:59 [MB.42.11] (lead) commit next; note for MB.42.3.3: check.rs's exe_dir.join("../../..") candidate is dead - it resolves one level ABOVE a wheel's site-packages/blastit/_bin, so it

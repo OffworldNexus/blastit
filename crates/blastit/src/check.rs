@@ -1108,29 +1108,33 @@ fn path_python() -> Option<PathBuf> {
     None
 }
 
-/// `<exe_dir>/../python`, or the site-packages directory three levels up, when
-/// it holds the staged `blastit` gate (`MB.40.8`, `MB.42.2.2.2`).
+/// `<exe_dir>/../python`, or the package root three levels up, when it holds the
+/// staged `blastit` gate (`MB.40.8`, `MB.42.2.2.2`, `MB.42.11`).
 ///
 /// Two layouts, one marker pair. `make install` puts the binary at
 /// `<prefix>/share/blastit/lib/blastit` and the package at
-/// `<prefix>/share/blastit/python/blastit`, so `../python` is the
-/// site-packages root. A wheel or the critical tier stages
-/// `<dir>/blastit/_bin/blastit`, whose `../../..` is that root instead. Both
-/// markers have to be there — `_check_pytest.py` is what `-p` imports, and
-/// `_bin/blastit-dbproxy` is what only a bundle ships — so a `cargo` build tree
+/// `<prefix>/share/blastit/python/blastit`, so `<exe_dir>/../python` is the
+/// package root. A wheel or the critical tier stages `<dir>/blastit/_bin/blastit`,
+/// whose `<exe_dir>/../../..` is that root instead. Both markers have to be
+/// there — `_check_pytest.py` is the gate `-p` imports and `__main__.py` is the
+/// package's entry point, and every bundle ships both — so a `cargo` build tree
 /// whose `target/<profile>` sits beside the repository's own `python/` can never
-/// be mistaken for one.
+/// be mistaken for one. `_bin` is deliberately not a marker: it is the retired
+/// wheel layout `scripts/check-bundle-layout.sh` refuses, so no bundle has it.
 fn bundled_python() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-    let mut roots = vec![exe_dir.join("../python"), exe_dir.join("../../..")];
-    roots.retain(|root| {
-        let package = root.join("blastit");
-        package.join("_check_pytest.py").is_file()
-            && package.join("_bin").join("blastit-dbproxy").is_file()
-    });
+    bundle_root(exe.parent()?)
+}
+
+/// The `blastit` package root beside `exe_dir` that carries the staged gate.
+fn bundle_root(exe_dir: &Path) -> Option<String> {
+    let roots = [exe_dir.join("../python"), exe_dir.join("../../..")];
     roots
-        .first()
+        .into_iter()
+        .find(|root| {
+            let package = root.join("blastit");
+            package.join("_check_pytest.py").is_file() && package.join("__main__.py").is_file()
+        })
         .map(|root| root.to_string_lossy().into_owned())
 }
 
@@ -1858,6 +1862,76 @@ view upload regex '/upload/.*' {}
         // The `python3` name wins over `python` when both are there.
         std::fs::write(bin.join("python3"), b"#!/bin/sh\n").expect("python3");
         assert_eq!(venv_python(&venv), Some(bin.join("python3")));
+    }
+
+    #[test]
+    fn an_installed_bundle_is_a_gate_root_and_a_cargo_tree_is_not() {
+        // A `make install` bundle: seven modules under
+        // `<prefix>/share/blastit/python/blastit`, the binary in `lib/`, and the
+        // `bin/blastit` symlink the operator runs — no `_bin`, which is the
+        // retired wheel layout `check-bundle-layout.sh` refuses.
+        let root = CheckRoot::create().expect("a runtime root");
+        let prefix = root.path().join("prefix");
+        let share = prefix.join("share/blastit");
+        let package = share.join("python/blastit");
+        std::fs::create_dir_all(&package).expect("package");
+        for module in [
+            "__init__",
+            "__main__",
+            "_blastit",
+            "_check_pytest",
+            "fold",
+            "logs",
+            "pytest_plugin",
+        ] {
+            std::fs::write(package.join(format!("{module}.py")), b"").expect("module");
+        }
+        let lib = share.join("lib");
+        std::fs::create_dir_all(&lib).expect("lib");
+        std::fs::write(lib.join("blastit"), b"#!/bin/sh\n").expect("binary");
+        std::fs::create_dir_all(prefix.join("bin")).expect("bin");
+        std::os::unix::fs::symlink("../share/blastit/lib/blastit", prefix.join("bin/blastit"))
+            .expect("symlink");
+        // `current_exe` resolves `bin/blastit`, so a bundle's `exe_dir` is the
+        // `lib/` directory the symlink names.
+        assert_eq!(
+            std::fs::read_link(prefix.join("bin/blastit")).expect("link"),
+            Path::new("../share/blastit/lib/blastit")
+        );
+        let expected = std::fs::canonicalize(share.join("python")).expect("canonical package");
+        let found = bundle_root(&lib).expect("a bundle root");
+        assert_eq!(
+            std::fs::canonicalize(&found).expect("canonical root"),
+            expected
+        );
+
+        // Denied twin: the pair is belt-and-braces, so a tree with only one
+        // marker is not the gate root (and neither marker is `_bin`).
+        let entry = package.join("__main__.py");
+        std::fs::remove_file(&entry).expect("remove");
+        assert_eq!(bundle_root(&lib), None, "a package with no entry point");
+        std::fs::write(&entry, b"").expect("restore");
+        assert_eq!(
+            std::fs::canonicalize(bundle_root(&lib).expect("restored gate")).expect("canonical"),
+            expected
+        );
+        let gate = package.join("_check_pytest.py");
+        std::fs::remove_file(&gate).expect("remove");
+        assert_eq!(bundle_root(&lib), None, "a package with no gate");
+
+        // A `cargo` tree: `target/<profile>/deps` beside the repository's own
+        // `python/`. Its two candidate roots are `target/<profile>/python` and
+        // the repository itself, and neither holds a `blastit` package — so a
+        // build tree is never mistaken for a bundle.
+        let repo = root.path().join("repo");
+        let deps = repo.join("target/debug/deps");
+        std::fs::create_dir_all(&deps).expect("deps");
+        let repo_package = repo.join("python/blastit");
+        std::fs::create_dir_all(&repo_package).expect("repository package");
+        for module in ["__init__", "__main__", "_check_pytest"] {
+            std::fs::write(repo_package.join(format!("{module}.py")), b"").expect("module");
+        }
+        assert_eq!(bundle_root(&deps), None);
     }
 
     #[test]
