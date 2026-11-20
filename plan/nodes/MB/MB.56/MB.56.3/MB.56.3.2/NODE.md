@@ -2,7 +2,7 @@
 id: MB.56.3.2
 title: "Create e2e_dev.rs (§2 & §4 local development: WSGI, PHP, static, reload, learn)"
 kind: epic
-status: active
+status: done
 priority: 1
 depends_on: [MB.56.3.1]
 paths: ["crates/blastit/tests/**"]
@@ -10,7 +10,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:45"
-updated: "2026-11-20T18:54"
+updated: "2026-11-20T20:28"
 ---
 
 # Goal

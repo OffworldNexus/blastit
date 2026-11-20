@@ -15,3 +15,7 @@ MUST COVER (from MB.56.3.2.2 review): 'blastit check validates the libphp gate/p
 ## 2026-11-20T19:52 [lead]
 
 ALSO (from MB.56.3.2.2 arch review): critical_dev_reload.rs:2473-2545 keeps its own drifting host-PHP probe (walks only [85,84,83], no libphp8.6) - when absorbing that file, delete the copy and call tests/common/php_host::host_php().
+
+## 2026-11-20T20:19 [lead]
+
+MUST COVER (from MB.56.3.2.3): the 9 critical_static_cli cases lost - a readable root under an owned 0700 ancestor is accepted on check AND dev; a root the caller cannot list is refused; a root that is a file is refused; a blastit app on an all-static manifest is refused; 'an all-static check refuses learn (nothing to learn: static mounts)'; a static mount the suite never requested is a warning not a finding; a missing mount root is named with its prefix before any output; a mixed tree without an app still names blastit_app; check without an app still runs the suite.

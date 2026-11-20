@@ -4292,3 +4292,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T19:52 [MB.56.3.3] (lead) ALSO (from MB.56.3.2.2 arch review): critical_dev_reload.rs:2473-2545 keeps its own drifting host-PHP probe (walks only [85,84,83], no libphp8.6) - when absorbi
 - 2026-11-20T19:52 [MB.56.3.4] (lead) EXTENDED MUST-COVER list (arch, MB.56.3.2.2): libphp not-a-library/package sentence; ZTS refusal (static .dynsym, zero stage-0 dlopen canary); unsupported-minor
 - 2026-11-20T19:59 [MB.56.3.2.2] (lead) status active -> done
+- 2026-11-20T19:59 [MB.56.3.2.2] (lead) commit 8ac0c76
+- 2026-11-20T19:59 [MB.56.3.2.3] (lead) status ready -> active
+- 2026-11-20T19:59 [MB.56.3.2.3] (lead) attempt 1/3 started
+- 2026-11-20T19:59 [MB.56.3.2.3] (lead) base 8ac0c76869aeef23daec7825f5170e8c6a7df1c0
+- 2026-11-20T20:12 [MB.56.4] (lead) From MB.56.3.2.3: PHP concurrency (critical_parallel_views PHP half) may be handed to run_prod.py's fair-queueing leg - confirm it proves slow-PHP-view isolatio
+- 2026-11-20T20:13 [MB.56.4] (lead) From MB.56.3.2.3: PHP concurrency (the critical_parallel_views PHP half) is handed to run_prod.py's fair-queueing leg - prove slow-PHP-view isolation there; WSG
+- 2026-11-20T20:18 [MB.56.4] (lead) From MB.56.3.2.3: the SPLIT store form (postgres { host $DB_HOST port $DB_PORT user $DB_USER password $DB_PASSWORD database $DB_NAME }) has no runtime leg now -
+- 2026-11-20T20:19 [MB.56.3.3] (lead) MUST COVER (from MB.56.3.2.3): the 9 critical_static_cli cases lost - a readable root under an owned 0700 ancestor is accepted on check AND dev; a root the call
+- 2026-11-20T20:19 [MB.56.3.4] (lead) MUST COVER (from MB.56.3.2.3): production_stage_one_refuses_a_manifest_edited_after_stage_zero_approved_it - a Blastfile rewritten between stage-0 approval and 
+- 2026-11-20T20:19 [MB.56.5] (lead) crates/blastit/src/dev_reload.rs still carries #[cfg(any(test, debug_assertions))] TestClock/FakeWatcher/report_pair/send_batch whose last caller (critical_dev_
+- 2026-11-20T20:20 HUMAN H-017 opened by lead (node MB.56.3.2.3)
+- 2026-11-20T20:20 [MB.56.3.2.3] (lead) OPENED HUMAN ITEM: Range header (TESTING_PLAN 2 promises byte-range; blastit answers full 200). e2e_dev drops the Range assertion until answered.
+- 2026-11-20T20:28 [MB.56.3.2.3] (lead) status active -> done
+- 2026-11-20T20:28 [MB.56.3.2] (lead) status active -> done

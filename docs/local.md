@@ -41,6 +41,8 @@ $ blastit dev --learn
 
 It binds `127.0.0.1:8080` (`--port N`, `--host ADDR`), prints one components line and a
 row per view and per `static` mount, and reloads every view on save (`--no-reload`).
+A request that lands in the instant a reload swaps the image may wait for the next
+cycle; a request already in flight is never dropped.
 
 ```mermaid
 flowchart LR

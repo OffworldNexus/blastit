@@ -37,7 +37,7 @@ $ blastit dev --no-reload
 |---|---|---|
 | `--port N` | `8080`, or `PORT` | listen on `N` |
 | `--host ADDR` | `127.0.0.1` | expose the server on another address; also needs `BLASTIT_DEV_EXPOSE=1`, and the boot line names the address and your uid |
-| `--learn` | off | allow what the file lacks and record it; writes exact `query` lines to the `Blastfile` when it stops |
+| `--learn` | off | allow what the file lacks and record it; writes exact `query` lines to the `Blastfile` when it stops. A statement that inlines a literal value is refused instead of written — one `learn: refused` line on stderr — and the run exits `1` |
 | `--no-reload` | reload on | turn live reload off: nothing is watched, and no `dev.reload.unavailable` is printed |
 
 A flag `dev` does not take is one sentence on stderr and exit `1`;

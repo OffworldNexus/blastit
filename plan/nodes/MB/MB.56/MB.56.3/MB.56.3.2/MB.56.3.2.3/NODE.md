@@ -2,16 +2,16 @@
 id: MB.56.3.2.3
 title: "e2e_dev.rs part 3: static/SPA, live reload, learn, shutdown; absorb smoke"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.3.2.2]
 paths: ["crates/blastit/tests/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:54"
-updated: "2026-11-20T18:54"
+updated: "2026-11-20T20:28"
 ---
 
 # Goal

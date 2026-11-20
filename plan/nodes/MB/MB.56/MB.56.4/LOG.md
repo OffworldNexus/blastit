@@ -19,3 +19,15 @@ From MB.56.2.5 review: NO workflow runs 'cargo test -p blastit-lsp' - the lsp ma
 ## 2026-11-20T18:33 [lead]
 
 From MB.56.2.5 review: no workflow runs cargo test -p blastit-lsp; ci.yml:690-757 lsp legs only run scripts/lsp_smoke.py, so didChange/hover/formatting/quickfix never run on macOS/Windows although TESTING_PLAN.md §7 promises them across Linux/macOS/Windows. Add e2e_lsp to those legs or narrow the §7 wording.
+
+## 2026-11-20T20:12 [lead]
+
+From MB.56.3.2.3: PHP concurrency (critical_parallel_views PHP half) may be handed to run_prod.py's fair-queueing leg - confirm it proves slow-PHP-view isolation there; WSGI concurrency lives in e2e_dev via tests/common/views.rs.
+
+## 2026-11-20T20:13 [lead]
+
+From MB.56.3.2.3: PHP concurrency (the critical_parallel_views PHP half) is handed to run_prod.py's fair-queueing leg - prove slow-PHP-view isolation there; WSGI concurrency lives in e2e_dev via tests/common/views.rs.
+
+## 2026-11-20T20:18 [lead]
+
+From MB.56.3.2.3: the SPLIT store form (postgres { host $DB_HOST port $DB_PORT user $DB_USER password $DB_PASSWORD database $DB_NAME }) has no runtime leg now - blastit-manifest §7 pins its lowering, but not the env rewrite + real connection. Prove it once end-to-end in the prod E2E (compose presets already use split stores).

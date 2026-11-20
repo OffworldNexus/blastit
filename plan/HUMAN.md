@@ -161,3 +161,11 @@ Release v0.2.0 is ready on branch release/0.2.0 (HEAD 7cdb546, PR targeting deve
 
 **Answer:**
 
+## H-017 [open] (node MB.56.3.2.3)
+
+- asked: 2026-11-20T20:20 by lead
+
+TESTING_PLAN.md §2 promises 'conditional ETag / byte-range requests' but blastit answers a Range header with the full 200 (design static-and-spa.md §615). Confirm: should §2 drop 'byte-range' (full 200 is the contract), or should blastit implement 206?
+
+**Answer:**
+
