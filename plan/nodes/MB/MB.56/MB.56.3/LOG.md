@@ -19,3 +19,7 @@ MB.56.2.1 REVIEW-GAP (must re-cover E2E): (1) blastit check exit table 0 clean/1
 ## 2026-11-20T17:41 [lead]
 
 MUST COVER in e2e_prod_refusals/e2e_dev (from MB.56.2.2 review): (a) env boot refusals naming the variable never its value: missing $IDENT, DATABASE_URL with target_session_attrs=any, multi-host URL, output naming BLASTIT_*, two proxies producing one variable (all one line each in one boot); BLASTIT_* stripped from worker env; injected default never overrides a present value; (b) WSGI host refusals verbatim: 'blastit dev: CPython 3.12 at <path> is not supported for WSGI views (CPython 3.13 and 3.14 ...)', free-threaded refusal, missing libpython sentence naming the minor and every remedy
+
+## 2026-11-20T18:33 [lead]
+
+MUST PORT before deleting crates/blastit/tests/critical_lsp.rs: (1) multi-error document -> multiple diagnostics (warning_sites_are_their_declarations / diagnostics_are_capped); (2) didClose publishes [] with no version; (3) formatting a BROKEN buffer answers null not an error; (4) non-BMP UTF-16 position (positions_are_utf16); (5) single-quoted query '\''... $1'\'' quick fix + nothing offered outside queries + context_diagnostics never trusted. MB.56.2.5 ports these.

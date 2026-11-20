@@ -11,3 +11,11 @@ From MB.56.2.2: e2e/php-sapi/Dockerfile:203 still runs 'cargo test -p blastit-ph
 ## 2026-11-20T17:41 [lead]
 
 From MB.56.2.2 review: e2e/php2shell.py (24 rows) runs ONLY via 'make e2e' - no workflow invokes it and make check never runs it; wire php2shell into the php-sapi/nightly container legs so TESTING_PLAN §2 'php2shell exploit neutrality' is actually gated. Also critical_php_embed.rs:932 the_worker_cannot_be_built_without_the_entry_pin is an include_str! source-grep oracle, not behavioural - replace with a real assertion.
+
+## 2026-11-20T18:33 [lead]
+
+From MB.56.2.5 review: NO workflow runs 'cargo test -p blastit-lsp' - the lsp matrix legs (ci.yml:690-757) only run scripts/lsp_smoke.py (initialize+didOpen+one diagnostic+shutdown), so didChange/hover/formatting/quickfix never execute on macOS/Windows while TESTING_PLAN.md §7 promises them across Linux/macOS/Windows. Add the e2e_lsp crate test to those legs or narrow the plan wording.
+
+## 2026-11-20T18:33 [lead]
+
+From MB.56.2.5 review: no workflow runs cargo test -p blastit-lsp; ci.yml:690-757 lsp legs only run scripts/lsp_smoke.py, so didChange/hover/formatting/quickfix never run on macOS/Windows although TESTING_PLAN.md §7 promises them across Linux/macOS/Windows. Add e2e_lsp to those legs or narrow the §7 wording.

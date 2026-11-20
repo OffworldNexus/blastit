@@ -126,7 +126,12 @@ def _build_targets(
     if not executables:
         raise CoverageError("cargo test --no-run built no test executable")
     target = TARGET_DIR.resolve()
-    objects = list(dict.fromkeys([*executables, *binaries]))
+    # Binaries first: `llvm-cov` keeps a file's absolute-path row only when the
+    # object that spells it absolutely is read before one that spells it by bare
+    # file name (a `--test` harness of the same crate does), so a test-first list
+    # silently drops every library row to `lib.rs` and the report says the
+    # requested path has no coverage.
+    objects = list(dict.fromkeys([*binaries, *executables]))
     for artifact in objects:
         if target not in artifact.resolve().parents:
             raise CoverageError(
@@ -302,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     profdata = TARGET_DIR / "coverage.profdata"
     _merge(profdata_tool, profdata, env)
 
-    objects = [*executables, *binaries]
+    objects = [*binaries, *executables]
     summaries = _summaries(_report(cov_tool, profdata, objects, env), files)
     uncovered = _uncovered(_lcov(cov_tool, profdata, objects, env), files)
     missing = [wanted for wanted in files if wanted not in summaries]

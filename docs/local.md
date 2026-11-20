@@ -116,7 +116,9 @@ Zed ≥ 0.205: **Blastfile** is not in the registry yet, so `git clone
 https://github.com/OffworldNexus/blastit` and `zed: install dev extension` on
 `editors/zed`. The extension finds [`blastit-lsp`](reference/cli.md#blastit-lsp) by
 itself (settings → `PATH` → release binary) and offers Quick Fix **Parameterize SQL
-for Blastfile ($?)** at the `line:col` a denial prints.
+for Blastfile ($?)** on any `query` literal in your `Blastfile`: paste the denied
+statement from the log, replace its `…` with `$?`, and let the fix rewrite the
+remaining `$1`s.
 
 ```json
 {

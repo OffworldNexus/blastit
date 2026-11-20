@@ -74,10 +74,10 @@ pub(super) fn is_env_name(name: &str) -> bool {
 /// The directive vocabulary, transcribed from `docs/reference/blastfile.md`
 /// (§7.3).
 ///
-/// Sorted by key, one paragraph each, ≤ 48 rows and ≤ 600 bytes a value; a
-/// duplicate key, an unsorted row or a key the reference page does not spell is
-/// a test failure (`mod tests`), and a one-word fix to the page never needs the
-/// editor to change its wording. Hover text is data, not a second grammar.
+/// Sorted by key, one paragraph each, ≤ 48 rows and ≤ 600 bytes a value; the
+/// verbatim paragraphs and their spans are asserted against the running server in
+/// `crates/blastit-lsp/tests/e2e_lsp.rs`, so a one-word fix to the page that the
+/// editor did not follow is red there. Hover text is data, not a second grammar.
 const HOVER_TABLE: &[(&str, &str)] = &[
     (
         "DELETE",

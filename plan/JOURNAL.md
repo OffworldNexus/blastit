@@ -4228,3 +4228,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T18:22 [MB.56.2.4] (lead) REVIEW FIX (ux): http: 431 header-cap, 408 head timeout, 417 bad Expect, 408 body_timeout+cancel, 503 over max_connections, 100-continue interim (and none for C
 - 2026-11-20T18:22 [MB.56.5] (lead) blastit-sqlpolicy: StatementClass::is_plain + Analysis::is_plain (analysis/types.rs:83,113) have NO production consumer -> delete. tools/coverage_report.py mis-
 - 2026-11-20T18:27 [MB.56.2.4] (lead) status active -> done
+- 2026-11-20T18:27 [MB.56.2.4] (lead) commit a7db6b3
+- 2026-11-20T18:27 [MB.56.2.5] (lead) status ready -> active
+- 2026-11-20T18:27 [MB.56.2.5] (lead) attempt 1/3 started
+- 2026-11-20T18:27 [MB.56.2.5] (lead) base a7db6b3a1cc38f5417e7420420f196841c8fc815
+- 2026-11-20T18:33 [MB.56.2.5] (lead) REVIEW FIX: (a) Session::spawn env_clear drops LLVM_PROFILE_FILE -> litters worktree with default_*.profraw and breaks make coverage (-p blastit-lsp) ; re-injec
+- 2026-11-20T18:33 [MB.56.3] (lead) MUST PORT before deleting crates/blastit/tests/critical_lsp.rs: (1) multi-error document -> multiple diagnostics (warning_sites_are_their_declarations / diagnos
+- 2026-11-20T18:33 [MB.56.2.5] (lead) edited fields
+- 2026-11-20T18:33 [MB.56.2.5] (lead) REVIEW FIX 2 (ux): (a) codeAction request omits required context + only:["quickfix"]; (b) add the documented query-parse squiggle ('SELCT id FROM t' -> one diag
+- 2026-11-20T18:33 [MB.56.4] (lead) From MB.56.2.5 review: NO workflow runs 'cargo test -p blastit-lsp' - the lsp matrix legs (ci.yml:690-757) only run scripts/lsp_smoke.py (initialize+didOpen+one
+- 2026-11-20T18:33 [MB.56.4] (lead) From MB.56.2.5 review: no workflow runs cargo test -p blastit-lsp; ci.yml:690-757 lsp legs only run scripts/lsp_smoke.py, so didChange/hover/formatting/quickfix
+- 2026-11-20T18:39 [MB.56.2.5] (lead) edited fields
+- 2026-11-20T18:42 [MB.56.2.5] (lead) status active -> done

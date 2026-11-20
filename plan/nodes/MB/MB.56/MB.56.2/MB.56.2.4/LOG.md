@@ -27,3 +27,7 @@ REVIEW FIX (ux): http: 431 header-cap, 408 head timeout, 417 bad Expect, 408 bod
 ## 2026-11-20T18:27 [lead]
 
 status active -> done
+
+## 2026-11-20T18:27 [lead]
+
+commit a7db6b3
