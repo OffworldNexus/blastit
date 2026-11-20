@@ -2,7 +2,7 @@
 id: MB.42.4
 title: "Rewrite hero & docs around zero-decision install.sh (signed APT/RPM repos) + bare blastit CLI + lockfile wrappers, and pass full make check + make e2e"
 kind: task
-status: ready
+status: active
 owner: writer
 priority: 1
 depends_on: [MB.42.3]
@@ -14,11 +14,11 @@ paths:
   - "python/tests/**"
   - "e2e/**"
   - scripts/platform_matrix.py
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-19T14:30"
-updated: "2026-11-20T03:39"
+updated: "2026-11-20T04:57"
 ---
 
 # Goal
@@ -62,7 +62,7 @@ Rewrite the hero snippet and install/usage commands across `README.md` and `docs
    - `docs/knowledge/LESSONS.md` gains one bullet from `MB.42.2.3`: a `0775` directory (Debian/Docker `umask 002`, and this repo's own `target/tmp`) makes the handoff's ancestor rule skip a project binary, so §4 fixtures must live under `$HOME` — the tool behaves correctly and the *line* must not read as an incident.
 7. **PHP 8.3, 8.4, 8.5 and 8.6 stated consistently** (`MB.42.5` owns the code; you own the prose):
    - Every page that names supported PHP minors says `PHP 8.3, 8.4, 8.5 and 8.6` (or `8.3–8.6`) — `docs/frameworks/php.md`, `docs/getting-started.md`, `docs/deploy/*`, `docs/reference/*`, `README.md`.
-   - The NTS note stays factual: `8.3, 8.4, 8.5, 8.6` embedded (`libphpX.Y-embed` / `phpXY-embed`), never `php-fpm`.
+   - The NTS note stays factual: `8.3, 8.4, 8.5, 8.6` embedded (`libphpX.Y-embed` / `phpXY-embed`), never an out-of-process worker pool.
    - `uv run --no-project scripts/platform_matrix.py --check` must stay green (it refuses a page claiming more shims than the 16-leg matrix declares, or more than are proven).
 8. **`docs/deploy/*` simplification:** Dockerfiles become one universal install (`curl -fsSL .../install.sh | sh` as root, apt/dnf path) or `--user`; a single runtime image now serves Python, PHP and Static — delete the "Python image vs PHP image vs archive" branching.
 9. **Sync harnesses & visual QA:**

@@ -172,6 +172,18 @@ rs-test: python-runtime ## Run all unprivileged Rust unit, integration (includin
 # Verify the default universal `blastit` links zero libpython/libphp/RUNPATH and still
 # pulls the shim ABI (design universal-distribution.md §1.1), and that
 # `blastit-view` stays runtime-agnostic.
+#
+# **What a host build can and cannot prove (`MB.42.14`).** This leg compiles on
+# whatever machine runs it, so it can prove the *shape* of the artifact — no
+# interpreter linked, no build-host RUNPATH, the frozen shim ABI still pulled — and
+# nothing about a C-library floor: a binary built on glibc 2.41 needs 2.41 no matter
+# what the gate wishes. Asserting `--max-glibc 2_28` here was therefore structurally
+# red on every developer machine and CI host, and it blocked `make check`. The 2.28
+# promise is a claim about a *compiler image*, so it belongs to `standalone-glibc`,
+# which builds inside `quay.io/pypa/manylinux_2_28_<arch>` and hands the ceiling to
+# `scripts/build-standalone.sh` / `scripts/build-lsp.sh` there. This leg keeps that
+# owner honest (it refuses to let the ceiling disappear) and `packaging-gates-test`
+# proves the ceiling itself still refuses an ELF above it.
 rs-no-python: ## Build + inspect the universal binary: zero libpython, zero libphp, zero RUNPATH
 	@echo "cargo build -p blastit --locked            # default universal artifact"
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
@@ -179,15 +191,17 @@ rs-no-python: ## Build + inspect the universal binary: zero libpython, zero libp
 	@echo "cargo build --release -p blastit --locked        # the binaries make install ships"
 	$(STANDALONE_ENV) $(CARGO) build --release -p blastit --locked
 	$(STANDALONE_ENV) $(CARGO) build --release -p blastit-lsp --locked
-	@set -e; portable=scripts/check-portable-elf.sh; advertised=0; parsed=0; \
-	if grep -q -- '--max-glibc' "$$portable"; then advertised=1; fi; \
-	if grep -q -e '--max-glibc)' "$$portable"; then parsed=1; fi; \
-	if [ "$$advertised" -eq 1 ] && [ "$$parsed" -eq 0 ]; then \
-		echo "error: $$portable advertises --max-glibc without parsing it: a floor that is never applied reads as enforced; add the '--max-glibc)' arm (or drop the prose)" >&2; \
-		exit 1; \
-	fi; \
-	flags=""; if [ "$$parsed" -eq 1 ]; then flags="--max-glibc 2_28"; fi; \
-	"$$portable" $$flags "$(CURDIR)/target/release/blastit" "$(CURDIR)/target/release/blastit-lsp"
+	@echo "host build: no glibc ceiling — that is standalone-glibc's job (quay.io/pypa/manylinux_2_28_<arch>)"
+	scripts/check-portable-elf.sh "$(CURDIR)/target/release/blastit" "$(CURDIR)/target/release/blastit-lsp"
+	@set -e; recipe=$$($(MAKE) -n --no-print-directory standalone-glibc); \
+	case "$$recipe" in \
+		*"--max-glibc $(STANDALONE_MAX_GLIBC)"*) \
+			echo "glibc floor: standalone-glibc still builds with --max-glibc $(STANDALONE_MAX_GLIBC) inside its manylinux image" ;; \
+		*) \
+			echo "error: standalone-glibc no longer passes --max-glibc $(STANDALONE_MAX_GLIBC): the manylinux floor has no owner left." >&2; \
+			echo "  It is a claim about the compiler image, so it is asserted there — never on a host build like this one." >&2; \
+			exit 1 ;; \
+	esac
 	@set -e; count=$$(grep -c -e pyo3 -e blastit-php-sapi crates/blastit-view/Cargo.toml || true); \
 	if [ "$$count" -ne 0 ]; then \
 		echo "error: crates/blastit-view names an interpreter ($$count line(s)): the transport crate must stay plain std" >&2; \
@@ -215,7 +229,11 @@ rs-no-python: ## Build + inspect the universal binary: zero libpython, zero libp
 	fi; \
 	echo "default build: blastit-py-sapi present, 0 pyo3, no libpython linked"
 
-# Verify `--no-default-features` pulls no view/pyo3 crates and exercises `static_feature_off`.
+# Verify `--no-default-features` pulls no view/pyo3 crates and exercises
+# `static_feature_off`. It asserts a *dependency graph*, not an ELF, so it carries no
+# portable-ELF or glibc claim: the artifact shape belongs to `rs-no-python` and the
+# 2.28 floor to `standalone-glibc`. Adding a ceiling here would smuggle a host build
+# into a claim only the manylinux image can honour (`MB.42.14`).
 rs-no-default: ## Build feature-less binary and prove static mount refusal when disabled
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked --no-default-features --all-targets
 	$(STANDALONE_ENV) $(CARGO) clippy -p blastit --locked --no-default-features --all-targets -- -D warnings
@@ -259,12 +277,18 @@ standalone: ## Package host standalone archive (release binary + proven shims + 
 STANDALONE_ARCH ?= $(shell uname -m)
 STANDALONE_TARGET ?= $(STANDALONE_ARCH)-unknown-linux-gnu
 STANDALONE_BUILDER ?= quay.io/pypa/manylinux_2_28_$(STANDALONE_ARCH)
+# The shipped glibc floor (`MB.42.14`). The image *is* the claim: inside
+# `$(STANDALONE_BUILDER)` the C library is already 2.28, and
+# `scripts/build-standalone.sh` / `scripts/build-lsp.sh` measure the finished binary
+# against this number and refuse a build that outgrew it. This is the only place 2.28
+# is asserted — a host build cannot honour it, so `rs-no-python` no longer pretends to.
+STANDALONE_MAX_GLIBC ?= 2_28
 
 standalone-glibc: ## Build gnu standalone archive inside manylinux_2_28 image (as CI ships it)
 	scripts/build-standalone-in-image.sh \
 		--image "$(STANDALONE_BUILDER)" \
 		--target "$(STANDALONE_TARGET)" \
-		--max-glibc 2_28
+		--max-glibc $(STANDALONE_MAX_GLIBC)
 
 packages: py-sapi php-sapi ## Build the .deb + .rpm from a manylinux bundle (slow; Docker for the bundle and rpmbuild when absent)
 	scripts/build-package-bundle.sh --out "$(PACKAGES_PREFIX)" \
