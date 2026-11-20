@@ -1,68 +1,10 @@
-# The pytest plugin's tests
+# Python package tests
 
-`python/tests/` covers the plugin of D3b and the manifest tooling of D3c
-(`python/blastit/pytest_plugin.py`, `python/blastit/logs.py`,
-`python/blastit/fold.py`, and the extension functions in
-`crates/blastit-py/src/audit.rs`):
+| File | What it proves |
+|---|---|
+| `test_launcher.py` | the console scripts are one `execvpe` of `blastit/_bin/blastit`: argv and exit status preserved, a missing binary named instead of a traceback |
+| `test_check_pytest_gate.py` | `blastit check`'s WSGI gate over real socketpairs: the observation file, `push_unrouted`/`pop`, and a dead channel raising `ControlError` (exit `3`) |
+| `critical/test_stdlib_only.py` | the published package installs no dependency and imports nothing but the stdlib |
 
-* `test_plugin_helpers.py` — the pure parts, no Django, no database: the wire
-  form of a query, `--blastit-proxy` parsing, the observations document, the
-  Django-level capture (with a fake connection and a fake session), and what a
-  live server's log folds into.
-* `test_logs.py` — blastit's event stream, and the normalised text of a
-  `sql.denied` event turned back into something PostgreSQL's parser accepts.
-* `test_fold.py` — `blastit-manifest fold`: which denials become grants, and the
-  line-level edit `--write` makes (checked by parsing the result).
-* `test_wire_capture.py` — what psycopg sends by itself, over a real connection
-  and no Django at all: `Connection.execute`, `Cursor.execute`/`executemany`/
-  `stream`, `ServerCursor`'s `DECLARE`, `TypeInfo.fetch`, and the statement
-  deduplication between the two capture layers.
-* `test_pytest_plugin.py` — real `pytest` sessions in a copy of `project/`, a
-  tiny Django app with an unfinished `Blastfile` next to it. That is the only
-  honest way to test a pytest plugin: the options, the hooks, the terminal
-  summary, the exit code and the xdist merge are all things only a session has.
-* `project/` — the Django project those sessions run: a dozen views, one model, a
-  `connection_created` receiver that runs a `SET`, and a `Blastfile` that is
-  missing grants, needs `transactions`, has stale grants, has a view nothing
-  exercises, has no view at all for one path a test asks for, grants none of the
-  statements psycopg runs as a connection is established, and lets only one of
-  the two views that open a socket say `egress any`.
-* `test_live_server.py` + `live_project/` — the live server of D3c: a second
-  tiny Django project whose tests are served by the *real* `blastit` binary, so
-  what is checked is front-end traffic against the manifest. They never skip for
-  privilege: without root and passwordless sudo the fixture serves through
-  `blastit dev`, the unprivileged single-UID simulation (R39).
-* `packaged_project/` — the same thing in the layout `django-admin startproject
-  myshop .` writes: the settings inside a package (`myshop/settings.py`), the
-  dotted `WSGI_APPLICATION` Django declares, and a relative
-  `--blastit-manifest`. Nothing here installs the project, so this is also what
-  checks that the directory blastit was started in is importable (§5.3).
-
-They need two things `cargo test` does not give them: the compiled extension
-(`blastit._blastit`) plus the plugin entry point, installed in a virtualenv, and
-a real PostgreSQL whose user may create databases.
-
-```console
-$ export PYO3_PYTHON=python3.14          # the interpreter the wheel is built for
-$ scripts/build-wheel.sh                 # dist/blastit-*.whl
-$ python3.14 -m venv "$HOME/.venvs/blastit-tests"
-$ "$HOME/.venvs/blastit-tests/bin/pip" install dist/blastit-*.whl \
-    pytest pytest-django pytest-xdist django 'psycopg[binary]'
-$ DATABASE_URL=postgresql://blastit:ci-not-secret@127.0.0.1:5432/blastit \
-    "$HOME/.venvs/blastit-tests/bin/pytest" python/tests
-```
-
-`DATABASE_URL` (or `BLASTIT_TEST_PG_URL`, the spelling dbproxy's tests use) is
-what the tests hand to the tiny project; without it they are skipped.
-
-With passwordless `sudo` the live tests run production `blastit`, which
-authorises the venv tree it loads the shim from — so hand it to root and drop the
-group/other write bits with `sudo --non-interactive chown -R root:root
-"$HOME/.venvs/blastit-tests"` and `sudo --non-interactive chmod -R go-w
-"$HOME/.venvs/blastit-tests"`; without root and sudo they serve through `blastit
-dev` instead (a venv under `/tmp` is refused by production's provenance either
-way).
-
-The plugin's own runs of `project/` and `live_project/` are subprocesses of this
-suite, so `-n` on the outer run also works. On a machine without `pip`,
-`uv venv` and `uv pip install` take the place of the three middle lines.
+`make docs-unit` runs the first two offline; `make test-critical` runs the
+critical tier against the staged binary.

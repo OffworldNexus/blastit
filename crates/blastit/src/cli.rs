@@ -46,13 +46,12 @@ use crate::stage1;
 
 mod handoff;
 mod help;
-mod internal_json;
 mod parse;
 mod preset;
 mod run;
 
 use help::{help_for, refuse, usage};
-use parse::{Subcommand, parse, parse_check, parse_dev, parse_fmt, parse_internal_json, parse_lsp};
+use parse::{Subcommand, parse, parse_check, parse_dev, parse_fmt, parse_lsp};
 use preset::env_is_known;
 use run::{run_check, run_dev, run_fmt};
 
@@ -72,9 +71,6 @@ pub enum Command {
     Fmt,
     /// `blastit lsp`: speak LSP on stdin/stdout for an editor (`MB.22.3`).
     Lsp,
-    /// `blastit --internal-json`: the NDJSON dispatcher the pure-Python package
-    /// drives (`MB.42.2.2.2`). Hidden, and never combined with a re-exec line.
-    InternalJson,
 }
 
 impl Command {
@@ -85,7 +81,6 @@ impl Command {
             Some("check" | "test") => Self::Check,
             Some("fmt") => Self::Fmt,
             Some("lsp") => Self::Lsp,
-            Some("--internal-json") => Self::InternalJson,
             _ => Self::Serve,
         }
     }
@@ -248,13 +243,6 @@ pub fn main(host: Host, argv: Vec<String>) -> u8 {
                 LSP_FAILURE
             }
         },
-        Command::InternalJson => match parse_internal_json(&argv[1..]) {
-            Ok(()) => internal_json::run(),
-            Err(message) => {
-                refuse("blastit", &message, true, colour);
-                USAGE_FAILURE
-            }
-        },
         Command::Serve => {
             // E1: the usage text lists the presets with their one-line
             // descriptions, which is the only way to find out what `--preset`
@@ -311,9 +299,9 @@ pub fn main(host: Host, argv: Vec<String>) -> u8 {
 
 /// §4: let the project's own `blastit` answer `command`, or run `this` image.
 ///
-/// Only `dev`, `check`, `fmt` and `lsp` reach here. `Serve` and
-/// `--internal-json` answer from the binary that was typed, so a deployment is
-/// the artifact the operator installed (`R6`–`R8`); a valid handoff replaces
+/// Only `dev`, `check`, `fmt` and `lsp` reach here. `Serve` answers from the
+/// binary that was typed, so a deployment is the artifact the operator
+/// installed (`R6`–`R8`); a valid handoff replaces
 /// this process image and never returns, and a refusal has already been
 /// printed, so `Some` is the status to exit with.
 fn after_handoff(command: Command, argv: &[String], this: impl FnOnce() -> u8) -> u8 {

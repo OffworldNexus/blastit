@@ -1,18 +1,9 @@
-"""`blastit` and `python -m blastit`: the console script.
+"""`blastit`, `blastit-lsp` and `python -m blastit`: the console scripts.
 
-The package is pure Python: the command line is handed to the universal `blastit`
-binary the wheel ships at ``blastit/_bin/blastit`` (a bundle installs it at
-``<prefix>/share/blastit/lib/blastit``), so one ``py3-none-*`` wheel serves every
-CPython ``>=3.12``. Blastit therefore has no interpreter of its own in the
-process, and three things follow from that:
-
-* stage 0 records ``sys.executable`` in ``BLASTIT_WHEEL_PYTHON`` — the
-  interpreter ``blastit check`` runs the project's ``pytest`` on — in the
-  environment the binary inherits;
-* the credentials-holding role is the same binary with ``--role=dbproxy``: it
-  runs no interpreter at all;
-* the configuration comes from the environment, as §8.2 says: the usual
-  ``BLASTIT_*`` variables, plus an optional ``--preset NAME``.
+The package carries no server: every entry point ends in one ``os.execvpe`` of a
+binary it ships (``blastit/_bin/blastit``, and ``blastit/_bin/blastit-lsp``), so
+one ``py3-none-*`` wheel serves every CPython ``>=3.12`` and no interpreter hosts
+a stage. The command line and the exit status are the binary's own.
 """
 
 import os
@@ -21,11 +12,6 @@ import sys
 
 def main() -> None:
     """Runs blastit: it becomes the server, or exits non-zero.
-
-    ``BLASTIT_HANDOFF_DONE`` is deliberately not set here: §4's handoff is the
-    binary's, and it sets that variable when it hands the command to a
-    project's own ``blastit``. Setting it here would keep a pip-installed
-    ``blastit`` from ever using ``.venv/bin/blastit``.
 
     Raises `SystemExit`, which is what a console script's exit status is.
     """
@@ -39,8 +25,17 @@ def main_lsp() -> None:
     """`blastit-lsp`: the language server a bundle ships beside the binary."""
     from blastit import _blastit
 
-    program = _blastit.lsp_bin_path()
-    os.execvpe(program, [program, *sys.argv[1:]], dict(os.environ))
+    try:
+        # Resolved before the environment is copied, and the guard is in the
+        # environment this process becomes: asked for a program while `_bin/`
+        # has none, the fallbacks would find this very console script and
+        # `exec` it again, one interpreter deep per turn.
+        program = _blastit.lsp_bin_path()
+        environment = dict(os.environ)
+        environment.setdefault(_blastit.EXEC_GUARD, "1")
+        os.execvpe(program, [program, *sys.argv[1:]], environment)
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"blastit-lsp: {error}") from error
 
 
 if __name__ == "__main__":

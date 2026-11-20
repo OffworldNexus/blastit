@@ -860,12 +860,11 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          # Not `/tmp`: it is 1777, so when `python/tests/test_live_server.py`
-          # starts the wheel's production `blastit` as root, provenance refuses
-          # the `_bin/libblastit_py3*.so` it `dlopen`s with "owned by uid 1001;
-          # /tmp is writable" — correctly, because a shim another uid could
-          # replace is code a view uid chooses. The venv therefore lives under
-          # `/opt` (already `go-w` above) and is handed to root without
+          # Not `/tmp`: it is 1777, so a shim another uid could replace under it
+          # makes provenance refuse the `_bin/libblastit_py3*.so` the wheel
+          # `dlopen`s ("owned by uid 1001; /tmp is writable") — correctly, because
+          # that shim would be code a view uid chooses. The venv therefore lives
+          # under `/opt` (already `go-w` above) and is handed to root without
           # group/other write bits once it is filled.
           sudo --non-interactive mkdir -p /opt/blastit-tests
           sudo --non-interactive chown "$(id -u):$(id -g)" /opt/blastit-tests
@@ -874,14 +873,7 @@ jobs:
           sudo --non-interactive chown -R root:root /opt/blastit-tests
           sudo --non-interactive chmod -R go-w /opt/blastit-tests
       - name: Run the plugin's tests
-        # `python/tests/runnable_docs/fixtures/*` are runnable-docs fixture apps,
-        # driven by the docs harness from their own directory: each fixture app
-        # that collects tests has its own `pytest.ini`, and the imports only
-        # resolve with the fixture directory on `sys.path`. Collected from here
-        # they error at collection. Ignore them here rather than in a global
-        # `norecursedirs`, which would also change what the harness collects
-        # inside those directories.
-        run: /opt/blastit-tests/bin/pytest python/tests -q --ignore=python/tests/runnable_docs/fixtures
+        run: /opt/blastit-tests/bin/pytest python/tests -q
 
   # `make check` runs the docs gate and both critical-test guards; this job and
   # `guards` are what run them on a pull request. Nothing else here calls `make`

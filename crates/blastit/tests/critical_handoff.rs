@@ -660,7 +660,6 @@ fn the_production_shapes_never_hand_off() {
         vec!["--stage=1"],
         vec!["--stage=1", "--config-fd=0"],
         vec!["--role=dbproxy"],
-        vec!["--internal-json"],
         // A re-exec token after a subcommand word.
         vec!["dev", "--stage=1"],
         vec!["test", "--stage=1"],
@@ -669,7 +668,6 @@ fn the_production_shapes_never_hand_off() {
         vec!["--stage=1", "dev"],
         vec!["dev", "--role=dbproxy"],
         vec!["dev", "--preset=x"],
-        vec!["--internal-json", "dev"],
     ] {
         let output = project.run(&arguments, &[]);
         assert!(

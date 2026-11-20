@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,406 @@ WSGI_APP = """def application(environ, start_response):
     start_response("200 OK", [("Content-Type", "text/plain")])
     return [b"wsgi-fixture"]
 """
+
+#: The `shop` project: one store with one granted statement, and a WSGI app that
+#: runs it through Blastit's proxy inside the audited suite, so exit 0 means the
+#: grant matched *and* the statement reached the upstream.
+SHOP_MANIFEST = """app "shop"
+
+entrypoint python "app:application"
+
+postgres $DATABASE_URL
+
+view home regex '.*' {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+"""
+
+SHOP_APP = """import pgwire
+
+
+def application(environ, start_response):
+    if environ.get("PATH_INFO") in ("", "/", "/products/"):
+        pgwire.simple(["SELECT 1"])
+    start_response("200 OK", [("Content-Type", "text/plain")])
+    return [b"ok"]
+"""
+
+SHOP_TEST = """import io
+
+from app import application
+from blastit import _check_pytest as gate
+
+
+def request(method="GET", path="/", body=b"", content_type=None):
+    environ = {
+        "REQUEST_METHOD": method,
+        "PATH_INFO": path,
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.input": io.BytesIO(body),
+    }
+    if content_type:
+        environ["CONTENT_TYPE"] = content_type
+    status = {}
+    payload = b"".join(
+        gate.wrap(application)(environ, lambda code, headers: status.update(code=code))
+    )
+    return status.get("code"), payload
+
+
+def test_products():
+    code, payload = request(path="/products/")
+    assert code == "200 OK"
+    assert payload == b"ok"
+"""
+
+#: The `findings` project: the same shape, with `SELECT 9` run and never granted:
+#: the audit must report it (exit 1) rather than pass or crash.
+FINDINGS_MANIFEST = """app "findings"
+
+entrypoint python "app:application"
+
+postgres $DATABASE_URL
+
+postgres analytics $ANALYTICS_URL
+
+view catalog "/catalog" {
+    postgres {
+        query 'SELECT 1'
+    }
+}
+
+view search "/search" {
+    postgres {
+        query 'SELECT 9'
+    }
+}
+
+view checkout "/checkout" {}
+
+view upload POST "/upload" {}
+"""
+
+FINDINGS_APP = """import pgwire
+
+
+def application(environ, start_response):
+    path = environ.get("PATH_INFO", "")
+    if path == "/catalog":
+        pgwire.simple(["SELECT 1", "SELECT 2"])
+    start_response("200 OK", [("Content-Type", "text/plain")])
+    return [b"ok\\n"]
+"""
+
+FINDINGS_TEST = """import io
+
+from app import application
+from blastit import _check_pytest as gate
+
+
+def request(method="GET", path="/", body=b"", content_type=None):
+    environ = {
+        "REQUEST_METHOD": method,
+        "PATH_INFO": path,
+        "CONTENT_LENGTH": str(len(body)),
+        "wsgi.input": io.BytesIO(body),
+    }
+    if content_type:
+        environ["CONTENT_TYPE"] = content_type
+    status = {}
+    payload = b"".join(
+        gate.wrap(application)(environ, lambda code, headers: status.update(code=code))
+    )
+    return status.get("code"), payload
+
+
+def test_catalog():
+    assert request(path="/catalog")[0] == "200 OK"
+
+
+def test_search():
+    # No statement here: the grant the view declares is the unused one, and the
+    # statement the catalog runs is the missing one. Either is a finding.
+    assert request(path="/search")[0] == "200 OK"
+
+
+def test_upload():
+    assert request("POST", "/upload", b"name=blastit")[0] == "200 OK"
+"""
+
+PYTEST_INI = "[pytest]\naddopts = -p no:cacheprovider\n"
+
+#: The fixture's PostgreSQL client: the wire protocol, not a driver. `socket` is
+#: in the standard library, and `blastit` hands the app a local URL, so every
+#: byte still crosses the proxy.
+PGWIRE = '''"""The fixture app's PostgreSQL client: the wire protocol, not a driver."""
+
+import os
+import socket
+import struct
+from urllib.parse import parse_qs, urlsplit
+
+
+def _message(kind, payload=b""):
+    return kind + struct.pack("!I", len(payload) + 4) + payload
+
+
+def _read(sock, count):
+    data = b""
+    while len(data) < count:
+        chunk = sock.recv(count - len(data))
+        if not chunk:
+            raise EOFError
+        data += chunk
+    return data
+
+
+def _error_message(body):
+    fields = {}
+    for field in body.split(b"\\0"):
+        if len(field) >= 2:
+            fields[field[0:1]] = field[1:].decode("utf-8", "replace")
+    return f"SQLSTATE {fields.get(b'C', '?????')}: {fields.get(b'M', '')}"
+
+
+def _until_ready(sock):
+    while True:
+        kind = _read(sock, 1)
+        length = struct.unpack("!I", _read(sock, 4))[0]
+        body = _read(sock, length - 4)
+        if kind == b"E":
+            raise RuntimeError(_error_message(body))
+        if kind == b"Z":
+            return
+
+
+def _connect():
+    url = urlsplit(os.environ["DATABASE_URL"])
+    query = parse_qs(url.query)
+    host = query["host"][0]
+    port = query.get("port", ["5432"])[0]
+    database = url.path.lstrip("/") or "shop"
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(f"{host}/.s.PGSQL.{port}")
+    params = b"user\\0blastit\\0database\\0" + database.encode() + b"\\0\\0"
+    sock.sendall(struct.pack("!I", len(params) + 8) + struct.pack("!I", 196608) + params)
+    _until_ready(sock)
+    return sock
+
+
+def simple(statements):
+    sock = _connect()
+    try:
+        for statement in statements:
+            sock.sendall(_message(b"Q", statement.encode() + b"\\0"))
+            _until_ready(sock)
+    finally:
+        sock.close()
+'''
+
+SHOP_FILES = {
+    "Blastfile": SHOP_MANIFEST,
+    "pgwire.py": PGWIRE,
+    "pytest.ini": PYTEST_INI,
+    "app.py": SHOP_APP,
+    "tests/test_app.py": SHOP_TEST,
+}
+
+FINDINGS_FILES = {
+    "Blastfile": FINDINGS_MANIFEST,
+    "pgwire.py": PGWIRE,
+    "pytest.ini": PYTEST_INI,
+    "app.py": FINDINGS_APP,
+    "tests/test_app.py": FINDINGS_TEST,
+}
+
+
+def _pg_message(kind, payload=b""):
+    return kind + struct.pack("!I", len(payload) + 4) + payload
+
+
+def _pg_cstring(text):
+    return text.encode() + b"\0"
+
+
+def _pg_row_description(name="?column?", oid=23):
+    body = (
+        struct.pack("!h", 1)
+        + _pg_cstring(name)
+        + struct.pack("!ihihih", 0, 0, oid, -1, -1, 0)
+    )
+    return _pg_message(b"T", body)
+
+
+def _pg_data_row(value=b"1"):
+    return _pg_message(
+        b"D", struct.pack("!h", 1) + struct.pack("!i", len(value)) + value
+    )
+
+
+def _pg_command_complete(tag):
+    return _pg_message(b"C", _pg_cstring(tag))
+
+
+def _pg_ready():
+    return _pg_message(b"Z", b"I")
+
+
+def _pg_run(sql):
+    head = sql.strip().lower()
+    if head.startswith("select"):
+        return _pg_row_description() + _pg_data_row() + _pg_command_complete("SELECT 1")
+    if head.startswith("begin"):
+        return _pg_command_complete("BEGIN")
+    if head.startswith(("commit", "end")):
+        return _pg_command_complete("COMMIT")
+    if head.startswith("rollback"):
+        return _pg_command_complete("ROLLBACK")
+    if head.startswith("set"):
+        return _pg_command_complete("SET")
+    return _pg_command_complete("OK")
+
+
+def _pg_startup():
+    """AuthenticationOk, the ParameterStatus set libpq needs, ReadyForQuery."""
+    return (
+        _pg_message(b"R", struct.pack("!i", 0))
+        + _pg_message(b"S", _pg_cstring("server_version") + _pg_cstring("16.0"))
+        + _pg_message(b"S", _pg_cstring("client_encoding") + _pg_cstring("UTF8"))
+        + _pg_message(
+            b"S", _pg_cstring("standard_conforming_strings") + _pg_cstring("on")
+        )
+        + _pg_message(b"S", _pg_cstring("DateStyle") + _pg_cstring("ISO, MDY"))
+        + _pg_message(b"S", _pg_cstring("integer_datetimes") + _pg_cstring("on"))
+        + _pg_message(b"S", _pg_cstring("TimeZone") + _pg_cstring("UTC"))
+        + _pg_message(b"K", struct.pack("!ii", 1234, 5678))
+        + _pg_ready()
+    )
+
+
+class _PgConnection:
+    """One client: startup, then the simple and extended query protocols."""
+
+    def __init__(self, sock):
+        self.sock = sock
+        self.buffer = b""
+        self.statements = {}
+
+    def read(self, count):
+        while len(self.buffer) < count:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise EOFError
+            self.buffer += chunk
+        data, self.buffer = self.buffer[:count], self.buffer[count:]
+        return data
+
+    def serve(self):
+        while True:
+            length = struct.unpack("!I", self.read(4))[0]
+            body = self.read(length - 4)
+            code = struct.unpack("!I", body[:4])[0]
+            if code == 80877103:
+                # SSLRequest: refused, exactly as a server with no TLS answers.
+                self.sock.sendall(b"N")
+                continue
+            if code == 196608:
+                self.sock.sendall(_pg_startup())
+                break
+            raise EOFError(f"unknown startup packet {code}")
+        while True:
+            kind = self.read(1)
+            length = struct.unpack("!I", self.read(4))[0]
+            body = self.read(length - 4)
+            if kind == b"Q":
+                self.sock.sendall(_pg_run(body[:-1].decode()) + _pg_ready())
+            elif kind == b"P":
+                name, sql = [part.decode() for part in body.split(b"\0")[:2]]
+                self.statements[name] = sql
+                self.sock.sendall(_pg_message(b"1"))
+            elif kind == b"B":
+                self.sock.sendall(_pg_message(b"2"))
+            elif kind == b"D":
+                answer = self.statements.get(body[1:-1].decode(), "")
+                selected = answer.strip().lower().startswith("select")
+                rows = _pg_row_description() if selected else _pg_message(b"n")
+                if body[:1] == b"S":
+                    self.sock.sendall(_pg_message(b"t", struct.pack("!h", 0)) + rows)
+                else:
+                    self.sock.sendall(rows)
+            elif kind == b"E":
+                name = body.split(b"\0")[0].decode()
+                self.sock.sendall(_pg_run(self.statements.get(name, "")))
+            elif kind == b"S":
+                self.sock.sendall(_pg_ready())
+            elif kind == b"C":
+                self.sock.sendall(_pg_message(b"3"))
+            elif kind in (b"H", b"p"):
+                continue
+            elif kind == b"X":
+                return
+            else:
+                raise EOFError(f"unknown frontend message {kind!r}")
+
+
+class PgStub:
+    """A deterministic PostgreSQL wire stub bound to one loopback port.
+
+    The audited fixture app and `blastit-dbproxy` both need a real socket, so the
+    row serves one: startup, simple queries and the extended protocol answer the
+    way a server does, and every connection is served on its own daemon thread.
+    """
+
+    def __init__(self, host="127.0.0.1", port=0):
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind((host, port))
+        self.port = self._listener.getsockname()[1]
+        self._listener.listen(64)
+        self._closed = threading.Event()
+        self._thread = threading.Thread(target=self._accept, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._closed.set()
+        try:
+            self._listener.close()
+        except OSError:
+            pass
+
+    def _accept(self):
+        while not self._closed.is_set():
+            try:
+                sock, _ = self._listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(sock,), daemon=True).start()
+
+    def _serve(self, sock):
+        try:
+            _PgConnection(sock).serve()
+        except (EOFError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def project(root, files):
+    """Writes one fixture project from `files` and returns its directory."""
+    root.mkdir(parents=True, exist_ok=True)
+    for relative, text in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -449,35 +850,29 @@ def row_no_reload(binary, run, out):
 
 def row_check(binary, run, out, python):
     """Row 5: the complete fixture, then one missing a grant."""
-    sys.path.insert(0, str(ROOT / "python/tests/runnable_docs"))
-    import pgstub
-
-    stub = pgstub.PgStub("127.0.0.1", 0)
-    stub.start()
-    url = f"postgresql://shop:secret@127.0.0.1:{stub.port}/shop"
-    env = {"DATABASE_URL": url, "ANALYTICS_URL": url}
+    fixtures = {
+        "shop": project(run / "fixtures/shop", SHOP_FILES),
+        "findings": project(run / "fixtures/findings", FINDINGS_FILES),
+    }
+    env = {"PYTHONPATH": str(ROOT / "python")}
     if python:
         env["BLASTIT_PYTHON"] = str(python)
-    try:
+    with PgStub() as stub:
+        url = f"postgresql://shop:secret@127.0.0.1:{stub.port}/shop"
+        env = {**env, "DATABASE_URL": url, "ANALYTICS_URL": url}
         for name, expected in (("shop", 0), ("findings", CHECK_EXIT_FINDINGS)):
-            project = run / "fixtures" / name
-            shutil.copytree(
-                ROOT / "python/tests/runnable_docs/fixtures" / name,
-                project,
-                dirs_exist_ok=True,
-            )
+            fixture = fixtures[name]
             for suffix, args in (("", ["check"]), ("-json", ["check", "--json"])):
-                completed = finish(binary, project, args, env)
+                completed = finish(binary, fixture, args, env)
                 write(out / f"row5-{name}{suffix}.stdout", completed.stdout)
                 write(out / f"row5-{name}{suffix}.stderr", completed.stderr)
                 write(out / f"row5-{name}{suffix}.exit", f"{completed.returncode}\n")
                 if completed.returncode != expected:
                     raise Failure(
-                        f"row 5: `blastit check` on {name} exited {completed.returncode}, "
-                        f"expected {expected}"
+                        f"row 5: `blastit check` on {name} exited "
+                        f"{completed.returncode}, expected {expected}: "
+                        f"{completed.stderr.strip() or completed.stdout.strip()}"
                     )
-    finally:
-        stub.stop()
 
 
 def row_libphp_refusal(binary, run, out):

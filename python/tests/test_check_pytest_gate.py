@@ -3,20 +3,14 @@
 `python/blastit/_check_pytest.py` is the one place a `blastit check` run learns
 which request the statements that follow belong to. It talks to dbproxy over an
 inherited `AF_UNIX` descriptor, so its tests use a real
-:func:`socket.socketpair` — never a mock server: what is asserted is the bytes
-on the wire and the observation file the orchestrator reads.
+:func:`socket.socketpair` — never a mock server.
 
 Two shapes are covered, because a store-less application declares no `postgres`
-proxy at all (`MB.40.2`):
-
-* **no proxy** — no ``BLASTIT_CHECK_CTL_FD`` is handed over: the request is
-  recorded and nothing is pushed, and the gate must not raise;
-* **a proxy** — the descriptor is a real socketpair, and the gate pushes
-  ``push_unrouted`` before the application runs and ``pop`` once the body is
-  exhausted, waiting for the proxy's ``{"ok": true}`` reply to each.
-
-The adversarial half is the dead channel: a proxy that has closed its end is
-exit `3` (`ControlError`), never a request silently attributed to nobody.
+proxy at all (`MB.40.2`): with no ``BLASTIT_CHECK_CTL_FD`` the request is
+recorded and nothing is pushed; with one, the gate pushes ``push_unrouted``,
+waits for ``{"ok": true}``, and pops once the body is exhausted. The adversarial
+half is the dead channel: a proxy that has closed its end is exit `3`
+(`ControlError`), never a request silently attributed to nobody.
 """
 
 from __future__ import annotations
@@ -203,11 +197,10 @@ class GateTest(unittest.TestCase):
 
 
 class StdlibProbeTest(unittest.TestCase):
-    """The sample without the C extension (`MB.40.8`).
+    """The sample the gate computes in the suite's own process (`MB.40.8`).
 
-    A staged bundle can carry `_blastit` for another CPython minor, so
-    :func:`blastit._check_pytest._probe` falls back to this pure-stdlib twin.
-    It answers exactly the keys the audit reads, over the same bounded prefix.
+    :func:`blastit._check_pytest._probe` answers exactly the keys the audit
+    reads, over the same bounded prefix, with no artifact to import.
     """
 
     def test_a_json_body_is_valid_and_a_duplicate_key_is_not(self) -> None:
@@ -257,26 +250,7 @@ class StdlibProbeTest(unittest.TestCase):
         self.assertFalse(sample["valid_form"])
 
 
-def _extension_probe():
-    """`_blastit.probe_ingress` as a callable, or `None` without the extension.
-
-    `make test-critical` stages the extension beside the package; a bare
-    `uv run` of this file does not. The corpus test therefore always asserts the
-    documented sample, and compares against the extension byte for byte whenever
-    it is importable.
-    """
-    try:
-        from blastit import _blastit
-    except ImportError:
-        return None
-
-    def probe(content_type, body):
-        return json.loads(_blastit.probe_ingress(content_type, body, len(body)))
-
-    return probe
-
-
-#: One body per row the two probes must agree on (`MB.40.8`).
+#: One body per row the gate judges (`MB.40.8`).
 SHARED_CORPUS = [
     ("application/json; charset=utf-8", b'{"a": [1, 2, {"b": null}]}'),
     (None, b'{"a": 1}'),
@@ -297,10 +271,9 @@ SHARED_CORPUS = [
 
 
 class SharedCorpusTest(unittest.TestCase):
-    """The stdlib probe against the Rust gate, on one shared corpus (`MB.40.8`)."""
+    """The stdlib probe over every body shape the gate sees (`MB.40.8`)."""
 
-    def test_the_shared_corpus_matches_the_extension(self) -> None:
-        extension = _extension_probe()
+    def test_the_shared_corpus_answers_well_formed_samples(self) -> None:
         for content_type, body in SHARED_CORPUS:
             sample = _check_pytest._probe_stdlib(content_type, body, len(body))
             self.assertIsInstance(sample["mime"], str, content_type)
@@ -311,8 +284,6 @@ class SharedCorpusTest(unittest.TestCase):
                 len(body) > _check_pytest.MAX_SAMPLE_BYTES,
                 content_type,
             )
-            if extension is not None:
-                self.assertEqual(sample, extension(content_type, body), content_type)
 
     def test_depth_is_capped_like_the_rust_parser(self) -> None:
         at_cap = _check_pytest._probe_stdlib(

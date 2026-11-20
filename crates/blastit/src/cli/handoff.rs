@@ -5,9 +5,8 @@
 //! writes `vendor/bin/blastit`, `npm` writes `node_modules/.bin/blastit` — means
 //! *that* one, so those four commands re-exec it with the same command line and
 //! print nothing. `Serve` never does: `--preset`, `--stage=1`, `--role=*`,
-//! `--internal-json`, `--help` and `--version` are answered by the binary that
-//! was typed, because a deployment must be the artifact the operator installed
-//! (`R6`–`R8`).
+//! `--help` and `--version` are answered by the binary that was typed, because
+//! a deployment must be the artifact the operator installed (`R6`–`R8`).
 //!
 //! # Why every decision is made on a descriptor
 //!
@@ -165,7 +164,7 @@ pub(super) fn attempt(command: Command, argv: &[String]) -> Option<u8> {
 }
 
 /// The word the user typed (`dev`, `check`, `test`, `fmt`, `lsp`), or `None` for
-/// the two shapes that never hand off.
+/// the one shape that never hands off.
 ///
 /// It comes from `argv`, not from [`Command`]: `blastit test` is `Check`, and a
 /// handoff that reported `blastit check:` would name a command nobody typed.
@@ -174,7 +173,7 @@ fn name(command: Command, argv: &[String]) -> Option<&str> {
         Command::Dev | Command::Check | Command::Fmt | Command::Lsp => {
             argv.first().map(String::as_str)
         }
-        Command::Serve | Command::InternalJson => None,
+        Command::Serve => None,
     }
 }
 

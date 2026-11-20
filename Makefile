@@ -5,7 +5,7 @@
 #   make check            # full unprivileged epic/release gate (fast-check + docs + wheel + standalone ELF + packaging gates)
 #   make clean            # format Rust and Python harness tools, then run lints
 #   make docs-check       # build Zensical documentation site with --strict (zero broken links/anchors)
-#   make docs-unit        # run the runnable-docs gate's own tests (offline, no wheel build)
+#   make docs-unit        # run the package's offline Python suites (no wheel build)
 #   make docs-serve       # build the site and serve it through a freshly built `blastit dev` (PORT=8080)
 #   make docs-serve-check # bounded smoke test of the docs serve stack (binds a port; not in `check`)
 #   make test-critical    # run critical skip check + staged Python critical tests (offline)
@@ -27,7 +27,6 @@
 UV ?= uv
 UVX ?= uvx --offline
 CARGO ?= cargo
-DOCS_PYTEST ?= 9.2.0
 
 # `make install`: one self-contained bundle under PREFIX (`MB.40.8`).
 # `$PREFIX/bin/{blastit,blastit-lsp}` are symlinks into `$PREFIX/share/blastit`,
@@ -114,7 +113,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help fast-check check clean guard critical-guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check coverage \
-        universal-smoke py-format py-lint test-critical docs-check docs-unit docs-test e2e e2e-universal mutants-rust \
+        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-universal mutants-rust \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image python-runtime platform-matrix-check standalone standalone-glibc workflow-check \
         packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp \
@@ -389,43 +388,9 @@ test-critical: critical-skip-check ## Run critical skip check + staged Python cr
 docs-check: ## Build Zensical documentation site with --strict
 	$(UVX) zensical build --strict
 
-docs-unit: ## Run runnable-docs and release-hygiene unit tests (offline, no wheel build)
-	UV_OFFLINE=1 $(UV) run --no-project --with pytest==$(DOCS_PYTEST) python -m pytest \
-		python/tests/test_runnable_docs.py \
-		python/tests/runnable_docs/test_harness.py \
-		python/tests/test_docs_assets.py \
-		python/tests/test_release_scripts.py -q
-
-# Build host wheel into `target/docs-wheel`, preserving any pre-existing `dist/` across the run.
-# `py-sapi` first, with `PY_SAPI_REQUIRE_ALL=1`: the runnable fences install the
-# wheel and boot a WSGI view, so the wheel must carry both CPython shims, and a
-# host missing 3.13 or 3.14 fails naming the interpreter rather than in
-# `--require-shims py` blaming the wheel step (`MB.47.2`).
-DOCS_WHEEL_STAGE ?= $(CURDIR)/target/docs-wheel
-docs-test: SHELL := /bin/bash
-docs-test: PY_SAPI_REQUIRE_ALL := 1
-docs-test: docs-unit py-sapi ## Execute runnable console fences across README.md and docs/ (needs the CPython 3.13/3.14 shims)
-	scripts/build-wheel.sh --require-shims py -o "$(DOCS_WHEEL_STAGE)"
-	@set -euo pipefail; \
-	saved=""; had_dist=0; \
-	if [ -d "$(CURDIR)/dist" ]; then \
-		had_dist=1; \
-		saved=$$(mktemp -d "$${TMPDIR:-/var/tmp}/blastit-saved-dist.XXXXXX"); \
-		mv "$(CURDIR)/dist" "$$saved/dist"; \
-	fi; \
-	restore_dist() { \
-		rm -rf "$(CURDIR)/dist"; \
-		if [ "$$had_dist" -eq 1 ] && [ -d "$$saved/dist" ]; then \
-			mv "$$saved/dist" "$(CURDIR)/dist"; \
-		fi; \
-		[ -n "$$saved" ] && rm -rf "$$saved" || true; \
-	}; \
-	trap restore_dist EXIT; \
-	mkdir -p "$(CURDIR)/dist"; \
-	cp "$(DOCS_WHEEL_STAGE)"/blastit-*.whl "$(CURDIR)/dist/"; \
-	UV_OFFLINE=1 BLASTIT_REQUIRE_WHEEL=1 $(UV) run --no-project --with pytest==$(DOCS_PYTEST) python -m pytest -q \
-		python/tests/test_release_scripts.py::test_built_wheel_long_description_has_absolute_links; \
-	$(UV) run --no-project python python/tests/runnable_docs/run.py
+docs-unit: ## Run the package's offline Python suites (no wheel build)
+	UV_OFFLINE=1 PYTHONPATH="$(CURDIR)/python" $(UV) run --no-project python -m unittest \
+		python/tests/test_check_pytest_gate.py python/tests/test_launcher.py
 
 # Stage Zensical `site/` + minimal static `Blastfile` and verify portable standalone `blastit`.
 docs-serve-stage:
@@ -929,7 +894,7 @@ print-mutants-tmp: ## Print the mutants scratch directory (disk, never /tmp)
 
 fast-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test py-lint workflow-check plan-validate universal-smoke ## Fast per-slice Rust + Python + plan + workflow check
 
-check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check docs-test rs-no-python rs-no-default seam-check e2e-universal platform-matrix-check workflow-check packaging-gates-test zed-check plan-validate ## Full unprivileged epic/release gate
+check: guard critical-guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check rs-no-python rs-no-default seam-check e2e-universal platform-matrix-check workflow-check packaging-gates-test zed-check plan-validate ## Full unprivileged epic/release gate
 
 # `make install` stages the §6.1 bundle: one universal `blastit` (the default
 # `python,php,static` features), its `blastit-lsp`, every shim this host built,

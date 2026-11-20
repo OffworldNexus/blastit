@@ -34,7 +34,7 @@ prefix="$1"
 share="$prefix/share/blastit"
 lib="$share/lib"
 package="$share/python/blastit"
-modules="__init__ __main__ _blastit _check_pytest fold logs pytest_plugin"
+modules="__init__ __main__ _blastit _check_pytest"
 problems=0
 
 fail() {
@@ -67,7 +67,7 @@ for name in blastit blastit-lsp; do
     fi
 done
 
-# --- the licence and the seven modules of the pure-Python package ------------
+# --- the licence and the four modules of the pure-Python package ------------
 [ -f "$share/LICENSE" ] ||
     fail "$share/LICENSE is missing; re-run make install (the bundle ships the licence)"
 
@@ -101,7 +101,7 @@ while IFS= read -r -d '' path; do
             case " $modules " in
                 *" $module "*) ;;
                 *)
-                    fail "$share/$relative is not one of the seven modules §6.1 ships ($modules); re-run make install"
+                    fail "$share/$relative is not one of the four modules §6.1 ships ($modules); re-run make install"
                     ;;
             esac
             ;;

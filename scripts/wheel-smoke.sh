@@ -13,9 +13,9 @@
 #   1a. `blastit --version` answers, and `--help` prints the usage the binary
 #      ships (`blastit` became a `py3-none` wheel in `MB.42.3.3`, so the version
 #      line is what proves the console script reaches the repacked binary);
-#   1b. the three console scripts design §6.1 names exist and are executable:
-#      `blastit`, `blastit-lsp` (which had no entry point at all before the
-#      repack) and `blastit-manifest` — a `bindings = "bin"` wheel shipped none;
+#   1b. the two console scripts design §6.1 names exist and are executable:
+#      `blastit` and `blastit-lsp` (which had no entry point at all before the
+#      repack) — a `bindings = "bin"` wheel shipped none;
 #   1c. the embedded `blastit/_bin/blastit` carries no test-only boot seam
 #      (`MB.3.67`): the wheel is the release artifact a `pip install blastit`
 #      gets, so the file `pip` installed is measured for
@@ -28,9 +28,9 @@
 #      interpreter in the manifest, so nothing here depends on Python *inside*
 #      the app, only on the interpreter that loaded the package.
 #
-# `scripts/wheel-drive.sh` is the companion that drives `blastit check`,
-# `blastit-manifest fold` and `blastit-lsp --help`; this script stops at the
-# serving proof so the CI legs that only need "the wheel works here" stay short.
+# `scripts/wheel-drive.sh` is the companion that drives `blastit check` and
+# `blastit-lsp`; this script stops at the serving proof so the CI legs that only
+# need "the wheel works here" stay short.
 #
 # Usage: scripts/wheel-smoke.sh [--python PATH] WHEEL [WHEEL...]
 #
@@ -88,10 +88,10 @@ echo "wheel-smoke: installed $*"
 # CPython (the musl legs) does not put its `bin/` on `PATH`, and an image's own
 # CPython does. Ask both.
 bindir="$(dirname "$python")"
-for name in blastit blastit-lsp blastit-manifest; do
+for name in blastit blastit-lsp; do
     if [ ! -x "$bindir/$name" ] && ! command -v "$name" >/dev/null 2>&1; then
         echo "error: the wheel installed no \`$name\` console script beside $python" >&2
-        echo "  (design §6.1: blastit, blastit-lsp and blastit-manifest)" >&2
+        echo "  (design §6.1: blastit, blastit-lsp)" >&2
         exit 1
     fi
 done
@@ -99,48 +99,7 @@ blastit_bin="$bindir/blastit"
 if [ ! -x "$blastit_bin" ]; then
     blastit_bin=$(command -v blastit)
 fi
-echo "wheel-smoke: console scripts on PATH: blastit, blastit-lsp, blastit-manifest"
-
-# 1b. The installed wheel's `entry_points.txt` carries the console scripts
-# **and** the sections `maturin` wrote from `[project.entry-points.*]`: the
-# repack used to rewrite that file with only `[console_scripts]`, which silently
-# deleted the pytest plugin from every released wheel (`MB.49`). Read it out of
-# the installed metadata, because that is what `pytest` reads.
-"$python" - <<'PY'
-import importlib.metadata
-import re
-import sys
-
-problems = []
-entry_points = importlib.metadata.distribution("blastit").read_text(
-    "entry_points.txt"
-) or ""
-for section in ("[console_scripts]", "[pytest11]"):
-    if section not in entry_points:
-        problems.append(f"entry_points.txt has no {section}")
-# The plugin entry point must sit in the `[pytest11]` body (a line under
-# `[console_scripts]` is not the plugin), and `maturin` writes no spaces around
-# `=`; `splitlines()` + `strip()` also accept CRLF metadata.
-pytest11 = []
-current = None
-for line in entry_points.splitlines():
-    stripped = line.strip()
-    if stripped.startswith("[") and stripped.endswith("]"):
-        current = stripped
-    elif current == "[pytest11]" and stripped:
-        pytest11.append(stripped)
-if not any(
-    re.fullmatch(r"blastit[ \t]*=[ \t]*blastit\.pytest_plugin[ \t]*", line)
-    for line in pytest11
-):
-    problems.append("entry_points.txt has no `blastit = blastit.pytest_plugin` (pytest11)")
-if problems:
-    for problem in problems:
-        print(f"FAIL {problem}", file=sys.stderr)
-    print(entry_points, file=sys.stderr)
-    sys.exit(1)
-print("wheel-smoke: entry_points.txt carries [console_scripts] and [pytest11]")
-PY
+echo "wheel-smoke: console scripts on PATH: blastit, blastit-lsp"
 
 # 1a. `--version` and `--help` come from the binary the repack put in
 # `blastit/_bin/`; a wheel whose console script cannot find it dies here.

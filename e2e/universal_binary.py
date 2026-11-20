@@ -25,8 +25,8 @@ Legs (one PASS/FAIL/SKIP line each, and one summary):
   global binary prints nothing, and never runs for production, `--version` or
   `help`;
 * `check 3.12` — a CPython 3.12 venv with no per-minor `.so` runs
-  `python -m blastit check --json` and `python -m blastit.fold`, which is the
-  whole pure-Python (`>=3.12`) half of the one-artifact claim.
+  `python -m blastit check --json`, which is the whole pure-Python (`>=3.12`)
+  half of the one-artifact claim.
 
 A SKIP means "this host cannot prove the claim", never "the claim holds": the
 summary exits 1 on any SKIP unless `--allow-skip` is passed, and the gates that
@@ -105,26 +105,6 @@ def application(environ, start_response):
 
 STATIC_MANIFEST = 'static "/" {\n    root "public"\n}\n'
 STATIC_INDEX = b"<!doctype html><h1>one binary, four runtimes</h1>\n"
-
-#: A store-less view with one grant, so `fold` has a view to add a grant to and
-#: `check`/`fold` never touch a socket: the denial comes from the log, not a
-#: database this host may not have.
-FOLD_MANIFEST = """postgres $DATABASE_URL
-
-view notes GET "/notes/" {
-    postgres {
-        query 'SELECT 1'
-    }
-}
-"""
-
-#: One `sql.denied` event, in the shape dbproxy writes (normalised text; a
-#: `$?` placeholder is not SQL, which is exactly what `fold` must not re-parse).
-#: The unnamed `postgres $DATABASE_URL` takes the store name `db` (§7.3).
-FOLD_LOG = (
-    '{"event":"sql.denied","route":"notes","proxy":"db",'
-    '"sql":"SELECT id FROM notes WHERE id = $?","reason":"no grant"}\n'
-)
 
 
 class Skip(Exception):
@@ -719,7 +699,7 @@ def leg_handoff(ctx: Context) -> str:
 
 
 def leg_check(ctx: Context, minor: str) -> str:
-    """CPython `minor` (no per-minor `.so`) runs `check --json` and `fold`."""
+    """CPython `minor` (no per-minor `.so`) runs `check --json`."""
     bundle_python = ctx.binary.resolve().parent.parent / "python"
     if not (bundle_python / "blastit" / "_blastit.py").is_file():
         raise Skip(
@@ -738,11 +718,8 @@ def leg_check(ctx: Context, minor: str) -> str:
     )
 
     # `$DATABASE_URL` is a manifest env reference, so the lowered model needs it
-    # to exist; nothing ever connects, and the store is the point only of `fold`.
-    env = {
-        "PYTHONPATH": str(bundle_python),
-        "DATABASE_URL": "postgres://blastit:blastit@127.0.0.1:1/blastit",
-    }
+    # to exist; nothing ever connects, because the static route stores nothing.
+    env = {"PYTHONPATH": str(bundle_python)}
     check_project = ctx.work / f"check-{minor}"
     write(check_project / "Blastfile", STATIC_MANIFEST)
     write(check_project / "public" / "index.html", STATIC_INDEX.decode())
@@ -769,41 +746,6 @@ def leg_check(ctx: Context, minor: str) -> str:
         f"`check --json` did not say ok: {document!r}",
     )
 
-    fold_project = ctx.work / f"fold-{minor}"
-    write(fold_project / "Blastfile", FOLD_MANIFEST)
-    write(fold_project / "app.log", FOLD_LOG)
-    fold = run(
-        [
-            str(venv_python),
-            "-m",
-            "blastit.fold",
-            "app.log",
-            "--manifest",
-            "Blastfile",
-        ],
-        cwd=fold_project,
-        env=env,
-    )
-    expect(
-        fold.returncode == 0,
-        f"`python -m blastit.fold` exited {fold.returncode}: {fold.stderr.strip()}",
-    )
-    # The grant, not the echoed denial: `fold` prints the directives to paste
-    # inside the view's store block — a `# view <route> (store <store>):` heading
-    # over a `query '<normalised statement>'` line — so that line is what proves
-    # both that the denial resolved to a declared store and that the statement is
-    # the one the log carried (`$?` and all, never re-parsed as SQL).
-    expect(
-        "query 'SELECT id FROM notes WHERE id = $?'" in fold.stdout,
-        "`fold` printed no `query '…'` grant for the denied statement: "
-        f"{fold.stdout[:600]!r}",
-    )
-    expect(
-        "# view notes (store db)" in fold.stdout,
-        "`fold` did not name the view and the store the grant belongs to: "
-        f"{fold.stdout[:600]!r}",
-    )
-
     # The bridge found the bundle's own binary through the §6.1 layout
     # (`<pkg>/../../lib/blastit`), not through PATH or `BLASTIT_BIN`.
     probe = run(
@@ -812,7 +754,7 @@ def leg_check(ctx: Context, minor: str) -> str:
             "-c",
             "from blastit import _blastit; print(_blastit.bin_path())",
         ],
-        cwd=fold_project,
+        cwd=check_project,
         env=env,
     )
     expect(probe.returncode == 0, f"`bin_path()` failed: {probe.stderr.strip()}")
@@ -827,7 +769,7 @@ def leg_check(ctx: Context, minor: str) -> str:
         f"the CPython {minor} venv holds a per-minor shim, so the leg proves nothing",
     )
     ctx.still_one_file()
-    return f"check --json ok + fold on CPython {minor}, no per-minor .so"
+    return f"check --json ok on CPython {minor}, no per-minor .so"
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
         "--handoff", action="store_true", help="a project's .venv/bin/blastit marker"
     )
     parser.add_argument(
-        "--check", action="store_true", help="check --json and fold on an old CPython"
+        "--check", action="store_true", help="check --json on an old CPython"
     )
     parser.add_argument(
         "--check-python", default="3.12", metavar="MINOR", help="the --check minor"

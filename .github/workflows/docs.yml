@@ -69,18 +69,12 @@ jobs:
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v10.3.2
-      # The inventory half of `make docs-test`, which needs no wheel: the page
-      # list the gate executes must equal the public pages `zensical.toml` names,
-      # every listed page must parse into the fences the inventory indexes, and
-      # every fence mode/reason/fixture must be valid. Any problem is printed
-      # with the file to fix and fails the job before a page is published.
-      #
-      # The inventory only compares the pages it *names*, so on its own it cannot
-      # see a brand-new page that neither it nor the nav mentions (the orphan
-      # class). The second half closes that: every Markdown page under `docs_dir`
-      # that `exclude_docs` does not keep out must be named by the nav, exactly
-      # as `--strict` would publish it.
-      - name: Check the runnable-docs inventory and the page list
+      # The page list `zensical.toml` publishes must be the one its nav names:
+      # every Markdown page under `docs_dir` that `exclude_docs` does not keep
+      # out has to appear in the nav, exactly as `--strict` would publish it. An
+      # orphan page ships a URL nothing links to, which is a page the review
+      # never read.
+      - name: Check the page list
         env:
           UV_PYTHON_DOWNLOADS: never
         run: |
@@ -91,14 +85,7 @@ jobs:
           import tomllib
           from pathlib import Path
 
-          sys.path.insert(0, "python/tests/runnable_docs")
-
-          from harness import load_inventory
-          from run import INVENTORY, check_inventory
-
           problems: list[str] = []
-          pages = load_inventory(INVENTORY)
-          problems += check_inventory(pages)
 
           # `zensical.toml` is where the site and the gate both get their page
           # list from, so the orphan check reads what the build reads:
@@ -145,23 +132,18 @@ jobs:
           for orphan in orphans:
               problems.append(
                   f"{orphan} is published by the site but named by neither the nav "
-                  "nor the runnable-docs inventory"
+                  "nor an exclude_docs rule"
               )
 
           for problem in problems:
-              print(f"inventory: {problem}", file=sys.stderr)
+              print(f"pages: {problem}", file=sys.stderr)
           if problems:
               print(
-                  "inventory: the runnable-docs gate and the site disagree; fix "
-                  "python/tests/runnable_docs/inventory.toml or zensical.toml's nav",
+                  "pages: the site and its nav disagree; fix zensical.toml's nav",
                   file=sys.stderr,
               )
               sys.exit(1)
-          fences = sum(len(page.fences) for page in pages)
-          print(
-              f"inventory: {len(pages)} pages / {fences} fences accounted, "
-              f"{len(named)} nav pages, 0 orphan pages"
-          )
+          print(f"pages: {len(named)} nav pages, 0 orphan pages")
           PY
       - name: Install Zensical
         run: pipx install "zensical==$ZENSICAL_VERSION"

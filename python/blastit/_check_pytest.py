@@ -511,7 +511,7 @@ def _hookimpl(function: Any) -> Any:
 
     Deferred import: the module is also imported by test suites and by the
     offline contract tier, where pytest is not installed. The import is the
-    plugin host's, exactly like `blastit.pytest_plugin`'s.
+    plugin host's, so it happens here and never at module import time.
     """
     try:
         import pytest

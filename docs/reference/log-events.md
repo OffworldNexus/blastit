@@ -9,7 +9,7 @@ exit `2` leaves stdout empty.
 
 | `BLASTIT_LOG_FORMAT` | What it prints |
 |---|---|
-| `json` (the default) | one JSON object per line, for a collector and for `blastit-manifest fold` |
+| `json` (the default) | one JSON object per line, for a collector |
 | `pretty` | the same events as coloured, aligned lines, for debugging by hand; `blastit dev` and `blastit check` use it by default |
 
 Every event carries `ts`, `level`, `event` and `component`, plus `route` and

@@ -155,10 +155,7 @@ assert_payload() {
         /usr/share/blastit/python/blastit/__init__.py \
         /usr/share/blastit/python/blastit/__main__.py \
         /usr/share/blastit/python/blastit/_blastit.py \
-        /usr/share/blastit/python/blastit/_check_pytest.py \
-        /usr/share/blastit/python/blastit/fold.py \
-        /usr/share/blastit/python/blastit/logs.py \
-        /usr/share/blastit/python/blastit/pytest_plugin.py; do
+        /usr/share/blastit/python/blastit/_check_pytest.py; do
         require "$path"
     done
     # The 8 libraries, by the names `ADR-0010` §4.1 fixes: 4 PHP minors and the 2
@@ -174,8 +171,8 @@ assert_payload() {
         [ "$count" -eq 1 ] || fail "$count Python $minor shim(s) installed, §6.1 ships exactly 1"
     done
     total=$(printf '%s\n' "$files" | grep -c '^/usr/share/blastit/' || true)
-    [ "$total" -eq 16 ] ||
-        fail "$total paths under /usr/share/blastit, §6.1 ships 16 (LICENSE, 8 libs, 7 modules)"
+    [ "$total" -eq 13 ] ||
+        fail "$total paths under /usr/share/blastit, §6.1 ships 13 (LICENSE, 8 libs, 4 modules)"
     [ "$(readlink /usr/bin/blastit)" = ../share/blastit/lib/blastit ] ||
         fail "/usr/bin/blastit does not point at ../share/blastit/lib/blastit"
     [ "$(readlink /usr/bin/blastit-lsp)" = ../share/blastit/lib/blastit-lsp ] ||

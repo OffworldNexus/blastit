@@ -215,25 +215,6 @@ pub(super) fn parse_fmt(arguments: &[String]) -> Result<Subcommand<FmtOptions>, 
     Ok(Subcommand::Run(FmtOptions { check, path }))
 }
 
-/// Parses `blastit --internal-json`: no arguments at all.
-///
-/// The flag is the whole command line — the requests are stdin's JSON lines and
-/// the answers are stdout's — so a second word is a mistake in what somebody
-/// typed (`exit 2`), and `--stage=1`/`--role=*` may never share a line with it.
-///
-/// # Errors
-///
-/// A one-line message naming the argument that does not belong.
-pub(super) fn parse_internal_json(arguments: &[String]) -> Result<(), String> {
-    match arguments.first() {
-        None => Ok(()),
-        Some(argument) => Err(format!(
-            "`--internal-json` reads its requests on stdin and takes no argument: \
-             `{argument}` belongs to a different command"
-        )),
-    }
-}
-
 /// Parses and validates `blastit lsp` (`MB.22.3`).
 ///
 /// The session has no argument: the editor writes the protocol on stdin and
@@ -330,14 +311,6 @@ pub(super) fn parse(arguments: &[String]) -> Result<Args, Refusal> {
             index += 1;
             args.preset = Some(preset::name(value).map_err(refuse)?);
             continue;
-        }
-        if argument == "--internal-json" {
-            // The dispatcher is a command of its own (`MB.42.2.2.2`): it never
-            // rides on a re-exec line, and the other way round is
-            // `parse_internal_json`'s refusal.
-            return Err(Refusal::usage(
-                "`--internal-json` is a command of its own; run it with nothing else".to_string(),
-            ));
         }
         if is_dev_only_flag(argument) {
             return Err(Refusal::usage(PORT_IS_DEV_ONLY.to_string()));

@@ -1,6 +1,6 @@
 //! The `blastit` binary: the universal install (`ARCHITECTURE.md` §2.1, §4).
 //!
-//! Everything it does lives in the library, so `blastit check`, `fmt` and `fold`
+//! Everything it does lives in the library, so `blastit check` and `blastit fmt`
 //! reach the same code whether they are started from `$PATH` or from a package's
 //! console script — which `exec`s this binary rather than importing anything.
 

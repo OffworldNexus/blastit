@@ -26,8 +26,8 @@ required:
 2. **Adds the console scripts.** `[project.scripts]` cannot be declared in
    `pyproject.toml` beside `bindings = "bin"` — maturin refuses the pair — so
    the repack writes the `*.dist-info/entry_points.txt` that `pip` turns into
-   `blastit`, `blastit-lsp` and `blastit-manifest` on `PATH`. `CONSOLE_SCRIPTS`
-   is the single owner of those three names.
+   `blastit` and `blastit-lsp` on `PATH`. `CONSOLE_SCRIPTS` is the single owner
+   of those two names.
 
 3. **Retags the file.** `Root-Is-Purelib: false` (the wheel carries ELFs — `pip`
    must not install it into the purelib tree unconditionally) and
@@ -64,13 +64,10 @@ from pathlib import Path
 #: The console scripts the wheel installs (`design §6.1`): `name = "module:callable"`.
 #:
 #: `blastit` is the package's `main` (which `exec`s `blastit/_bin/blastit`);
-#: `blastit-lsp` reaches `blastit.__main__:main_lsp`, the entry point that had no
-#: console script until `MB.42.3`; `blastit-manifest` is `fold`'s command line
-#: (`blastit-manifest fold LOG --manifest Blastfile`).
+#: `blastit-lsp` reaches `blastit.__main__:main_lsp`, the editor's entry point.
 CONSOLE_SCRIPTS: dict[str, str] = {
     "blastit": "blastit.__main__:main",
     "blastit-lsp": "blastit.__main__:main_lsp",
-    "blastit-manifest": "blastit.fold:main",
 }
 
 #: Where a `bindings = "bin"` wheel keeps the binary (`maturin`'s data scripts).
@@ -100,8 +97,8 @@ MANYLINUX_REST = re.compile(r"^(?P<major>\d+)_(?P<minor>\d+)_(?P<arch>x86_64|aar
 #: A section header is its **leading** `[name]` token: anything after the closing
 #: bracket is an annotation, not part of the name. `startswith("[") and
 #: endswith("]")` silently dropped a whole section whose header carried a trailing
-#: comment (`[pytest11]  # plugin`) — the exact user-visible regression this
-#: script exists to stop, quietly back.
+#: comment (`[extra]  # note`) — the exact user-visible regression this script
+#: exists to stop, quietly back.
 ENTRY_POINT_SECTION = re.compile(r"^\[(?P<name>[^\]]+)\]")
 
 #: The sections this script does **not** own: `CONSOLE_SCRIPTS` is their single
@@ -118,17 +115,15 @@ def record_hash(data: bytes) -> str:
 def preserved_entry_point_sections(existing: str) -> list[str]:
     """Every section of maturin's `entry_points.txt` except `[console_scripts]`.
 
-    `maturin` writes that file from `[project.entry-points.*]`, and
-    `[pytest11] blastit = blastit.pytest_plugin` is one of them (D3b: `pytest`
-    finds the plugin by itself, with no conftest and no `-p`). Writing only the
-    console scripts therefore *deleted* a user-facing feature from every repacked
-    wheel — the plugin simply stopped existing for `pip install blastit`. The
-    sections this script does not own are copied through, in their original
+    `maturin` writes that file from `[project.entry-points.*]`, and a section it
+    declared for a user-facing feature has to survive the repack: writing only
+    the console scripts would *delete* that feature from every repacked wheel.
+    The sections this script does not own are copied through, in their original
     order; `[console_scripts]` is dropped because `CONSOLE_SCRIPTS` is its single
     owner.
 
     A header is matched by its leading `[name]` token and the rest of the line is
-    discarded, so a trailing annotation (`[pytest11]  # plugin`) cannot lose the
+    discarded, so a trailing annotation (`[extra]  # note`) cannot lose the
     section. A name that appears twice is merged into one block at its first
     position: `configparser` (what `importlib.metadata` and `pip` read this file
     with) raises on a duplicated section, so a wheel that repeated one would be a
@@ -160,8 +155,8 @@ def entry_points_text(scripts: dict[str, str] | None = None, existing: str = "")
     """The `*.dist-info/entry_points.txt` body: the console scripts, then maturin's.
 
     `existing` is the file the wheel arrived with (empty for a `maturin` build
-    that declared no entry points at all); its non-`[console_scripts]` sections —
-    `[pytest11]` today — are preserved by [`preserved_entry_point_sections`].
+    that declared no entry points at all); its non-`[console_scripts]` sections
+    are preserved by [`preserved_entry_point_sections`].
     """
     blocks = ["[console_scripts]"]
     for name, target in (scripts or CONSOLE_SCRIPTS).items():
@@ -325,7 +320,7 @@ def repack(
     ).encode()
     # The wheel's own `entry_points.txt` (maturin's `[project.entry-points.*]`) is
     # read *before* it is overwritten: the console scripts are written here, every
-    # other section (`[pytest11]`) is carried through untouched.
+    # other section is carried through untouched.
     arrived_entry_points = relocated.get(f"{dist_info}/entry_points.txt", b"").decode(
         "utf-8", "replace"
     )

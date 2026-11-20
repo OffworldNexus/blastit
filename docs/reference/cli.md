@@ -8,7 +8,6 @@
 | `blastit lsp` | your editor, Linux |
 | `blastit-lsp` | your editor, Linux/macOS/Windows |
 | `blastit` | production |
-| `blastit-manifest fold` | grants from a log |
 
 `dev`, `check`, `fmt` and `blastit` read `./Blastfile` here; `BLASTIT_MANIFEST`
 names another file, the only way to move it. There is no upward search.
@@ -200,26 +199,3 @@ safety check is skipped with one warning line — an unusual checkout or a third
 `node_modules` never bricks the command — and `BLASTIT_NO_LOCAL_HANDOFF` keeps the global
 binary for every command. `Serve` never hands off: `--version` and `--help` answer from
 the binary you typed.
-
-`blastit --internal-json` is not a command: it is the NDJSON bridge the Python package
-speaks to this binary, and it says so instead of waiting on input.
-
-## `blastit-manifest fold`
-
-Reads Blastit's JSON events and the `Blastfile`, and lists the missing grants.
-
-```console
-$ blastit-manifest fold LOG... --manifest Blastfile [--write] [--prefer-tables] [--allow-dangerous]
-```
-
-| Argument | What it does |
-|---|---|
-| `LOG`… | the logs to read; `-` is stdin |
-| `--manifest PATH` (required) | the `Blastfile` to extend; this command does not discover it |
-| `--write` | rewrite the `Blastfile` in place instead of printing it |
-| `--prefer-tables` | add the smallest table grant for the denials: `select`, `insert`, `update` and `delete` lines |
-| `--allow-dangerous` | also grant statements calling a function outside the safe set |
-
-Not on `PATH`? `uv run python -m blastit.fold LOG... --manifest Blastfile`
-is the same. Exits `0` on a missing-grant diff, empty or not, `1` on an
-unreadable log or `Blastfile`.
