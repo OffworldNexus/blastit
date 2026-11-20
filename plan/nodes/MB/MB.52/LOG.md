@@ -27,3 +27,7 @@ OUT OF SCOPE (python/blastit/** not in paths, needs its own node): pytest_plugin
 ## 2026-11-20T12:55 [lead]
 
 status active -> done
+
+## 2026-11-20T12:55 [lead]
+
+commit 297061e

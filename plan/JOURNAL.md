@@ -4101,3 +4101,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T12:49 [MB.52] (lead) review-arch VERDICT CLEAN on ci.yml + smoke.rs; fix round 1 (python/tests only): PROTECTED_ROOT probe+ancestor walk, staging leak/assert, README venv recipe
 - 2026-11-20T12:49 [MB.52] (lead) OUT OF SCOPE (python/blastit/** not in paths, needs its own node): pytest_plugin._serveable_project copies a non-traversable $HOME project to /tmp/blastit-live-
 - 2026-11-20T12:55 [MB.52] (lead) status active -> done
+- 2026-11-20T12:55 [MB.52] (lead) commit 297061e
