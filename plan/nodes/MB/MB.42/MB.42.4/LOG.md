@@ -35,3 +35,7 @@ lead: my own NODE.md:65 carried the literal retired PHP-transport token, trippin
 ## 2026-11-20T05:25 [lead]
 
 writer blocked (honest report): (1) REAL BUG in MB.42.3.3's build-wheel.sh - floor derived as ${wheel_platform#manylinux_} leaves '2_39_x86_64' for maturin bin wheels, so --max-glibc rejects it and make docs-test/check die -> split to MB.42.13; (2) rootless e2e leg needs CAP_SETFCAP, refused by this host (verified: setcap -> 'unable to set CAP_SETFCAP effective capability'). docs-unit 117 passed, 60 fences green, docs-check green, matrix green, fast-check green.
+
+## 2026-11-20T05:48 [lead]
+
+status active -> review
