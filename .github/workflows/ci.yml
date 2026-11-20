@@ -72,6 +72,17 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The per-minor CPython shims are a **build artifact** (`target/py-sapi`),
+      # so a `cargo test` that never built them passes only by accident.
+      # `make python-runtime` builds both minors and fails closed
+      # (`PY_SAPI_REQUIRE_ALL=1`) when an interpreter is missing, and
+      # `uv python install` is what puts CPython 3.13 *and* 3.14 on the runner
+      # (setup-python above pins 3.13 for PYO3 only).
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
       # Ubuntu 24.04+ (today's `ubuntu-latest`) ships
       # `kernel.apparmor_restrict_unprivileged_userns=1`, so an unprivileged
       # child cannot create a user namespace and
@@ -111,13 +122,13 @@ jobs:
     # workflow's 360-minute ceiling, and an in-flight job has no downloadable
     # log, so the only visible symptom was "still running" (run 43407063422).
     # Every phase below is independently bounded, so a regression is a red phase
-    # whose log and `::error::` name what blocked (a healthy run is ~5 minutes).
-    # The bounds do not sum to a promise, though: 1 + 2 + 10 + 12 + 3 = 28
-    # worst-case minutes, so the 20-minute `timeout-minutes` below - not any
+    # whose log and `::error::` name what blocked (a healthy run is ~8 minutes).
+    # The bounds do not sum to a promise, though: 1 + 2 + 10 + 10 + 20 + 3 = 46
+    # worst-case minutes, so the 30-minute `timeout-minutes` below - not any
     # single step - is the outer bound in a pathological run where several
     # phases go long at once. (A cold `rust-cache` is the one legitimate way to
     # approach it: the build step below is then the long one.)
-    timeout-minutes: 20
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:18
@@ -143,6 +154,8 @@ jobs:
       # anything either: `--non-interactive` turns "sudo wants a password" into an
       # instant readable error, and the step is bounded so a wedged `chmod -R` is a
       # red step rather than a job that idles to its timeout (MA.9).
+      # `~/.local` (where `uv` keeps its CPython) gets the same treatment right
+      # after `uv python install` below, once that tree exists (`MB.47.2`).
       - name: Make /opt and the tool cache non-world-writable (as root)
         timeout-minutes: 1
         run: |
@@ -151,6 +164,23 @@ jobs:
           sudo --non-interactive chmod -R go-w /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The per-minor CPython shims are a **build artifact** (`target/py-sapi`),
+      # so every root-run test binary that needs one would otherwise fail on a
+      # runner that never built it. `uv python install` puts CPython 3.13 and
+      # 3.14 under `~/.local/share/uv` — the tree root's provenance check has to
+      # trust — and `make python-runtime` builds both shims, failing closed when a
+      # minor is absent (`MB.47.2`).
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: |
+          set -euo pipefail
+          uv python install 3.13 3.14
+          if [ -d "$HOME/.local" ]; then
+            sudo --non-interactive chmod -R go-w "$HOME/.local"
+          fi
+      - name: Build the per-minor CPython shims (fails closed)
+        timeout-minutes: 10
+        run: make python-runtime
       # Preflight: prove, in seconds, that root is reachable *without a prompt*
       # and that cargo resolves for root with the homes this job hands it, and
       # echo what was resolved. `--non-interactive` is the point: a sudo that
@@ -182,6 +212,7 @@ jobs:
           echo "homes: RUSTUP_HOME=${RUSTUP_HOME:-<unset>} CARGO_HOME=${CARGO_HOME:-<unset>}"
           echo "postgres: BLASTIT_TEST_PG_URL=set"
           sudo --non-interactive env \
+            "HOME=$HOME" \
             "PATH=$HOME/.cargo/bin:$PATH" \
             "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
@@ -313,14 +344,14 @@ jobs:
               sys.exit("every test binary was excluded: the root phase would prove nothing")
           # Non-fatal, because this is a budget warning and not a correctness
           # failure: each binary costs at most 120 s (90 s timeout + 30 s
-          # --kill-after), and the run step's 15-minute bound (900 s) holds seven
-          # with slack. The eighth reaches 900 s exactly, so the step's own
+          # --kill-after), and the run step's 20-minute bound (1200 s) holds ten
+          # with slack. The eleventh reaches 1200 s exactly, so the step's own
           # overhead is already enough to cut it off before its `::error::`.
-          if len(kept) * 120 >= 900:
+          if len(kept) * 120 >= 1200:
               print(
                   f"::warning::the root phase now runs {len(kept)} test binaries at up to "
-                  f"120 s each = {len(kept) * 120} s, at or beyond the run step's 900 s "
-                  "(15-minute) bound: raise `timeout-minutes` on 'Run every test binary as "
+                  f"120 s each = {len(kept) * 120} s, at or beyond the run step's 1200 s "
+                  "(20-minute) bound: raise `timeout-minutes` on 'Run every test binary as "
                   "root, one at a time' with the count so every binary still reaches its "
                   "own timeout error annotation"
               )
@@ -356,21 +387,23 @@ jobs:
       # `timeout` bounds each binary instead of the whole step. The budget adds
       # up: 90 s per binary, plus the up-to-30 s `--kill-after` a binary that
       # ignores SIGTERM costs before SIGKILL, so at most 2 minutes per binary and
-      # six kept binaries is 12 minutes — this step allows 15 so every binary still
-      # reaches its own timeout and its own `::error::` naming the blocked test
-      # instead of being cut off by the step. (The whole suite takes ~5 s when
-      # healthy, so 90 s is ~18x headroom; the build step prints a non-fatal
+      # eight kept binaries is 16 minutes — this step allows 20 so every binary
+      # still reaches its own timeout and its own `::error::` naming the blocked
+      # test instead of being cut off by the step. (The whole suite takes ~5 s
+      # when healthy, so 90 s is ~18x headroom; the build step prints a non-fatal
       # `::warning::` naming the count, the budget and this step when the kept
       # count makes the bound tight, and the bound is raised deliberately rather
-      # than a wedged binary being cut off.)
+      # than a wedged binary being cut off.) `HOME` is passed so root's stage-0
+      # provenance check resolves the same `uv` CPython the runner did
+      # (`~/.local/share/uv`, made `go-w` above — `MB.47.2`).
       - name: Run every test binary as root, one at a time
-        timeout-minutes: 15
+        timeout-minutes: 20
         run: |
           set -euo pipefail
           mapfile -t binaries < "$RUNNER_TEMP/test-binaries.txt"
           log="$RUNNER_TEMP/root-tests.log"
-          # 90 s per binary + up to 30 s kill-after: 6 × 2 min = 12 min, inside
-          # this step's 15-minute bound.
+          # 90 s per binary + up to 30 s kill-after: 10 × 2 min = 20 min, so the
+          # tenth binary can still reach its own timeout inside this step.
           binary_timeout=90
           : > "$log"
           if [ -s "$RUNNER_TEMP/excluded-binaries.txt" ]; then
@@ -382,6 +415,7 @@ jobs:
             set +e
             timeout --kill-after=30s "${binary_timeout}s" \
               sudo --non-interactive env \
+                "HOME=$HOME" \
                 "PATH=$HOME/.cargo/bin:$PATH" \
                 "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
                 "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
@@ -409,6 +443,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo --non-interactive env \
+            "HOME=$HOME" \
             "PATH=$HOME/.cargo/bin:$PATH" \
             "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
             "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
@@ -440,8 +475,17 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The e2e scenario boots a real WSGI app through the wheel, so the wheel
+      # must carry both CPython shims: `--require-shims py` fails closed when it
+      # does not, and these steps are what put them in `target/py-sapi`
+      # (`MB.47.2`).
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
       - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
+        run: pipx install maturin && scripts/build-wheel.sh --require-shims py
         env:
           MATURIN: maturin
       - name: Run the scenario under blastit
@@ -467,8 +511,15 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Same wheel, same promise as the `e2e` job (`MB.47.2`): the rootless
+      # scenario serves a WSGI app, so the wheel must carry both CPython shims.
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
       - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
+        run: pipx install maturin && scripts/build-wheel.sh --require-shims py
         env:
           MATURIN: maturin
       - name: Run the scenario with capabilities instead of root
@@ -637,8 +688,15 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # `e2e/venv-smoke.sh` boots the wheel's WSGI path, so the wheel must carry
+      # both CPython shims (`MB.47.2`).
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
       - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
+        run: pipx install maturin && scripts/build-wheel.sh --require-shims py
         env:
           MATURIN: maturin
       - run: e2e/venv-smoke.sh
@@ -670,8 +728,22 @@ jobs:
       - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The plugin's tests boot a WSGI view through the wheel (`MB.47.2`), so the
+      # wheel must carry both CPython shims. `uv`'s CPython lands under
+      # `~/.local/share/uv`, and root's provenance check has to trust that tree:
+      # the same `go-w` treatment `/opt` got above, applied once it exists.
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: |
+          set -euo pipefail
+          uv python install 3.13 3.14
+          if [ -d "$HOME/.local" ]; then
+            sudo --non-interactive chmod -R go-w "$HOME/.local"
+          fi
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
       - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
+        run: pipx install maturin && scripts/build-wheel.sh --require-shims py
         env:
           MATURIN: maturin
       - name: Install the wheel and the test tools
@@ -780,6 +852,15 @@ jobs:
           uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/pytest-cache"
           uv pip install --python "$RUNNER_TEMP/pytest-cache/bin/python" pytest==9.2.0
           uv cache dir
+      # `make docs-test` builds the wheel every console fence installs, and that
+      # wheel must carry both CPython shims (`build-wheel.sh --require-shims py`,
+      # `docs-test: py-sapi`): build them here with the `uv` and toolchain this
+      # job already has, rather than letting the gate discover it half-way
+      # through the fences (`MB.47.2`).
+      - name: Install the CPython minors the shims need
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims the wheel embeds
+        run: make python-runtime
       - name: Execute every documented console fence
         run: |
           set -o pipefail

@@ -4045,3 +4045,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T08:02 [MB.47.1] (lead) REVIEW ROUND 2 (review-arch, all verified by lead): [BLOCKER] getcap on symlink command -v python3 prints nothing/rc=0 so 'cap_ not in python' can never fail (r
 - 2026-11-20T08:02 [MB.47] (lead) TWO OUT-OF-SCOPE FOLLOW-UPS for a crates/blastit node (host.rs not in any MB.47 slice's paths): (1) Host::binary() should name <dir of /proc/self/exe>/blastit w
 - 2026-11-20T08:15 [MB.47.1] (lead) status review -> done
+- 2026-11-20T08:15 [MB.47.1] (lead) commit 2c31404
+- 2026-11-20T08:15 [MB.47.2] (lead) status ready -> active
+- 2026-11-20T08:15 [MB.47.2] (lead) attempt 1/3 started
+- 2026-11-20T08:15 [MB.47.2] (lead) base 2c31404ae5e3516bb96e1e6f41c0e5e8b0e93a0f
+- 2026-11-20T08:15 [MB.47.2] (lead) correction: base is 2c31404627a6f28ca740c949452fc68423a1c169 (the previous line's tail was mistyped)
+- 2026-11-20T08:24 [MB.47.2] (lead) status active -> review
+- 2026-11-20T08:27 [MB.47.2] (lead) REVIEW FIX (both lenses, lead-verified): [arch-MAJOR] live.yml:53-57 builds the wheel with no --require-shims and feeds e2e/Dockerfile.prebuilt the WSGI demo ->
+- 2026-11-20T08:34 [MB.47.2] (lead) status review -> done

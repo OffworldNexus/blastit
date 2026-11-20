@@ -2,16 +2,16 @@
 id: MB.47.2
 title: "CI py-sapi shims & root provenance, wheel --require-shims, standalone .tar.gz CPython shims"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 2
 depends_on: [MB.47.1]
 paths: [Makefile, ".github/workflows/**", "scripts/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T07:50"
-updated: "2026-11-20T07:50"
+updated: "2026-11-20T08:34"
 ---
 
 # Goal

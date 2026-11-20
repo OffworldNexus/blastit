@@ -305,6 +305,30 @@ build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
 if [ -n "$SHIM_DIR" ]; then
     build+=(--shim-dir "$SHIM_DIR")
 fi
+# The per-minor CPython shims (`MB.47.2`): `scripts/build-standalone.sh` stages
+# them beside the binary so a WSGI view boots out of the box, and they are built
+# **here** so their glibc floor is the floor of this image. `manylinux_2_28`
+# ships `/opt/python/cp313-cp313` and `cp314-cp314`, so neither minor is
+# downloaded; `PY_SAPI_PROBE=0` skips only the `dlopen` probe, which needs a
+# shared libpython this image does not ship (`.github/workflows/py-sapi.yml`
+# runs that probe).
+# The triple decides the shim libc, not this image: `--target` is the claim, and
+# a `-musl` triple here would otherwise get `-gnu`-named shims that staging then
+# refuses without naming the libc. `PY_SAPI_REQUIRE_ALL=1` makes a missing
+# `/opt/python/cp31x` name the interpreter instead of reporting "0 shims".
+case "${TARGET##*-}" in
+    gnu) shim_libc=gnu ;;
+    musl) shim_libc=musl ;;
+    *)
+        echo "error: $TARGET names no libc this script builds a shim for (gnu, musl)" >&2
+        exit 1
+        ;;
+esac
+arch=${TARGET%%-*}
+make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_PROBE=0 PY_SAPI_REQUIRE_ALL=1 \
+    PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC="$shim_libc" \
+    PY_SAPI_PYTHON_313=/opt/python/cp313-cp313/bin/python3 \
+    PY_SAPI_PYTHON_314=/opt/python/cp314-cp314/bin/python3
 bash scripts/build-standalone.sh "${build[@]}"
 BUILD_BODY
         chmod 0755 /tmp/blastit-inner-build.sh

@@ -31,3 +31,7 @@ REVIEW ROUND 2 (review-arch, all verified by lead): [BLOCKER] getcap on symlink 
 ## 2026-11-20T08:15 [lead]
 
 status review -> done
+
+## 2026-11-20T08:15 [lead]
+
+commit 2c31404

@@ -10,26 +10,24 @@
 #     dynamic loader, on musl `libc.musl-<arch>` and libgcc_s — and that one file
 #     serves every backend, because each runtime is `dlopen`ed: embedded PHP from
 #     the distro's NTS `libphp` plus the PHP shims below, a WSGI app from the
-#     host's CPython 3.13/3.14 plus `libblastit_py3<minor>` (which this archive
-#     does **not** stage, see below), and `static` mounts (`ADR-0017` decision 1,
-#     `ADR-0016` decision 6). There is no Python-less variant of this artifact
-#     any more.
+#     host's CPython 3.13/3.14 plus the CPython shims below, and `static` mounts
+#     (`ADR-0017` decision 1, `ADR-0016` decision 6). There is no Python-less
+#     variant of this artifact any more.
 #   * `libblastit_php<digits>-<arch>-<libc>.so` — one PHP shim per minor this leg
-#     has built *and* probed (`scripts/platform_matrix.py` is the list). PHP
-#     shims are the **only** shims in this archive.
+#     has built *and* probed (`scripts/platform_matrix.py` is the list).
+#   * `libblastit_py3<digits>-<arch>-<libc>.so` — the `3.13` and `3.14` CPython
+#     shims this leg built, so a WSGI view boots out of the box instead of
+#     asking the operator to copy one in (`MB.47.2`).
 #   * `LICENSE`, and `SHA256SUMS` over everything in the archive.
 #
-# **The CPython shim is the operator's to put beside the binary.** The
-# `blastit-py-sapi` loader is compiled in, and a deployment resolves
-# `libblastit_py3<minor>-<arch>-<libc>.so` beside the `blastit` executable and
-# nowhere else — no `PATH`, no environment variable
-# (`crates/blastit-py-sapi/src/discovery/mod.rs`). So a WSGI view on this archive
-# needs that file copied next to `blastit`: take it from the wheel (`uv add --dev
-# blastit` puts it in `.venv/lib/python3*/site-packages/blastit/_bin/`) or build
-# it in a checkout with `make py-sapi`. Without it the boot refuses with
-# `NoShim`, naming the file and the directory. Stage them in the archive and the
-# matrix also has to build them per `(arch, libc)` for the tarball
-# (`MB.42.3.3`), which is a packaging slice of its own.
+# **Both shim families are staged beside the binary.** The `blastit-py-sapi`
+# loader resolves `libblastit_py3<minor>-<arch>-<libc>.so` beside the `blastit`
+# executable and nowhere else — no `PATH`, no environment variable
+# (`crates/blastit-py-sapi/src/discovery/mod.rs`) — which is exactly where this
+# script puts them, so `install.sh --user` and an Alpine `.tar.gz` install both
+# serve Python WSGI. `--require-py-shims` (default `2`) and `--require-shims`
+# (PHP) fail closed when a family is missing: an archive that cannot serve a
+# declared backend is refused loudly, never shipped half-working.
 #
 # `scripts/check-portable-elf.sh` runs on the binary before packaging: no
 # `libpython`/`libphp` `NEEDED` entry, no `RPATH`/`RUNPATH` into a build host.
@@ -45,6 +43,7 @@
 #
 # Usage: scripts/build-standalone.sh [--out DIR] [--target TRIPLE]
 #                                   [--shim-dir DIR] [--require-shims N]
+#                                   [--py-shim-dir DIR] [--require-py-shims N]
 #                                   [--max-glibc 2_28] [--builder-image IMAGE]
 set -euo pipefail
 
@@ -54,7 +53,11 @@ cd "$root"
 out="dist"
 target=""
 shim_dir="${PHP_SAPI_OUT:-$root/target/php-sapi}"
+py_shim_dir="${PY_SAPI_OUT:-$root/target/py-sapi}"
 require_shims=0
+# A tarball with no CPython shim cannot serve a WSGI view, and that refusal
+# belongs to the build rather than to a user's first request (`MB.47.2`).
+require_py_shims=2
 max_glibc=""
 builder_image=""
 
@@ -64,9 +67,11 @@ while [ "$#" -gt 0 ]; do
         --target) target=$2; shift 2 ;;
         --shim-dir) shim_dir=$2; shift 2 ;;
         --require-shims) require_shims=$2; shift 2 ;;
+        --py-shim-dir) py_shim_dir=$2; shift 2 ;;
+        --require-py-shims) require_py_shims=$2; shift 2 ;;
         --max-glibc) max_glibc=$2; shift 2 ;;
         --builder-image) builder_image=$2; shift 2 ;;
-        *) echo "usage: $0 [--out DIR] [--target TRIPLE] [--shim-dir DIR] [--require-shims N] [--max-glibc 2_28] [--builder-image IMAGE]" >&2; exit 2 ;;
+        *) echo "usage: $0 [--out DIR] [--target TRIPLE] [--shim-dir DIR] [--require-shims N] [--py-shim-dir DIR] [--require-py-shims N] [--max-glibc 2_28] [--builder-image IMAGE]" >&2; exit 2 ;;
     esac
 done
 
@@ -288,19 +293,69 @@ mkdir -p "$stage/$name"
 install -m 0755 "$binary" "$stage/$name/blastit"
 install -m 0644 LICENSE "$stage/$name/LICENSE"
 
+# A staged shim's *file name* is not evidence of what was linked against it:
+# `$arch` and `$libc` come from `--target`, so a cross leg or a mis-flagged
+# `PY_SAPI_ARCH`/`PY_SAPI_LIBC` stages a file whose name promises a machine or a
+# C library it cannot `dlopen` on. `scripts/check-portable-elf.sh` refuses a
+# linked interpreter, not a name that disagrees with the ELF, so this reads the
+# file itself: an archive may only promise what its shims really are.
+assert_shim_target() {
+    local shim=$1 base machine wanted needed
+    base=$(basename "$shim")
+    machine=$(readelf -h "$shim" | sed -n 's/.*Machine:[[:space:]]*//p' | head -n 1)
+    case "$arch" in
+        x86_64) wanted="Advanced Micro Devices X86-64" ;;
+        aarch64) wanted="AArch64" ;;
+        *) wanted="" ;;
+    esac
+    if [ -n "$wanted" ] && [ "$machine" != "$wanted" ]; then
+        echo "error: $base is an ELF for '${machine:-an unknown machine}', but this archive claims $arch:" >&2
+        echo "  a shim built for another architecture cannot be dlopen'ed here; build it on an" >&2
+        echo "  $arch leg (this build already globs $arch-$libc)" >&2
+        exit 1
+    fi
+    needed=$(readelf -d "$shim" | sed -n 's/.*(NEEDED) *Shared library: \[\(.*\)\]/\1/p')
+    case "$libc" in
+        musl)
+            case "$needed" in
+                *libc.musl-*) ;;
+                *)
+                    echo "error: $base is not linked against musl, but this archive claims $arch-$libc:" >&2
+                    printf '%s\n' "$needed" | sed 's/^/  NEEDED /' >&2
+                    echo "  a glibc shim wearing a '-musl' name cannot be dlopen'ed on Alpine" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+        gnu)
+            case "$needed" in
+                *libc.so.6*) ;;
+                *)
+                    echo "error: $base is not linked against glibc, but this archive claims $arch-$libc:" >&2
+                    printf '%s\n' "$needed" | sed 's/^/  NEEDED /' >&2
+                    echo "  a musl shim wearing a '-gnu' name cannot be dlopen'ed here" >&2
+                    exit 1
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+php_contents=""
+php_floor_lines=""
 shims=0
-shim_lines=""
 for shim in "$shim_dir"/libblastit_php*-"$arch"-"$libc".so; do
     [ -f "$shim" ] || continue
-    install -m 0644 "$shim" "$stage/$name/$(basename "$shim")"
+    assert_shim_target "$shim"
+    base=$(basename "$shim")
+    install -m 0644 "$shim" "$stage/$name/$base"
     shims=$((shims + 1))
     # A shim is `dlopen`ed, so the loader applies *its* version needs too: the
     # binary's floor is not the archive's only number. Each one is measured and
     # listed, because a 2.28 binary beside a 2.41 shim is portable only for the
     # routes that do not use PHP (`MB.3.60`).
     if [ -n "$musl" ]; then
-        shim_lines="$shim_lines- \`$(basename "$shim")\` — musl (no glibc; needs \`libgcc\`)
-"
+        shim_floor_note="musl (no glibc; needs \`libgcc\`)"
     else
         shim_floor=$(
             readelf --version-info "$shim" \
@@ -308,13 +363,19 @@ for shim in "$shim_dir"/libblastit_php*-"$arch"-"$libc".so; do
                 | sort -V \
                 | tail -n 1
         )
-        shim_lines="$shim_lines- \`$(basename "$shim")\` — glibc ${shim_floor:-none} or newer
-"
+        shim_floor_note="glibc ${shim_floor:-none} or newer"
     fi
+    php_contents="$php_contents- \`$base\` — PHP SAPI shim
+"
+    php_floor_lines="$php_floor_lines- PHP \`$base\` — $shim_floor_note
+"
 done
 if [ "$shims" -eq 0 ]; then
-    shim_lines="No PHP shims in this archive. Get them from the wheel (\`uv add --dev blastit\`
-ships all four beside its binary), or build them here with \`make php-sapi\`."
+    php_contents="- no PHP shim in this archive
+"
+    php_floor_lines="No PHP shim in this archive: rebuild it on a leg that builds them
+(\`scripts/build-standalone.sh\` with a \`make php-sapi\`-provisioned \`target/php-sapi\`).
+"
 fi
 if [ "$shims" -eq 1 ]; then shim_word="shim"; else shim_word="shims"; fi
 echo "build-standalone: $shims $shim_word for $arch-$libc from $shim_dir"
@@ -322,6 +383,88 @@ if [ "$shims" -lt "$require_shims" ]; then
     echo "error: $shims $shim_word in $shim_dir, this artifact must carry $require_shims:" >&2
     echo "  build them first (make php-sapi PHP_MINORS=... or the per-leg CI job)" >&2
     exit 1
+fi
+
+# The CPython shims travel beside the binary for the same reason the PHP ones do
+# (`MB.47.2`): a WSGI view resolves `libblastit_py3<minor>-<arch>-<libc>.so` from
+# the executable's own directory, and an archive without one can only refuse at
+# boot (`NoShim`). Same shape as the PHP loop above: stage what exists, count it,
+# and fail the build when the count is short of what this artifact must carry.
+# The supported minors below come from the *staged files*, never from a literal:
+# an archive carrying one shim must not tell a host on the other minor that it
+# works (`--require-py-shims 1` is a legal build).
+py_contents=""
+py_floor_lines=""
+py_minors=""
+py_shims=0
+for shim in "$py_shim_dir"/libblastit_py3*-"$arch"-"$libc".so; do
+    [ -f "$shim" ] || continue
+    assert_shim_target "$shim"
+    base=$(basename "$shim")
+    install -m 0644 "$shim" "$stage/$name/$base"
+    py_shims=$((py_shims + 1))
+    minor=$(printf '%s' "$base" | sed -n 's/^libblastit_py\([0-9]\)\([0-9][0-9]\)-.*/\1.\2/p')
+    if [ -n "$minor" ]; then py_minors="$py_minors $minor"; fi
+    if [ -n "$musl" ]; then
+        shim_floor_note="musl (no glibc; needs \`libgcc\`)"
+    else
+        shim_floor=$(
+            readelf --version-info "$shim" \
+                | sed -n 's/.*Name: GLIBC_\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
+                | sort -V \
+                | tail -n 1
+        )
+        shim_floor_note="glibc ${shim_floor:-none} or newer"
+    fi
+    py_contents="$py_contents- \`$base\` — CPython SAPI shim
+"
+    py_floor_lines="$py_floor_lines- CPython \`$base\` — $shim_floor_note
+"
+done
+if [ "$py_shims" -eq 1 ]; then py_shim_word="shim"; else py_shim_word="shims"; fi
+echo "build-standalone: $py_shims CPython $py_shim_word for $arch-$libc from $py_shim_dir"
+if [ "$py_shims" -lt "$require_py_shims" ]; then
+    echo "error: $py_shims CPython $py_shim_word in $py_shim_dir, this artifact must carry $require_py_shims:" >&2
+    echo "  build them first (\`make py-sapi\` locally, or let the builder image compile them:" >&2
+    echo "  \`scripts/build-standalone-in-image.sh\` runs \`make py-sapi\` before it stages)" >&2
+    exit 1
+fi
+shim_lines="$php_floor_lines$py_floor_lines"
+
+# The minors this archive can actually serve, from the staged basenames, sorted.
+py_minor_list=""
+if [ -n "$py_minors" ]; then
+    for minor in $(printf '%s\n' $py_minors | sort -V); do
+        if [ -z "$py_minor_list" ]; then
+            py_minor_list="\`$minor\`"
+        else
+            py_minor_list="$py_minor_list and \`$minor\`"
+        fi
+    done
+fi
+
+# What a WSGI view really needs, once per archive (both libc branches share it).
+# The archive removes the "copy the shim beside the binary" step, not the
+# interpreter requirement: stage 0 `dlopen`s the *host's* `libpython3.1x.so` and
+# refuses with `UnsupportedMinor` or `NoLibpython` when it is absent, which is
+# the truth a reader can act on.
+if [ "$py_shims" -gt 0 ]; then
+    wsgi_contract="**A WSGI view needs the host's CPython $py_minor_list with its shared
+\`libpython3.1x.so\`.** This archive removes the “copy the shim beside the binary”
+step — the shim for this platform is already next to \`blastit\` — but the
+interpreter is still the host's, and its boot refusal names the reason:
+\`UnsupportedMinor\` for another minor (listing the minors it supports) and
+\`NoLibpython\` when that CPython was built without a shared \`libpython3.1x.so\`.
+The app's own dependencies have to be installed for that interpreter too.
+
+    apt install libpython3.13      # Debian/Ubuntu
+    apk add python3                # Alpine
+    dnf install python3-libs       # Fedora/RHEL
+    uv python install 3.14         # anywhere, via uv"
+else
+    wsgi_contract="**This archive carries no CPython shim**, so a WSGI view refuses at boot
+(\`NoShim\`). Rebuild the archive on a leg that builds one (\`scripts/build-standalone.sh\`
+after \`make py-sapi\`)."
 fi
 
 # The floor, out loud, in the thing the user unzips. `--max-glibc` above is the
@@ -336,14 +479,7 @@ package:
 
 The binary is dynamically linked on purpose: a static musl build cannot \`dlopen\`,
 and \`dlopen\` is how \`[route.php]\` reaches the distro's \`libphp\` (with the PHP
-shims in this archive) and how a WSGI view reaches the host's \`libpython\`.
-
-**This archive carries PHP shims only.** A WSGI view needs that minor's CPython
-shim *beside the binary*: copy \`libblastit_py3<minor>-$arch-$libc.so\` next to
-\`blastit\` — the only place a deployment looks — from the wheel
-(\`uv add --dev blastit\` puts it in \`.venv/lib/python3*/site-packages/blastit/_bin/\`)
-or from a checkout with \`make py-sapi\`. Without it the boot refuses with
-\`NoShim\` and names the file."
+shims in this archive) and how a WSGI view reaches the host's \`libpython\`."
 else
     requirements="**glibc $floor or newer.** That is the floor measured in this binary:
 
@@ -351,19 +487,28 @@ else
 
 Check a host with \`getconf GNU_LIBC_VERSION\` before deploying. Nothing is linked
 against an interpreter: no \`libpython\`, no \`libphp\`. \`[route.php]\` works with the
-distro's NTS \`libphp\` and the PHP shims in this archive.
-
-**This archive carries PHP shims only.** A WSGI view needs that minor's CPython
-shim *beside the binary*: copy \`libblastit_py3<minor>-$arch-$libc.so\` next to
-\`blastit\` — the only place a deployment looks — from the wheel
-(\`uv add --dev blastit\` puts it in \`.venv/lib/python3*/site-packages/blastit/_bin/\`)
-or from a checkout with \`make py-sapi\`. Without it the boot refuses with
-\`NoShim\` and names the file."
+distro's NTS \`libphp\` and the PHP shims in this archive."
 fi
 if [ -n "$builder_image" ]; then
     built_in="Built inside \`$builder_image\`."
 else
-    built_in="Built on the machine that ran \`scripts/build-standalone.sh\`."
+    built_in="Built on the release machine."
+fi
+if [ "$py_shims" -gt 0 ]; then
+    wsgi_try="A WSGI view (the host needs CPython $py_minor_list with its shared \`libpython\`
+— see “What it needs at run time”):
+
+    cat > app.py <<'PY'
+    def application(env, start_response):
+        start_response(\"200 OK\", [])
+        return [b\"hello\\n\"]
+    PY
+    printf 'entrypoint python \"app:application\"\\n' > Blastfile
+    ./blastit dev --port 8080
+"
+else
+    wsgi_try="A WSGI view is not available from this archive, which carries no CPython
+shim — see “What it needs at run time”."
 fi
 cat > "$stage/$name/README.md" <<README
 # blastit — $target
@@ -371,40 +516,42 @@ cat > "$stage/$name/README.md" <<README
 The universal artifact from \`ADR-0017\` decision 1: one \`blastit\` binary serves
 Python WSGI apps, embedded PHP routes and \`static\` mounts, and links neither
 \`libpython\` nor \`libphp\`. Python arrives at run time through \`dlopen\` of the
-host's \`libpython\` plus a per-minor shim, PHP through \`dlopen\` of the distro's
-NTS \`libphp\` plus the PHP shims below. There is no Python-less build of this
-binary to install instead.
+host's \`libpython\` plus the per-minor CPython shims below, PHP through \`dlopen\`
+of the distro's NTS \`libphp\` plus the PHP shims below. There is no Python-less
+build of this binary to install instead.
 
 ## Contents
 
 - \`blastit\` — the server (\`blastit [--preset NAME]\` for a production boot, \`blastit dev\`, \`blastit check\`)
-- \`libblastit_php<minor>-$arch-$libc.so\` — PHP SAPI $shim_word, $shims in this archive
-- \`LICENSE\`, \`SHA256SUMS\` (verify with \`sha256sum -c SHA256SUMS\`)
-
-PHP shims are the **only** shims here: there is no \`libblastit_py3*\` file. A WSGI
-view needs one beside the binary — see “What it needs at run time”.
+$php_contents$py_contents- \`LICENSE\`, \`SHA256SUMS\` (verify with \`sha256sum -c SHA256SUMS\`)
 
 ## Try it
+
+A \`static\` mount:
 
     printf 'hello from blastit\\n' > index.html
     printf 'static "/" { root "." }\\n' > Blastfile
     ./blastit dev --port 8080
 
-Then open http://127.0.0.1:8080. A WSGI layout needs the CPython shim described
-below first.
+Then open http://127.0.0.1:8080.
 
+$wsgi_try
 ## What it needs at run time
 
 $requirements
 
+$wsgi_contract
+
 Each shim is \`dlopen\`ed, so the loader applies its version needs as well: a
-shim's floor is the PHP distribution's, not this archive's.
+shim's floor is its runtime distribution's (PHP or CPython), not this archive's.
 
 $shim_lines
 ## How it was built
 
 $built_in A binary packaged from a build host keeps that host's C-library floor,
 so the floor above is a measurement of this file, not an estimate of the toolchain.
+
+Full install and runtime reference → https://offworldnexus.github.io/blastit/
 README
 
 # The list is built from what is actually staged (`find`), not from a glob: a

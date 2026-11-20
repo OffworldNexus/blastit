@@ -35,8 +35,10 @@
 #     (built on a developer host they need `GLIBC_2.34`).
 #
 # `--require-shims py|all` fails closed when the staged set is incomplete (the
-# release legs pass `all`: six shims, design §6.1). `make docs-test` and the host
-# path pass nothing: those wheels are not release artifacts and ship no shims.
+# release legs pass `all`: six shims, design §6.1). `make docs-test` passes `py`
+# — its runnable fences install the wheel and boot a WSGI view, so the target
+# builds the two CPython shims first (`docs-test: py-sapi`) — and the plain host
+# path passes nothing: that wheel is a developer artifact.
 #
 # Platform tag & glibc floor:
 #

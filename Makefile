@@ -271,7 +271,7 @@ seam-check: ## Verify debug-only test seam presence in debug and absence in rele
 		echo "note: no target/release/blastit; scripts/build-standalone.sh checks release artifacts"; \
 	fi
 
-standalone: ## Package host standalone archive (release binary + proven shims + checksum)
+standalone: py-sapi ## Package host standalone archive (release binary + both shim families + checksum)
 	scripts/build-standalone.sh
 
 STANDALONE_ARCH ?= $(shell uname -m)
@@ -384,10 +384,15 @@ docs-unit: ## Run runnable-docs and release-hygiene unit tests (offline, no whee
 		python/tests/test_release_scripts.py -q
 
 # Build host wheel into `target/docs-wheel`, preserving any pre-existing `dist/` across the run.
+# `py-sapi` first, with `PY_SAPI_REQUIRE_ALL=1`: the runnable fences install the
+# wheel and boot a WSGI view, so the wheel must carry both CPython shims, and a
+# host missing 3.13 or 3.14 fails naming the interpreter rather than in
+# `--require-shims py` blaming the wheel step (`MB.47.2`).
 DOCS_WHEEL_STAGE ?= $(CURDIR)/target/docs-wheel
 docs-test: SHELL := /bin/bash
-docs-test: docs-unit ## Execute runnable console fences across README.md and docs/, then check wheel links
-	scripts/build-wheel.sh -o "$(DOCS_WHEEL_STAGE)"
+docs-test: PY_SAPI_REQUIRE_ALL := 1
+docs-test: docs-unit py-sapi ## Execute runnable console fences across README.md and docs/ (needs the CPython 3.13/3.14 shims)
+	scripts/build-wheel.sh --require-shims py -o "$(DOCS_WHEEL_STAGE)"
 	@set -euo pipefail; \
 	saved=""; had_dist=0; \
 	if [ -d "$(CURDIR)/dist" ]; then \

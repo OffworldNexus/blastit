@@ -49,11 +49,23 @@ jobs:
         if: steps.token.outputs.present == 'true'
       - uses: Swatinem/rust-cache@v2
         if: steps.token.outputs.present == 'true'
+      # The image installs the wheel, and the Django demo (`e2e/demo/Blastfile`) is
+      # a WSGI `view`: the wheel must carry both CPython shims, so this is the same
+      # pairing `ci.yml` uses — `uv python install` for the minors, then
+      # `make python-runtime`, which fails closed when one is missing (`MB.47.2`).
+      - uses: astral-sh/setup-uv@v10.3.2
+        if: steps.token.outputs.present == 'true'
+      - name: Install the CPython minors the shims need
+        if: steps.token.outputs.present == 'true'
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims (fails closed)
+        if: steps.token.outputs.present == 'true'
+        run: make python-runtime
       - name: Build the image
         if: steps.token.outputs.present == 'true'
         run: |
           pipx install maturin
-          MATURIN=maturin scripts/build-wheel.sh
+          MATURIN=maturin scripts/build-wheel.sh --require-shims py
           IMAGE="ghcr.io/$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')-e2e:${GITHUB_SHA}"
           docker build -f e2e/Dockerfile.prebuilt -t "$IMAGE" .
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin

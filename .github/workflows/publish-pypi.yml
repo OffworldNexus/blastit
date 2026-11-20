@@ -254,12 +254,12 @@ jobs:
       # The archive is the *universal* binary (`ADR-0017` decision 1):
       # `blastit`'s default features (`python`, `php`, `static`) link no
       # `libpython` and no `libphp` — `python` is a `dlopen` loader — so one
-      # artifact serves a WSGI app (given the host's CPython 3.13/3.14 and that
-      # minor's shim *beside the binary*), embedded PHP through `dlopen`, and
-      # `static` mounts. The archive carries PHP shims only; it stages no
-      # `libblastit_py3*` (that is the per-`(arch, libc)` packaging slice).
-      # `scripts/build-standalone.sh` is the one place that spelling lives; this
-      # leg only chooses the builder image.
+      # artifact serves a WSGI app, embedded PHP through `dlopen`, and `static`
+      # mounts. It stages both shim families (`MB.47.2`): the four PHP shims from
+      # the `shim-*` artifacts, and the two CPython shims
+      # `scripts/build-standalone-in-image.sh` builds inside the image, so a WSGI
+      # view boots out of the box. `scripts/build-standalone.sh` is the one place
+      # that spelling lives; this leg only chooses the builder image.
       #
       # `MB.3.60`: the archive is built **inside `matrix.builder_image`**, whose
       # glibc *is* `matrix.glibc_floor`, and `--max-glibc` refuses the build if
@@ -371,6 +371,17 @@ jobs:
                   curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                       | bash -s -- -y --profile minimal --default-toolchain stable >/dev/null
                   export PATH="$HOME/.cargo/bin:$PATH"
+                  if ! command -v uv >/dev/null 2>&1; then
+                      curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+                  fi
+                  export PATH="$HOME/.local/bin:$PATH"
+                  # The archive stages the per-minor CPython shims (`MB.47.2`), and a
+                  # musl shim must be linked by musl: both minors are built here,
+                  # against `uv`'s musl CPython, before the archive is packaged.
+                  uv python install 3.13 3.14 >/dev/null
+                  arch=${TARGET%%-*}
+                  make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_PROBE=0 \
+                      PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC=musl
                   bash scripts/build-standalone.sh --target "$TARGET" \
                       --shim-dir dist/shims --require-shims "$OWED" \
                       --builder-image "$BUILDER_IMAGE"
