@@ -4180,3 +4180,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T17:12 [MB.56.1.3] (lead) status active -> done
 - 2026-11-20T17:12 [MB.56.1.3] (lead) commit d6de59a
 - 2026-11-20T17:12 [MB.56.1] (lead) status ready -> done: all 3 sub-slices done; full make check runs now at the MB.56.1 gate
+- 2026-11-20T17:15 [MB.56.1] (lead) GATE: make check green (e2e-universal 6/6, zed-check 11 tests, plan OK); commit 496ce69
+- 2026-11-20T17:15 [MB.56.2] (lead) edited fields
+- 2026-11-20T17:15 [MB.56.2.1] (lead) created (task) Delete non-§7 micro-tests in scheduler, dbproxy, view-* and crates/blastit/src
+- 2026-11-20T17:15 [MB.56.2.2] (lead) created (task) Delete non-§7 micro-tests in php-sapi, sys, env, ingress, py-shim, events, frame, py-sapi, lsp/src
+- 2026-11-20T17:15 [MB.56.2.3] (lead) created (task) Consolidate blastit-manifest §7 suite (15k -> <=1.5k LOC) incl. every docs/README Blastfile fence
+- 2026-11-20T17:15 [MB.56.2.4] (lead) created (task) Consolidate blastit-sqlpolicy (<=1.5k) and blastit-http (<=800) §7 suites
+- 2026-11-20T17:15 [MB.56.2.5] (lead) created (task) Consolidate blastit-lsp e2e_lsp.rs (<=600 LOC) over the real binary + keep zed-check

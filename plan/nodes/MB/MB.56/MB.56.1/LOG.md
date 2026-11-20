@@ -15,3 +15,7 @@ Split into 3 sequential implementer slices: .1 Python/--internal-json retirement
 ## 2026-11-20T17:12 [lead]
 
 status ready -> done: all 3 sub-slices done; full make check runs now at the MB.56.1 gate
+
+## 2026-11-20T17:15 [lead]
+
+GATE: make check green (e2e-universal 6/6, zed-check 11 tests, plan OK); commit 496ce69
