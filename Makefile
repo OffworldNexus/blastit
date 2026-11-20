@@ -10,6 +10,7 @@
 #   make docs-serve-check # bounded smoke test of the docs serve stack (binds a port; not in `check`)
 #   make test-critical    # run critical skip check + staged Python critical tests (offline)
 #   make rs-test-critical # run every crates/*/tests/critical_*.rs suite standalone
+#   make coverage         # instrumented line/region % + uncovered lines (TESTS="…" FILES="…")
 #   make e2e              # build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
 #   make e2e-universal    # one staged bundle, four runtimes: CPython 3.13/3.14, PHP 8.4, static, handoff (slow)
 #   make install          # stage a self-contained release bundle under PREFIX (default ~/.local)
@@ -112,7 +113,7 @@ CRITICAL_STAGE ?= $(CURDIR)/target/python-critical
 CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytest\.mark\.skip|pytest\.skip[[:space:]]*\(|importorskip[[:space:]]*\(|unittest\.skip
 
 .PHONY: help fast-check check clean guard critical-guard critical-skip-check plan-validate \
-        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check \
+        rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default seam-check coverage \
         universal-smoke py-format py-lint test-critical docs-check docs-unit docs-test e2e e2e-universal mutants-rust \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image python-runtime platform-matrix-check standalone standalone-glibc workflow-check \
@@ -168,6 +169,18 @@ python-runtime: ## Build both CPython shims for the test gate (fails closed)
 rs-test: python-runtime ## Run all unprivileged Rust unit, integration (including critical_*), and doc tests
 	$(RUST_ENV) $(CARGO) test --workspace --all-targets --locked --features python
 	$(RUST_ENV) $(CARGO) test --workspace --doc --locked --features python
+
+# Reviewer-owned coverage audit (`MB.55`): rebuilds only the requested test
+# target into `target/cov` (never `target/debug`), runs it, and prints per-file
+# line/region % plus exact uncovered line ranges. Uncovered lines are not an
+# error: `review-arch` decides delete-vs-extend-E2E. The first run pays the
+# instrumented rebuild of the dependency graph; warm runs are fast.
+coverage: ## Per-file line/region % + uncovered lines (TESTS="-p <crate> --tests" FILES="crates/<crate>/src/lib.rs")
+	@if [ -z '$(strip $(TESTS))' ] || [ -z '$(strip $(FILES))' ]; then \
+		echo 'usage: make coverage TESTS="-p <crate> --tests" FILES="crates/<crate>/src/lib.rs"' >&2; \
+		exit 2; \
+	fi
+	$(RUST_ENV) $(UV) run --no-project tools/coverage_report.py --tests "$(TESTS)" --files "$(FILES)"
 
 # Verify the default universal `blastit` links zero libpython/libphp/RUNPATH and still
 # pulls the shim ABI (design universal-distribution.md §1.1), and that

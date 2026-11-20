@@ -167,4 +167,5 @@ Never push to `develop`, never create git tags, and never merge PRs. Instead, pr
 
 - Never edit code or documentation yourself; only mutate `plan/` through `tools/plan.py`, commit `plan/` updates, push `release/<version>` branches, and open/update Release PRs into `develop`.
 - Never push to `develop`, never force-push, never run `git tag`, and never run `gh pr merge`.
+- **`TESTING_PLAN.md` human gate:** whenever a node opens "Validate TESTING_PLAN.md update for <feature>", present it with `question`; no tests or production code proceed until the human validates it, and no slice may silently alter `TESTING_PLAN.md`.
 - Expensive agents (`strategist`, `architect`, `expert`) always require `plan.py escalate` first and tight briefs.

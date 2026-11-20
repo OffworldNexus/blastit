@@ -59,6 +59,7 @@ You are the Blastit **strategist** (expensive tier). You own `plan/ROADMAP.md` a
 Read the DX spec or technical design doc and its `review-ux` / `review-arch` findings + `## Review Resolution`. Verify:
 - Zero unresolved genuine `[BLOCKER]` or `[MAJOR]` findings across UX, Constructor IoC, deduplication, and security.
 - No creep toward bloated configuration, legacy non-12-factor complexity, mock-trait ceremony, or regex guard scripts.
+- Any new user-facing feature whose pure user-story `TESTING_PLAN.md` update was not human-validated (`human answered`) stays blocked: refuse `status: Accepted` and return it to `lead`.
 - Either mark `status: Accepted` (and its ADRs `Accepted`) or return sharp, actionable findings to `lead`.
 
 ### 3. Replan `<subtree>` / Restructure

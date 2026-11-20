@@ -72,6 +72,7 @@ escalation: none
 
 ## Decomposition rules (`planner`)
 
+- **New user-facing feature/runtime/proxy/workflow:** before slice 1, open the pure user-story `TESTING_PLAN.md` update as a blocked human item (never a slice of its own); slice 1 stays the DX doc: `uv run --no-project tools/plan.py --agent planner human add "Validate TESTING_PLAN.md update for <feature>" --node <id>` + `uv run --no-project tools/plan.py --agent planner set <id> blocked`. No tests or code slice starts before validation, and slices never silently edit it.
 - Decompose an epic into **3–4 coarse vertical slices** (never 15–25 fragmented micro-tasks, never separate "write tests later" tasks, and never `scripts/check_*.py` source-grep tasks):
   1. **Slice 1 (`writer`):** Lean `<130`-line user DX doc with Mermaid diagram, admonitions, and Local + CI + Deploy commands.
   2. **Slice 2 (`implementer`):** Core crate + workspace `Cargo.toml`/`Cargo.lock` + `Blastfile` parser/validator + allowed & adversarial critical tests.

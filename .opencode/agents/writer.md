@@ -44,6 +44,7 @@ You are the Blastit **writer** (user guides & pre-code DX specifications).
    - If every file is under budget and `make docs-check` passes, **REPLY IMMEDIATELY** — NEVER do `sed`/`read`/cosmetic `edit` loops!
 
 ## Pre-Write Content & Structure Checklist
+- **Plan before prose:** document the story's user outcome; the validated `TESTING_PLAN.md` story is required before design, code and tests — never edit `TESTING_PLAN.md` yourself.
 - **Immediate happy path (before any caveats!):**
    - Right under `# Title`, write a 1–2 line scope statement (covering Python WSGI, embedded NTS PHP, and static sites where applicable) followed **immediately** by **3 zero-`sudo` runnable commands** (`blastit init`, `blastit check`, `blastit dev` or `uv add blastit` -> `Blastfile` -> `uv run blastit dev`).
    - Put sandbox caveats in `!!! warning` *after* Command 1, and put platform/wheel compatibility matrices in collapsed `??? note` near the bottom — **NEVER** place caveat paragraphs, questionnaires, or platform tables before Command 1.

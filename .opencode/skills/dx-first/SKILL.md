@@ -9,7 +9,7 @@ Blastit succeeds only if adopting it feels **effortless, foolproof, and lean** �
 
 ## 1. The Iron Law: Docs Before Design, Design Before Code
 
-Before writing internal Rust/Python architecture or production code for a feature, backend, ingress validator, or outgoing proxy:
+Before writing internal Rust/Python architecture or production code for a feature, backend, ingress validator, or outgoing proxy — **and before its tests** — the pure user-story `TESTING_PLAN.md` update is proposed (zero file/crate/code references) and blocked on human validation; no tests or code proceed until it is validated:
 
 1. **Write the user-facing documentation FIRST** (`docs/`, owned by `writer` or `architect`), showing **exact, runnable commands and files** in all three environments:
    - **On the local developer machine:** Zero `sudo`, zero manual `chmod` on home directories, zero `setcap` ceremony required for daily coding. Lead immediately with 3 zero-`sudo` commands (`blastit dev` runs the real multi-process topology, stage-0 `execve` secret swap, ingress validators, and egress brokers so any misconfiguration fails loudly on `localhost`).

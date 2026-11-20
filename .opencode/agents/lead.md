@@ -77,6 +77,7 @@ Spawn `planner` with `<container>` id to create **3–4 coarse vertical slices**
    - Special owners:
      - `architect` or `expert`: run `uv run --no-project tools/plan.py --agent lead escalate <id> --to <owner> --reason "..."` first.
      - `human`: `plan.py --agent lead human add "..." --node <id>`, then `set <id> blocked`.
+     - **New-feature gate:** if this task is the first for a new user-facing feature/runtime/proxy/workflow, verify its `TESTING_PLAN.md` story update is validated (`human answered`) before spawning tests or code; never let a slice alter `TESTING_PLAN.md` silently.
    - Spawn owner `X` (`implementer`, `writer`, `researcher`, `architect`, `expert`) with a crisp <= 35-line brief naming `<id>`, `NODE.md`, exact `paths`, and instructing them to write a brief `RESULT.md` *before* their single verification command (`make fast-check` or `make docs-check`).
    - Handle owner report:
      - `STATUS: done` -> `uv run --no-project tools/plan.py --agent lead set <id> review`.
@@ -86,7 +87,7 @@ Spawn `planner` with `<container>` id to create **3–4 coarse vertical slices**
 
 ### `review <task>`
 1. Spawn **`review-arch` and `review-ux` in parallel** with `<id>` and `<base sha>` (plus `visual-checker` when `docs/` layout, theme, or Mermaid diagrams changed and rendered browser verification is needed).
-2. Read both reports and apply **Core Law #2 (Noise Filtering)**: discard `RESULT.md` line-number/paperwork nits, `scripts/check_*.py` regex-guard requests, and `MINOR` style churn.
+2. Read both reports and apply **Core Law #2 (Noise Filtering)**: discard `RESULT.md` line-number/paperwork nits, `scripts/check_*.py` regex-guard requests, and `MINOR` style churn. Reject tests with no `TESTING_PLAN.md` story, unit tests duplicating E2E coverage, and vacuous oracles, and require `review-arch`'s `make coverage` verdict resolved (delete dead code, extend the E2E test for a real story).
 3. **If genuine `[BLOCKER]` or `[MAJOR]` behavioural/DX/security bugs remain:**
    - Log the filtered genuine defects to `<id>` (`plan.py --agent lead log <id> "REVIEW FIX: ..."`).
    - Dispatch **at most 1** crisp, consolidated fix brief to the owner (`implementer` or `writer`) targeting ONLY those real defects (explicitly telling them to run targeted crate tests during the fix and `make fast-check` / `make docs-check` once at the end), then re-verify the diff. If the identical real defect still fails, apply the Escalation Ladder (`escalate <id> --to expert`).
