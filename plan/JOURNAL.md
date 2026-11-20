@@ -3972,3 +3972,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T04:52 [MB.42.3.4] (lead) status review -> done
 - 2026-11-20T04:52 [MB.42.3] (lead) status ready -> done
 - 2026-11-20T04:52 [MB.42.3] (lead) epic closed on leaf evidence (4 slices): .deb/.rpm with measured 2.34 floor + 3 static + WSGI container legs; install.sh with fd-0 closed, symlink-member refusa
+- 2026-11-20T04:52 [MB.42.12] (lead) status ready -> active
+- 2026-11-20T04:52 [MB.42.12] (lead) attempt 1/3 started
+- 2026-11-20T04:52 [MB.42.12] (lead) base a57e693b99fb1cb1bb1984bd70ba4359ce39cfb9
+- 2026-11-20T04:57 [MB.42.12] (lead) status active -> done

@@ -13,9 +13,10 @@
 //! and status `0`. It runs twice — once with a **cleared** environment and once
 //! with `BLASTIT_*` poisoned — because "reads no environment" needs both halves:
 //! a cleared one proves nothing is required, a poisoned one proves nothing is read
-//! (§1.3 row 3, §8.3a's allowlist). The third case is the one documented argv
-//! difference: the portable binary ignores an argument and exits `1` at end of
-//! input, where `blastit lsp --bogus` exits `2` with a CLI error (§1.3 obligation 3).
+//! (§1.3 row 3, §8.3a's allowlist). The last three cases are the binary's own argv
+//! surface (`MB.42.12`), which `blastit lsp` keeps behind the CLI: `--version`
+//! answers one line with `0`, any other argument is one sentence on stderr with
+//! `2`, and no argument at all is the session — silent on both streams.
 //!
 //! No case mutates this process's environment: each child gets its own pipes and
 //! its own `env_clear()`/`env` pair.
@@ -322,25 +323,18 @@ fn a_poisoned_environment_changes_nothing() {
     assert_one_session(&capabilities, &diagnostics, &status, &stderr);
 }
 
-/// §1.3 obligation 3: the one documented argv difference. The portable binary
-/// ignores an argument — it reads stdin and exits `1` at end of input, where
-/// `blastit lsp --bogus` exits `2` with a CLI error. Nothing is written to
-/// either stream.
-#[test]
-fn an_argument_is_ignored_and_end_of_input_exits_one() {
+/// Runs the portable binary with `args` and no input at all, returning its exit
+/// status and both streams — the shape every argv case below reads.
+fn run_argv(args: &[&str]) -> (ExitStatus, String, String) {
     let mut child = binary()
         .env_clear()
-        .arg("--bogus")
-        .stdin(Stdio::piped())
+        .args(args)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn blastit-lsp --bogus");
-    // End of input at once: a server that had parsed argv would have exited
-    // `2` before opening the pipe.
-    drop(child.stdin.take());
+        .expect("spawn blastit-lsp");
     let status = wait_or_kill(&mut child);
-    assert_eq!(status.code(), Some(1), "EOF without `shutdown` is `1`");
     let mut stdout = String::new();
     if let Some(mut pipe) = child.stdout.take() {
         pipe.read_to_string(&mut stdout).expect("read stdout");
@@ -349,9 +343,71 @@ fn an_argument_is_ignored_and_end_of_input_exits_one() {
     if let Some(mut pipe) = child.stderr.take() {
         pipe.read_to_string(&mut stderr).expect("read stderr");
     }
-    assert!(stdout.is_empty(), "stdout is the protocol: {stdout:?}");
+    (status, stdout, stderr)
+}
+
+/// `MB.42.12`: `--version` is the probe a package manager or an editor extension
+/// makes before it spawns anything — exactly one line on stdout naming the
+/// version the capability document's `serverInfo` carries, nothing on stderr,
+/// and `0`. `-V` is the same probe under its short name.
+#[test]
+fn version_is_one_line_on_stdout_and_exit_zero() {
+    let (status, stdout, stderr) = run_argv(&["--version"]);
+    assert_eq!(status.code(), Some(0), "{stderr:?}");
+    assert_eq!(
+        stdout,
+        format!("blastit-lsp {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert_eq!(stdout.lines().count(), 1, "{stdout:?}");
+    assert!(stderr.is_empty(), "{stderr:?}");
+
+    let (status, short, stderr) = run_argv(&["-V"]);
+    assert_eq!(status.code(), Some(0), "{stderr:?}");
+    assert_eq!(short, stdout, "`-V` is the same line as `--version`");
+    assert!(stderr.is_empty(), "{stderr:?}");
+}
+
+/// `MB.42.12`: every other argument — `--help` included — is a misuse, and is
+/// answered with one sentence on stderr and `2`. It is never the old
+/// exit-`1`-and-silence (a broken binary, to any probe) and never a usage block:
+/// this server has no option to list, so the sentence is the whole surface.
+#[test]
+fn any_other_argument_is_one_sentence_on_stderr_and_exit_two() {
+    for argument in ["--help", "-h", "--bogus"] {
+        let (status, stdout, stderr) = run_argv(&[argument]);
+        assert_eq!(status.code(), Some(2), "{argument}: {stderr:?}");
+        assert!(
+            stdout.is_empty(),
+            "{argument}: stdout is the protocol: {stdout:?}"
+        );
+        let sentence = stderr.trim_end();
+        assert!(
+            sentence.starts_with("blastit-lsp is a language server"),
+            "{argument}: {sentence:?}"
+        );
+        assert!(sentence.contains("stdin"), "{argument}: {sentence:?}");
+        assert_eq!(
+            sentence.lines().count(),
+            1,
+            "{argument}: one sentence, one line: {sentence:?}"
+        );
+    }
+}
+
+/// §3 / §1.3 obligation 3, the other half: with no argument the binary is the
+/// session, so end of input is the ordinary "the client disappeared" status `1`
+/// — not a usage error, and with **nothing** on either stream, because an LSP
+/// client's stdout carries framed messages and nothing else.
+#[test]
+fn no_argument_is_the_session_and_end_of_input_exits_one_silently() {
+    let (status, stdout, stderr) = run_argv(&[]);
+    assert_eq!(status.code(), Some(1), "EOF without `shutdown` is `1`");
+    assert!(
+        stdout.is_empty(),
+        "an LSP client's stream stays clean: {stdout:?}"
+    );
     assert!(
         stderr.is_empty(),
-        "the argument was not a CLI error: {stderr:?}"
+        "the session's start prints no banner: {stderr:?}"
     );
 }

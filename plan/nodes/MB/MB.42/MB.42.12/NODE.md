@@ -2,16 +2,16 @@
 id: MB.42.12
 title: "blastit-lsp argv: --version/--help answer silence and exit 1 (now reachable on PATH)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.3.3]
 paths: ["crates/blastit-lsp/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T03:39"
-updated: "2026-11-20T03:39"
+updated: "2026-11-20T04:57"
 ---
 
 # Goal

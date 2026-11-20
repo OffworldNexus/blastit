@@ -53,6 +53,7 @@
 
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{self, Read, Write};
 use std::panic::AssertUnwindSafe;
 
@@ -110,6 +111,16 @@ const ENDED: &str = "the input ended inside a frame";
 const HEADER_TOO_LONG: &str = "the header block is too long";
 const BODY_TOO_LONG: &str = "the body is too long";
 const INTERNAL: &str = "internal error";
+
+/// The one sentence a misused `blastit-lsp` prints on stderr (`MB.42.12`).
+///
+/// It is the binary's **whole** argv surface — there is no usage block and no
+/// option to list, because the server takes none by design: what it answers is
+/// on stdin, and what it says is on stdout.
+const ARGUMENTS: &str = concat!(
+    "blastit-lsp is a language server: it takes no arguments and speaks LSP ",
+    "on stdin and stdout; point your editor at it."
+);
 
 // §2.4's codes. `-32603` and `-32800` are reserved and never emitted.
 const PARSE_ERROR: i32 = -32700;
@@ -216,6 +227,51 @@ pub fn run() -> u8 {
     let mut input = Input::new(stdin.lock());
     let mut out = stdout.lock();
     Server::new().serve(&mut input, &mut out)
+}
+
+/// The `blastit-lsp` binary's entry point, given the argv its `main` read: argv
+/// first (`MB.42.12`), and — only with **no** argument — exactly the session
+/// `blastit lsp` runs.
+///
+/// The argv is a parameter and not an environment read here on purpose: this
+/// module is the text tool both entries share, and its critical suite asserts it
+/// names no environment at all (`crates/blastit/tests/critical_lsp.rs`, R3). The
+/// binary's own `main` is the one place a process's arguments exist.
+pub fn run_binary(args: &[OsString]) -> u8 {
+    let mut out = io::stdout();
+    let mut err = io::stderr();
+    if let Some(status) = answer_argv(args, &mut out, &mut err) {
+        return status;
+    }
+    run()
+}
+
+/// The one line `--version` prints: this package's own version, which is the
+/// same `CARGO_PKG_VERSION` the capability document's `serverInfo` carries, so
+/// a probe of the binary and a probe of the protocol cannot disagree (§2.3).
+fn version_line() -> String {
+    format!("blastit-lsp {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// What an invocation with arguments says and returns, or `None` for "no
+/// argument" — which is the session, and prints **nothing**: an LSP client's
+/// stream must stay clean, so a bare run has no banner and no version line.
+///
+/// `--version`/`-V`, alone, is the probe a package manager or an editor
+/// extension makes before it spawns anything: one line on stdout, `0`. Every
+/// other argument is a misuse: one sentence on stderr, `2`.
+pub fn answer_argv(args: &[OsString], out: &mut impl Write, err: &mut impl Write) -> Option<u8> {
+    let first = args.first()?;
+    if args.len() == 1 && matches!(first.to_str(), Some("--version" | "-V")) {
+        // A stream that fails is still a probe that answered: the status is the
+        // probe's, and there is nothing left to complain on.
+        let _ = writeln!(out, "{}", version_line());
+        let _ = out.flush();
+        return Some(0);
+    }
+    let _ = writeln!(err, "{ARGUMENTS}");
+    let _ = err.flush();
+    Some(2)
 }
 
 /// One framed session: the frame reader and the message loop (§3).
@@ -1337,11 +1393,14 @@ fn max_point_utf16(text: &str) -> (u32, u32) {
     clippy::indexing_slicing
 )]
 mod tests {
+    use std::ffi::OsString;
+
     use blastit_manifest::{Position, QuerySite};
 
     use super::{
-        Lines, MAX_FRAME_BODY_BYTES, MAX_FRAME_HEADER_BYTES, char_index, declared_length,
-        encode_interior, intersects, max_point_utf16, parameterize, sql_token, word_at,
+        Lines, MAX_FRAME_BODY_BYTES, MAX_FRAME_HEADER_BYTES, answer_argv, char_index,
+        declared_length, encode_interior, intersects, max_point_utf16, parameterize, sql_token,
+        version_line, word_at,
     };
 
     /// §3.1's bound, asserted as a literal: a change to the parser's cap must be
@@ -1593,5 +1652,52 @@ mod tests {
             encode_interior(single, &site, "SELECT \"x\" FROM t"),
             "SELECT \"x\" FROM t"
         );
+    }
+
+    /// `MB.42.12`: the binary's argv surface, without a process. No argument is
+    /// the session and says nothing; `--version`/`-V` alone is one stdout line
+    /// and `0`; anything else — `--help` included — is one stderr sentence and
+    /// `2`. A probe with two arguments is a misuse, not a version answer.
+    #[test]
+    fn argv_is_a_version_probe_or_one_sentence() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        assert_eq!(answer_argv(&[], &mut out, &mut err), None);
+        assert!(out.is_empty(), "the session prints no banner");
+        assert!(err.is_empty(), "the session prints no banner");
+
+        for flag in ["--version", "-V"] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let args = [OsString::from(flag)];
+            assert_eq!(answer_argv(&args, &mut out, &mut err), Some(0), "{flag}");
+            let line = String::from_utf8(out).expect("a UTF-8 version line");
+            assert_eq!(line, format!("{}\n", version_line()), "{flag}");
+            assert_eq!(line.lines().count(), 1, "{flag}: {line:?}");
+            assert_eq!(
+                version_line(),
+                format!("blastit-lsp {}", env!("CARGO_PKG_VERSION"))
+            );
+            assert!(err.is_empty(), "{flag}: {err:?}");
+        }
+
+        for args in [
+            vec![OsString::from("--help")],
+            vec![OsString::from("-h")],
+            vec![OsString::from("--bogus")],
+            vec![OsString::from("--version"), OsString::from("--bogus")],
+        ] {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            assert_eq!(answer_argv(&args, &mut out, &mut err), Some(2), "{args:?}");
+            assert!(out.is_empty(), "{args:?}: stdout is the protocol: {out:?}");
+            let sentence = String::from_utf8(err).expect("a UTF-8 sentence");
+            assert_eq!(sentence.trim_end(), super::ARGUMENTS, "{args:?}");
+            assert_eq!(sentence.lines().count(), 1, "{args:?}: {sentence:?}");
+            assert!(
+                sentence.starts_with("blastit-lsp is a language server"),
+                "{args:?}: {sentence:?}"
+            );
+        }
     }
 }
