@@ -215,7 +215,7 @@ check_blob_floors() {
         [ -f "$shim" ] || continue
         scripts/check-portable-elf.sh --max-glibc "$floor" "$shim" >/dev/null || {
             echo "error: $(basename "$shim") outgrew the wheel's glibc floor ($floor)" >&2
-            echo "  build it inside the builder image (py shims: manylinux_2_28 has no shared libpython, so \`make py-sapi PY_SAPI_PROBE=0\` there)" >&2
+            echo "  build it inside the builder image (\`make py-sapi\` there, whose glibc is the floor this wheel claims)" >&2
             exit 1
         }
     done
@@ -434,13 +434,13 @@ DOCKER
             # **here**, inside the image whose glibc is the floor the wheel names
             # (`MB.42.3.3`, design §6.1): built on the host they need 2.34, and a
             # `manylinux_2_28` tag over a 2.34 binary is a promise `pip` cannot
-            # check. `PY_SAPI_PROBE=0` skips only the `dlopen` probe, which needs
-            # a shared libpython manylinux does not ship; `.github/workflows/
-            # py-sapi.yml` is where that probe runs.
+            # check. `make py-sapi` asserts each shim's own artifact contract
+            # (`DT_SONAME`, undefined `Py_Initialize*`, the three exports), which
+            # needs no shared libpython.
             cargo build --release --locked -p blastit-lsp
             install -D -m 0755 "/src/target/manylinux_'"${manylinux_ver}"'/release/blastit-lsp" "$BLOB_DIR/blastit-lsp"
             ( cd /src && make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_OUT="$BLOB_DIR" \
-                PY_SAPI_PROBE=0 PY_SAPI_ARCH='"${arch}"' PY_SAPI_LIBC=gnu \
+                PY_SAPI_ARCH='"${arch}"' PY_SAPI_LIBC=gnu \
                 PY_SAPI_PYTHON_313=/opt/python/cp313-cp313/bin/python3 \
                 PY_SAPI_PYTHON_314=/opt/python/cp314-cp314/bin/python3 )
             maturin build --release --out /wheel-out \
@@ -483,12 +483,11 @@ if [[ -z ${wheel_platform:-} ]]; then
     install -m 0755 target/release/blastit-lsp "$blob_abs/blastit-lsp"
     stage_shims "$host_arch" "$host_libc"
     # A musl host can compile its own CPython shims (no `--target`: the default
-    # triple *is* musl, so `NEEDED` names `libc.musl-<arch>.so.1`). The dlopen
-    # probe is skipped: python-build-standalone ships no shared libpython, and
-    # `scripts/py_sapi_leg.sh` is where a shim is asserted with the probe.
+    # triple *is* musl, so `NEEDED` names `libc.musl-<arch>.so.1`), and
+    # `make py-sapi` asserts the artifact contract on each one.
     if [ "$host_libc" = musl ] && [ "${BLASTIT_WHEEL_BUILD_PY_SHIMS:-}" = 1 ]; then
         make py-sapi PY_MINORS="${PY_MINORS:-3.14 3.13}" PY_SAPI_OUT="$blob_abs" \
-            PY_SAPI_ARCH="$host_arch" PY_SAPI_LIBC=musl PY_SAPI_PROBE=0
+            PY_SAPI_ARCH="$host_arch" PY_SAPI_LIBC=musl
     fi
 fi
 

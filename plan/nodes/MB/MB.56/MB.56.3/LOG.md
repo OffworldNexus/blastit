@@ -15,3 +15,7 @@ MB.56.2.1 inventory: crates/blastit-scheduler/tests/static_feature_off.rs stays 
 ## 2026-11-20T17:28 [lead]
 
 MB.56.2.1 REVIEW-GAP (must re-cover E2E): (1) blastit check exit table 0 clean/1 findings/2 could-not-start/3 suite-failed incl pytest 5 = 3, docs/reference/cli.md:78-80; (2) pytest-django handshake: settings module/manage.py/test_<db>, owner-only never-reused handshake file removed however run ends, Django without postgres proxy + store with no inputs = exit 2 naming the block; (3) check --learn human line 'learn: N routes, M queries added -> /abs/Blastfile' and 'proposed (dry-run)' never 'added'/relative, to stderr under --json; (4) check finds its gate root from installed/repacked bundle (never a cargo tree), prefers project venv interpreter, prepends caller PYTHONPATH
+
+## 2026-11-20T17:41 [lead]
+
+MUST COVER in e2e_prod_refusals/e2e_dev (from MB.56.2.2 review): (a) env boot refusals naming the variable never its value: missing $IDENT, DATABASE_URL with target_session_attrs=any, multi-host URL, output naming BLASTIT_*, two proxies producing one variable (all one line each in one boot); BLASTIT_* stripped from worker env; injected default never overrides a present value; (b) WSGI host refusals verbatim: 'blastit dev: CPython 3.12 at <path> is not supported for WSGI views (CPython 3.13 and 3.14 ...)', free-threaded refusal, missing libpython sentence naming the minor and every remedy

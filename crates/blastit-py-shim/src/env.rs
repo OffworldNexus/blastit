@@ -282,16 +282,3 @@ if blastit_app_module:
         for _location in (getattr(_spec, 'submodule_search_locations', None) or ()):
             _add_blastit_path(_location)
 ";
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_different_minor_is_refused_in_dotted_form() {
-        let err = dotted_py_minor(313);
-        assert_eq!(err, "3.13");
-        assert!(!err.contains("313"));
-    }
-}

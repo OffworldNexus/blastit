@@ -213,28 +213,3 @@ const FREEZE: &CStr = c"
 import gc
 gc.freeze()
 ";
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use crate::request::Immortalize;
-
-    #[test]
-    fn the_freeze_follows_the_immortalisation_pass() {
-        // The order is the value of the slice: an immortal object is never
-        // freed, so its address cannot be reused by a later allocation.
-        let collect = super::CLOSE_AND_COLLECT.to_str().expect("utf-8");
-        let freeze = super::FREEZE.to_str().expect("utf-8");
-        assert!(collect.contains("gc.collect()"));
-        assert!(freeze.contains("gc.freeze()"));
-        assert!(!collect.contains("gc.freeze()"), "freeze is its own step");
-    }
-
-    #[test]
-    fn an_operator_who_turned_the_pass_off_is_reported_as_off() {
-        // `off` is a decision, not a failure: the shim still freezes the heap.
-        assert_eq!(Immortalize::Off.setting(), Settings::Off);
-    }
-
-    use blastit_view_python::immortal::Setting as Settings;
-}

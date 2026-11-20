@@ -1,6 +1,5 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 //! Per-minor C SAPI shims for embedded PHP: the frozen `blastit_php_abi_v1`
 //! surface, the toolchain that builds a shim, and the request-side types that

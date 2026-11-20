@@ -101,8 +101,8 @@ fi
 
 # The gnu legs run on a runner whose oldest CPython may be 3.12: fetch the minor
 # the leg names when nothing names an interpreter for it yet.
-# `PY_SAPI_PYTHON_<digits>` is the Makefile's first stop, and the `dlopen` probe
-# proves the shim against *that* interpreter's shared `libpython`.
+# `PY_SAPI_PYTHON_<digits>` is the Makefile's first stop: it validates that this
+# interpreter is exactly the minor the shim is compiled against.
 py_var="PY_SAPI_PYTHON_$digits"
 if [ "$libc" = gnu ] && [ -z "${!py_var:-}" ] && command -v uv >/dev/null 2>&1; then
     if ! interpreter=$(uv python find --no-project "$minor" 2>/dev/null); then
@@ -112,20 +112,17 @@ if [ "$libc" = gnu ] && [ -z "${!py_var:-}" ] && command -v uv >/dev/null 2>&1; 
     export "$py_var=$interpreter"
 fi
 
-# `PY_SAPI_OUT` must be absolute: the `dlopen` probe hands the path to a test
-# binary whose working directory is the crate's, so a relative path there reads as
-# "not a file" (found while proving this script).
+# `PY_SAPI_OUT` must be absolute: `make -C "$root"` resolves a relative value
+# against the checkout rather than this shell's working directory, so the
+# artifact would land somewhere this script never reads.
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
-# `PY_SAPI_PROBE=0` for musl: python-build-standalone ships no shared libpython,
-# so the `dlopen` probe cannot run there. The contract above is what the shim
-# owes, and it is asserted below; the probe runs on the gnu legs.
-probe=1
-if [ "$libc" = musl ]; then probe=0; fi
+# The shim's contract is asserted on the artifact itself below (`readelf`/`nm`),
+# and `make py-sapi` refuses a shim without `DT_SONAME`, an undefined
+# `Py_Initialize*` entry point or the three exports.
 make -C "$root" py-sapi PY_MINORS="$minor" PY_SAPI_OUT="$out" \
-    PY_SAPI_ARCH="$arch" PY_SAPI_LIBC="$libc" PY_SAPI_REQUIRE_ALL=1 \
-    PY_SAPI_PROBE="$probe"
+    PY_SAPI_ARCH="$arch" PY_SAPI_LIBC="$libc" PY_SAPI_REQUIRE_ALL=1
 
 shim="$out/$soname"
 [ -f "$shim" ] || { echo "error: py-sapi-leg: $shim was not built" >&2; exit 1; }

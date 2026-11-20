@@ -24,14 +24,13 @@
 #     `scripts/check-portable-elf.sh` passes with no relaxation: zero libpython,
 #     zero libphp, no build-host `RUNPATH`.
 #
-# `make py-sapi` already runs those four assertions (and the `dlopen` probe) for
+# `make py-sapi` already runs those four assertions for
 # every minor it builds; the explicit block here is what makes this job's log a
 # *proof line per leg* rather than "the target exited 0", and it is what fails
 # when `make py-sapi` is refactored into something weaker.
 #
-# Kept out of `make check` (Docker-free but needs several interpreters and, for
-# the `dlopen` probe, each minor's shared libpython), exactly like `php-sapi.yml`,
-# so the shim cannot rot unnoticed between gates.
+# Kept out of `make check` (Docker-free but needs several interpreters), exactly
+# like `php-sapi.yml`, so the shim cannot rot unnoticed between gates.
 name: Python SAPI
 
 on:

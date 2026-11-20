@@ -31,25 +31,3 @@ pub(crate) fn check_syntax(code: &[u8], path: &[u8]) -> Result<(), String> {
             .map_err(|err| format!("{name}: {err}"))
     })
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_nul_byte_is_refused_before_the_interpreter_is_touched() {
-        // This leg runs on any host: the refusal happens while the C strings are
-        // built, so no interpreter is started and nothing can crash a bare CI
-        // box.
-        let err = check_syntax(b"x = 1\0", b"/srv/app.py").expect_err("a NUL byte");
-        assert!(err.contains("/srv/app.py"), "{err}");
-        assert!(err.contains("NUL"), "{err}");
-    }
-
-    #[test]
-    fn a_nul_byte_in_the_path_is_refused_by_name_too() {
-        let err = check_syntax(b"x = 1", b"/srv/a\0pp.py").expect_err("a NUL byte");
-        assert!(err.contains("NUL"), "{err}");
-    }
-}

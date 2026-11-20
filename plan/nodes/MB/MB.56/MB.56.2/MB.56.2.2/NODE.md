@@ -2,7 +2,7 @@
 id: MB.56.2.2
 title: "Delete non-§7 micro-tests in php-sapi, sys, env, ingress, py-shim, events, frame, py-sapi, lsp/src"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.2.1]
@@ -16,11 +16,15 @@ paths:
   - "crates/blastit-frame/**"
   - "crates/blastit-py-sapi/**"
   - "crates/blastit-lsp/src/**"
-attempts: 0
+  - Makefile
+  - "e2e/php-sapi/**"
+  - "scripts/**"
+  - ".github/workflows/publish-pypi.yml"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T17:15"
-updated: "2026-11-20T17:15"
+updated: "2026-11-20T17:45"
 ---
 
 # Goal

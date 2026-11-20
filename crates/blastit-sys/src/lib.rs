@@ -155,9 +155,6 @@ pub mod fanotify;
 pub mod mem;
 pub mod pin;
 
-#[cfg(any(test, feature = "testutil"))]
-pub mod testutil;
-
 pub use crate::caps::{CapSet, Capabilities, Capability, Held, PrivilegeMode};
 pub use crate::child::set_env;
 pub use crate::error::Error;

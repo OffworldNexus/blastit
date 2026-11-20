@@ -11,3 +11,11 @@ DEFERRED COMMENTS: crates/blastit/src/stage0/gates.rs:272 + crates/blastit-view-
 ## 2026-11-20T17:28 [lead]
 
 crates/blastit-view-static::StaticRoot::open_with is the only seam that can prove the openat2+Walk matrix for MB.56.3 - do NOT prune it. Also candidate dead (no in-crate user): blastit/src/{coverage.rs, mem_usage.rs::advisory, unified.rs renderer, py.rs::refusal_message, forking.rs::agrees}, blastit-view-php::is_serveable_entry
+
+## 2026-11-20T17:40 [lead]
+
+From MB.56.2.2 coverage sweep: blastit-sys/src/mem.rs (13 pub, 3 used outside), proc.rs thread_count/chdir only via stage0; god-files >500 LOC to split/trim while stripping comments: blastit-events/src/lib.rs 1813, json.rs 1402, blastit-lsp/src/lib.rs 1386, blastit-php-sapi/src/loader.rs 1075, blastit-sys/src/fanotify.rs 1031, blastit/src/supervise.rs 2767, worker(pre)-1611, discovery 1576
+
+## 2026-11-20T17:40 [lead]
+
+From MB.56.2.2 coverage sweep: blastit-sys/src/mem.rs (13 pub items, 3 referenced outside crate), blastit-sys/src/proc.rs thread_count/chdir only reachable via stage0 fork_exec/gates; god-files >500 LOC: blastit-events/src/lib.rs 1813, json.rs 1402, blastit-lsp/src/lib.rs 1386, blastit-php-sapi/src/loader.rs 1075, blastit-sys/src/fanotify.rs 1031, crates/blastit/src/supervise.rs 2767, blastit-scheduler worker 1611, discovery 1576

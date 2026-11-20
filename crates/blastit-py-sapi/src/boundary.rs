@@ -157,34 +157,3 @@ fn check_syntax_with(
         Err(refusal(failure))
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    /// A slot the shim never wrote: a length that says nothing is there. `take`
-    /// reads only when `cap != 0` and `len <= cap`.
-    #[test]
-    fn an_unwritten_slot_is_never_read() {
-        let slot = PyBufV1 {
-            ptr: ptr::dangling_mut::<u8>(),
-            len: 3,
-            cap: 0,
-        };
-        assert!(slot.cap == 0 || slot.len > slot.cap);
-    }
-
-    #[test]
-    fn the_refusal_placeholder_names_itself() {
-        let text = String::from_utf8_lossy(NO_MESSAGE);
-        assert!(text.contains("\"error\""), "{text}");
-        assert!(text.contains("without a message"), "{text}");
-    }
-
-    #[test]
-    fn the_null_zygote_names_nothing() {
-        assert!(PyZygote::null().is_null());
-        assert!(PyZygote::from_raw(ptr::null_mut()).is_null());
-    }
-}

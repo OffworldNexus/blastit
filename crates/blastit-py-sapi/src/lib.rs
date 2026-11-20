@@ -1,6 +1,5 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 //! Per-minor CPython shims: the frozen `blastit_py_abi_v1` surface, the
 //! filesystem-only stage-0 discovery, and the one `dlopen` module.

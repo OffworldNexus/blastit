@@ -82,27 +82,3 @@ fn hex_digit(byte: Option<u8>) -> Result<u8, IngressReject> {
         _ => Err(IngressReject::FormBadEscape),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn drops_empty_segments() {
-        assert_eq!(
-            decode(b"a=1&&b=2&"),
-            Ok(vec![
-                ("a".to_string(), "1".to_string()),
-                ("b".to_string(), "2".to_string())
-            ])
-        );
-    }
-
-    #[test]
-    fn keeps_duplicate_names_in_order() {
-        assert_eq!(
-            decode(b"b=1&b=2").map(|pairs| encode(&pairs)),
-            Ok("b=1&b=2".to_string())
-        );
-    }
-}

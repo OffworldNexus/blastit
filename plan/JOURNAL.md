@@ -4195,3 +4195,19 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T17:28 [MB.56.5] (lead) crates/blastit-view-static::StaticRoot::open_with is the only seam that can prove the openat2+Walk matrix for MB.56.3 - do NOT prune it. Also candidate dead (no
 - 2026-11-20T17:28 [MB.56.3] (lead) MB.56.2.1 REVIEW-GAP (must re-cover E2E): (1) blastit check exit table 0 clean/1 findings/2 could-not-start/3 suite-failed incl pytest 5 = 3, docs/reference/cli
 - 2026-11-20T17:30 [MB.56.2.1] (lead) status active -> done
+- 2026-11-20T17:30 [MB.56.2.1] (lead) commit 3f44850
+- 2026-11-20T17:30 [MB.56.2.1] (lead) also removed crates/blastit/tests/{common_harness_parity,stage1_install_sites}.rs (include_str! subjects deleted here); e13cf58
+- 2026-11-20T17:30 [MB.56.2.2] (lead) edited fields
+- 2026-11-20T17:30 [MB.56.2.2] (lead) status ready -> active
+- 2026-11-20T17:30 [MB.56.2.2] (lead) attempt 1/3 started
+- 2026-11-20T17:30 [MB.56.2.2] (lead) base e13cf585512e43441c1ebbcdc6ce013430f6bda7
+- 2026-11-20T17:38 [MB.56.4] (lead) From MB.56.2.2: e2e/php-sapi/Dockerfile:203 still runs 'cargo test -p blastit-php-sapi --test critical_file_sink' (deleted) and Makefile:748 rs-test-php doc + p
+- 2026-11-20T17:40 [MB.56.2.2] (lead) edited fields
+- 2026-11-20T17:40 [MB.56.2.2] (lead) REVIEW FIX: (a) inventory the two critical_file_sink cases (.env read never reported / per-request reset / exit() still reports; BLASTIT_PHP_ABI_VERSION+struct 
+- 2026-11-20T17:40 [MB.56.5] (lead) From MB.56.2.2 coverage sweep: blastit-sys/src/mem.rs (13 pub, 3 used outside), proc.rs thread_count/chdir only via stage0; god-files >500 LOC to split/trim whi
+- 2026-11-20T17:40 [MB.56.5] (lead) From MB.56.2.2 coverage sweep: blastit-sys/src/mem.rs (13 pub items, 3 referenced outside crate), blastit-sys/src/proc.rs thread_count/chdir only reachable via 
+- 2026-11-20T17:41 [MB.56.3] (lead) MUST COVER in e2e_prod_refusals/e2e_dev (from MB.56.2.2 review): (a) env boot refusals naming the variable never its value: missing $IDENT, DATABASE_URL with ta
+- 2026-11-20T17:41 [MB.56.4] (lead) From MB.56.2.2 review: e2e/php2shell.py (24 rows) runs ONLY via 'make e2e' - no workflow invokes it and make check never runs it; wire php2shell into the php-sa
+- 2026-11-20T17:41 [MB.56.2.2] (lead) REVIEW FIX 2: crates/blastit-ingress/tests/critical_ingress.rs is a TESTING_PLAN §7 'body policies' suite (JSON/form/none/raw refusals) and was deleted by mista
+- 2026-11-20T17:43 [MB.56.2.4] (lead) NOTE from MB.56.2.2: 'body policies' §7 stays owned by crates/blastit-ingress/tests/critical_ingress.rs (blastit-http does not depend on blastit-ingress, so cod
+- 2026-11-20T17:45 [MB.56.2.2] (lead) status active -> done

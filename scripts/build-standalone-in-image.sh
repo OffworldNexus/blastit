@@ -309,9 +309,8 @@ fi
 # them beside the binary so a WSGI view boots out of the box, and they are built
 # **here** so their glibc floor is the floor of this image. `manylinux_2_28`
 # ships `/opt/python/cp313-cp313` and `cp314-cp314`, so neither minor is
-# downloaded; `PY_SAPI_PROBE=0` skips only the `dlopen` probe, which needs a
-# shared libpython this image does not ship (`.github/workflows/py-sapi.yml`
-# runs that probe).
+# downloaded, and `make py-sapi` refuses a shim without `DT_SONAME`, an
+# undefined `Py_Initialize*` entry point or the three exports.
 # The triple decides the shim libc, not this image: `--target` is the claim, and
 # a `-musl` triple here would otherwise get `-gnu`-named shims that staging then
 # refuses without naming the libc. `PY_SAPI_REQUIRE_ALL=1` makes a missing
@@ -325,7 +324,7 @@ case "${TARGET##*-}" in
         ;;
 esac
 arch=${TARGET%%-*}
-make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_PROBE=0 PY_SAPI_REQUIRE_ALL=1 \
+make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_REQUIRE_ALL=1 \
     PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC="$shim_libc" \
     PY_SAPI_PYTHON_313=/opt/python/cp313-cp313/bin/python3 \
     PY_SAPI_PYTHON_314=/opt/python/cp314-cp314/bin/python3

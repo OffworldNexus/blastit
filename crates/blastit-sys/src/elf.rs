@@ -782,6 +782,9 @@ pub fn le_u64(bytes: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(slice))
 }
 
+// The one surviving non-§7 suite in this crate: a malformed ELF object cannot be
+// produced by any end-to-end run of the real binary (the binary either refuses to
+// boot or never writes one), so these byte-level refusals are only reachable here.
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -794,9 +797,6 @@ mod tests {
 
     /// A little-endian ELF64 header for a file of `len` bytes whose section
     /// table starts at `shoff` and holds `shnum` entries of `shentsize` bytes.
-    ///
-    /// Every byte the header does not set is zero, so a field a test does not
-    /// patch is an honest zero rather than whatever the allocator had.
     fn elf64_file(shoff: u64, shentsize: u16, shnum: u16, len: usize) -> Vec<u8> {
         let mut file = vec![0_u8; 64.max(len)];
         file[..4].copy_from_slice(MAGIC);
@@ -810,93 +810,17 @@ mod tests {
         file
     }
 
-    /// The fields one section header is written from, grouped because they are
-    /// one record.
-    struct Header {
-        name: u32,
-        kind: u32,
-        offset: usize,
-        size: usize,
-        link: u32,
-        entsize: u64,
-    }
-
-    /// Writes `header` as the ELF64 section header at `at`.
-    fn write_header(file: &mut [u8], at: usize, header: &Header) {
-        file[at..at + 4].copy_from_slice(&header.name.to_le_bytes());
-        file[at + 4..at + 8].copy_from_slice(&header.kind.to_le_bytes());
-        file[at + 0x18..at + 0x20].copy_from_slice(&(header.offset as u64).to_le_bytes());
-        file[at + 0x20..at + 0x28].copy_from_slice(&(header.size as u64).to_le_bytes());
-        file[at + 0x28..at + 0x2c].copy_from_slice(&header.link.to_le_bytes());
-        file[at + 0x38..at + 0x40].copy_from_slice(&header.entsize.to_le_bytes());
-    }
-
-    /// A little-endian ELF64 object with four sections: the null header,
-    /// `.dynstr` (a string table), `.dynsym` (a symbol table linked to
-    /// `.dynstr`), and `.shstrtab`, the names all three are looked up by.
-    fn elf64_with_sections() -> Vec<u8> {
-        let shstrtab = b"\0.dynstr\0.dynsym\0.shstrtab\0";
-        let dynstr = b"\0executor_globals\0";
-        let dynsym = [0_u8; 48];
-        let shstrtab_off = 64usize;
-        let dynstr_off = shstrtab_off + shstrtab.len();
-        let dynsym_off = dynstr_off + dynstr.len();
-        let shoff = dynsym_off + dynsym.len();
-        let mut file = vec![0_u8; shoff + 4 * 64];
-        file[..4].copy_from_slice(MAGIC);
-        file[4] = ELFCLASS64;
-        file[5] = ELFDATA2LSB;
-        file[6] = 1;
-        file[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
-        file[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
-        file[0x3c..0x3e].copy_from_slice(&4u16.to_le_bytes());
-        file[0x3e..0x40].copy_from_slice(&3u16.to_le_bytes());
-        file[shstrtab_off..shstrtab_off + shstrtab.len()].copy_from_slice(shstrtab);
-        file[dynstr_off..dynstr_off + dynstr.len()].copy_from_slice(dynstr);
-        file[dynsym_off..dynsym_off + dynsym.len()].copy_from_slice(&dynsym);
-        write_header(
-            &mut file,
-            shoff + 64,
-            &Header {
-                name: 1,
-                kind: SHT_STRTAB,
-                offset: dynstr_off,
-                size: dynstr.len(),
-                link: 0,
-                entsize: 0,
-            },
-        );
-        write_header(
-            &mut file,
-            shoff + 128,
-            &Header {
-                name: 9,
-                kind: SHT_DYNSYM,
-                offset: dynsym_off,
-                size: dynsym.len(),
-                link: 1,
-                entsize: 24,
-            },
-        );
-        write_header(
-            &mut file,
-            shoff + 192,
-            &Header {
-                name: 17,
-                kind: SHT_STRTAB,
-                offset: shstrtab_off,
-                size: shstrtab.len(),
-                link: 0,
-                entsize: 0,
-            },
-        );
+    /// An ELF64 object with two sections: the null header, then one at `offset`
+    /// holding `size` bytes, named by itself (`e_shstrndx = 1`).
+    fn elf64_with_one_section(offset: u64, size: u64) -> Vec<u8> {
+        let shoff = 128u64;
+        let mut file = elf64_file(shoff, 64, 2, 256);
+        file[0x3e..0x40].copy_from_slice(&1u16.to_le_bytes());
+        let at = usize::try_from(shoff).unwrap() + 64;
+        file[at + 4..at + 8].copy_from_slice(&SHT_STRTAB.to_le_bytes());
+        file[at + 0x18..at + 0x20].copy_from_slice(&offset.to_le_bytes());
+        file[at + 0x20..at + 0x28].copy_from_slice(&size.to_le_bytes());
         file
-    }
-
-    /// The `.dynsym` section header's byte offset in `elf64_with_sections`.
-    fn dynsym_header_at(file: &[u8]) -> usize {
-        let shoff = u64::from_le_bytes(file[0x28..0x30].try_into().unwrap());
-        usize::try_from(shoff).unwrap() + 128
     }
 
     #[test]
@@ -944,17 +868,12 @@ mod tests {
     fn a_section_table_past_the_end_of_the_file_is_refused() {
         let err = Elf::parse(Cursor::new(elf64_file(4096, 64, 2, 128))).expect_err("e_shoff 4096");
         assert!(matches!(err, ElfError::SectionTablePastEnd), "{err}");
-    }
 
-    #[test]
-    fn a_section_count_that_does_not_fit_the_file_is_refused() {
-        // 60 000 entries of 64 bytes is a 3.7 MiB table in a 128-byte file.
+        // 60 000 entries of 64 bytes is a 3.7 MiB table in a 128-byte file, and
+        // the widest `u16` fields must not wrap the multiplication either.
         let err =
             Elf::parse(Cursor::new(elf64_file(64, 64, 60_000, 128))).expect_err("60 000 entries");
         assert!(matches!(err, ElfError::SectionTablePastEnd), "{err}");
-
-        // The widest values the two `u16` fields can hold must not wrap the
-        // multiplication into a table that looks small.
         let err = Elf::parse(Cursor::new(elf64_file(64, u16::MAX, u16::MAX, 256)))
             .expect_err("0xffff entries of 0xffff bytes");
         assert!(matches!(err, ElfError::SectionTablePastEnd), "{err}");
@@ -970,57 +889,11 @@ mod tests {
     }
 
     #[test]
-    fn a_real_section_table_is_walked_by_index_and_by_name() {
-        let mut elf = Elf::parse(Cursor::new(elf64_with_sections())).expect("a well-formed object");
-        assert_eq!(elf.class(), Class::Elf64);
-        assert_eq!(elf.section_count(), 4);
-
-        let dynsym = elf.section(2).expect("the .dynsym header");
-        assert_eq!(dynsym.kind, SHT_DYNSYM);
-        assert_eq!(dynsym.link, 1);
-        assert_eq!(dynsym.entsize, 24);
-        assert_eq!(usize::try_from(dynsym.size).unwrap(), 48);
-
-        let strtab = elf.section(1).expect("the linked string table");
-        assert_eq!(strtab.kind, SHT_STRTAB);
-        assert_eq!(
-            elf.section_bytes(&strtab, LIMIT).expect("its bytes"),
-            b"\0executor_globals\0"
-        );
-
-        let by_name = elf
-            .section_by_name(".dynstr", LIMIT)
-            .expect("a name table")
-            .expect(".dynstr is named");
-        assert_eq!(by_name.kind, SHT_STRTAB);
-        assert_eq!(by_name.offset, strtab.offset);
-        assert!(matches!(elf.section_by_name(".text", LIMIT), Ok(None)));
-    }
-
-    #[test]
-    fn a_section_index_past_the_table_is_refused() {
-        let mut elf = Elf::parse(Cursor::new(elf64_with_sections())).expect("a well-formed object");
-        let err = elf.section(4).expect_err("index 4 of 4");
-        assert!(
-            matches!(err, ElfError::SectionIndexOutOfRange { index: 4 }),
-            "{err}"
-        );
-        let err = elf.section(usize::MAX).expect_err("a huge index");
-        assert!(
-            matches!(err, ElfError::SectionIndexOutOfRange { index } if index == usize::MAX),
-            "{err}"
-        );
-    }
-
-    #[test]
     fn a_section_that_wraps_the_file_length_is_refused() {
-        let mut image = elf64_with_sections();
-        let at = dynsym_header_at(&image);
         // `sh_offset = u64::MAX`, `sh_size = 16`: `offset + size` overflows.
-        image[at + 0x18..at + 0x20].copy_from_slice(&u64::MAX.to_le_bytes());
-        image[at + 0x20..at + 0x28].copy_from_slice(&16u64.to_le_bytes());
-        let mut elf = Elf::parse(Cursor::new(image)).expect("the header is still well-formed");
-        let section = elf.section(2).expect("the .dynsym header");
+        let mut elf = Elf::parse(Cursor::new(elf64_with_one_section(u64::MAX, 16)))
+            .expect("the header is still well-formed");
+        let section = elf.section(1).expect("the only section");
         let err = elf
             .section_bytes(&section, LIMIT)
             .expect_err("offset + size wraps");
@@ -1029,250 +902,26 @@ mod tests {
 
     #[test]
     fn a_section_over_the_callers_limit_is_refused() {
-        let mut elf = Elf::parse(Cursor::new(elf64_with_sections())).expect("a well-formed object");
-        let strtab = elf.section(1).expect("a string table");
+        let mut elf =
+            Elf::parse(Cursor::new(elf64_with_one_section(64, 16))).expect("a well-formed object");
+        let section = elf.section(1).expect("the only section");
         let err = elf
-            .section_bytes(&strtab, 4)
-            .expect_err("a string table under a 4-byte limit");
+            .section_bytes(&section, 4)
+            .expect_err("a 16-byte section under a 4-byte limit");
         assert!(
-            matches!(err, ElfError::SectionTooLarge { size } if size == strtab.size),
+            matches!(err, ElfError::SectionTooLarge { size } if size == 16),
             "{err}"
         );
     }
 
     #[test]
-    fn a_section_larger_than_this_build_can_address_is_an_error() {
-        let mut image = elf64_with_sections();
-        let at = dynsym_header_at(&image);
-        // `sh_size = u64::MAX` under the widest limit a caller can pass: a
-        // 32-bit build cannot address the length at all, and a 64-bit one finds
-        // the range outside the file. Neither is a wrap and neither is a panic.
-        image[at + 0x20..at + 0x28].copy_from_slice(&u64::MAX.to_le_bytes());
-        let mut elf = Elf::parse(Cursor::new(image)).expect("the header is well-formed");
-        let section = elf.section(2).expect("the .dynsym header");
-        let err = elf
-            .section_bytes(&section, u64::MAX)
-            .expect_err("a u64::MAX-byte section");
+    fn a_section_index_past_the_table_is_refused() {
+        let mut elf =
+            Elf::parse(Cursor::new(elf64_with_one_section(64, 16))).expect("a well-formed object");
+        let err = elf.section(2).expect_err("index 2 of 2");
         assert!(
-            matches!(
-                err,
-                ElfError::SectionTooLargeToAddress | ElfError::SectionPastEnd
-            ),
+            matches!(err, ElfError::SectionIndexOutOfRange { index: 2 }),
             "{err}"
         );
-        // And the variant's own sentence, which the 32-bit path prints.
-        assert_eq!(
-            ElfError::SectionTooLargeToAddress.to_string(),
-            "a section is larger than this build can address"
-        );
-    }
-
-    #[test]
-    fn a_section_name_table_that_cannot_name_sections_returns_none() {
-        // `e_shstrndx` past the table: this object names nothing.
-        let mut image = elf64_with_sections();
-        image[0x3e..0x40].copy_from_slice(&99u16.to_le_bytes());
-        let mut elf = Elf::parse(Cursor::new(image)).expect("the header is well-formed");
-        assert!(
-            matches!(elf.section_by_name(".dynstr", LIMIT), Ok(None)),
-            "an e_shstrndx past the section table names nothing"
-        );
-
-        // The section it points at is there but is not `SHT_STRTAB`: it is not a
-        // name table, so nothing is looked up in it.
-        let mut image = elf64_with_sections();
-        let shoff = u64::from_le_bytes(image[0x28..0x30].try_into().unwrap());
-        let at = usize::try_from(shoff).unwrap() + 3 * 64 + 4;
-        image[at..at + 4].copy_from_slice(&SHT_DYNSYM.to_le_bytes());
-        let mut elf = Elf::parse(Cursor::new(image)).expect("the header is well-formed");
-        assert!(
-            matches!(elf.section_by_name(".dynstr", LIMIT), Ok(None)),
-            "a name table that is not SHT_STRTAB names nothing"
-        );
-    }
-
-    /// The positive case on a real object rather than a fixture: the test
-    /// binary the suite is running from.
-    #[test]
-    fn a_real_host_binary_parses_and_names_its_dynamic_sections() {
-        let path = std::env::current_exe().expect("the test binary's own path");
-        let mut file = std::fs::File::open(&path).expect("the test binary");
-        let len = file.metadata().expect("its metadata").len();
-        let mut elf = Elf::parse(&mut file).expect("the test binary is an ELF this build reads");
-        assert!(elf.section_count() > 1);
-        assert_eq!(elf.file_len(), len);
-        // Every linked object names its sections through `.shstrtab`.
-        assert!(
-            matches!(elf.section_by_name(".shstrtab", LIMIT), Ok(Some(_))),
-            "{}: it has a section-name table",
-            path.display()
-        );
-        // A dynamically linked binary carries `.dynsym`/`.dynstr` beside each
-        // other; a fully static one may not, so the pair is asserted only when
-        // the binary has it.
-        if let Ok(Some(dynstr)) = elf.section_by_name(".dynstr", LIMIT) {
-            assert_eq!(dynstr.kind, SHT_STRTAB);
-            assert!(elf.section_bytes(&dynstr, LIMIT).is_ok());
-            let dynsym = elf
-                .section_by_name(".dynsym", LIMIT)
-                .expect("a name table")
-                .expect(".dynsym beside .dynstr");
-            assert_eq!(dynsym.kind, SHT_DYNSYM);
-            assert!(elf.section_bytes(&dynsym, LIMIT).is_ok());
-        }
-    }
-
-    /// A little-endian ELF64 object with `.dynstr`, a two-entry `.dynsym`, a
-    /// `.shstrtab` and a `.dynamic` holding one `DT_SONAME`.
-    ///
-    /// Symbol 0 is **defined** (`st_shndx = 1`), symbol 1 is **imported**
-    /// (`st_shndx = 0`): the gate defect this fixture pins.
-    fn elf64_with_symbols_and_soname() -> Vec<u8> {
-        let shstrtab = b"\0.dynstr\0.dynsym\0.shstrtab\0.dynamic\0";
-        let dynstr = b"\0libpython3.14.so.1.0\0Py_InitializeEx\0PyGILState_Ensure\0";
-        let mut dynsym = [0_u8; 48];
-        dynsym[0..4].copy_from_slice(&22_u32.to_le_bytes());
-        dynsym[4] = (1 << 4) | STT_FUNC;
-        dynsym[6..8].copy_from_slice(&1_u16.to_le_bytes());
-        dynsym[24..28].copy_from_slice(&38_u32.to_le_bytes());
-        dynsym[24 + 6..24 + 8].copy_from_slice(&SHN_UNDEF.to_le_bytes());
-        let mut dynamic = [0_u8; 32];
-        dynamic[0..8].copy_from_slice(&14_u64.to_le_bytes());
-        dynamic[8..16].copy_from_slice(&1_u64.to_le_bytes());
-        // The third entry's tag is zero: the array ends there.
-
-        let shstrtab_off = 64usize;
-        let dynstr_off = shstrtab_off + shstrtab.len();
-        let dynsym_off = dynstr_off + dynstr.len();
-        let dynamic_off = dynsym_off + dynsym.len();
-        let shoff = dynamic_off + dynamic.len();
-        let mut file = vec![0_u8; shoff + 5 * 64];
-        file[..4].copy_from_slice(MAGIC);
-        file[4] = ELFCLASS64;
-        file[5] = ELFDATA2LSB;
-        file[6] = 1;
-        file[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
-        file[0x3a..0x3c].copy_from_slice(&64_u16.to_le_bytes());
-        file[0x3c..0x3e].copy_from_slice(&5_u16.to_le_bytes());
-        file[0x3e..0x40].copy_from_slice(&3_u16.to_le_bytes());
-        file[shstrtab_off..shstrtab_off + shstrtab.len()].copy_from_slice(shstrtab);
-        file[dynstr_off..dynstr_off + dynstr.len()].copy_from_slice(dynstr);
-        file[dynsym_off..dynsym_off + dynsym.len()].copy_from_slice(&dynsym);
-        file[dynamic_off..dynamic_off + dynamic.len()].copy_from_slice(&dynamic);
-        write_header(
-            &mut file,
-            shoff + 64,
-            &Header {
-                name: 1,
-                kind: SHT_STRTAB,
-                offset: dynstr_off,
-                size: dynstr.len(),
-                link: 0,
-                entsize: 0,
-            },
-        );
-        write_header(
-            &mut file,
-            shoff + 128,
-            &Header {
-                name: 9,
-                kind: SHT_DYNSYM,
-                offset: dynsym_off,
-                size: dynsym.len(),
-                link: 1,
-                entsize: 24,
-            },
-        );
-        write_header(
-            &mut file,
-            shoff + 192,
-            &Header {
-                name: 17,
-                kind: SHT_STRTAB,
-                offset: shstrtab_off,
-                size: shstrtab.len(),
-                link: 0,
-                entsize: 0,
-            },
-        );
-        write_header(
-            &mut file,
-            shoff + 256,
-            &Header {
-                name: 27,
-                kind: SHT_DYNAMIC,
-                offset: dynamic_off,
-                size: dynamic.len(),
-                link: 1,
-                entsize: 16,
-            },
-        );
-        file
-    }
-
-    #[test]
-    fn a_dynsym_walk_reports_imports_as_undefined_and_a_dynamic_walk_reads_the_soname() {
-        let mut elf = Elf::parse(Cursor::new(elf64_with_symbols_and_soname())).expect("an object");
-        let symbols = elf.dynsym_symbols(MAX_SECTION_BYTES).expect("the .dynsym");
-        assert_eq!(symbols.len(), 2);
-        assert_eq!(symbols[0].name, "Py_InitializeEx");
-        assert!(symbols[0].defined, "st_shndx 1 is a definition");
-        assert_eq!(symbols[0].kind, STT_FUNC);
-        assert_eq!(symbols[1].name, "PyGILState_Ensure");
-        assert!(
-            !symbols[1].defined,
-            "SHN_UNDEF is an import, and must never be reported as an export"
-        );
-
-        let names = elf.dynsym_names(MAX_SECTION_BYTES).expect("the names");
-        assert_eq!(
-            names,
-            vec![
-                DynSymbol {
-                    name: "Py_InitializeEx".to_owned(),
-                    defined: true
-                },
-                DynSymbol {
-                    name: "PyGILState_Ensure".to_owned(),
-                    defined: false
-                },
-            ]
-        );
-
-        assert_eq!(
-            elf.dynamic_strings(14, MAX_SECTION_BYTES)
-                .expect("the dynamic array"),
-            vec!["libpython3.14.so.1.0".to_owned()]
-        );
-    }
-
-    #[test]
-    fn an_unwalkable_dynsym_is_a_typed_refusal_not_a_clamped_stride() {
-        let mut image = elf64_with_symbols_and_soname();
-        let shoff = u64::from_le_bytes(image[0x28..0x30].try_into().unwrap());
-        let dynsym_header = usize::try_from(shoff).unwrap() + 128;
-        // `sh_entsize = 8`: below `Elf64_Sym`'s 24.
-        image[dynsym_header + 0x38..dynsym_header + 0x40].copy_from_slice(&8_u64.to_le_bytes());
-        let mut elf = Elf::parse(Cursor::new(image)).expect("the header is well-formed");
-        let err = elf
-            .dynsym_symbols(MAX_SECTION_BYTES)
-            .expect_err("a short stride would read garbage");
-        assert!(matches!(err, ElfError::SymbolEntriesTooSmall), "{err}");
-    }
-
-    #[test]
-    fn a_dynamic_walk_without_the_section_is_a_typed_refusal() {
-        let mut elf = Elf::parse(Cursor::new(elf64_with_sections())).expect("an object");
-        let err = elf
-            .dynamic_strings(14, MAX_SECTION_BYTES)
-            .expect_err("no .dynamic");
-        assert!(matches!(err, ElfError::NoDynamic), "{err}");
-
-        // A null section table only: no `.dynsym` to walk.
-        let mut elf = Elf::parse(Cursor::new(elf64_file(64, 64, 1, 128))).expect("an object");
-        let err = elf
-            .dynsym_symbols(MAX_SECTION_BYTES)
-            .expect_err("no .dynsym");
-        assert!(matches!(err, ElfError::NoDynsym), "{err}");
     }
 }

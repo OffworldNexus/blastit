@@ -23,3 +23,11 @@ REVIEW FIX: restore crates/blastit-scheduler/tests/static_feature_off.rs (Makefi
 ## 2026-11-20T17:30 [lead]
 
 status active -> done
+
+## 2026-11-20T17:30 [lead]
+
+commit 3f44850
+
+## 2026-11-20T17:30 [lead]
+
+also removed crates/blastit/tests/{common_harness_parity,stage1_install_sites}.rs (include_str! subjects deleted here); e13cf58

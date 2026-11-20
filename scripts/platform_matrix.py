@@ -413,8 +413,8 @@ SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
         "measured by MB.42.10 in the `alpine:edge` image with `edge/testing` "
         "appended: with `BLASTIT_LIBPHP` unset the boot reaches "
         "`/usr/lib/php86/libphp.so` through the per-minor directory and serves "
-        "`GET / → 200`; `critical_php_backend` 9/9, `critical_php_embed` 29/29 and "
-        "`critical_file_sink` 8/8 pass in the same image (MB.42.5's `suites: False` "
+        "`GET / → 200`; `critical_php_backend` 9/9 and `critical_php_embed` 29/29 "
+        "pass in the same image (MB.42.5's `suites: False` "
         "was only the handoff's gnu-only `libc::execveat`, fixed by MB.42.10), and "
         "the unprivileged `PR_SET_DUMPABLE(0)` witness denies 2 roles",
     ),
@@ -706,7 +706,7 @@ def shim_name(minor: str, arch: str, libc: str) -> str:
 
 
 # The image a CPython shim of each libc is built in. gnu builds on the runner
-# itself (its `uv python` ships the shared `libpython` the `dlopen` probe needs);
+# itself (its `uv python` provides the interpreter each shim is compiled against);
 # musl must build in Alpine, because no `--target` makes a glibc linker emit a
 # musl binary — and the resulting `NEEDED libc.musl-<arch>.so.1` is asserted.
 PY_SHIM_BUILDER_IMAGES = {"gnu": "", "musl": "alpine:3.21"}
@@ -737,8 +737,8 @@ def py_shim_legs() -> list[dict]:
             "exports": "blastit_py_abi_version,blastit_py_minor,blastit_py_abi_v1",
             "undefined": "Py_InitializeEx",
             # `make py-sapi` needs an interpreter of exactly this minor: it
-            # validates the pair and finds that minor's shared libpython for the
-            # `dlopen` probe (a shim never links it).
+            # validates the pair and asserts the shim's exported and undefined
+            # symbols on the artifact (a shim never links a libpython).
             "python": minor,
             # Where this shim can actually be **linked** for its libc
             # (`MB.42.3.3` review): a musl shim built on a glibc runner was

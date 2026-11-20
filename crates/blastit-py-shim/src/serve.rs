@@ -72,18 +72,3 @@ fn set_environment(py: Python<'_>, home: &[u8]) -> PyResult<()> {
     environ.set_item("TMPDIR", &decoded)?;
     Ok(())
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use crate::request::Serve;
-
-    #[test]
-    fn a_child_without_a_view_descriptor_is_refused_by_name() {
-        // The refusal a caller sees must name the call, not a raw `EBADF`: this
-        // is the one failure the shim can diagnose before touching Python.
-        let req = Serve::default();
-        assert!(req.view_fd < 0);
-        assert!(req.loaded_fd < 0);
-    }
-}

@@ -610,12 +610,6 @@ PY_SAPI_PROFILE ?= release
 PY_SAPI_ARCH ?=
 PY_SAPI_LIBC ?=
 PY_SAPI_REQUIRE_ALL ?=
-# `PY_SAPI_PROBE=0` builds and asserts the shim but skips the `dlopen` probe,
-# which needs that minor's shared `libpython`. `scripts/build-wheel.sh` sets it
-# inside `manylinux_2_28` (the image ships no shared libpython) so the wheel's
-# embedded shims meet the floor the wheel claims;
-# `.github/workflows/py-sapi.yml` is where the probe runs.
-PY_SAPI_PROBE ?= 1
 PY_SAPI_PYTHON_313 ?=
 PY_SAPI_PYTHON_314 ?=
 
@@ -695,22 +689,7 @@ py-sapi: ## Build CPython shims per minor (PY_MINORS="3.14 3.13"; PY_SAPI_REQUIR
 			nm -D --defined-only "$$out" | awk '{print $$2" "$$3}' | grep -qx "T $$symbol" \
 				|| { echo "py-sapi: $$out does not export $$symbol" >&2; exit 1; }; \
 		done; \
-		echo "py-sapi: proving $$out with the self-contained dlopen probe"; \
-		if [ "$(PY_SAPI_PROBE)" = 0 ]; then \
-			echo "py-sapi: PY_SAPI_PROBE=0, artifact contract asserted; the dlopen probe runs in .github/workflows/py-sapi.yml"; \
-		else \
-		libdir="$$("$$interp" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"; \
-		libpython="$$(ls "$$libdir/libpython$${minor}"*.so* 2>/dev/null | head -n 1 || true)"; \
-		if [ -z "$$libpython" ]; then \
-			echo "py-sapi: CPython $$minor has no shared libpython under $$libdir, so this shim cannot be proven on this host; install it — Debian/Ubuntu: apt install libpython$$minor, Alpine: apk add python3, Fedora/RHEL: dnf install python3-libs" >&2; \
-			exit 1; \
-		fi; \
-		BLASTIT_PY_SAPI_SHIM="$$out" BLASTIT_PY_SAPI_LIBPYTHON="$$libpython" \
-			PYO3_PYTHON="$$interp" \
-			LD_LIBRARY_PATH="$$libdir$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
-			$(CARGO) test -p blastit-py-shim --locked --features extension-module \
-				--test abi_load -- --ignored --nocapture; \
-		fi; \
+		echo "py-sapi: $$out carries the frozen artifact contract (DT_SONAME, UND Py_Initialize, exported entry points)"; \
 		built=$$((built + 1)); \
 	done; \
 	if [ -n "$$skipped" ] && [ "$(PY_SAPI_REQUIRE_ALL)" = 1 ]; then \
@@ -761,19 +740,15 @@ php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (n
 # Real-pair PHP suites (`--nocapture` preserves served/respawn evidence lines checked by CI).
 PHP_SUITE_ARGS := --test critical_php_backend --test critical_php_embed \
 	--test critical_parallel_views
-PHP_SINK_SUITE_ARGS := --test critical_file_sink
 PHP_SAPI_IMAGE ?= blastit-php-sapi-e2e:local
 PHP_SAPI_IMAGE_MINOR ?= 8.4
 PHP_SAPI_IMAGE_LIBPHP ?= /usr/lib/libphp$(PHP_SAPI_IMAGE_MINOR).so
 PHP_SAPI_IMAGE_SHIM_DIR ?= /src/target/php-sapi
 
-rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed + critical_parallel_views + critical_file_sink
+rs-test-php: php-sapi ## Real-pair PHP legs: critical_php_backend + critical_php_embed + critical_parallel_views
 	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit $(PHP_SUITE_ARGS) -- --nocapture"
 	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
 		$(RUST_ENV) $(CARGO) test -p blastit --locked $(PHP_SUITE_ARGS) -- --nocapture
-	@echo "BLASTIT_PHP_SHIM_DIR=$(PHP_SAPI_OUT) cargo test -p blastit-php-sapi $(PHP_SINK_SUITE_ARGS) -- --nocapture"
-	BLASTIT_PHP_SHIM_DIR="$(PHP_SAPI_OUT)" \
-		$(RUST_ENV) $(CARGO) test -p blastit-php-sapi --locked $(PHP_SINK_SUITE_ARGS) -- --nocapture
 
 # Run image-built PHP suites first as root (`--cap-add SYS_PTRACE` for maps content check), then unprivileged (`PR_SET_DUMPABLE(0)` EACCES witness).
 rs-test-php-image: ## Docker: run image-built PHP suites as root + unprivileged dumpable witness
@@ -795,8 +770,8 @@ rs-test-php-image: ## Docker: run image-built PHP suites as root + unprivileged 
 			set --; \
 			while IFS= read -r binary; do set -- "$$@" "$$binary"; done \
 				< /src/target/php-suite-executables; \
-			if [ "$$#" -ne 3 ]; then \
-				echo "rs-test-php-image: the image records $$# suite executable(s), expected 3" >&2; \
+			if [ "$$#" -ne 2 ]; then \
+				echo "rs-test-php-image: the image records $$# suite executable(s), expected 2" >&2; \
 				exit 1; \
 			fi; \
 			for binary in "$$@"; do \

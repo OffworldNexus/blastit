@@ -383,7 +383,7 @@ jobs:
                   # with `TARGET` unbound (`MB.49`).
                   uv python install 3.13 3.14 >/dev/null
                   arch=${TARGET%%-*}
-                  make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_PROBE=0 \
+                  make py-sapi PY_MINORS="3.14 3.13" \
                       PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC=musl
                   bash scripts/build-standalone.sh --target "$TARGET" \
                       --shim-dir dist/shims --require-shims "$OWED" \

@@ -200,13 +200,9 @@ RUN bash -euo pipefail -c '\
             2>&1 | tee /dev/stderr \
             | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\\1/p" \
             > /src/target/php-suite-executables; \
-        RUSTFLAGS="$extra" cargo test --locked -p blastit-php-sapi --test critical_file_sink --no-run \
-            2>&1 | tee /dev/stderr \
-            | sed -n "s/^[[:space:]]*Executable [^(]*(\(.*\))\$/\\1/p" \
-            >> /src/target/php-suite-executables; \
         count=$(wc -l < /src/target/php-suite-executables); \
-        if [ "$count" -ne 3 ]; then \
-            echo "expected 3 suite executables, recorded $count:" >&2; \
+        if [ "$count" -ne 2 ]; then \
+            echo "expected 2 suite executables, recorded $count:" >&2; \
             cat /src/target/php-suite-executables >&2; \
             exit 1; \
         fi' \
