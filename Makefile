@@ -246,7 +246,7 @@ rs-no-default: ## Build feature-less binary and prove static mount refusal when 
 universal-smoke: ## Debug binary + portable-ELF and the handoff suite (in fast-check)
 	$(STANDALONE_ENV) $(CARGO) build -p blastit --locked
 	scripts/check-portable-elf.sh "$(CURDIR)/target/debug/blastit"
-	$(RUST_ENV) $(CARGO) test -p blastit --locked --features python --test critical_handoff
+	$(RUST_ENV) $(CARGO) test -p blastit --locked --features python --test e2e_cli
 
 standalone: py-sapi ## Package host standalone archive (release binary + both shim families + checksum)
 	scripts/build-standalone.sh

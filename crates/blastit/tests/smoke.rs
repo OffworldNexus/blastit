@@ -2320,58 +2320,6 @@ fn a_failing_boot_still_says_the_preset_assumption_it_contradicts() {
 }
 
 #[test]
-fn an_unknown_preset_is_refused_with_the_list_of_presets() {
-    if !needs_root("preset refusal") {
-        return;
-    }
-    // E1: a startup error, before anything is forked, naming the flag the
-    // operator used and every preset this build knows.
-    let fixture = Fixture::new("preset-refusal");
-    let manifest = fixture.write("Blastfile", ONE_ROUTE);
-    fixture.write("app.py", APP);
-    let text = run_to_exit(
-        &[
-            std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit")),
-            std::ffi::OsStr::new("--preset=compose-trafik"),
-        ],
-        &[
-            ("PORT", "8097"),
-            ("BLASTIT_APP", "app:application"),
-            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
-            ("PYTHONPATH", &fixture.python_path()),
-            ("BLASTIT_UID_BASE", "48100"),
-            ("BLASTIT_LOG_FORMAT", "json"),
-        ],
-        0,
-        None,
-    );
-    assert!(text.contains("unknown preset"), "{text}");
-    assert!(text.contains("compose-trafik"), "{text}");
-    assert!(text.contains("--preset"), "{text}");
-    for preset in ["digitalocean-paas", "compose-traefik"] {
-        assert!(text.contains(preset), "{preset} is missing from\n{text}");
-    }
-
-    // The same name through the environment, named as the variable it is.
-    let text = run_to_exit(
-        &[std::ffi::OsStr::new(env!("CARGO_BIN_EXE_blastit"))],
-        &[
-            ("PORT", "8097"),
-            ("BLASTIT_APP", "app:application"),
-            ("BLASTIT_MANIFEST", manifest.to_str().unwrap()),
-            ("PYTHONPATH", &fixture.python_path()),
-            ("BLASTIT_UID_BASE", "48100"),
-            ("BLASTIT_LOG_FORMAT", "json"),
-            ("BLASTIT_PRESET", "compose-trafik"),
-        ],
-        0,
-        None,
-    );
-    assert!(text.contains("BLASTIT_PRESET"), "{text}");
-    assert!(text.contains("unknown preset"), "{text}");
-}
-
-#[test]
 fn a_writable_working_directory_is_refused() {
     // §5.3: blastit puts the directory it was started in on `sys.path`, so a
     // `0777` one lets a view plant a module another view imports. The check is

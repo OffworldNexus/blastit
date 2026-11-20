@@ -7,6 +7,7 @@
 | `blastit fmt` | canonical `Blastfile` formatting (`--check` in CI) |
 | `blastit lsp` | your editor, Linux |
 | `blastit-lsp` | your editor, Linux/macOS/Windows |
+| `blastit help [COMMAND]` | the usage text for one command (`dev`, `check`, `fmt`, `lsp`) |
 | `blastit` | production |
 
 `dev`, `check`, `fmt` and `blastit` read `./Blastfile` here; `BLASTIT_MANIFEST`
@@ -18,6 +19,10 @@ that pinned its own copy still runs it: `dev`, `check`, `fmt` and `lsp` hand off
 `./.venv/bin/blastit`, `./vendor/bin/blastit` or `./node_modules/.bin/blastit` when one is
 present and safe, and `BLASTIT_NO_LOCAL_HANDOFF=1` keeps the global binary for every command
 ([which binary answers](#blastit)).
+
+Colour is decided **per stream**: a stream that is not a terminal, a non-empty
+`NO_COLOR`, or `TERM=dumb` gets plain text, so `blastit --help >help.txt` writes
+none while the refusal it prints on stderr keeps its own.
 
 ## `blastit dev`
 
@@ -34,6 +39,9 @@ $ blastit dev --no-reload
 | `--host ADDR` | `127.0.0.1` | expose the server on another address; also needs `BLASTIT_DEV_EXPOSE=1`, and the boot line names the address and your uid |
 | `--learn` | off | allow what the file lacks and record it; writes exact `query` lines to the `Blastfile` when it stops |
 | `--no-reload` | reload on | turn live reload off: nothing is watched, and no `dev.reload.unavailable` is printed |
+
+A flag `dev` does not take is one sentence on stderr and exit `1`;
+`blastit check` (and `test`) answer the same class of mistake with `2`.
 
 It runs the real process topology — http, scheduler, dbproxy and one view per
 route — on your own uid, with the stage-0 secret swap and the policy checks. It
@@ -60,7 +68,7 @@ $ blastit check -- -k products
 | `--json` | off | one JSON document on stdout; everything else on stderr |
 | `--learn` | off | record instead of failing, and write missing unrouted views and their exact `query` lines (`dev --learn` adds statements to existing views); an all-static file has nothing to learn (`2`) |
 | `--dry-run` | off | with `--learn`: print the proposal, write nothing |
-| `-- ARGS…` | — | pass `ARGS` to pytest |
+| `-- ARGS…` | — | pass `ARGS` to pytest; Blastit's own `--blastit-manifest` and `--blastit-live-server` are refused (`2`) |
 
 `--json` prints one document on stdout: `schema_version`, `ok`, `requests`,
 `statements`, `routes`, `proxies`, `findings`. Under `--learn` the document is
@@ -180,10 +188,11 @@ $ blastit --help
 | *(none)* | runs the server, configuration from the environment |
 | `--preset NAME`, `--preset=NAME` | one platform's defaults; a set `BLASTIT_*` or `PORT` still wins |
 | `--help`, `-h` | prints the usage and the preset list |
-| `-V`, `--version` | prints this binary's version; `--help` and `--version` always answer from the global `blastit` |
+| `-V`, `--version` | prints one line, `blastit <version>`, and answers only when the command line carries nothing else; `--help` and `--version` always answer from the global `blastit` |
 
 There is no `--port` here: the listener is a [setting](settings.md) (`PORT` or
-`BLASTIT_*`), and `blastit --port 8080` exits `1` with the usage.
+`BLASTIT_*`), and `blastit --port 8080` exits `2`, naming `--port` and pointing at
+`PORT=<n>`; the `-p` spelling is refused the same way.
 
 Production **fails closed**: without root or the capability set in
 [the settings](settings.md#privileges-and-the-uid-layout), and without seccomp,
@@ -194,8 +203,11 @@ it exits `1` and points at `blastit dev`. `--preset` belongs to stage 0;
 
 `dev`, `check`, `fmt` and `lsp` run the project's own `blastit` when
 `./.venv/bin/blastit`, `./vendor/bin/blastit` or `./node_modules/.bin/blastit` is present
-and safe; the `boot` event names the build that actually ran. A candidate that fails a
-safety check is skipped with one warning line — an unusual checkout or a third-party
-`node_modules` never bricks the command — and `BLASTIT_NO_LOCAL_HANDOFF` keeps the global
-binary for every command. `Serve` never hands off: `--version` and `--help` answer from
-the binary you typed.
+and safe. An activated `$VIRTUAL_ENV` names the first candidate instead of the `./.venv`
+beside the working directory. An ambient candidate that fails a safety check is **skipped**
+with one warning line — an unusual checkout or a third-party `node_modules` never bricks
+the command — and probing continues with the next candidate, then the global binary.
+`BLASTIT_BIN` is the one path you name yourself: it is probed last, and a failure there is
+a **refusal** (`1`), not a skip, because you pointed at it. `BLASTIT_NO_LOCAL_HANDOFF`
+keeps the global binary for every command. `Serve` never hands off: `--version` and
+`--help` answer from the binary you typed.

@@ -2,16 +2,22 @@
 id: MB.56.3.1
 title: "Create e2e_cli.rs (§3 CLI & safe handoff) and delete absorbed suites"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
-paths: ["crates/blastit/tests/**"]
-attempts: 0
+paths:
+  - "crates/blastit/tests/**"
+  - Makefile
+  - docs/reference/cli.md
+  - docs/reference/settings.md
+  - docs/troubleshooting.md
+  - docs/install.md
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:45"
-updated: "2026-11-20T18:45"
+updated: "2026-11-20T18:54"
 ---
 
 # Goal

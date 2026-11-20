@@ -95,11 +95,7 @@ impl Sandbox {
         fs::write(self.dir.join("Blastfile"), content).expect("write Blastfile");
     }
 
-    fn run_cli(&self, arguments: &[&str]) -> Output {
-        self.run_cli_env(&[], arguments)
-    }
-
-    /// The same, with exactly `vars` in the child's environment.
+    /// The child's whole environment is exactly `vars` (see below).
     ///
     /// `env_clear` keeps the suite's own environment out of the child — every
     /// `BLASTIT_*` variable the tests set would otherwise leak into it — so a
@@ -411,94 +407,6 @@ fn a_boot_event_round_trips_the_build_and_never_a_port() {
     );
 }
 
-/// One rejected command line: the exit code, the stderr text it must name, and
-/// the empty stdout every CLI failure promises.
-struct Rejection {
-    argv: &'static [&'static str],
-    code: i32,
-    stderr: &'static str,
-}
-
-#[test]
-fn cli_matrix_rejects_each_bad_command_line() {
-    let sandbox = Sandbox::new("matrix");
-    let cases = [
-        Rejection {
-            argv: &["dev", "--manifest", "x"],
-            code: 1,
-            stderr: "--manifest",
-        },
-        Rejection {
-            argv: &["dev", "--preset", "x"],
-            code: 1,
-            stderr: "--preset",
-        },
-        Rejection {
-            argv: &["dev", "--port", "70000"],
-            code: 1,
-            stderr: "--port",
-        },
-        Rejection {
-            argv: &["dev", "--host", "999.9.9.9"],
-            code: 1,
-            stderr: "--host",
-        },
-        Rejection {
-            argv: &["check", "--manifest", "x"],
-            code: 2,
-            stderr: "--manifest",
-        },
-        Rejection {
-            argv: &["check", "--preset", "x"],
-            code: 2,
-            stderr: "--preset",
-        },
-        Rejection {
-            argv: &["check", "--dry-run"],
-            code: 2,
-            stderr: "--dry-run",
-        },
-        Rejection {
-            argv: &["test", "--preset", "x"],
-            code: 2,
-            stderr: "--preset",
-        },
-        Rejection {
-            argv: &["--stage=1", "--preset", "x"],
-            code: 1,
-            stderr: "--preset",
-        },
-        Rejection {
-            argv: &["check", "--", "--blastit-manifest", "x"],
-            code: 2,
-            stderr: "--blastit-manifest",
-        },
-    ];
-    for case in cases {
-        let output = sandbox.run_cli(case.argv);
-        assert_eq!(
-            output.status.code(),
-            Some(case.code),
-            "{:?}: {}",
-            case.argv,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "{:?} wrote stdout: {}",
-            case.argv,
-            String::from_utf8_lossy(&output.stdout)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains(case.stderr),
-            "{:?}: expected `{}` in `{stderr}`",
-            case.argv,
-            case.stderr
-        );
-    }
-}
-
 #[test]
 fn an_environment_driven_abort_is_a_real_exit_code_and_names_its_cause() {
     let sandbox = Sandbox::new("process-env");
@@ -549,88 +457,6 @@ fn an_environment_driven_abort_is_a_real_exit_code_and_names_its_cause() {
             combined.contains("BLASTIT_SECCOMP"),
             "the abort names the gate: {combined}"
         );
-    }
-}
-
-#[test]
-fn top_level_help_lists_the_three_commands_and_the_presets() {
-    let sandbox = Sandbox::new("help");
-    let output = sandbox.run_cli(&["--help"]);
-    assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for expected in ["blastit dev", "blastit check", "blastit [--preset NAME]"] {
-        assert!(stdout.contains(expected), "{stdout}");
-    }
-    for preset in ["digitalocean-paas", "compose-traefik"] {
-        assert!(stdout.contains(preset), "{stdout}");
-    }
-    // `MB.40.5` (`A-8`): the re-exec grammar stage 0 uses between its own two
-    // images is plumbing, not a feature, and `--version` is the line a bug
-    // report asks for.
-    for internal in ["--stage=1", "--role=dbproxy", "--config-fd"] {
-        assert!(!stdout.contains(internal), "{internal} is hidden: {stdout}");
-    }
-    assert!(stdout.contains("--version"), "{stdout}");
-    assert!(output.stderr.is_empty(), "{output:?}");
-
-    // `A-14` / `A-8`: `--version` and `-V` answer with the version on stdout.
-    for flag in ["--version", "-V"] {
-        let version = sandbox.run_cli(&[flag]);
-        assert_eq!(version.status.code(), Some(0), "{flag}: {version:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&version.stdout),
-            "blastit 0.2.0\n",
-            "{flag}"
-        );
-        assert!(version.stderr.is_empty(), "{flag}: {version:?}");
-    }
-
-    // `A-8` / `A-14`: the version answers only a command line that carries
-    // nothing else, so a typo is named instead of being swallowed by `-V`.
-    let mixed = sandbox.run_cli(&["--preset", "nope", "-V"]);
-    assert_eq!(mixed.status.code(), Some(2), "{mixed:?}");
-    assert!(mixed.stdout.is_empty(), "{mixed:?}");
-    let stderr = String::from_utf8_lossy(&mixed.stderr);
-    assert!(stderr.contains("unknown preset `nope`"), "{stderr}");
-    assert!(stderr.contains("compose-traefik"), "{stderr}");
-
-    // `A-14`: `blastit help [COMMAND]` is the word people type, and an unknown
-    // command is a usage error (`2`), not a grammar lecture.
-    let help = sandbox.run_cli(&["help", "dev"]);
-    assert_eq!(help.status.code(), Some(0), "{help:?}");
-    assert!(String::from_utf8_lossy(&help.stdout).contains("--port"));
-    let unknown = sandbox.run_cli(&["help", "wat"]);
-    assert_eq!(unknown.status.code(), Some(2), "{unknown:?}");
-    assert!(
-        String::from_utf8_lossy(&unknown.stderr).contains("unknown subcommand 'wat'"),
-        "{unknown:?}"
-    );
-
-    // `A-11`: a misspelled preset is named before anything about capabilities,
-    // whichever spelling asked for it, and the error lists the real ones.
-    for (vars, argv) in [
-        (&[][..], &["--preset", "nope"][..]),
-        (&[("BLASTIT_PRESET", "nope")][..], &[][..]),
-    ] {
-        let output = sandbox.run_cli_env(vars, argv);
-        assert_eq!(output.status.code(), Some(2), "{argv:?}: {output:?}");
-        assert!(output.stdout.is_empty(), "{argv:?}: {output:?}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("nope"), "{argv:?}: {stderr}");
-        for preset in ["digitalocean-paas", "compose-traefik"] {
-            assert!(stderr.contains(preset), "{argv:?}: {stderr}");
-        }
-    }
-
-    for (argv, expected) in [
-        (&["dev", "--help"][..], "--port"),
-        (&["check", "--help"][..], "--dry-run"),
-        (&["test", "-h"][..], "--json"),
-    ] {
-        let output = sandbox.run_cli(argv);
-        assert_eq!(output.status.code(), Some(0), "{argv:?}");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains(expected), "{argv:?}: {stdout}");
     }
 }
 

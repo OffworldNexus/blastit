@@ -6,12 +6,12 @@ status: ready
 owner: implementer
 priority: 1
 depends_on: [MB.56.3.4]
-paths: ["crates/blastit/tests/**", Makefile, ".github/**"]
+paths: ["crates/blastit/tests/**", "e2e/**", "docs/design/**", Makefile, ".github/**"]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:45"
-updated: "2026-11-20T18:45"
+updated: "2026-11-20T18:50"
 ---
 
 # Goal

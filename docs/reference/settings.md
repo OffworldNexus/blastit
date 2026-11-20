@@ -36,6 +36,7 @@ the process environment only; `set -a; . ./.env; set +a` before `blastit dev` lo
 | `BLASTIT_BACKLOG` | `1024` | the TCP listen backlog |
 | `BLASTIT_DEV_EXPOSE` | — | `1` is the second acknowledgement `blastit dev --host` needs before it binds a non-loopback address |
 | `BLASTIT_NO_LOCAL_HANDOFF` | — | any value but `0`/empty stops `dev`, `check`, `fmt` and `lsp` from handing off to the project's own `blastit` |
+| `BLASTIT_BIN` | — | the project `blastit` you name yourself: probed last, after `.venv`, `vendor` and `node_modules`, and unlike those a failure is a refusal (`1`), not a skip |
 
 The health path takes no worker slot: traffic cannot starve a health check.
 

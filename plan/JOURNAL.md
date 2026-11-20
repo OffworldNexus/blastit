@@ -4252,3 +4252,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T18:45 [MB.56.3.3] (lead) created (task) Create e2e_check_fmt.rs (§5 check/fmt/learn, exit table) and drop the audit_v1 shim
 - 2026-11-20T18:45 [MB.56.3.4] (lead) created (task) Create e2e_prod_refusals.rs (§6 fail-closed startup, env/WSGI refusals)
 - 2026-11-20T18:45 [MB.56.3.5] (lead) created (task) Finish consolidation: four suites + minimal common/, <=5,500 LOC, fix dead test legs
+- 2026-11-20T18:45 [MB.56.3.1] (lead) attempt 1/3 started
+- 2026-11-20T18:45 [MB.56.3.1] (lead) base 48e1c3727b907a0050fba3422b5b3807feaf83ae
+- 2026-11-20T18:45 [MB.56.3.1] (lead) status ready -> active
+- 2026-11-20T18:45 [MB.56.3.1] (lead) base 48e1c3727b907a0050fba3422b5b3807feaf83ae
+- 2026-11-20T18:50 [MB.56.3.5] (lead) edited fields
+- 2026-11-20T18:50 [MB.56.3.5] (lead) GOAL UPDATED (from MB.56.3.1 review): also retire e2e/dx_replay.py (reads deleted dx-* fixtures) + amend docs/design/view-crates-architecture.md R14; fold the 4
+- 2026-11-20T18:50 [MB.56.3.1] (lead) edited fields
+- 2026-11-20T18:50 [MB.56.3.1] (lead) REVIEW FIX: tests: per-spelling preset message + --preset=NAME accepted/rejected, --port 8080 -> 2, TOCTOU swap adversarial test, self-image test observable or 
+- 2026-11-20T18:54 [MB.56.3.1] (lead) status active -> done

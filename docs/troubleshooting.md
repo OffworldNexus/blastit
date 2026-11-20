@@ -29,6 +29,13 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `is the uid the layout hands out` | the service uid collides with `BLASTIT_UID_BASE + 1…3` or a route's uid |
 | `memory: … is above BLASTIT_MEM_HIGH_WATERMARK` | `blastit dev` stops rather than serve `503`s: the memory the kernel cannot reclaim is over the knob. Free memory, or raise `BLASTIT_MEM_HIGH_WATERMARK` |
 
+## The wrong `blastit` answers
+
+| Symptom | Fix |
+|---|---|
+| `skipping local binary <path> (<reason>); continuing with the next candidate or the global binary` | the project's own `blastit` is not safe to run: another uid could have written it (`0775`/`0777`), it is owned by another uid, or a directory on the way to it is group/world-writable. The command continues with the next candidate, then the global binary — so the fix is the checkout (`chmod go-w` it, or turn off a shared `umask 002`), not the command |
+| `refusing local handoff to <path>: …; set BLASTIT_NO_LOCAL_HANDOFF=1 to use the global blastit` | you named that path in `BLASTIT_BIN` and it is not safe to run: fix its owner and mode (and the directories above it), or set `BLASTIT_NO_LOCAL_HANDOFF=1` to run the global binary |
+
 ## A boot warning
 
 | Symptom | Fix |
