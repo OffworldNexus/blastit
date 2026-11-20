@@ -154,10 +154,26 @@ only from a peer in `BLASTIT_TRUSTED_PROXIES`; both presets name `*`,
 
 ## The full harness
 
-The end-to-end tests drive a Django app over HTTP, run the same raw SQL from views
-with different grants, and assert the denials name the right view and the password
-appears nowhere in the log — `uv run e2e/run.py` in Docker as root,
-`uv run e2e/rootless/run.py --local` for the rootless path that checks `/proc` too.
+The end-to-end tests drive real frameworks over real sockets: `run_apps.py` runs
+a Symfony-shaped PHP front controller, Django and Flask on CPython 3.13 and 3.14,
+and a bare static container against a real PostgreSQL 18, proving per-view grants,
+the same raw SQL refused in the wrong view, and a password that appears nowhere in
+a worker or a response.
+
+`run_prod.py` is the deployment half (`TESTING_PLAN.md` §6): both presets in real
+containers. It runs `--preset digitalocean-paas` as container root and
+`BLASTIT_PRESET=compose-traefik` as the capability-only uid behind Traefik and
+PgBouncer, and observes the boundary directly rather than through the app — each
+view's own OS uid and `Seccomp:` mode from `/proc/<pid>/status`, the capability
+sets and `NoNewPrivs:` of every child, the absence of the database password from
+`/proc/<pid>/environ` (with a scan that first proves it can read a view), a
+refused `exec` and outbound connection, trusted versus forged forwarded headers,
+the pool on the path, and a `SIGTERM` drain that answers the request in flight.
+
+```console
+$ uv run --no-project e2e/run_apps.py
+$ uv run --no-project e2e/run_prod.py      # or: make e2e-prod
+```
 
 ## Where next
 

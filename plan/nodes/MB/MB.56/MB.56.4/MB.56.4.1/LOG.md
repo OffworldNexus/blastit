@@ -31,3 +31,7 @@ REVIEW FIX 2 (ux fixtures): Flask trait needs psycopg's hstore OID query (+ pros
 ## 2026-11-20T21:57 [lead]
 
 status active -> done
+
+## 2026-11-20T21:57 [lead]
+
+commit 2392890

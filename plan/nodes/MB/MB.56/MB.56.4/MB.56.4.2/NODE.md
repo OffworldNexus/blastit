@@ -2,16 +2,16 @@
 id: MB.56.4.2
 title: "e2e/run_prod.py: root + rootless presets, isolation, fair queueing, drain"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.4.1]
-paths: ["e2e/**"]
-attempts: 0
+paths: ["e2e/**", docs/security.md, "docs/deploy/**", docs/reference/settings.md, Makefile]
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T21:07"
-updated: "2026-11-20T21:07"
+updated: "2026-11-20T22:27"
 ---
 
 # Goal

@@ -40,10 +40,16 @@ RUN set -eux; \
         -o "/opt/blastit/shims/libblastit_php84-${arch}-${libc}.so" \
         /opt/blastit-src/c/blastit_php_sapi.c; \
     rm -rf /opt/blastit-src; \
-    ls -l /opt/blastit/shims/ /usr/lib/libphp8.4.so
+    ls -l /opt/blastit/shims/ /usr/lib/libphp8.4.so; \
+    install -d /usr/share/blastit/lib; \
+    install -m 0644 /opt/blastit/shims/libblastit_php84-*.so /usr/share/blastit/lib/
 
 # The fixture, the probe matrix and the driver that replays it.
 COPY e2e/apps/php /fixture
+# The production fixture (`e2e/run_prod.py`) is baked into the same image: the
+# production legs run it from `/prod`, and the rootless image is this image plus
+# a capable copy of the binary.
+COPY e2e/apps/prod /prod
 COPY e2e/php2shell.py /opt/e2e/php2shell.py
 COPY docs/frameworks/php /opt/e2e/php-docs
 COPY e2e/apps/php/probes.md /opt/e2e/probes.md

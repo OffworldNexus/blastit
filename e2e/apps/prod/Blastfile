@@ -1,0 +1,40 @@
+# The production fixture served by `e2e/run_prod.py`'s **root** leg
+# (`--preset digitalocean-paas`): the block store the DigitalOcean page tells the
+# operator to write, so the app gets `DB_HOST` (its socket directory),
+# `DB_PORT`, `DB_USERNAME` and `DB_DATABASE` and never a URL or the password.
+app "prod"
+
+entrypoint php "public/index.php"
+
+postgres {
+    host $DB_HOST
+    port $DB_PORT
+    user $DB_USERNAME
+    password $DB_PASSWORD
+    database $DB_DATABASE
+    sslmode $DB_SSLMODE
+}
+
+# The view every client-address, sandbox and fair-queuing row uses.
+view front GET "/whoami", "/fast", "/slow" {
+}
+
+# The catalogue: three columns of `products`, and nothing else.
+view catalog GET "/catalog/*" {
+    postgres {
+        select products(id, name, price)
+    }
+}
+
+# A second view with its own grant: the same application, another policy.
+view warehouse GET "/warehouse/*" {
+    postgres {
+        select orders(customer_id, total)
+    }
+}
+
+view env GET "/env" {
+}
+
+view probe GET "/shell", "/egress" {
+}

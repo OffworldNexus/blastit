@@ -4347,3 +4347,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T21:49 [MB.56.4.1] (lead) REVIEW FIX: (B) e2e/live.py + e2e/rootless/run.py still exec deleted scenario.py/check_logs.py -> delete both with an explicit handoff to MB.56.4.2's run_prod.p
 - 2026-11-20T21:49 [MB.56.4.1] (lead) REVIEW FIX 2 (ux fixtures): Flask trait needs psycopg's hstore OID query (+ prose: use_native_hstore=False alternative); Django static mount must follow django.
 - 2026-11-20T21:57 [MB.56.4.1] (lead) status active -> done
+- 2026-11-20T21:57 [MB.56.4.1] (lead) commit 2392890
+- 2026-11-20T21:57 [MB.56.4.2] (lead) status ready -> active
+- 2026-11-20T21:57 [MB.56.4.2] (lead) attempt 1/3 started
+- 2026-11-20T21:57 [MB.56.4.2] (lead) base 2392890b3f1230f5bd71750767a4c028af2b1ea8
+- 2026-11-20T22:21 [MB.56.4.2] (lead) edited fields
+- 2026-11-20T22:21 [MB.56.4.2] (lead) REVIEW FIX 2 (ux): (B) the two legs prove the OTHER page's store: root leg must use the DO block (host/port/user/password/database/sslmode/ca_cert, no DATABASE_
+- 2026-11-20T22:27 [MB.56.4.2] (lead) status active -> done

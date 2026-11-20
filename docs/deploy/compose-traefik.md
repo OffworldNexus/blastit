@@ -50,7 +50,7 @@ Each container hop is a bridge network, not the internet; the
 | Thing | Value | Why |
 |---|---|---|
 | app container | `user: 10000`, the capability set, `mem_limit: 1g` | a file-capability copy turns every process of that uid into init, so the uid is the app's alone |
-| runtime directory | `tmpfs /run/blastit`, mode `0700`, owned by 10000 | `/run` belongs to root, and a rootless init cannot create its own |
+| runtime directory | `tmpfs /run/blastit`, mode `0711`, owned by 10000 | `/run` belongs to root, and a rootless init cannot create its own; `0711` lets a view traverse into its own `0700` directory without listing the others |
 | pool | PgBouncer, `transaction`, `DEFAULT_POOL_SIZE=20`, `MAX_CLIENT_CONN=100`, `MAX_PREPARED_STATEMENTS=200` | 20 server connections for up to 100 clients, and prepared statements are rewritten rather than refused |
 | pool auth | `scram-sha-256` | the image's `md5` default fails against PostgreSQL 18's SCRAM passwords |
 | migrate | its own container, `user: 10001`, the owner role on `db:5432` | a migration bug cannot run the capable copy |
@@ -249,7 +249,9 @@ services:
     mem_limit: 1g
     tmpfs:
       # /run belongs to root; this is the runtime directory, owned by init's uid.
-      - /run/blastit:mode=0700,uid=10000,gid=10000
+      # `0711`: each view gets its own `0700` directory inside, and only needs to
+      # traverse this one (a `0700` here would lock every view out of its own).
+      - /run/blastit:mode=0711,uid=10000,gid=10000
     environment: *app-env
     command: ["/usr/share/blastit/lib/blastit-init"]
     expose: ["8080"]

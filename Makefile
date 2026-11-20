@@ -12,6 +12,7 @@
 #   make rs-test-critical # run every crates/*/tests/critical_*.rs suite standalone
 #   make coverage         # instrumented line/region % + uncovered lines (TESTS="…" FILES="…")
 #   make e2e              # build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
+#   make e2e-prod         # both deployment presets in real containers: uids, caps, /proc, fair queue, drain
 #   make e2e-universal    # one staged bundle, four runtimes: CPython 3.13/3.14, PHP 8.4, static, handoff (slow)
 #   make install          # stage a self-contained release bundle under PREFIX (default ~/.local)
 #   make uninstall        # remove the bundle `make install` staged under PREFIX
@@ -100,7 +101,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help fast-check check clean guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default coverage \
-        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-universal \
+        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-prod e2e-universal \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image python-runtime standalone standalone-glibc \
         zed-check \
@@ -500,6 +501,14 @@ e2e: ## Run the application/runtime e2e suite (Docker, PostgreSQL, PHP, Django/F
 	$(CARGO) build -p blastit --release --locked
 	$(MAKE) python-runtime
 	$(UV) run --no-project e2e/run_apps.py
+
+# `TESTING_PLAN.md` §6 (`MB.56.4.2`): both deployment presets in real containers.
+# It needs a Docker daemon that can store file capabilities in an image layer and
+# pulls `traefik`/`pgbouncer`; every missing host fact is a loud SKIP naming the
+# command that installs it (the rootless image build is a FAIL, not a SKIP).
+e2e-prod: ## Both production presets in containers (uids, caps, /proc, fair queuing, drain)
+	$(CARGO) build -p blastit --release --locked
+	$(UV) run --no-project e2e/run_prod.py
 
 # One artifact, four runtimes (`MB.42.2.4`). Slow: it stages a release bundle,
 # builds a venv per interpreter and boots a real `blastit dev` per leg, so it is
