@@ -738,7 +738,7 @@ fn is_dotfile_segment(segment: &str) -> bool {
 /// retired key's §4.1, transferred verbatim).
 ///
 /// Existence, symlinks and readability are not checked here: an explicit probe
-/// owns those (`MB.3.5.2`), so a manifest still validates on a machine that has
+/// owns those, so a manifest still validates on a machine that has
 /// not produced `public/` yet. There is no `listen` key to check — the
 /// transport is a `socketpair` blastit owns.
 fn check_php(manifest: &Manifest, errors: &mut Vec<ManifestError>) {

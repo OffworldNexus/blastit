@@ -324,7 +324,7 @@ impl Shared {
 }
 
 /// One listener's policy, swapped whole by a dev policy document
-/// (`MB.23.5.3`, §4.6 step 2).
+/// (§4.6 step 2).
 ///
 /// The cell is what makes "new connections see the new grants" true for an
 /// **enforcing** listener without touching `hooks.rs`: `check` clones the

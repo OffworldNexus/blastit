@@ -33,7 +33,7 @@ pub(crate) struct InitPaths {
     /// The installation prefix CPython must call home before it starts: the
     /// one `Config.python.python_home` recorded (design §2.4). This is the
     /// **only** way the prefix reaches the interpreter now — stage 0 exports no
-    /// `PYTHONHOME` (`MB.42.2.1.4`).
+    /// `PYTHONHOME`.
     pub(crate) python_home: Option<Vec<u8>>,
 }
 

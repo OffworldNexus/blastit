@@ -274,7 +274,7 @@ impl Allowlist {
         // and `…` where a literal was redacted — which no parser accepts. So a
         // text in that spelling is restored to one of the same shape first: the
         // access set a table grant decides on is identical, and the cache key
-        // stays the normalised text (`MB.40.2`).
+        // stays the normalised text.
         let analysable: Cow<'_, str> =
             if normalized.contains("$?") || normalized.contains('\u{2026}') {
                 Cow::Owned(restore_parameters(sql))

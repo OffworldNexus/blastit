@@ -11,9 +11,9 @@
 //!
 //! The C shim re-checks the four names (`c/blastit_php_sapi.c`), so a bug on
 //! this side cannot become an escalation there either. Both halves are tested:
-//! here in `tests/critical_shim_contract.rs`, and in the container by
-//! `make php-sapi-e2e`, which puts a `PHP_VALUE` entry in the request and
-//! asserts `$_SERVER` never sees it.
+//! the Rust side by `e2e/php2shell.py`'s adversarial request rows, and the shim
+//! in the container by `make php-sapi-e2e`, which puts a `PHP_VALUE` entry in
+//! the request and asserts `$_SERVER` never sees it.
 
 use std::fmt;
 use std::path::Path;

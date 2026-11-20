@@ -230,8 +230,8 @@ pub trait Sink {
 /// The most paths one request's file sink buffers before it stops recording.
 ///
 /// `EG(included_files)` holds one entry per included file; a request that
-/// loads more than this is beyond every real framework (`MB.23.4` measured a
-/// 458-file Django view) and the report is a hint, never a budget.
+/// loads more than this is beyond every real framework (the largest measured
+/// view loaded 458 files) and the report is a hint, never a budget.
 pub const MAX_RECORDED_PATHS: usize = 4096;
 
 /// The longest path one request's file sink buffers: `PATH_MAX` including the
@@ -352,7 +352,7 @@ pub struct Loaded {
     request: RequestFn,
     /// Set by [`Loaded::worker_init`]. A request before it is a caller bug.
     initialized: bool,
-    /// The file sink this process's shim was handed (`MB.23.4.2`), or `None`
+    /// The file sink this process's shim was handed, or `None`
     /// when nothing is installed.
     ///
     /// **`Box`, and owned here rather than borrowed:** the shim's
@@ -387,8 +387,7 @@ unsafe impl Send for Loaded {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Installed(());
 
-/// Why a file sink was not installed — the two cases a `bool` used to conflate
-/// (`MB.23.4.2` review, finding 2).
+/// Why a file sink was not installed — the two cases one `bool` cannot tell apart.
 ///
 /// [`NoSink::Absent`] is a property of the *shim* and permanent for this load: a
 /// PHP build or shim from before the addition reports no files and serves
@@ -642,8 +641,7 @@ impl Loaded {
     /// is the only owner, its pointee never moves again (not even when `self`
     /// moves into a `Mutex`/`Box`/`Arc`), and [`Loaded::worker_shutdown`] and
     /// [`Loaded::drop`] clear the shim's statics before the box is dropped. A
-    /// caller that kept a reference and dropped it early — the shape the
-    /// `&FileSink` parameter used to allow — is no longer expressible.
+    /// caller that kept a reference and dropped it early is not expressible.
     ///
     /// The shim's per-request state (`clear`/`take`) stays reachable through
     /// [`Loaded::file_sink`], which borrows the same allocation.
@@ -892,8 +890,8 @@ fn c_path(path: &Path, what: &'static str) -> Result<CString, LoadError> {
 /// with different arguments would transmute silently — so the declarations are
 /// guarded where they are written: `src/abi.rs` mirrors the header field by
 /// field, the shim's `_Static_assert`s pin the struct layout at compile time,
-/// and `tests/critical_shim_contract.rs` keeps the mirror and the header in
-/// step on every `make check`.
+/// and `make php-sapi-e2e` loads a real shim, which is where the mirror and the
+/// header are checked against each other.
 ///
 /// # Safety
 ///

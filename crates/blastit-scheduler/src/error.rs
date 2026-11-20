@@ -39,7 +39,7 @@ pub enum SchedulerError {
     /// The manifest declares a `static` mount, but this binary was built
     /// without the responder: nothing here can open a root or resolve a path,
     /// so the role refuses to start instead of answering `404` for a file the
-    /// page promised (`MB.36.2`, ADR-0016 decision 6).
+    /// page promised (ADR-0016 decision 6).
     #[error(
         "this build cannot serve a static mount: it was compiled without the `static` \
          feature (rebuild with `--features static`, which `blastit`'s default features \

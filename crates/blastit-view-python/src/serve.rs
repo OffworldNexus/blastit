@@ -197,7 +197,7 @@ pub fn serve(
 /// [`serve`], with the dev-only loaded-file report.
 ///
 /// `loaded` is the write end of this view's `SOCK_DGRAM` socketpair and the
-/// source id its batches name (`MB.23.4`, design §4.4). The view sends one
+/// source id its batches name (design §4.4). The view sends one
 /// `boot` batch — the module closure it inherited from the preload phase plus
 /// anything already opened — before it announces `READY`, and then one delta
 /// per request, from the request thread, through a non-blocking socket. A
@@ -352,13 +352,12 @@ impl PoolInner {
 /// threads allocated up front. At most [`IDLE_POOL_MAX`] workers stay parked:
 /// a view between requests keeps a few stacks warm and lets the rest go.
 ///
-/// Why reuse at all, when the cost of a thread was once considered the price of
-/// "one OS thread per request": starting a thread, attaching it to the
-/// interpreter and tearing its thread state down again costs more than a
-/// trivial request does (§8, D5's profile). The application contract does not
-/// change — still one request at a time on its thread, with its own
-/// `wsgi.input` and its own response — but per-thread state the application
-/// keeps (`threading.local`) now lives as long as the worker does.
+/// Reuse is worth it: starting a thread, attaching it to the interpreter and
+/// tearing its thread state down again costs more than a trivial request does
+/// (§8, D5's profile). The application contract does not change — still one
+/// request at a time on its thread, with its own `wsgi.input` and its own
+/// response — but per-thread state the application keeps (`threading.local`)
+/// now lives as long as the worker does.
 struct Pool {
     /// The hand-off the workers park on.
     park: Arc<Park>,
@@ -629,7 +628,7 @@ impl Pool {
     /// the count of jobs they have already been matched with is the number
     /// still available. Without that check a second concurrent request would
     /// queue behind the first on the one parked worker — reuse would quietly
-    /// serialise requests that used to run in parallel.
+    /// serialise otherwise parallel requests.
     ///
     /// # Errors
     ///

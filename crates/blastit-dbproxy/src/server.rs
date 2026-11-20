@@ -208,7 +208,7 @@ async fn serve(
         spawn_control(fd, Arc::clone(&shared))?;
     }
 
-    // The dev policy channel (`MB.23.5.3`): dbproxy's end of the socketpair
+    // The dev policy channel: dbproxy's end of the socketpair
     // stage 0 created for a `blastit dev` boot with reload on. It is spawned
     // only when the configuration carries the descriptor, which
     // `DbproxyConfig::validate_policy` has already tied to `dev_policy`, so a

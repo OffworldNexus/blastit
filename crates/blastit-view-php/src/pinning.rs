@@ -266,7 +266,7 @@ fn swap_sidecar(point: &Path, suffix: &str) -> PathBuf {
 /// variable's name in `stage0::TEST_SWAP_POINT_VAR` — exists only under
 /// `debug_assertions`, which is what a `cargo test` build is; a release artifact
 /// compiles it out and carries no name to act on, which
-/// `scripts/check-no-test-seam.sh` measures on the packaged binary instead of
+/// `scripts/build-standalone.sh` measures on the packaged binary instead of
 /// trusting the `cfg`. Nothing here is reachable from a route process either:
 /// the value lives in the stage-0/stage-1 configuration document, and
 /// `blastit-env` strips every `BLASTIT_*` variable from the environment a view

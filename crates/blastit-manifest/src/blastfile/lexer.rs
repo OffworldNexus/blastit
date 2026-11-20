@@ -9,7 +9,7 @@
 //! Every scan walks `char_indices()` of a shrinking `&str`, and every cursor
 //! advance is derived from the iterator's remaining slice: there is no `i += 1`
 //! anywhere, so no mutant can freeze a scan and no loop can run past the input
-//! (`LESSONS.md`, `MB.1.4`). [`MAX_TOKENS`] and [`MAX_TRIVIA`] are checked in
+//! (`LESSONS.md`). [`MAX_TOKENS`] and [`MAX_TRIVIA`] are checked in
 //! the one [`Lexer::push`] and [`Lexer::push_trivia`] every item goes through.
 
 use std::ops::Range;
@@ -32,11 +32,10 @@ pub(crate) fn lex(text: &str) -> Result<Lexed, ManifestError> {
 /// The two budgets one lexing pass enforces (§4.5).
 ///
 /// Production has exactly one instance, [`Caps::PRODUCTION`], built from
-/// [`MAX_TOKENS`] and [`MAX_TRIVIA`]. The unit tests lower it so a cap witness
-/// trips the real `push`/`push_trivia` check with a handful of items instead of
-/// allocating in proportion to the production budget; the refusal sentence
-/// always names the production budget, and
-/// `tests/critical_blastfile_lexer.rs` proves that boundary end to end.
+/// [`MAX_TOKENS`] and [`MAX_TRIVIA`]. A smaller cap trips the same
+/// `push`/`push_trivia` check with a handful of items instead of allocating in
+/// proportion to the production budget, while the refusal sentence always names
+/// the production budget.
 #[derive(Clone, Copy)]
 struct Caps {
     /// Most tokens this pass may push, excluding `Eof`.

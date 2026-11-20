@@ -404,7 +404,7 @@ impl Scheduler {
             event = event.with_route(route.name.clone());
         } else if !request.learn_fallback && served_by_static(request) {
             // §9.2: the `static` mount answered, and saying so is the whole
-            // point of the column: a served file used to read
+            // point of the column: a served file otherwise reads
             // `GET /css/app.css` with an unmatched route, as if nothing had
             // matched it. A request neither a mount nor a route claimed keeps
             // `None` and still renders `(unmatched)`.
@@ -480,7 +480,7 @@ impl Scheduler {
         //   guard is the only thing that speaks.
         //
         // So a client disconnect during a handler that bails is **not**
-        // covered: the worker still retires (`crates/blastit-view/src/php.rs`
+        // covered: the worker still retires (`crates/blastit-view-php/src/worker.rs`
         // sets `worker.bailed |= retire` and `recycle` acts on it), but its
         // `DONE` is forced to `Aborted` for the cancelled stream (`if
         // io.cancelled`), `cancelled` is set, and no mark is made. Such a
@@ -793,7 +793,7 @@ pub(super) fn retry_after_seconds(timeout: Duration) -> u64 {
 /// handler never returned, and it is not `view_died` either: it answered before
 /// it went away, so it is no death mid-request ([`Outcome::Bailed`]'s own
 /// gloss). The worker retires after that request — a bailout leaves the
-/// interpreter unusable (`crates/blastit-view/src/php.rs`) — and its ordered
+/// interpreter unusable (`crates/blastit-view-php/src/worker.rs`) — and its ordered
 /// `view.chan` frames are read before the close that would fail what it owes
 /// ([`Scheduler::view_exited`]).
 ///

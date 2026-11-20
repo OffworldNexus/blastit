@@ -29,20 +29,20 @@
 mod config;
 mod error;
 pub mod flow;
-// The dev-only loaded-file report (`MB.23.4`, `ADR-0014`): one bounded,
+// The dev-only loaded-file report (`ADR-0014`): one bounded,
 // versioned datagram codec, shared by every worker. It is plain `std`, so it is
 // compiled whether or not a worker that reports is.
 pub mod loaded;
-// The one request-target decoder (`MB.36.2`, D3): the scheduler routes on it
+// The one request-target decoder (D3): the scheduler routes on it
 // and the static responder resolves on it, so there is never a second
 // implementation of what `%2F` means.
 pub mod path;
-// The composition root's seam to every view crate (`MB.36.4`, design §4.4
+// The composition root's seam to every view crate (design §4.4
 // D1/D2): the boot data a forked child is made from, and the fork itself as an
 // injected parameter, so a view crate never calls `fork(2)` and never names
 // `blastit`.
 pub mod spawn;
-// The output stream and its line cap (`MB.36.3`): the PHP worker writes a log
+// The output stream and its line cap: the PHP worker writes a log
 // line through it, and a huge `echo` must not bury the log.
 pub mod stream;
 pub mod sync;

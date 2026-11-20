@@ -167,7 +167,7 @@ fn install_tracker(
 ///
 /// `socket` is stage 1's write end, adopted by [`install_tracker`]; the cold
 /// `sys.modules` scan is paid once here, in this parent, so every view's first
-/// report is warm (`MB.23.4`). A boot with no tracker consumes the socket
+/// report is warm. A boot with no tracker consumes the socket
 /// without sending anything.
 fn report_boot(py: Python<'_>, tracker: Option<&LoadedTracker>, socket: Option<UnixDatagram>) {
     let (Some(tracker), Some(socket)) = (tracker, socket) else {

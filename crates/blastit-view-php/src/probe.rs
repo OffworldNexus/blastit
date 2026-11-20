@@ -21,11 +21,11 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use blastit_php_sapi::SharedObject;
-use blastit_sys::child::{child_exit, wait_readable, ChildIo, ChildPlan};
+use blastit_sys::child::{ChildIo, ChildPlan, child_exit, wait_readable};
 use blastit_sys::{ExitStatus, Fork, Pid, Rlimits, Signal};
 use blastit_view::spawn::{ForkProtocol, Forker};
 
-use crate::discovery::{php_probe_refusal, PhpRuntime};
+use crate::discovery::{PhpRuntime, php_probe_refusal};
 use crate::pinning::{PhpBinding, PhpSlot};
 use crate::spawn::set_view_environment;
 

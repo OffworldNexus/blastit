@@ -123,7 +123,7 @@ pub fn normalize(sql: &str) -> String {
                 // counter this loop adds to: a step that fails to advance is
                 // the one way the pass could stop terminating, and a counter
                 // increment is exactly the arithmetic a mutation can leave
-                // standing (MB.1.4). `resume` only says how many of the
+                // standing. `resume` only says how many of the
                 // characters the iterator is about to reach are already in
                 // `out`, because one token can be several characters long
                 // (`a$1`, `f(`, `::`).
@@ -258,7 +258,7 @@ pub fn restore_parameters(sql: &str) -> String {
 /// `normalize` writes a varying `IN` list as `IN ($?, ...)` and a varying run of
 /// identical `VALUES` rows as `($?, $?), ...`. Neither parses, and both are what
 /// a Django `__in`, `prefetch_related` or `bulk_create` sends every request, so
-/// a table grant would otherwise deny them (`MB.40.2`). The tail is `, ...` in
+/// a table grant would otherwise deny them. The tail is `, ...` in
 /// code: after a placeholder it gains one more placeholder, and after a `)` it
 /// repeats the group that closes there. Any other `...` is left as it was.
 fn expand_tails(code: &[char]) -> Vec<char> {
@@ -474,7 +474,7 @@ fn tokenize(chars: &[char]) -> Vec<Token> {
                 // The same shape as the scan in `normalize`: the iterator is
                 // the step, `resume` is only the end of the token just taken,
                 // so a token that spans several characters cannot keep the
-                // loop on one position (MB.1.4).
+                // loop on one position.
                 let mut resume = 0;
                 for (i, &c) in text.iter().enumerate() {
                     if i < resume {

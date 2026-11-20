@@ -1,5 +1,5 @@
 //! Deciding what one request to a static route answers (`R6`, `R8`, design
-//! `MB.2.5a` §4.2–§4.4).
+//! §4.2–§4.4).
 //!
 //! [`decide`] is the whole rewrite precedence once the routing table has chosen
 //! the route and [`crate::static_asset`] has resolved the path. It is a total
@@ -24,9 +24,8 @@
 //! all.
 //!
 //! Nothing here touches a filesystem, opens a descriptor, builds a header or
-//! waits for a body. `static_asset.rs` resolves (`MB.2.4.1`),
-//! `static_response.rs` responds (`MB.2.4.2`) and `scheduler.rs` dispatches
-//! (`MB.2.5.2`).
+//! waits for a body. `static_asset.rs` resolves, `static_response.rs` responds
+//! and the scheduler dispatches.
 
 use crate::static_asset::{StaticFile, StaticOutcome};
 

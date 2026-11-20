@@ -53,8 +53,8 @@ pub(crate) fn init_paths(req: &InitPaths) -> Result<Answer, String> {
 ///
 /// `PyConfig_InitPythonConfig` + `Py_InitializeFromConfig` is `Py_InitializeEx(0)`
 /// with one addition: the prefix the composition root recorded goes in through
-/// `PyConfig.home`, so the interpreter finds its stdlib under `env -i` and the
-/// retired `PYTHONHOME` is not needed (`MB.42.2.1.4`, design 00a72.4).
+/// `PyConfig.home`, so the interpreter finds its stdlib under `env -i` and no
+/// `PYTHONHOME` is needed (design 00a72.4).
 fn initialize(req: &InitPaths) -> Result<(), String> {
     use core::ptr;
 

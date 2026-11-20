@@ -675,7 +675,7 @@ impl Scheduler {
         let frame = match raw.into_frame() {
             Ok(frame) => frame,
             // A non-head payload that does not decode is a bug in this build,
-            // exactly as a decode error used to be.
+            // exactly like any other decode error.
             Err(error) => return Err(SchedulerError::Frame(error)),
         };
         match frame {

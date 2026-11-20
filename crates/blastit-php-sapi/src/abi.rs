@@ -4,13 +4,13 @@
 //! (the crate root says `deny(unsafe_code)` and allows it here): naming an
 //! `extern "C"` function pointer is the whole hand-off to C. No `unsafe` block
 //! exists in this crate — the worker that calls through these pointers
-//! (`MB.3.13`) owns the `dlopen` handle and every precondition, and the probe in
-//! `src/probe/ffi.rs` is the one place that calls them here.
+//! (`crates/blastit-php-sapi/src/loader.rs`) owns the `dlopen` handle and every
+//! precondition, and the probe in `src/probe/ffi.rs` is the one place that calls
+//! them here.
 //!
 //! Layout drift is a `segfault` at `exit()` time, so it is checked twice: the
 //! `_Static_assert`s at the top of `c/blastit_php_sapi.c` (compile time, in the
-//! container) and `tests/critical_shim_contract.rs` (Rust side, every
-//! `make check`).
+//! container) and `make php-sapi-e2e`, which loads a real shim in a container.
 
 use core::ffi::{c_char, c_void};
 

@@ -142,7 +142,7 @@ impl Scheduler {
     /// in-flight requests here would bill a request the view **answered** as a
     /// dead view with no cost. A rare `php-sapi` flake showed the shape: a
     /// contained bailout writes `RESP_HEAD`, `RESP_END_COST` and `DONE{Bailed}`
-    /// and then retires by design (`crates/blastit-view/src/php.rs`), and
+    /// and then retires by design (`crates/blastit-view-php/src/worker.rs`), and
     /// `Ctl::Exited` can reach the scheduler first on the other channel.
     ///
     /// So the failure is left to [`Scheduler::view_gone`], which

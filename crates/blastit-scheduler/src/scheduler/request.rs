@@ -1,8 +1,8 @@
 //! Requests: body collection, routing decisions and the request lifecycle.
 
-use super::mounts::{header_text, Resolution};
 #[cfg(feature = "static")]
 use super::mounts::{MountHead, StaticHead};
+use super::mounts::{Resolution, header_text};
 use super::response::retry_after_seconds;
 use super::*;
 

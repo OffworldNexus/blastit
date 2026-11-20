@@ -6,8 +6,7 @@ use super::*;
 /// One live view process of one route.
 ///
 /// A route holds a pool of these ([`ViewSet`]): the pid init reported is the
-/// identity, so two workers of one route are told apart exactly the way a
-/// replaced instance used to be.
+/// identity, which is also how a replaced instance is told from its successor.
 #[derive(Debug)]
 pub(super) struct View {
     pub(super) key: ViewKey,
@@ -40,8 +39,7 @@ pub(super) struct View {
     /// [`Scheduler::expire_exited_views`] bounds the wait.
     pub(super) exited: Option<Instant>,
     /// When the worker answered a request the scheduler still tracked with
-    /// `DONE { Bailed }`, and the ordered `view.chan` has not closed yet
-    /// (`MB.26.8`).
+    /// `DONE { Bailed }`, and the ordered `view.chan` has not closed yet.
     ///
     /// `Bailed` is the handler never returning — a contained `exit()`/`die()`/
     /// fatal — and the runtime retires the process after it (the PHP worker's

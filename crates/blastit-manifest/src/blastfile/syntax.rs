@@ -8,8 +8,8 @@
 //! token or trivia span, which is what makes [`print_lossless`] return the
 //! original text byte for byte (P1, §14.3).
 //!
-//! There is no second AST: `lower` (`MB.21.3.8`) and the printer
-//! (`MB.21.3.4`) read this arena through the accessors below, and the node
+//! There is no second AST: `lower` and the printer
+//! read this arena through the accessors below, and the node
 //! kinds are exactly §6.4's list. The accessors return node ids, never a
 //! parallel struct, so the tree `lower` reads is the tree `print` writes.
 
@@ -153,7 +153,7 @@ impl Cst {
     }
 
     /// The child nodes of `node`, in source order.
-    #[allow(dead_code)] // the editor walks it (`MB.21.3.5`)
+    #[allow(dead_code)] // the editor walks it
     pub(crate) fn child_nodes(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let range = self.child_range(node);
         let start = range.start;
@@ -394,7 +394,7 @@ impl Cst {
     }
 
     /// The source text `node`'s subtree spans.
-    #[allow(dead_code)] // the editor rewrites a node in place (`MB.21.3.5`)
+    #[allow(dead_code)] // the editor rewrites a node in place
     pub(crate) fn node_text(&self, node: NodeId) -> &str {
         let start = self.first_token(node).and_then(|id| self.token_span(id));
         let end = self.last_token(node).and_then(|id| self.token_span(id));

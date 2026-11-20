@@ -1,5 +1,5 @@
 //! The `blastit-lsp` server — and `blastit lsp`, which delegates to it — is the
-//! LSP 3.17 subset Zed needs, on stdin/stdout (`MB.22.3`, `MB.35.4`).
+//! LSP 3.17 subset Zed needs, on stdin/stdout.
 //!
 //! This is a **text tool** the developer's editor spawns: it reads framed
 //! JSON-RPC from stdin, answers on stdout, and never opens a file, reads an
@@ -112,7 +112,7 @@ const HEADER_TOO_LONG: &str = "the header block is too long";
 const BODY_TOO_LONG: &str = "the body is too long";
 const INTERNAL: &str = "internal error";
 
-/// The one sentence a misused `blastit-lsp` prints on stderr (`MB.42.12`).
+/// The one sentence a misused `blastit-lsp` prints on stderr.
 ///
 /// It is the binary's **whole** argv surface — there is no usage block and no
 /// option to list, because the server takes none by design: what it answers is
@@ -230,12 +230,12 @@ pub fn run() -> u8 {
 }
 
 /// The `blastit-lsp` binary's entry point, given the argv its `main` read: argv
-/// first (`MB.42.12`), and — only with **no** argument — exactly the session
+/// first, and — only with **no** argument — exactly the session
 /// `blastit lsp` runs.
 ///
 /// The argv is a parameter and not an environment read here on purpose: this
 /// module is the text tool both entries share, and its critical suite asserts it
-/// names no environment at all (`crates/blastit/tests/critical_lsp.rs`, R3). The
+/// names no environment at all (`crates/blastit-lsp/tests/e2e_lsp.rs`, R3). The
 /// binary's own `main` is the one place a process's arguments exist.
 pub fn run_binary(args: &[OsString]) -> u8 {
     let mut out = io::stdout();

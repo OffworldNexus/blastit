@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::process;
 
 /// The portable binary: reads its own argv and hands it to
-/// [`blastit_lsp::run_binary`] (`MB.42.12`) — with no argument that is the
+/// [`blastit_lsp::run_binary`] — with no argument that is the
 /// session `blastit lsp` runs too.
 ///
 /// `std::env` and `std::process` are named in this file and nowhere in the

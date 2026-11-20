@@ -81,7 +81,7 @@ pub(crate) struct Compiled {
 
 impl Compiled {
     /// The pattern's value, as compiled.
-    #[allow(dead_code)] // the editor reads the value (`MB.21.3.5`)
+    #[allow(dead_code)] // the editor reads the value
     pub(crate) fn text(&self) -> &str {
         &self.text
     }

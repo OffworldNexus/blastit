@@ -79,7 +79,7 @@ struct Lowering<'a> {
     /// The source the tree spans, for `line:col` (§18).
     text: &'a str,
     /// The byte offset of the start of every line, so a position is a binary
-    /// search rather than a scan (`LESSONS.md`, `MB.21.3.2`).
+    /// search rather than a scan (`LESSONS.md`).
     line_starts: Vec<u32>,
     /// Step 2's store declarations, by name.
     proxies: BTreeMap<ProxyName, Proxy>,

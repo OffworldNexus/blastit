@@ -20,8 +20,7 @@
 //! * [`Route::static_policy`] and [`Route::php`] are the retired per-route
 //!   blocks: no `Blastfile` can set either (a static site is a top-level
 //!   `static` mount and PHP is one `entrypoint php`), and they stay in the
-//!   model until the two pages that still describe them are rewritten
-//!   (`MB.21.5.1`);
+//!   model until the two pages that still describe them are rewritten;
 //! * [`Manifest::is_all_static`], [`Manifest::static_roots`] and
 //!   [`Manifest::check_static_roots`] answer the app-less static site: no `app`
 //!   is needed when a `static` mount answers every request and no view or
@@ -108,7 +107,7 @@ pub mod edit;
 pub use blastit_sqlpolicy::{Columns, TableGrant, TableGrants};
 // The Quick Fix's rewrite, re-exported beside `TableGrant`/`Columns` on the
 // same argument: a caller that asks the manifest for a `query`'s canonical `$?`
-// text should not have to name a second crate (`ADR-0013`, `MB.35.4`).
+// text should not have to name a second crate (`ADR-0013`).
 pub use blastit_sqlpolicy::parameterize;
 pub use error::{Location, ManifestError, ManifestErrors, ManifestWarning, Position};
 // §18's one line is the crate's: a caller that prints a path or a message of

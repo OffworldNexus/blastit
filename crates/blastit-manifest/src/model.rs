@@ -860,7 +860,7 @@ impl Route {
     ///
     /// No `Blastfile` can set it: a static site is a top-level `static` mount.
     /// It stays in the model, and in `check_static`'s coverage, until the
-    /// per-route pair is removed with `MB.21.5.1`.
+    /// per-route pair is removed.
     pub(crate) fn with_static(mut self, static_policy: Option<StaticPolicy>) -> Self {
         self.static_policy = static_policy;
         self
@@ -870,8 +870,7 @@ impl Route {
     /// §2).
     ///
     /// No `Blastfile` can set it: PHP is one `entrypoint php` for every view.
-    /// It stays in the model until the per-route pair is removed with
-    /// `MB.21.5.1`.
+    /// It stays in the model until that pair is removed.
     pub(crate) fn with_php(mut self, php: Option<PhpPolicy>) -> Self {
         self.php = php;
         self
@@ -978,7 +977,7 @@ impl Route {
     /// Every spelling that matches every request counts. The bare string
     /// `path = ".*"` parses to `[".*"]`, and `path = ['.*']` is the same list;
     /// an anchored `^.*$` matches the same requests. The lowered form of a
-    /// `Blastfile` `view app "/*"` is `/.*` (`MB.21.3.5`, §4.3), so it counts
+    /// `Blastfile` `view app "/*"` is `/.*` (§4.3), so it counts
     /// too: `--learn` inserts new views above the catch-all it finds in either
     /// document. A catch-all restricted to some methods is not unrestricted: a
     /// request with another method still falls through to the route below it.
@@ -1205,7 +1204,7 @@ impl Manifest {
     /// **no views**, and the `routes.is_empty()` arm below is the whole answer
     /// for it. The `route.static_policy()` arm is the retired per-route block's
     /// compatibility path — no `Blastfile` can reach it, and it goes with the
-    /// per-route pair in `MB.21.5.1`. It is **not** a second definition:
+    /// per-route pair. It is **not** a second definition:
     /// a `Blastfile` never reaches it. `BLASTIT_APP` may still supply an app, so
     /// this is the manifest-level answer and the boot decides what to do with it.
     pub fn is_all_static(&self) -> bool {
@@ -1232,8 +1231,8 @@ impl Manifest {
     /// before the catch-all view exists.
     ///
     /// The per-route arms are the retired per-route blocks' compatibility path
-    /// (they are unreachable from a `Blastfile` and go with the pair in
-    /// `MB.21.5.1`). A `Blastfile` never sets `route.php()` or
+    /// (they are unreachable from a `Blastfile` and go with that pair). A
+    /// `Blastfile` never sets `route.php()` or
     /// `route.static_policy()`, so for it this reduces to §9.5's two shapes. An
     /// empty manifest is not bootable without an app.
     pub fn can_boot_without_app(&self) -> bool {

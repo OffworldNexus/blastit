@@ -1530,9 +1530,8 @@ impl DevReloadUnavailable {
 /// One per boot whose marking pass actually placed marks: `directories` is how
 /// many directories it marked, and the human form spells `1 directory` in the
 /// singular. It is an event so that it takes the same columns as every other
-/// line and the JSON stream carries it too — the boot line used to be free text
-/// printed beside the stream, which no reader could parse and no column lined
-/// up.
+/// line and the JSON stream carries it too, rather than a free-text line beside
+/// the stream that no reader could parse and no column lined up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReloadBoot {
     directories: u32,

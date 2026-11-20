@@ -110,7 +110,7 @@ pub(crate) struct AppContext {
     /// function call, and the interpreter lookup would be the expensive part.
     pub(crate) clock: Option<Py<PyAny>>,
     /// The dev-only loaded-file reporter, or `None` in production and under
-    /// `--no-reload` (`MB.23.4`).
+    /// `--no-reload`.
     ///
     /// Shared by every request thread: each one reports what it loaded when it
     /// finishes, which is the first-touch attribution the reload policy needs
@@ -209,7 +209,7 @@ impl Worker {
             ctx,
         } = self;
         let outcome = serve_request(py, &head, &ctx, &state, &writer, body, id);
-        // `MB.23.4`: first-touch attribution. What this request loaded is
+        // First-touch attribution. What this request loaded is
         // reported once it is over — after `close()`, before `DONE` — so the
         // report names exactly the files the response depended on. Best effort
         // by construction: nothing here can fail the request, and a view with

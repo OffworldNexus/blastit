@@ -11,9 +11,9 @@
 //! depth counter refuses a third block (§4.5's `MAX_BLOCK_DEPTH`) before the
 //! recursion can grow, and every list loop refuses its 257th item
 //! (`MAX_LIST_ITEMS`). The cursor is a slice iterator, not a hand-written
-//! index, so no scan can be frozen by a mutant (`LESSONS.md`, `MB.1.4`).
+//! index, so no scan can be frozen by a mutant (`LESSONS.md`).
 //!
-//! Nothing here lowers into a `Manifest`: that is `MB.21.3.8`'s. The one value
+//! Nothing here lowers into a `Manifest`: `lower` does that. The one value
 //! the parser does decide is a pattern's text, because §8.3's rows are refusals
 //! at the pattern's own `line:col` (§8.1) and only the parser sees which
 //! spelling was written. The compiled fragment is stored on the pattern's
@@ -55,7 +55,7 @@ pub(crate) fn parse(text: &str) -> Result<Cst, ManifestErrors> {
 ///
 /// One pass over the source, so a position is a binary search: the pattern hook
 /// asks for one per pattern, and a per-item scan from byte 0 is `O(n²)` on a
-/// generated file (`LESSONS.md`, `MB.21.3.2`). `lower` builds the same index
+/// generated file (`LESSONS.md`). `lower` builds the same index
 /// once, so a lowering refusal is a `line:col` too.
 pub(crate) fn line_starts(text: &str) -> Vec<u32> {
     let mut starts = Vec::new();
@@ -194,7 +194,7 @@ struct Parser<'a> {
     /// The source, for token text and `line:col`.
     text: &'a str,
     /// The byte offset of the start of every line, so a position is a binary
-    /// search instead of a scan from byte 0 (`LESSONS.md`, `MB.21.3.2`).
+    /// search instead of a scan from byte 0 (`LESSONS.md`).
     line_starts: Vec<u32>,
     /// Every token, so a token's index is its `TokenId`.
     tokens: &'a [Token],
@@ -295,7 +295,7 @@ impl<'a> Parser<'a> {
     /// The line is a binary search over [`line_starts`], so this is `O(log n)`
     /// rather than a scan from byte 0: the pattern hook calls it once per
     /// pattern, and a scan per item is `O(n²)` on a generated file
-    /// (`LESSONS.md`, `MB.21.3.2`).
+    /// (`LESSONS.md`).
     fn position_of(&self, offset: u32) -> Position {
         let end = (offset as usize).min(self.text.len());
         // The number of line starts at or before `end` is the 1-based line.

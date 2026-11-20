@@ -1,9 +1,9 @@
 //! Resolving one decoded request path to a regular file strictly beneath a
-//! declared static root (`R7`, `R11`, design `MB.2.4a` §4.2, §5.1–§5.2).
+//! declared static root (`R7`, `R11`, design §4.2, §5.1–§5.2).
 //!
 //! This module owns the decode-to-segments half of the boundary and the
-//! filesystem half. It never builds a header: `rewrite.rs` decides
-//! (`MB.2.5.1`) and `static_response.rs` responds (`MB.2.4.2`).
+//! filesystem half. It never builds a header: `rewrite.rs` decides and
+//! `static_response.rs` responds.
 //!
 //! The boundary is one `O_PATH|O_DIRECTORY|O_CLOEXEC` dirfd per root, opened
 //! once on `manifest_dir.join(root)`, and then `openat2` with
@@ -20,7 +20,7 @@
 //! traversal CVE class defeats.
 //!
 //! A final segment ending in `.php`, `.phtml` or `.phar` (ASCII
-//! case-insensitively) is never served (`MB.3.33`): [`head_segments`] and
+//! case-insensitively) is never served: [`head_segments`] and
 //! [`StaticRoot::resolve`] answer [`StaticOutcome::Hidden`] before any
 //! descriptor is opened, so the canonical layout (`[route.static] root =
 //! "public"` beside `[route.php] entry = "public/index.php"`) cannot disclose
@@ -58,8 +58,8 @@ pub const STATIC_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const CONTROL_LIMIT: u8 = 0x20;
 
 /// The exact `RESOLVE_*` composition [`StaticRoot::resolve`] passes to
-/// `openat2`. Exported so `critical_static_resolve.rs` can assert the bits
-/// instead of restating them (the only unprivileged oracle for the flag set).
+/// `openat2`. Exported so a consumer can assert the bits instead of
+/// restating them (the only unprivileged oracle for the flag set).
 ///
 /// Mounts are deliberately followed: `RESOLVE_NO_XDEV` is not used, because a
 /// bind-mounted asset directory under `root` is legitimate and the boundary
@@ -185,8 +185,8 @@ pub enum Backend {
 #[derive(Debug)]
 pub struct StaticRoot {
     /// The root exactly as declared, for boot-time messages.
-    // Read by `SchedulerError::Protocol`'s message and the boot probe
-    // (`MB.2.5.2`, `MB.2.6`); this leaf only stores it.
+    // Read by `SchedulerError::Protocol`'s message and the boot probe; this
+    // leaf only stores it.
     #[allow(dead_code)]
     pub(crate) root: String,
     /// The one `O_PATH|O_DIRECTORY|O_CLOEXEC` dirfd every lookup starts from.
@@ -217,7 +217,7 @@ pub struct StaticRoot {
     /// `immutable` year-caches every exact file; an `index` or `fallback`
     /// answer stays `no-cache` because the responder asks this only about an
     /// exact answer (`S3`).
-    // Read by `static_response.rs`'s cache rule (`MB.2.4.2`).
+    // Read by `static_response.rs`'s cache rule.
     pub(crate) immutable: StaticImmutable,
     /// The per-file ceiling, from `SchedulerConfig::static_max_bytes`
     /// ([`STATIC_MAX_FILE_BYTES`] until `run` overrides it).
@@ -282,7 +282,7 @@ impl StaticRoot {
             fallback: policy.fallback.clone(),
             prefix: "/".to_string(),
             // The policy *is* the matcher: `StaticImmutable::{None, All,
-            // Patterns}` already holds the anchored programs `MB.31.2` built at
+            // Patterns}` already holds the anchored programs the parser built at
             // lower time, so this clones a policy and compiles nothing else.
             // There is no second matcher, and a `regex '…'` entry, a nested
             // `"/assets/*"` or a quoted pattern over the old 256-byte guard all
@@ -517,7 +517,7 @@ impl StaticRoot {
     /// A final PHP-source segment (`.php`/`.phtml`/`.phar`) answers `Hidden`
     /// before this function opens anything, so a source file under `root` is
     /// neither probed nor read — a `000`-mode source is therefore a `404`, not
-    /// a read failure (`MB.3.33`).
+    /// a read failure.
     fn probe(&self, rel: &str) -> Landing {
         if rel.rsplit('/').next().is_some_and(is_php_source) {
             return Landing::Hidden;
@@ -703,7 +703,7 @@ pub fn head_segments(target: &str) -> Result<Vec<String>, StaticOutcome> {
     }
     // `404`, final, before the method and body gates: a `POST /index.php` with
     // a body is a source-disclosure probe, never a `405`/`413` (design
-    // §4.4, `MB.3.33`). The file is not opened here or later.
+    // §4.4). The file is not opened here or later.
     if parts.last().is_some_and(|segment| is_php_source(segment)) {
         return Err(StaticOutcome::Hidden);
     }
@@ -724,8 +724,7 @@ pub fn is_dotfile(segments: &[&str]) -> bool {
 }
 
 /// Whether one path segment names PHP source: its final `.`-separated
-/// extension is `php`, `phtml` or `phar`, ASCII case-insensitively
-/// (`MB.3.33`).
+/// extension is `php`, `phtml` or `phar`, ASCII case-insensitively.
 ///
 /// A static root never answers such a path, whatever the method or body, and
 /// never opens it: the file may legitimately be the route's `entry` living

@@ -1,5 +1,5 @@
 //! Building one static response from an already-resolved [`StaticFile`]
-//! (`R5`, `R9`, design `MB.2.4b` §4.2, §4.5–§4.6).
+//! (`R5`, `R9`, design §4.2, §4.5–§4.6).
 //!
 //! [`StaticRoot::respond`] is the whole head half of a static answer: the closed
 //! `Content-Type` table, `Content-Length`, the quoted strong `ETag`, the
@@ -13,7 +13,7 @@
 //! It never reads a byte either. `HEAD` answers the `200` head with a
 //! `Content-Length` and no body, a `304` carries no body and no
 //! `Content-Length`, and a `GET` hands the scheduler a [`StaticBody`] it pumps
-//! in `STATIC_CHUNK_BYTES` reads (`MB.2.5.2`), so no response buffers a whole
+//! in `STATIC_CHUNK_BYTES` reads, so no response buffers a whole
 //! file and no truncated body is ever sent under a promised `Content-Length`.
 //!
 //! The cache rule is keyed on the **answering** file: only an
@@ -95,7 +95,7 @@ impl StaticRoot {
             return refusal_not_found();
         }
         // Defence in depth: `resolve` never hands over a `.php`/`.phar`/
-        // `.phtml` path (`MB.3.33`), but a caller that constructs a
+        // `.phtml` path, but a caller that constructs a
         // `StaticFile` directly must still never stream source. The gate reads
         // the final non-empty segment of the URL path, so a forged trailing `/`
         // or query cannot hide the extension.

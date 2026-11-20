@@ -15,7 +15,7 @@
 //!
 //! # The entry pin is a required value, not an adapter
 //!
-//! `ADR-0016` decision 2: the runtime seam the pin used to wrap is gone, so
+//! `ADR-0016` decision 2: there is no runtime seam around the pin, so
 //! [`PhpRuntimeConfig::new`] takes the [`EntryPin`] the boot recorded as a
 //! **required** argument. There is no `Option` and no `Default`: a runtime that
 //! could be built without a pin would be a fail-open seam, and a

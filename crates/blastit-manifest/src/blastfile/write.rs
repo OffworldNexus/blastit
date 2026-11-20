@@ -30,7 +30,7 @@
 //! [`EditError::Verification`] and `apply` returns `Err`, so the caller writes
 //! nothing. The comparison covers every field — `static` mounts and the
 //! `entrypoint` included — so an edit that cannot reproduce a block refuses
-//! instead of dropping it (`MB.3.21`).
+//! instead of dropping it.
 //!
 //! Nothing here writes `body`: [`super::ProposedView`] and
 //! [`super::ProposedGrant`] have no field for it, so "`--learn` never
@@ -254,7 +254,7 @@ fn view_groups(manifest: &Manifest) -> Vec<Vec<Route>> {
 /// A rebuild that forgets one of these chains answers a different question than
 /// the writer asked: `Route::new` starts `ingress`, `static_policy` and `php` at
 /// `None`, so a route with a `static` policy or an `entrypoint` would compare
-/// unequal to the parsed one and refuse every edit (`MB.3.21`).
+/// unequal to the parsed one and refuse every edit.
 fn with_grant(route: &Route, store: ProxyName, grant: Grant) -> Route {
     let mut grants = route.grants().clone();
     grants.insert(store, grant);

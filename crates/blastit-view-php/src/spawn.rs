@@ -43,14 +43,14 @@ use std::path::Path;
 use std::time::Instant;
 
 use blastit_php_sapi::SharedObject;
-use blastit_sys::child::{child_exit, panic_message, set_env, ChildIo, ChildPlan};
+use blastit_sys::child::{ChildIo, ChildPlan, child_exit, panic_message, set_env};
 use blastit_sys::{Fork, Pid};
 use blastit_view::spawn::{ForkProtocol, Forker, SpawnContext};
 
 use crate::pinning::PhpBinding;
 use blastit_view::loaded::LoadedReport;
 
-use crate::worker::{serve_forever, PhpEmbedRuntime, PhpRuntimeConfig};
+use crate::worker::{PhpEmbedRuntime, PhpRuntimeConfig, serve_forever};
 
 /// How many extra processes a view's uid may have beyond its workers (§7.2:
 /// gVisor leaves out the main thread, so one unit of margin).

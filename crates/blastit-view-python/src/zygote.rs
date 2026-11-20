@@ -178,8 +178,7 @@ pub fn fork_view(
 /// turned into an exit code instead of an unwinding child that leaves a
 /// half-initialised interpreter behind. A view that panics exits `70`.
 fn child_main(py: Python<'_>, mut spawn: ViewSpawn<'_>, child: ChildIo, view_end: OwnedFd) -> ! {
-    // The child sequence, in the order `blastit_sys::child` documents and
-    // `crates/blastit-sys/tests/critical_child_sequence.rs` asserts:
+    // The child sequence, in the order `blastit_sys::child` documents:
     // descriptors, limits, umask, working directory, then privileges, then
     // hardening, then the seccomp filter, then dumpability, then the mask —
     // which is the last thing to happen before the view starts a thread (§4,

@@ -439,7 +439,7 @@ fn second_statement(tokens: &[Token]) -> Option<usize> {
 ///
 /// The two facts the walk needs are marked on the characters first — deleted, or
 /// a placeholder's first character — so the loop's step is the iterator's own
-/// index and nothing in it can stand still (MB.1.4).
+/// index and nothing in it can stand still.
 fn expand(chars: &[char], tokens: &[Token], deletions: &[Span]) -> Result<String, TemplateError> {
     let mut marks = vec![0u8; chars.len()];
     for span in deletions {

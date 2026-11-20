@@ -42,7 +42,7 @@
 //! `DONE`'s `outcome` says how the request's worker thread ended, which is a
 //! different fact from the status it may have answered: `completed` (the
 //! handler returned), `aborted` (the client went away), `errored` (the
-//! runtime's own failure) or `bailed` (`MB.3.41`: a contained
+//! runtime's own failure) or `bailed` (a contained
 //! `exit()`/`die()`/fatal). A `500` an app answers itself and a `500` a dying
 //! handler leaves behind are identical on `RESP_HEAD`, so the outcome — not the
 //! status — is what the scheduler may trust for "the view failed mid-request".
@@ -257,8 +257,8 @@ impl Scheme {
 
 /// How a request's worker thread finished, carried by [`Frame::Done`].
 ///
-/// It tells the scheduler whether the slot may be reused, what to log, and —
-/// since `MB.3.41` — whether the handler **returned** (`Completed`), so a `5xx`
+/// It tells the scheduler whether the slot may be reused, what to log, and
+/// whether the handler **returned** (`Completed`), so a `5xx`
 /// it answered itself is an answer the app produced, or **bailed**
 /// (`Bailed`: a contained `exit()`/`die()`/fatal that the SAPI shim trapped),
 /// which is the one thing the scheduler bills as `R19`'s crash. The response

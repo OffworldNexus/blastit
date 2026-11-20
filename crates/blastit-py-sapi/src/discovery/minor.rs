@@ -20,7 +20,7 @@ pub(super) struct PyvenvCfg {
     pub(super) release: Option<String>,
 }
 
-/// Reads `pyvenv.cfg`'s `home`, `version`/`version_info` (`MB.40.8`, §2.3).
+/// Reads `pyvenv.cfg`'s `home`, `version`/`version_info` (§2.3).
 pub(super) fn read_pyvenv(root: &Path) -> Option<PyvenvCfg> {
     let text = std::fs::read_to_string(root.join("pyvenv.cfg")).ok()?;
     let mut home = None;

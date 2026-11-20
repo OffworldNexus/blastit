@@ -1,5 +1,4 @@
-//! The `Blastfile` language: its reader, its lexer and, from `MB.21.3.2` on,
-//! its parser and CST (§4.1).
+//! The `Blastfile` language: its reader, its lexer, its parser and CST (§4.1).
 //!
 //! A `Blastfile` is policy, not input: whoever can write it can already grant
 //! `unrestricted`, so the reader's job is to be total and cheap rather than to
@@ -152,7 +151,6 @@ pub struct ProposedGrant {
 /// This is the `Blastfile` edits type. The file has one reader
 /// ([`read`]) and one writer, and the proposal shape follows the file: a `view`
 /// carries methods and patterns, so a proposed view is not a route regex list.
-/// The Python side that plans against it moves in `MB.21.4.7`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlastfileEdits {
     /// New `view` blocks.
@@ -190,7 +188,7 @@ impl BlastfileEdits {
 /// added twice. The result is re-parsed, re-lowered and compared with
 /// [`BlastfileEdits::apply_to`]'s model, so an edit that would change anything
 /// else fails with [`EditError::Verification`] and no output — a view's
-/// `static` mount and the `entrypoint` included (`MB.3.21`).
+/// `static` mount and the `entrypoint` included.
 ///
 /// An edits set with nothing to add returns the source unchanged, which makes
 /// repeated learning runs byte-identical.

@@ -235,8 +235,7 @@ impl PyForkHooks<'static> {
     ///
     /// The three `PyOS_*Fork` entry points of a **loaded** shim, built by
     /// [`crate::loader`]. There is deliberately no constructor for an interpreter
-    /// this process already runs: the universal binary starts none
-    /// (`MB.42.2.2.2`).
+    /// this process already runs: the universal binary starts none.
     #[must_use]
     pub fn hosted(
         before_fork: extern "C" fn(),

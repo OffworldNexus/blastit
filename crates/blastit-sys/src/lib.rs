@@ -113,9 +113,9 @@
 //!
 //! A **view** child does not spell that list out: [`child::enter`] runs it from
 //! a [`child::ChildPlan`] (`setpgid` between `prepare` and the privilege drop,
-//! when the plan asks for it), so the WSGI fork — and the PHP worker and probe
-//! forks once `MB.36.5` moves them here — cannot drift from each other or from
-//! this order. Init's own role children keep using the steps directly.
+//! when the plan asks for it), so the WSGI fork and the PHP probe fork cannot
+//! drift from each other or from this order. Init's own role children keep
+//! using the steps directly.
 //!
 //! # Example
 //!

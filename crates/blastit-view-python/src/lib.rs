@@ -65,7 +65,7 @@ mod serve;
 pub mod zygote;
 
 pub use crate::config::WsgiConfig;
-// The boot batch and its reporter (`MB.23.4`, `ADR-0014`): the Python half of
+// The boot batch and its reporter (`ADR-0014`): the Python half of
 // the loaded-file report, which installs the audit hook and inherits it across
 // the fork.
 pub use crate::loaded::{LoadedReporter, LoadedTracker};

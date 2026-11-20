@@ -10,10 +10,9 @@
 //! # Where the sequence lives, and where it does not
 //!
 //! [`enter`] is the **view** child sequence: steps 1–7 and nothing after them.
-//! Its callers are the WSGI fork (`blastit-view-python`'s `zygote`) today and
-//! the two PHP forks (`blastit-view-php`'s `spawn` and `probe`) once
-//! `MB.36.5` moves them; the sequence is written down here so the second caller
-//! cannot arrange the steps differently. It runs
+//! Its callers are the WSGI fork (`blastit-view-python`'s `zygote`) and the PHP
+//! probe (`blastit-view-php`'s `probe`); the sequence is written down here so
+//! neither caller can arrange the steps differently. It runs
 //! `prepare` → `setpgid(0, 0)` (when the plan asks) → `drop_privileges` (when
 //! the plan says `DropTo`) → `harden_child` → `install_filter` (when the plan
 //! says `Seccomp`) → `set_dumpable(false)` → the saved signal mask (when the
