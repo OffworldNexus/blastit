@@ -219,12 +219,19 @@ for artifact in "${paths[@]}"; do
     # requirement, and a shim compiled against 2.28 headers legitimately needs
     # `libdl.so.2` for `dlopen`. The caller derives its dependency names from the
     # same list.
+    #
+    # `libgcc_s-<hash>.so*` is auditwheel's vendored name for libgcc (maturin
+    # repairs a repaired wheel's `libgcc_s.so.1` that way and points the artefact
+    # at it with an `$ORIGIN`-relative RPATH, which is why `--allow-origin-rpath`
+    # exists). It is still libgcc — the one library besides libc the contract
+    # allows — so a wheel that ships it is within the contract, not outside it
+    # (`MB.42.3.3` review: a musllinux wheel was refused for naming its own copy).
     needed="$(printf '%s\n' "$dynamic" \
         | sed -n 's/.*(NEEDED) *Shared library: \[\(.*\)\]/\1/p' \
         | paste -sd ' ' -)"
     for library in $needed; do
         case "$library" in
-            libc.so.6 | libm.so.6 | libgcc_s.so.1 | libdl.so.2 | libpthread.so.0 | librt.so.1 | ld-linux-*.so* | libc.musl-*.so*) ;;
+            libc.so.6 | libm.so.6 | libgcc_s.so.1 | libgcc_s-*.so* | libdl.so.2 | libpthread.so.0 | librt.so.1 | ld-linux-*.so* | libc.musl-*.so*) ;;
             *)
                 echo "error: $artifact needs $library, which no supported distribution guarantees:" >&2
                 echo "  fix: link only the C library, libm, libgcc and their libc6-provided companions;" >&2

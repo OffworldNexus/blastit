@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
 # Installs one built wheel into a bare CPython image and proves it is the
-# artifact the release claims (node MB.3.18, acceptance 1).
+# artifact the release claims (nodes MB.3.18, MB.42.3.3).
 #
 #   docker run --rm -v "$PWD/dist:/dist:ro" -v "$PWD:/src:ro" \
 #       python:3.13-slim bash /src/scripts/wheel-smoke.sh /dist/blastit-*.whl
 #
 # Nothing else is installed: no Rust, no PHP, no uvicorn. What is proved:
 #
-#   1. `import blastit` and the extension load (`blastit --help`, which prints the
-#      usage from the extension: `blastit` has no `--version` by design, see
-#      `docs/reference/cli.md`), i.e. the
-#      wheel matches this interpreter's ABI — the one thing a `cp3NN` tag
-#      promises and a wrongly-built wheel breaks;
-#   1b. the extension carries no test-only boot seam (`MB.3.67`): the wheel is the
-#      release artifact a `pip install blastit` gets, so the installed
-#      `_blastit*.so` is measured for `BLASTIT_TEST_SWAP_POINT` exactly as
-#      `scripts/build-standalone.sh` measures the archive's binary. This is the
-#      leg the published wheels go through (maturin-action builds them, not
-#      `scripts/build-wheel.sh`), so without it the shipped wheel is the one
-#      artifact nothing reads;
+#   1. the wheel installs into *this* interpreter at all — `py3-none-*` is the
+#      promise that one artifact serves CPython 3.12, 3.13 and 3.14, so the same
+#      file is installed in each of those images and answers from each;
+#   1a. `blastit --version` answers, and `--help` prints the usage the binary
+#      ships (`blastit` became a `py3-none` wheel in `MB.42.3.3`, so the version
+#      line is what proves the console script reaches the repacked binary);
+#   1b. the three console scripts design §6.1 names exist and are executable:
+#      `blastit`, `blastit-lsp` (which had no entry point at all before the
+#      repack) and `blastit-manifest` — a `bindings = "bin"` wheel shipped none;
+#   1c. the embedded `blastit/_bin/blastit` carries no test-only boot seam
+#      (`MB.3.67`): the wheel is the release artifact a `pip install blastit`
+#      gets, so the file `pip` installed is measured for
+#      `BLASTIT_TEST_SWAP_POINT` exactly as `scripts/build-standalone.sh`
+#      measures the archive's binary;
 #   2. `blastit-dbproxy` is present and executable, because stage 0 `execve`s it
 #      and a wheel without it refuses to boot (§2.2);
 #   3. one static route is served (`200` with `Cache-Control: no-cache`) and an
 #      unmatched path is Blastit's own `404` — with no WSGI route and no
 #      interpreter in the manifest, so nothing here depends on Python *inside*
-#      the app, only on the interpreter that loaded the extension.
+#      the app, only on the interpreter that loaded the package.
+#
+# `scripts/wheel-drive.sh` is the companion that drives `blastit check`,
+# `blastit-manifest fold` and `blastit-lsp --help`; this script stops at the
+# serving proof so the CI legs that only need "the wheel works here" stay short.
 #
 # Usage: scripts/wheel-smoke.sh [--python PATH] WHEEL [WHEEL...]
 #
@@ -48,10 +54,18 @@ fi
 version=$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
 echo "wheel-smoke: CPython $version"
 
+# A `py3-none` wheel installs anywhere CPython 3 does; a `cp3NN` wheel (a
+# developer build straight out of `maturin`, before the repack) is only valid for
+# its own minor. Both are accepted, and nothing else is: `pip` would refuse the
+# install, and this script must refuse it first, with a sentence.
 for wheel in "$@"; do
     case "$wheel" in
+        *-py3-none-*) ;;
         *-cp"${version//./}"-*) ;;
-        *) echo "error: $wheel is not a cp${version//./} wheel for CPython $version" >&2; exit 1 ;;
+        *)
+            echo "error: $wheel is neither a py3-none wheel nor a cp${version//./} wheel for CPython $version" >&2
+            exit 1
+            ;;
     esac
 done
 
@@ -68,18 +82,34 @@ else
 fi
 echo "wheel-smoke: installed $*"
 
-# 1. The extension loads.
+# 1. The package imports and its binary answers.
 "$python" -c 'import blastit; print("wheel-smoke: import blastit ok")'
-# The console script lands beside the interpreter that installed it: a uv-managed
+# The console scripts land beside the interpreter that installed them: a uv-managed
 # CPython (the musl legs) does not put its `bin/` on `PATH`, and an image's own
 # CPython does. Ask both.
-blastit_bin="$(dirname "$python")/blastit"
+bindir="$(dirname "$python")"
+for name in blastit blastit-lsp blastit-manifest; do
+    if [ ! -x "$bindir/$name" ] && ! command -v "$name" >/dev/null 2>&1; then
+        echo "error: the wheel installed no \`$name\` console script beside $python" >&2
+        echo "  (design §6.1: blastit, blastit-lsp and blastit-manifest)" >&2
+        exit 1
+    fi
+done
+blastit_bin="$bindir/blastit"
 if [ ! -x "$blastit_bin" ]; then
     blastit_bin=$(command -v blastit)
 fi
-# `blastit` has no `--version` (`docs/reference/cli.md`): `--help` exits 0 and
-# the words it prints come from the installed extension, so this is the same
-# proof — a wheel whose `_blastit` did not load cannot answer.
+echo "wheel-smoke: console scripts on PATH: blastit, blastit-lsp, blastit-manifest"
+
+# 1a. `--version` and `--help` come from the binary the repack put in
+# `blastit/_bin/`; a wheel whose console script cannot find it dies here.
+version_line=$("$blastit_bin" --version)
+printf '%s\n' "$version_line" | grep -q '^blastit ' || {
+    echo "error: blastit --version printed no version line" >&2
+    printf '%s\n' "$version_line" >&2
+    exit 1
+}
+echo "wheel-smoke: $version_line"
 usage=$("$blastit_bin" --help)
 printf '%s\n' "$usage" | grep -q "stage 0" || {
     echo "error: blastit --help did not print the usage an installed wheel answers with" >&2
@@ -88,32 +118,24 @@ printf '%s\n' "$usage" | grep -q "stage 0" || {
 }
 echo "wheel-smoke: blastit --help ok"
 
-# 1b. The installed extension carries no test-only boot seam (`MB.3.67`).
-# `_blastit*.so` is a `--release` build, so `BLASTIT_TEST_SWAP_POINT` (compiled
-# under `debug_assertions` alone) must not be in it: a shipped binary that can be
-# paused by an environment variable before it binds a listener is a
-# denial-of-service surface. Measured on the file that was installed, not on the
-# flags the build was asked to use — `scripts/check-no-test-seam.sh` is the
-# two-direction reader the archive's binary goes through as well.
+# 1b/1c. The installed binary carries no test-only boot seam (`MB.3.67`) and is
+# executable — `pip` drops the wheel's modes, so the repack's 0755 is what makes
+# this true, and a `_bin/blastit` installed 0644 would be a wheel that cannot run.
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-site_dir=$("$python" - <<'PY'
+binary=$("$python" - <<'PY'
 import pathlib
 import blastit
 
-print(pathlib.Path(blastit.__file__).parent)
+print(pathlib.Path(blastit.__file__).parent / "_bin" / "blastit")
 PY
 )
-extensions=0
-for extension in "$site_dir"/_blastit*.so; do
-    [ -e "$extension" ] || continue
-    bash "$script_dir/check-no-test-seam.sh" "$extension"
-    extensions=$((extensions + 1))
-done
-if [ "$extensions" -eq 0 ]; then
-    echo "error: no _blastit*.so in $site_dir: the wheel's extension is not where" >&2
-    echo "  this smoke test looks, so the boot seam went unmeasured" >&2
+if [ ! -x "$binary" ]; then
+    echo "error: $binary is missing or not executable: the wheel's binary did not" >&2
+    echo "  travel at blastit/_bin/blastit with mode 0755" >&2
     exit 1
 fi
+bash "$script_dir/check-no-test-seam.sh" "$binary"
+echo "wheel-smoke: $binary carries no test seam"
 
 # 2. dbproxy travels in the wheel and is executable.
 dbproxy=$("$python" - <<'PY'

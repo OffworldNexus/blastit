@@ -1,145 +1,131 @@
 name: Build a wheel
 description: >
-  Build one blastit wheel in manylinux_2_28 — the extension, the Python package,
-  and the Python-free `blastit-dbproxy` binary the wheel carries (§4, D2) — and
-  upload it as an artifact.
+  Build one universal `py3-none-<platform>` blastit wheel with
+  `scripts/build-wheel.sh` and upload it as an artifact.
 
-  `scripts/build-wheel.sh` does the same thing on a developer's machine; the
-  container is what makes the wheel work on an older glibc than the runner's, so
-  CI builds in there. Both the development wheels
-  (`.github/workflows/wheels.yml`) and the published ones
-  (`.github/workflows/publish-pypi.yml`) come from here, so the released wheel is
-  the one every commit to `develop` already built and smoked.
+  **`scripts/build-wheel.sh` is the build** (`MB.42.3.3`). This action used to run
+  `maturin-action` directly with `--features blastit-py/extension-module`, a crate
+  `MB.42.2.2.2` deleted: that step failed with *the package `blastit` does not
+  contain this feature*, and had it built it would have produced a `cp3NN`
+  extension wheel — while `wheels.yml` and `publish-pypi.yml` upload and count
+  `py3-none` wheels, so the release published zero of four. The script builds
+  `maturin build --bindings bin` inside the manylinux container, repacks the result
+  (`scripts/repack_universal_wheel.py`), checks the tag and measures **every**
+  embedded ELF (`check-portable-elf.sh`, `check-no-test-shim.sh`), so the action is
+  a thin, honest caller: one place builds a wheel, on a developer's machine and in
+  CI alike.
 
-  **One platform tag, from one place (`MB.3.58`).** `maturin-action`'s
-  `manylinux:` input *is* the tag: it runs `maturin build` inside
-  `quay.io/pypa/manylinux_<tag>_<arch>`, and the built wheel is named from the
-  container it was built in. Passing `--compatibility manylinux_<tag>` as well
-  gives maturin the platform twice and it refuses the build outright
-  (`Expected only one platform tag but found 2`). So this action never passes
-  `--compatibility`, and it refuses an empty `manylinux:` — a host build needs
-  the flag and must go through `scripts/build-wheel.sh` instead, which sets it
-  once and checks the tag it produced (`scripts/check_wheel_tag.py`).
+  A wheel this action builds carries the two CPython shims the builder image can
+  compile. The four PHP shims need a distro's `php_config.h`, so they only travel
+  when a caller stages them (`shims-from:`, the `shim-*` artifacts of
+  `php-sapi.yml`, or `target/php-sapi` on a release machine); `require-shims: all`
+  fails closed when six are not there.
 
 inputs:
-  python:
-    description: CPython version to build for, as maturin's `--interpreter` takes it (`3.13`)
-    required: true
   artifact:
     description: Name to upload the wheel under
     required: true
   manylinux:
     description: >
       manylinux tag to build in (`2_28`). It selects
-      `quay.io/pypa/manylinux_<tag>_<arch>` **and** is the wheel's platform tag,
-      so it must be set: this action has no host-build path (that is
-      `scripts/build-wheel.sh`, which passes `--compatibility` once).
+      `quay.io/pypa/manylinux_<tag>_<arch>`; the wheel's platform tag is read back
+      from the built wheel (`scripts/build-wheel.sh` refuses a promise that
+      disagrees with it).
     required: false
     default: "2_28"
   platform:
     description: >
-      The wheel tag the leg promises (`manylinux_2_28`, `musllinux_1_2`), from
-      `scripts/platform_matrix.py`. The built file must carry exactly this
-      prefix: a wheel built for one libc and named for the other installs and
-      then fails at `import`, which is the failure mode a matrix produces when
-      it grows a leg nobody checked. It is passed to
-      `scripts/check_wheel_tag.py` only — never to maturin (see `manylinux:`
-      above: that input is the tag).
+      The platform tag the leg promises (`manylinux_2_28`), from
+      `scripts/platform_matrix.py`. `scripts/build-wheel.sh` refuses a wheel whose
+      own `Tag:` disagrees, and `scripts/check_wheel_tag.py` rejects one above the
+      manylinux floor.
     required: false
     default: "manylinux_2_28"
+  require-shims:
+    description: >
+      `py` (the two CPython shims the builder image compiles) or `all` (those plus
+      the four PHP shims a caller staged with `shims-from:`). `scripts/build-wheel.sh`
+      fails closed when the count is short.
+    required: false
+    default: "py"
+  shims-from:
+    description: >
+      Directory holding PHP shims a previous job built (the `shim-*` artifacts of
+      `.github/workflows/php-sapi.yml`). Empty when there are none: no PHP headers
+      exist in the wheel builder, so this is the only way a wheel carries them.
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
     - uses: dtolnay/rust-toolchain@stable
-    # The tag comes from `manylinux:` alone. Refused here rather than built on
-    # the runner: a host build would carry the runner's glibc tag, which the tag
-    # check below (`--max-glibc 2_28`) would then reject — after the wheel exists.
+    # Refused here rather than built on the runner: a host build would carry the
+    # runner's glibc tag, and `--max-glibc 2_28` would reject it after the compile.
     - name: Refuse a wheel with no manylinux container
       shell: bash
       run: |
         set -euo pipefail
         if [ -z "${{ inputs.manylinux }}" ]; then
-          echo "::error::build-wheel needs a non-empty \`manylinux:\`: it builds inside quay.io/pypa/manylinux_<tag>_<arch>, and the image is the wheel's platform tag. A host build passes \`--compatibility\` itself (scripts/build-wheel.sh) and belongs there, not here."
+          echo "::error::build-wheel needs a non-empty \`manylinux:\`: scripts/build-wheel.sh builds inside quay.io/pypa/manylinux_<tag>_<arch>, and that image is the wheel's platform tag."
           exit 1
         fi
         echo "building in quay.io/pypa/manylinux_${{ inputs.manylinux }}_<arch>; the platform tag is manylinux_${{ inputs.manylinux }}"
-    - name: Build in manylinux_${{ inputs.manylinux }}
-      uses: PyO3/maturin-action@v1
-      with:
-        manylinux: ${{ inputs.manylinux }}
-        # Both capabilities are named here, not inherited by accident: the wheel
-        # is `python, php` (`ADR-0010` §4), and `blastit-py`'s dependency on
-        # `blastit` enables `python` today only because that manifest says so
-        # (`crates/blastit-py/Cargo.toml`). Passing `blastit/python` here too
-        # means a future reshuffle of that dependency — or a `--no-default-features`
-        # flag — cannot silently produce a wheel whose extension loads no
-        # interpreter, which would refuse every WSGI route at Stage 0.
-        #
-        # No `--compatibility`: `manylinux:` above already names the platform,
-        # and passing both is the "Expected only one platform tag but found 2"
-        # build failure (`MB.3.58`). `check_wheel_tag.py` is what proves the
-        # wheel still says `manylinux_2_28`.
-        args: --release --out dist --interpreter python${{ inputs.python }} --features blastit-py/extension-module,blastit/python
-        # Inside the container, so the Python-free dbproxy binary the wheel
-        # carries is built against the same old glibc as the extension.
-        before-script-linux: |
-          dnf install -y --setopt=install_weak_deps=False clang && dnf clean all
-          cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
-          install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
+    - name: Build the universal wheel (scripts/build-wheel.sh)
+      shell: bash
+      run: |
+        set -euo pipefail
+        extra=()
+        if [ -n "${{ inputs.shims-from }}" ]; then
+            extra+=(--shims-from "${{ inputs.shims-from }}")
+        fi
+        bash scripts/build-wheel.sh \
+            --manylinux "${{ inputs.manylinux }}" \
+            --require-shims "${{ inputs.require-shims }}" \
+            "${extra[@]}" \
+            --out dist
     - name: The wheel's tag is the platform this leg promised (and never above manylinux_2_28)
       shell: bash
       run: |
         set -euo pipefail
-        for wheel in dist/*.whl; do
+        for wheel in dist/*-py3-none-*.whl; do
             unzip -p "$wheel" '*.dist-info/WHEEL' | grep '^Tag:'
+            unzip -p "$wheel" '*.dist-info/WHEEL' | grep -qx 'Root-Is-Purelib: false'
         done
         python3 scripts/check_wheel_tag.py \
-            --max-glibc 2_28 \
+            --max-glibc "${{ inputs.manylinux }}" \
             --platform "${{ inputs.platform }}" \
-            dist/*.whl
+            dist/*-py3-none-*.whl
 
     - name: The wheel carries dbproxy, executable
       shell: bash
       run: |
         set -euo pipefail
-        for wheel in dist/*.whl; do
+        for wheel in dist/*-py3-none-*.whl; do
             # A wheel is a zip and the file name is stored uncompressed, so
             # finding it needs no tool; the mode lives in the zip's attributes,
-            # which is what `zipinfo -l` prints in its first column.
+            # which is what `zipinfo -l` prints in its first column. The repack
+            # writes `0100755`, so the file type is `-` and the bits are `rwxr-xr-x`.
             if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
-                echo "$wheel has no dbproxy binary in it: blastit refuses to start without it" >&2
+                echo "::error::$wheel has no dbproxy binary in it: blastit refuses to start without it"
                 exit 1
             fi
-            if ! zipinfo -l "$wheel" | awk '{ print $1, $NF }' | grep -qx -- "-..x..x..x blastit/_bin/blastit-dbproxy"; then
-                echo "dbproxy is not executable in $wheel" >&2
+            if ! zipinfo -l "$wheel" | awk '{ print $1, $NF }' | grep -qx -- "-rwxr-xr-x blastit/_bin/blastit-dbproxy"; then
+                echo "::error::dbproxy is not executable in $wheel"
+                zipinfo -l "$wheel" | grep dbproxy || true
                 exit 1
             fi
             echo "$wheel ok"
         done
-    # Installed and smoked here, in a bare CPython image, for every leg: a wheel
-    # whose `cp3NN` tag does not match what it can load, or one that lost the
-    # dbproxy binary on the way out of the container, is caught on the commit
-    # that built it and again on the tag that publishes it (`MB.3.18`,
-    # acceptance 1). The image follows the wheel's own tag: a non-abi3 wheel's
-    # tag *is* the interpreter it needs.
-    - name: Install the wheel and serve one static route (bare CPython image)
+    # One wheel, three interpreters — the promise a `py3-none` tag makes. Every
+    # leg runs the same three images, so a wheel that loads on 3.13 and not on
+    # 3.12 fails on the commit that built it (`scripts/wheel_container_smoke.sh`
+    # takes the images from `scripts/platform_matrix.py`'s leg).
+    - name: Install the wheel in python:3.12/3.13/3.14 and drive it
       shell: bash
-      run: |
-        set -euo pipefail
-        for wheel in dist/*.whl; do
-            tag=$(basename "$wheel" | grep -oE 'cp3[0-9]+' | head -1)
-            py="${tag#cp}"
-            python="${py:0:1}.${py:1}"
-            echo "wheel-smoke: $(basename "$wheel") on python:${python}-slim"
-            docker run --rm \
-                -v "$PWD/dist:/dist:ro" -v "$PWD:/src:ro" \
-                "python:${python}-slim" \
-                bash /src/scripts/wheel-smoke.sh "/dist/$(basename "$wheel")"
-        done
-
+      run: bash scripts/wheel_container_smoke.sh dist
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact }}
-        path: dist/*.whl
+        path: dist/*-py3-none-*.whl
         if-no-files-found: error

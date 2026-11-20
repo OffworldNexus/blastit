@@ -511,10 +511,9 @@ jobs:
         run: uv run --no-project scripts/readme-absolute-links.py --ref "$LINK_REF"
       - uses: ./.github/actions/build-wheel
         with:
-          python: ${{ matrix.python }}
           manylinux: ${{ matrix.manylinux }}
-          platform: ${{ matrix.wheel_tag }}
-          artifact: wheel-${{ matrix.python_tag }}-${{ matrix.arch }}-${{ matrix.libc }}
+          platform: manylinux_${{ matrix.manylinux }}
+          artifact: wheel-${{ matrix.name }}
 
   wheels_musl:
     name: wheel (${{ matrix.name }})
@@ -543,8 +542,7 @@ jobs:
           docker run --rm \
               -e HOST_UID="$(id -u)" \
               -e HOST_GID="$(id -g)" \
-              -e PY_VER="${{ matrix.python }}" \
-              -e PY_TAG="${{ matrix.python_tag }}" \
+              -e PY_VER=3.13 \
               -v "$PWD:/src" \
               -w /src \
               alpine:3.21 \
@@ -558,11 +556,11 @@ jobs:
                   export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
                   interpreter=$(uv python find "$PY_VER")
                   bash scripts/wheel-smoke.sh --python "$interpreter" \
-                      dist/blastit-*-"${PY_TAG}"*-musllinux_*.whl
+                      dist/blastit-*-py3-none-musllinux_*.whl
               '
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.python_tag }}-${{ matrix.arch }}-${{ matrix.libc }}
+          name: wheel-${{ matrix.name }}
           path: dist/*.whl
           if-no-files-found: error
 
@@ -871,6 +869,24 @@ jobs:
           path: dist
           merge-multiple: true
           pattern: lsp-*
+      # The Composer wrapper's digest table (`MB.42.3.3` review): the four rows
+      # were all `pending`, so the only origin a real `composer require` takes
+      # always refused. Stamped here from the archives this job just verified, and
+      # refused while any row is still `pending` — a package that cannot run is
+      # not a release asset.
+      - name: The Composer wrapper's digest table is complete
+        run: |
+          set -euo pipefail
+          # Exactly the `binaries` family, taken from the matrix: `dist/` also
+          # holds the `blastit-lsp-*` assets, whose names match a looser glob.
+          mapfile -t archives < <(
+              uv run --no-project scripts/platform_matrix.py --matrix binaries |
+                  uv run --no-project python -c 'import json,sys; [print("dist/" + item["archive"]) for item in json.load(sys.stdin)["include"]]'
+          )
+          printf 'composer table: %s\n' "${archives[@]}"
+          uv run --no-project scripts/composer_sha256.py \
+              --version "${{ needs.guard.outputs.version }}" \
+              --archives "${archives[@]}" --require-complete
       # Verify every per-target archive checksum, check that the exact matrix
       # counts of archives, shims and lsp assets arrived, and write one sorted
       # `SHA256SUMS` covering every release asset.

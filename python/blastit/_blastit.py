@@ -39,6 +39,7 @@ import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -83,25 +84,89 @@ _PROGRAM: str | None = None
 _ERRORS: Any = None
 
 
-def _executable(path: str) -> bool:
-    """Whether `path` is a file this process may execute."""
-    return os.path.isfile(path) and os.access(path, os.X_OK)
+def _executable(path: str, *, repair: bool = False) -> bool:
+    """Whether `path` is a file this process may execute.
+
+    A wheel cannot carry a mode: `pip` writes `0644` for every file outside
+    `*.data/scripts/`, so the repacked `blastit/_bin/blastit` arrives without its
+    execute bit and `os.access` says no.
+
+    `repair` is set **only** for paths under this package's own `_bin/`: a
+    `chmod` on whatever path a caller happened to name (`$BLASTIT_BIN`, the
+    interpreter's `bin/`, another project's tools) is not this package's business,
+    and a read-only `site-packages` cannot be repaired at all — which is why the
+    missing bit must never be the thing that decides "there is no binary here"
+    (see `EXEC_GUARD` and `_program`: that path is a silent `exec` loop).
+    """
+    if not os.path.isfile(path):
+        return False
+    if os.access(path, os.X_OK):
+        return True
+    if not repair:
+        return False
+    try:
+        # Add the three execute bits to the mode the file already has: a `0600`
+        # file must not become world-readable just because it became runnable.
+        os.chmod(path, stat.S_IMODE(os.stat(path).st_mode) | 0o111)
+    except OSError:
+        return False
+    return os.access(path, os.X_OK)
 
 
-def _candidates(name: str) -> list[str]:
-    """Where an installation may keep `name`, in resolution order."""
+#: Set by `main()` in the environment of the binary it `exec`s. If a *second*
+#: console script ever asks this package for a program with the guard set, the
+#: package's own `_bin/` did not answer and the `PATH` fallbacks would find the
+#: very script that is running: an `exec` loop with no output. The guard turns
+#: that into one sentence (`_program`, `MB.42.3.3` review).
+EXEC_GUARD = "BLASTIT_WHEEL_EXEC"
+
+#: The programs a wheel keeps in `blastit/_bin/` (design §6.1). `blastit-dbproxy`
+#: is in the list because stage 0 runs it directly — neither this package nor the
+#: user ever executes it through `_program()`.
+_PROGRAMS = ("blastit", "blastit-lsp", "blastit-dbproxy")
+
+
+def _bin_dir() -> str:
+    """`<package>/_bin` — the only directory whose modes this package repairs."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "_bin")
+
+
+def _repair_modes(program: str) -> None:
+    """Give the package's own `blastit/_bin/` programs their execute bit back.
+
+    `pip` normalises the whole wheel to `0644`, so the repair `_executable` makes
+    for the one program a command line names has to be made for the two it does
+    not: `blastit-lsp` (a second console script) and `blastit-dbproxy` (which
+    stage 0 `execve`s). It applies **only** when `program` is a file of this
+    package's `_bin/`: a `$BLASTIT_BIN` or a bundle's `lib/blastit` is left
+    exactly as its owner made it.
+    """
+    directory = _bin_dir()
+    if os.path.dirname(os.path.abspath(program)) != directory:
+        return
+    for name in _PROGRAMS:
+        _executable(os.path.join(directory, name), repair=True)
+
+
+def _candidates(name: str) -> list[tuple[str, bool]]:
+    """`(path, repair)` where an installation may keep `name`, in order.
+
+    Only the first candidate — this package's own `_bin/` — may have its mode
+    repaired; the `<prefix>/share/blastit/lib` one belongs to a bundle or a
+    system install and is never touched.
+    """
     package = os.path.dirname(os.path.abspath(__file__))
     return [
-        os.path.join(package, "_bin", name),
-        os.path.abspath(os.path.join(package, "..", "..", "lib", name)),
+        (os.path.join(package, "_bin", name), True),
+        (os.path.abspath(os.path.join(package, "..", "..", "lib", name)), False),
     ]
 
 
 def _program(name: str) -> str:
     """The installation's `name`, from the package, `BLASTIT_BIN`, or this prefix."""
     candidates = _candidates(name)
-    for candidate in candidates:
-        if _executable(candidate):
+    for candidate, repair in candidates:
+        if _executable(candidate, repair=repair):
             return candidate
     if name == "blastit":
         configured = os.environ.get("BLASTIT_BIN")
@@ -112,6 +177,21 @@ def _program(name: str) -> str:
                     "BLASTIT_BIN, or point it at the blastit binary"
                 )
             return configured
+    # The console script puts `EXEC_GUARD` in the environment before it `exec`s
+    # the binary (`main`, below). If we are asked for a program *with the guard
+    # set*, the package's own `_bin/` did not answer — and the two fallbacks left
+    # (`<venv>/bin/<name>`, `PATH`) would find **the console script that is
+    # running right now**, re-`exec` it, and loop silently forever. Reproduced
+    # by the review: `STILL-LOOPING after 6 execs`, zero output. So the only
+    # honest answer here is the sentence that says how to fix the install.
+    if os.environ.get(EXEC_GUARD):
+        looked = ", ".join(path for path, _ in candidates)
+        raise ValueError(
+            "this blastit package is incomplete: it ships no executable "
+            f"`{name}` under {looked or 'its own _bin/'} and "
+            f"{EXEC_GUARD} is set, so no other `{name}` on PATH was tried; "
+            "reinstall it with `pip install --force-reinstall blastit`"
+        )
     # An installed wheel puts the binary in the interpreter's own `bin/`
     # (`pip` installs a wheel's data scripts there), which is also where a
     # bundle's `bin/blastit` symlink lives. `MB.42.3`'s repack moves it to
@@ -122,7 +202,7 @@ def _program(name: str) -> str:
     found = shutil.which(name)
     if found is not None:
         return found
-    looked = ", ".join([*candidates, "BLASTIT_BIN", "PATH"])
+    looked = ", ".join([*(path for path, _ in candidates), "BLASTIT_BIN", "PATH"])
     if name == "blastit":
         raise ValueError(
             "this blastit package is incomplete: it ships no `blastit` (looked in "
@@ -475,8 +555,13 @@ def main(argv: list[str], executable: str, dbproxy: str = "") -> int:
     del dbproxy
     environment = dict(os.environ)
     environment.setdefault("BLASTIT_WHEEL_PYTHON", executable)
+    # The cycle-breaker (`EXEC_GUARD`): once this is set, a `_program()` that
+    # cannot find the binary in this package refuses instead of `exec`-ing the
+    # console script again.
+    environment.setdefault(EXEC_GUARD, "1")
     try:
         program = bin_path()
+        _repair_modes(program)
         os.execvpe(program, [program, *argv], environment)
     except (OSError, ValueError) as error:
         raise SystemExit(f"blastit: {error}") from error

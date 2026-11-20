@@ -1,0 +1,131 @@
+# The real proof for the per-minor CPython shims (`MB.42.2`, `MB.42.3.3`).
+#
+# `make check` builds the shims this host can build and asserts their ELF
+# contract, but it cannot prove every leg: it has one interpreter per minor and
+# one libc, and it says so by printing the minors it skipped. This workflow is
+# the acceptance that counts, and it runs **once per leg** —
+# `scripts/platform_matrix.py --matrix py-shims` is the list, so a leg is added in
+# one place and appears here, in the wheel/archive bundles and in the counts the
+# documentation is allowed to state.
+#
+# Each leg builds `libblastit_py3<minor>-<arch>-<libc>.so` natively, with a
+# CPython of exactly that minor, and then asserts the four properties the frozen
+# ABI depends on — on the **artifact**, not on the flags the build was asked for:
+#
+#   * `nm -D --defined-only` carries the three exports (`blastit_py_abi_version`,
+#     `blastit_py_minor`, `blastit_py_abi_v1`): the version handshake stage 1
+#     reads before it calls anything;
+#   * `readelf -d` reports `DT_SONAME` equal to the file name, because the loader
+#     looks the shim up by that name;
+#   * `nm -uD` leaves `Py_InitializeEx` **undefined**: the host interpreter's
+#     symbols are resolved at `dlopen`, and a shim that linked its own libpython
+#     would be a second interpreter in the worker (`R1`);
+#   * `readelf -d` carries no `NEEDED libpython*`, and
+#     `scripts/check-portable-elf.sh` passes with no relaxation: zero libpython,
+#     zero libphp, no build-host `RUNPATH`.
+#
+# `make py-sapi` already runs those four assertions (and the `dlopen` probe) for
+# every minor it builds; the explicit block here is what makes this job's log a
+# *proof line per leg* rather than "the target exited 0", and it is what fails
+# when `make py-sapi` is refactored into something weaker.
+#
+# Kept out of `make check` (Docker-free but needs several interpreters and, for
+# the `dlopen` probe, each minor's shared libpython), exactly like `php-sapi.yml`,
+# so the shim cannot rot unnoticed between gates.
+name: Python SAPI
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+concurrency:
+  group: py-sapi-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/develop' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  matrix:
+    name: the legs (scripts/platform_matrix.py)
+    runs-on: ubuntu-latest
+    outputs:
+      py_shims: ${{ steps.legs.outputs.py_shims }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # A broken matrix fails here, once, before any interpreter is installed.
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
+      - id: legs
+        run: |
+          set -euo pipefail
+          echo "py_shims=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims)" >> "$GITHUB_OUTPUT"
+
+  lint:
+    name: fmt + clippy (the shim crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
+      - name: fmt + clippy
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy -p blastit-py-shim --features extension-module --all-targets --locked -- -D warnings
+
+  legs:
+    name: shim + contract (${{ matrix.shim }})
+    needs: [lint, matrix]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.py_shims) }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # **The leg's own builder image.** `matrix.builder_image` comes from
+      # `scripts/platform_matrix.py`: a musl shim is compiled inside
+      # `alpine:3.21`, because no `--target` makes a glibc linker emit a musl
+      # binary — the review found `libblastit_py313-x86_64-musl.so` linked
+      # against `libc.so.6`, and every assertion below passed anyway. The script
+      # also asserts the artifact's `NEEDED` line against the leg's libc, which
+      # is the assertion that catches it.
+      - name: 'shim + contract (CPython ${{ matrix.minor }}, ${{ matrix.arch }}-${{ matrix.libc }})'
+        run: >-
+          bash scripts/py_sapi_leg.sh
+          --minor ${{ matrix.minor }} --arch ${{ matrix.arch }} --libc ${{ matrix.libc }}
+          --out target/py-sapi
+          ${{ matrix.builder_image != '' && format('--image {0}', matrix.builder_image) || '' }}
+      - name: the proof lines this job owes (log, not just an exit status)
+        run: |
+          set -euo pipefail
+          shim="target/py-sapi/${{ matrix.shim }}"
+          test -f "$shim"
+          {
+            echo "### ${{ matrix.shim }}"
+            readelf -d "$shim" | sed -n 's/.*(SONAME).*/&/p'
+            nm -D --defined-only "$shim" | awk '$2 == "T" && $3 ~ /^blastit_py_/ { print "exported: " $2 " " $3 }'
+            nm -uD "$shim" | grep -E ' Py_Initialize(Ex|FromConfig)$' | sed 's/^/undefined:/'
+            echo "NEEDED: $(readelf -d "$shim" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
+          } >> "$GITHUB_STEP_SUMMARY"
+      # Built *and* asserted is the release bar: the shim leaves with the name the
+      # bundle and the wheel embed, and the publish pipeline ships that file.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: py-shim-${{ matrix.name }}
+          path: target/py-sapi/${{ matrix.shim }}
+          if-no-files-found: error

@@ -6,12 +6,19 @@ status: ready
 owner: writer
 priority: 1
 depends_on: [MB.42.3]
-paths: [README.md, "docs/**", zensical.toml, "crates/blastit-manifest/tests/**", "python/tests/**", "e2e/**"]
+paths:
+  - README.md
+  - "docs/**"
+  - zensical.toml
+  - "crates/blastit-manifest/tests/**"
+  - "python/tests/**"
+  - "e2e/**"
+  - scripts/platform_matrix.py
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T14:30"
-updated: "2026-11-19T14:30"
+updated: "2026-11-20T03:39"
 ---
 
 # Goal
@@ -67,3 +74,6 @@ Rewrite the hero snippet and install/usage commands across `README.md` and `docs
 - `make check`
 - `make e2e`
 - `visual-checker` PASS on the new hero and Getting Started pages
+
+# Deployment note carried in from MB.42.3.3
+A **musllinux** wheel needs `apk add libgcc` on the host (`_Unwind_*` symbols are not in musl). State it in exactly one place a musl user will look — `docs/getting-started.md`'s install section or the troubleshooting page — as a one-line `!!! warning`, never before command 1.

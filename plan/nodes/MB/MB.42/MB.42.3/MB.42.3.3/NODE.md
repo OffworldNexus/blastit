@@ -2,7 +2,7 @@
 id: MB.42.3.3
 title: "Ecosystem wrappers: 4 universal py3-none wheels + console scripts + py-sapi.yml + Composer package"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.3.2]
@@ -14,11 +14,11 @@ paths:
   - "packages/**"
   - ".github/workflows/py-sapi.yml"
   - pyproject.toml
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T01:33"
-updated: "2026-11-20T01:33"
+updated: "2026-11-20T04:23"
 ---
 
 # Goal

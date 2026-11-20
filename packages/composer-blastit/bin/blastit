@@ -1,0 +1,182 @@
+#!/bin/sh
+# `vendor/bin/blastit`: the release archive for this host, verified, then `exec`ed.
+#
+# `composer require --dev offworldnexus/blastit` is a **per-project version pin**,
+# not an install method (design §6.1): it puts this script on the project's PATH
+# so a local CLI handoff works inside that project, and `composer update` upgrades
+# it. The machine install stays `install.sh` / `.deb` / `.rpm` / the wheel.
+#
+# What this script does, in order, and why each step is here:
+#
+#   1. **Resolves `(arch, libc)`.** The archive is per `(arch, libc)` — a glibc
+#      host cannot run the musl build, and an aarch64 host cannot run x86_64.
+#   2. **Verifies before it extracts anything.** The digest comes from the table
+#      below when the asset is fetched from the pinned GitHub release, and from
+#      `$BLASTIT_SHA256` or a local `$BLASTIT_SHA256SUMS_FILE` when
+#      `BLASTIT_RELEASE_BASE_URL` overrides the origin — never from the same
+#      server that served the archive, because a mirror that can substitute the
+#      tarball can substitute the checksum too. An `pending` row, or no digest at
+#      all, is refused **before** the cache is consulted: a cache is a place to
+#      keep a verified artifact, never a reason to skip the verification.
+#   3. **Caches** in `$BLASTIT_COMPOSER_CACHE` or
+#      `${XDG_CACHE_HOME:-$HOME/.cache}/blastit/composer`. There is deliberately
+#      **no `<package>/.runtime` candidate**: Composer materialises this script as
+#      a *symlink*, so `dirname $0/..` is the consuming project's `vendor/` —
+#      which means the cache would live inside the repository a checkout can
+#      write, and a committed tree would be executed (`MB.42.3.3` review).
+#      The cached tarball is re-hashed on **every** run and re-extracted, so
+#      nothing in the cache is trusted on the strength of a marker file beside it.
+#   4. **`exec`s it with `BLASTIT_HANDOFF_DONE=1`**, which is what stops the
+#      binary from handing the command to the project's own `blastit` again (a
+#      loop that ends in a fork bomb, §4).
+#
+# POSIX `sh` only: no arrays, no `[[`, no `local`, no `set --` (it would clobber
+# the arguments this script forwards). Every refusal is one `stderr` line that
+# names the fix, and exits non-zero.
+set -eu
+
+VERSION="0.2.0"
+
+# The pinned release, and the digest of each asset it publishes (design §6.1).
+# A row is `<arch> <libc> <archive> <sha256>`; `pending` is a leg the release did
+# not publish, and this script refuses it by name instead of downloading
+# something else. `scripts/composer_sha256.py` rewrites this table from the built
+# archives (`make composer-stamp`), and `--require-complete` is what a release
+# runs before packaging so no row reaches PyPI/Packagist as `pending`.
+ASSETS='
+x86_64 gnu blastit-x86_64-unknown-linux-gnu.tar.gz pending
+aarch64 gnu blastit-aarch64-unknown-linux-gnu.tar.gz pending
+x86_64 musl blastit-x86_64-unknown-linux-musl.tar.gz pending
+aarch64 musl blastit-aarch64-unknown-linux-musl.tar.gz pending
+'
+
+die() {
+    printf 'blastit: %s\n' "$1" >&2
+    exit 1
+}
+
+# 1. This host's `(arch, libc)`.
+machine=$(uname -m)
+case "$machine" in
+x86_64 | amd64) arch=x86_64 ;;
+aarch64 | arm64) arch=aarch64 ;;
+*) die "unsupported architecture '$machine' (published: x86_64, aarch64); use install.sh on a supported host" ;;
+esac
+libc=gnu
+for loader in /lib/ld-musl-"$arch".so.1 /lib/ld-musl-"$machine".so.1; do
+    if [ -e "$loader" ]; then
+        libc=musl
+    fi
+done
+if [ "$libc" = gnu ] && command -v ldd >/dev/null 2>&1; then
+    case "$(ldd --version 2>&1 | head -n 1)" in
+    *musl* | *Musl*) libc=musl ;;
+    esac
+fi
+
+archive=""
+embedded=""
+while read -r row_arch row_libc row_archive row_digest; do
+    if [ -n "${row_arch:-}" ] && [ "$row_arch" = "$arch" ] && [ "$row_libc" = "$libc" ]; then
+        archive=$row_archive
+        embedded=$row_digest
+    fi
+done <<ASSET_TABLE
+$ASSETS
+ASSET_TABLE
+[ -n "$archive" ] || die "no release asset for $arch-$libc"
+target="${archive%.tar.gz}"
+
+# 2. The digest to verify against, before anything about the cache is decided.
+expected=$embedded
+base="${BLASTIT_RELEASE_BASE_URL:-https://github.com/OffworldNexus/blastit/releases/download/v$VERSION}"
+if [ -n "${BLASTIT_RELEASE_BASE_URL:-}" ]; then
+    expected="${BLASTIT_SHA256:-}"
+    if [ -z "$expected" ]; then
+        sums="${BLASTIT_SHA256SUMS_FILE:-}"
+        if [ -z "$sums" ]; then
+            case "$base" in
+            file://*)
+                if [ -f "${base#file://}/SHA256SUMS" ]; then
+                    sums="${base#file://}/SHA256SUMS"
+                fi
+                ;;
+            /*)
+                if [ -f "$base/SHA256SUMS" ]; then
+                    sums="$base/SHA256SUMS"
+                fi
+                ;;
+            esac
+        fi
+        if [ -z "$sums" ] || [ ! -f "$sums" ]; then
+            die "BLASTIT_RELEASE_BASE_URL is set, so a digest is required: set BLASTIT_SHA256=<hex> or BLASTIT_SHA256SUMS_FILE=<local SHA256SUMS>"
+        fi
+        expected=$(awk -v want="$archive" '$2 == want || $2 == "*" want { print $1; exit }' "$sums")
+        [ -n "$expected" ] || die "$sums has no line for $archive"
+    fi
+fi
+if [ "$expected" = pending ]; then
+    die "$VERSION publishes no $arch-$libc archive yet, so there is nothing to verify against: use install.sh, or pin a version whose table is stamped (make composer-stamp)"
+fi
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{ print $1 }'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{ print $1 }'
+    else
+        die "no sha256sum or shasum: cannot verify the archive, and an unverified blastit is not run"
+    fi
+}
+
+# 3. The cache: an explicit directory, else the user's. Never inside the
+# consuming project — this script is a symlink into `vendor/bin`, so `$0` says
+# nothing about where the package lives, and anything inside the repository is
+# something a checkout can write.
+cache="${BLASTIT_COMPOSER_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/blastit/composer}"
+if ! mkdir -p "$cache/v$VERSION" 2>/dev/null || [ ! -w "$cache/v$VERSION" ]; then
+    die "BLASTIT_COMPOSER_CACHE ($cache) is not writable: point it at a directory this user can write, or unset it to use \$XDG_CACHE_HOME/blastit/composer"
+fi
+tree="$cache/v$VERSION/$target"
+binary="$tree/blastit"
+tarball="$cache/v$VERSION/$archive"
+
+# A cached tarball is trusted only after it hashes to `expected` — on every run,
+# and the tree is then re-extracted from it. That makes the cache a copy of the
+# verified artifact and not a second, unverified installation.
+have_tarball=no
+if [ -f "$tarball" ] && [ "$(sha256_of "$tarball")" = "$expected" ]; then
+    have_tarball=yes
+fi
+if [ "$have_tarball" = no ]; then
+    if [ -n "${BLASTIT_ARCHIVE:-}" ]; then
+        # A pre-seeded archive (CI, an air-gapped mirror): verified like any other.
+        cp "$BLASTIT_ARCHIVE" "$tarball" 2>/dev/null ||
+            die "BLASTIT_ARCHIVE=$BLASTIT_ARCHIVE could not be copied into $cache: check the path and the cache's free space"
+    else
+        # One line, before a ~30 MB download that otherwise looks like a hang
+        # (`review-ux`): only on the cold path, so a warm run stays silent.
+        printf 'blastit: fetching %s %s (once; cached afterwards)\n' "$archive" "$VERSION" >&2
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$base/$archive" -o "$tarball" ||
+                die "could not download $base/$archive: check the network, set BLASTIT_RELEASE_BASE_URL to a reachable mirror, or download the archive yourself and set BLASTIT_ARCHIVE=<path>"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -O "$tarball" "$base/$archive" ||
+                die "could not download $base/$archive: check the network, set BLASTIT_RELEASE_BASE_URL to a reachable mirror, or download the archive yourself and set BLASTIT_ARCHIVE=<path>"
+        else
+            die "no curl or wget: download $base/$archive yourself and set BLASTIT_ARCHIVE=<path>"
+        fi
+    fi
+    actual=$(sha256_of "$tarball")
+    if [ "$actual" != "$expected" ]; then
+        rm -f "$tarball"
+        die "$archive does not match its digest (want $expected, got $actual): refusing to run it"
+    fi
+fi
+
+# 4. Extract from the verified tarball, then `exec`.
+rm -rf "$tree"
+tar -xzf "$tarball" -C "$cache/v$VERSION" 2>/dev/null ||
+    die "$tarball could not be extracted into $cache/v$VERSION: remove that directory and run again"
+[ -x "$binary" ] || die "$archive has no executable $target/blastit"
+BLASTIT_HANDOFF_DONE=1 exec "$binary" "$@"

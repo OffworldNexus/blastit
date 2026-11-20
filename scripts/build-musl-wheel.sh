@@ -53,7 +53,15 @@ if ! command -v cargo >/dev/null 2>&1; then
         | bash -s -- -y --profile minimal --default-toolchain stable >/dev/null
 fi
 
-uv python install "$python" >/dev/null
+# Both CPython minors the wheel ships shims for (`MB.42.3.3`, design §6.1): the
+# wheel's `blastit/_bin/` carries `libblastit_py313-…musl.so` and the 3.14 one,
+# and `--require-shims py` below refuses a wheel with fewer.
+for minor in 3.13 3.14; do
+    uv python install "$minor" >/dev/null
+done
+PY_SAPI_PYTHON_313=$(uv python find 3.13)
+PY_SAPI_PYTHON_314=$(uv python find 3.14)
+export PY_SAPI_PYTHON_313 PY_SAPI_PYTHON_314
 interpreter=$(uv python find "$python")
 echo "build-musl-wheel: $("$interpreter" -c 'import sys, sysconfig; print(sys.version.split()[0], sysconfig.get_platform())')"
 
@@ -64,8 +72,15 @@ echo "build-musl-wheel: $("$interpreter" -c 'import sys, sysconfig; print(sys.ve
 # a build script. Exported here (not passed as `--target`) for that reason.
 export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=-crt-static"
 rm -f dist/blastit-*.whl
+# `BLASTIT_WHEEL_BUILD_PY_SHIMS=1` makes the host path compile the two CPython
+# shims into the same `_bin/` staging directory (`make py-sapi`, no `--target`:
+# this *is* the musl triple). `--require-shims py` then fails closed if either is
+# missing, so a musllinux wheel can never ship zero shims (the review found one
+# that shipped none).
+BLASTIT_WHEEL_BUILD_PY_SHIMS=1 PY_MINORS="3.14 3.13" \
 PYO3_PYTHON="$interpreter" MATURIN="uvx maturin" \
-    bash scripts/build-wheel.sh --interpreter "$interpreter" --compatibility musllinux_1_2 "$@"
+    bash scripts/build-wheel.sh --interpreter "$interpreter" \
+        --compatibility musllinux_1_2 --require-shims py "$@"
 
 # The tag is the promise: a wheel built on glibc and named musllinux installs and
 # then fails at `import` (that is the whole reason this leg exists). Verify the

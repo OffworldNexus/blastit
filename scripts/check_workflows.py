@@ -166,6 +166,9 @@ OUTPUT_SPECS: dict[str, tuple[str, str]] = {
     "binaries": ("binaries", ""),
     "lsp": ("lsp", ""),
     "legs": ("shims", ""),
+    # `MB.42.3.3`: the per-minor CPython shims have their own family and their own
+    # workflow (`.github/workflows/py-sapi.yml`).
+    "py_shims": ("py-shims", ""),
     "wheels_gnu": ("wheels", "gnu"),
     "wheels_musl": ("wheels", "musl"),
     "binaries_gnu": ("binaries", "gnu"),
@@ -315,16 +318,16 @@ def check_platform_matrix_calls(run_text: str, scope: str, report: Report) -> No
                 # job itself expands, so there is no literal here to judge.
                 continue
             report.check(
-                family in {"shims", "binaries", "wheels", "images", "lsp"},
+                family in {"shims", "py-shims", "binaries", "wheels", "images", "lsp"},
                 f"{scope}: platform_matrix.py --matrix {family!r} names a family the "
-                "generator does not have (wheels, binaries, shims, images, lsp)",
+                "generator does not have (wheels, binaries, shims, py-shims, images, lsp)",
             )
             continue
         leg_match = re.search(r"--leg\s+(\S+)", tail)
         if leg_match is None:
             continue
         family = leg_match.group(1).strip("'\"")
-        if family not in {"shims", "binaries", "wheels", "lsp"}:
+        if family not in {"shims", "py-shims", "binaries", "wheels", "lsp"}:
             report.fail(
                 f"{scope}: platform_matrix.py --leg {family!r} names an unknown family"
             )
@@ -338,17 +341,84 @@ def check_platform_matrix_calls(run_text: str, scope: str, report: Report) -> No
                 "matches five legs and exits 2 under `set -e` (use `--count lsp` for counts)",
             )
             continue
+        # A `py3-none` wheel is one artifact per `(arch, libc)` (`MB.42.3.3`), so
+        # `--libc` + `--arch` identify it; `--python` selects a *smoke* leg and is
+        # not part of a wheel leg any more. `py-shims` needs `--minor` like `shims`.
         required = ["--libc", "--arch"]
-        if family == "shims":
+        if family in ("shims", "py-shims"):
             required.insert(0, "--minor")
-        elif family == "wheels":
-            required.insert(0, "--python")
         for flag in required:
             report.check(
                 re.search(rf"{re.escape(flag)}\b", tail) is not None,
                 f"{scope}: `platform_matrix.py --leg {family}` omits `{flag}`, "
                 f"which matches multiple legs and exits 2 under `set -e` (use `--count {family}` for counts)",
             )
+
+
+#: The generator call a producer step must make: `scripts/platform_matrix.py …
+#: --matrix <family>`, where the family is a literal or a shell variable.
+MATRIX_CALL = re.compile(
+    r"platform_matrix\.py[^\n]*?--matrix\s+['\"]?(?P<family>[\w$}{.-]+)"
+)
+
+
+def _producer_names_family(text: str, family: str) -> bool:
+    """Whether this step builds `family`'s legs, literally or through a variable.
+
+    `publish-pypi.yml` iterates `for pair in wheels:gnu wheels:musl shims: …` and
+    calls `--matrix "$family"`, which no regex can resolve. The convention that
+    makes it checkable is the table itself: the family appears as a `name:libc`
+    token in the same step. Without that, a variable is not evidence of anything.
+    """
+    for call in MATRIX_CALL.finditer(text):
+        token = call.group("family").strip("'\"")
+        resolved = token.startswith("$") or token.startswith("{")
+        if not resolved and token == family:
+            return True
+        if resolved and re.search(
+            rf"(?:^|[\s:=]){re.escape(family)}(?::|\s|$)", text, re.MULTILINE
+        ):
+            return True
+    return False
+
+
+def check_matrix_producers(
+    jobs: dict, job_name: str, matrix: object, scope: str, report: Report
+) -> None:
+    """Rule 19 (`MB.42.3.3` review): a leg list comes from the generator, or it lies.
+
+    A job consuming `fromJSON(needs.<producer>.outputs.<key>)` gets a list of
+    legs, and *nothing else in this file can tell that list was written by
+    `scripts/platform_matrix.py`*: a hard-coded one-leg array has exactly the
+    shape a generator output has. Replacing `py-sapi.yml`'s producer with one
+    therefore printed `ok — 458 checks, 0 problem(s)` while the workflow shipped
+    one leg of eight. So the **producer step** is read: some step of the job that
+    owns the output must run the generator for that family.
+    """
+    match = FROM_JSON.search(str(matrix or ""))
+    if match is None:
+        return
+    producer, key = match.group(1), match.group(2)
+    spec = OUTPUT_SPECS.get(key)
+    if spec is None or producer not in jobs:
+        # An unknown key or producer is another rule's problem (rule 4/5); this
+        # one only judges where the list came from.
+        return
+    family = spec[0]
+    for step in jobs[producer].get("steps") or []:
+        if _producer_names_family(str(step.get("run") or ""), family):
+            report.check(
+                True,
+                f"{scope}: needs.{producer}.outputs.{key} comes from --matrix {family}",
+            )
+            return
+    report.fail(
+        f"{scope}: job {job_name} takes its legs from needs.{producer}.outputs.{key}, "
+        f"but no step of {producer} builds them with "
+        f"`scripts/platform_matrix.py --matrix {family}`: a hand-written leg list "
+        "ships legs the matrix does not declare, and no other rule can see the "
+        "difference"
+    )
 
 
 def is_diagnostic_condition(if_expr: object) -> bool:
@@ -1136,6 +1206,10 @@ def main(argv: list[str] | None = None) -> int:
             needs = job.get("needs") or []
             needs_list = [needs] if isinstance(needs, str) else list(needs)
             jobs_needing[job_name] = [str(item) for item in needs_list]
+            check_matrix_producers(
+                jobs, job_name, (job.get("strategy") or {}).get("matrix"),
+                str(path.name), report,
+            )
             entries = matrix_entries(job, repo, report)
             job_matrices[job_name] = entries
             concrete_entries = tuple(entries) if entries is not None else ({},)

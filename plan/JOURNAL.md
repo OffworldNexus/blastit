@@ -3954,3 +3954,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T02:36 [MB.42.3.2] (lead) base 24b1a1043c0e23c904faed3715564ba336cfcb19
 - 2026-11-20T02:48 [MB.42.3.2] (lead) status active -> review
 - 2026-11-20T02:56 [MB.42.3.2] (lead) status review -> done
+- 2026-11-20T02:56 [MB.42.3.3] (lead) status ready -> active
+- 2026-11-20T02:56 [MB.42.3.3] (lead) attempt 1/3 started
+- 2026-11-20T02:56 [MB.42.3.3] (lead) base HEAD
+- 2026-11-20T03:37 [MB.42.3.3] (lead) status active -> review
+- 2026-11-20T03:39 [MB.42.12] (unknown) created (task) blastit-lsp argv: --version/--help answer silence and exit 1 (now reachable on PATH)
+- 2026-11-20T03:39 [MB.42.3.3] (lead) REVIEW PENDING (ux): BLOCKER exec loop hidden not fixed (RO site-packages -> _executable False -> falls through to the console script -> silent infinite exec lo
+- 2026-11-20T03:39 [MB.42.4] (unknown) edited fields
+- 2026-11-20T03:39 [MB.42.4] (lead) paths extended (lead): STALE_CLAIMS in scripts/platform_matrix.py fails once the docs are fixed, and MB.42.4 must be able to clear it - delete both STALE_CLAIMS
+- 2026-11-20T04:23 [MB.42.3.3] (lead) status review -> done

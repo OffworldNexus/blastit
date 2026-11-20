@@ -91,11 +91,17 @@ def check_platform(
     *,
     expected_platform: str | None,
     max_glibc: tuple[int, int] | None,
+    allow_host_tag: bool = False,
 ) -> list[str]:
     problems: list[str] = []
     plat = tag.platform
 
     if plat.startswith("linux_"):
+        if allow_host_tag:
+            # `scripts/build-wheel.sh` without `--manylinux`: a developer wheel,
+            # not a release artifact. The caller said so with `--allow-host-tag`,
+            # and the sentence is still printed so a log shows which wheel this is.
+            return problems
         problems.append(
             f"{wheel_name}: Tag: {tag.raw} uses unversioned host tag {plat!r}; "
             "build with manylinux_2_28 or musllinux_1_2 compatibility"
@@ -150,6 +156,7 @@ def inspect_wheel(
     expected_platform: str | None,
     max_glibc: tuple[int, int] | None,
     allow_stub: bool,
+    allow_host_tag: bool = False,
 ) -> tuple[list[WheelTag], list[str]]:
     if not wheel.is_file():
         return [], [f"{wheel}: wheel file does not exist"]
@@ -170,6 +177,7 @@ def inspect_wheel(
                 tag,
                 expected_platform=expected_platform,
                 max_glibc=max_glibc,
+                allow_host_tag=allow_host_tag,
             )
         )
     return tags, problems
@@ -192,6 +200,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="skip non-zip stub files used by README-restore unit tests",
     )
+    parser.add_argument(
+        "--allow-host-tag",
+        action="store_true",
+        help=(
+            "accept the unversioned `linux_<arch>` tag a host build carries "
+            "(scripts/build-wheel.sh without --manylinux: a developer wheel)"
+        ),
+    )
     parser.add_argument("wheels", nargs="+", help="wheel file(s) to check")
     args = parser.parse_args(argv)
 
@@ -210,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             expected_platform=expected_platform,
             max_glibc=max_glibc,
             allow_stub=args.allow_stub,
+            allow_host_tag=args.allow_host_tag,
         )
         for tag in tags:
             print(f"wheel-tag: {wheel.name}: Tag: {tag.raw}")

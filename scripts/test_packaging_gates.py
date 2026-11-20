@@ -201,9 +201,13 @@ def test_workflow_auditor_cases() -> int:
         shutil.copytree(base, case_dir)
         act = case_dir / ".github" / "actions" / "build-wheel" / "action.yml"
         act.write_text(
+            # Anchored on the action's own build step (rewritten in
+            # `MB.42.3.3`: the action now calls `scripts/build-wheel.sh`), so the
+            # mutation lands inside a real `\` continuation.
             act.read_text(encoding="utf-8").replace(
-                "docker run --rm \\\n",
-                "docker run --rm \\\n                # broken comment inside continuation\n",
+                "        bash scripts/build-wheel.sh \\\n",
+                "        bash scripts/build-wheel.sh \\\n"
+                "            # broken comment inside continuation\n",
                 1,
             ),
             encoding="utf-8",
@@ -284,8 +288,18 @@ def test_workflow_auditor_cases() -> int:
         shutil.copytree(base, case_dir)
         whl = case_dir / ".github" / "workflows" / "wheels.yml"
         whl.write_text(
-            whl.read_text(encoding="utf-8").replace(
-                'dist/blastit-*-"${PY_TAG}"*-musllinux_*.whl',
+            whl.read_text(encoding="utf-8")
+            # The variable has to be *defined* in the same step for the double
+            # prefix to be recognisable (`MB.42.3.3` removed the per-minor
+            # `cp${{ matrix.python_tag }}` from the wheel jobs, so this case
+            # reintroduces both halves).
+            .replace(
+                "              -e PY_VER=3.13 \\\n",
+                '              -e PY_VER=3.13 \\\n              -e PY_TAG="${{ matrix.python_tag }}" \\\n',
+                1,
+            )
+            .replace(
+                "dist/blastit-*-py3-none-musllinux_*.whl",
                 'dist/blastit-*-cp"${PY_TAG}"*-musllinux_*.whl',
                 1,
             ),
@@ -314,49 +328,51 @@ def test_workflow_auditor_cases() -> int:
         )
         cases_run += 1
 
-        # 9. MB.3.58 failure 1: maturin gets the platform tag twice. `manylinux:`
-        #    names the container *and* the wheel's tag, so `--compatibility`
-        #    beside it is the `Expected only one platform tag but found 2` build.
-        case_dir = Path(tmp) / "double-platform-tag"
-        shutil.copytree(base, case_dir)
-        act = case_dir / ".github" / "actions" / "build-wheel" / "action.yml"
-        act.write_text(
-            act.read_text(encoding="utf-8").replace(
-                "--interpreter python${{ inputs.python }} --features",
-                "--interpreter python${{ inputs.python }} "
-                "--compatibility ${{ inputs.platform }} --features",
-                1,
-            ),
-            encoding="utf-8",
+        # 9/10. MB.3.58's two maturin shapes. `MB.42.3.3` replaced the
+        # `maturin-action` step in `.github/actions/build-wheel` with
+        # `scripts/build-wheel.sh` (one place builds a wheel), so these cases
+        # mutate a synthetic step instead of the action: the *rule* is what has to
+        # keep working, and a workflow that still calls `maturin-action` directly
+        # must still be refused.
+        two_tags = (
+            "name: maturin two tags\n"
+            "on: {workflow_dispatch: {}}\n"
+            "jobs:\n"
+            "  wheel:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            "      - uses: PyO3/maturin-action@v1\n"
+            "        with:\n"
+            "          manylinux: 2_28\n"
+            "          args: --release --compatibility manylinux_2_28\n"
         )
-        res = _run_auditor(case_dir)
-        _expect(
-            res.returncode == 1
-            and "passes both `manylinux:` and `--compatibility`" in res.stdout,
-            "auditor must reject a maturin step that supplies two platform tags",
-            res.stdout + res.stderr,
+        no_image = (
+            "name: maturin no image\n"
+            "on: {workflow_dispatch: {}}\n"
+            "jobs:\n"
+            "  wheel:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            "      - uses: PyO3/maturin-action@v1\n"
+            "        with:\n"
+            "          args: --release --compatibility manylinux_2_28\n"
         )
-        cases_run += 1
-
-        # 10. ... and the other half of the same rule: a maturin step with no
-        #     `manylinux:` builds on the host, so the wheel carries the runner's
-        #     glibc tag.
-        case_dir = Path(tmp) / "no-manylinux-image"
-        shutil.copytree(base, case_dir)
-        act = case_dir / ".github" / "actions" / "build-wheel" / "action.yml"
-        act.write_text(
-            act.read_text(encoding="utf-8").replace(
-                "        manylinux: ${{ inputs.manylinux }}\n", "", 1
-            ),
-            encoding="utf-8",
-        )
-        res = _run_auditor(case_dir)
-        _expect(
-            res.returncode == 1 and "sets no `manylinux:`" in res.stdout,
-            "auditor must reject a maturin step that names no manylinux image",
-            res.stdout + res.stderr,
-        )
-        cases_run += 1
+        for text, needle, what in (
+            (two_tags, "passes both `manylinux:` and `--compatibility`", "two platform tags"),
+            (no_image, "sets no `manylinux:`", "no manylinux image"),
+        ):
+            case_dir = Path(tmp) / f"maturin-{what.replace(' ', '-')}"
+            shutil.copytree(base, case_dir)
+            (case_dir / ".github" / "workflows" / "maturin-fixture.yml").write_text(
+                text, encoding="utf-8"
+            )
+            res = _run_auditor(case_dir)
+            _expect(
+                res.returncode == 1 and needle in res.stdout,
+                f"auditor must reject a maturin step with {what}",
+                res.stdout + res.stderr,
+            )
+            cases_run += 1
 
         # 11. MB.3.58 failure 2: the job runs a runner-built binary in a container
         #     without checking that the container's glibc is at least the
@@ -579,7 +595,8 @@ def test_platform_matrix_cases() -> int:
     for flags, expected in (
         (("--count", "shims", "--libc", "gnu", "--arch", "x86_64"), "4"),
         (("--count", "shims"), "16"),
-        (("--count", "wheels"), "8"),
+        (("--count", "wheels"), "4"),
+        (("--count", "py-shims"), "8"),
         (("--count", "binaries"), "4"),
     ):
         res = subprocess.run(
@@ -638,7 +655,7 @@ def test_platform_matrix_cases() -> int:
         res = _run_matrix(case_dir, "--check", "--quiet")
         _expect(
             res.returncode == 1
-            and "claims 12 wheels, the matrix declares 8" in res.stderr,
+            and "claims 12 wheels, the matrix declares 4" in res.stderr,
             "matrix check must reject public over-claim of wheels",
             res.stderr,
         )
@@ -1865,6 +1882,218 @@ def test_portable_elf_glibc_cases() -> int:
     return cases_run
 
 
+def test_matrix_producer_cases() -> int:
+    """Rule 19 (`MB.42.3.3` review): a leg list that no step generates is refused.
+
+    The failure that motivated it: replacing `py-sapi.yml`'s producer step with a
+    hard-coded one-leg JSON array kept every other rule green (`ok — 458 checks`),
+    because a hand-written array has exactly the shape a generator output has.
+    """
+    cases_run = 0
+    with tempfile.TemporaryDirectory(prefix="blastit-matrix-producer-") as tmp:
+        # The workflow fixture, not the count fixture: this case is about the
+        # YAML graph (`_copy_matrix_fixture` copies no `.github/`).
+        base = _copy_workflow_fixture(Path(tmp))
+        clean = _run_auditor(base)
+        _expect(
+            clean.returncode == 0,
+            "the fixture workflows must pass the producer rule",
+            clean.stdout + clean.stderr,
+        )
+        cases_run += 1
+
+        case_dir = Path(tmp) / "hand-written-legs"
+        shutil.copytree(base, case_dir)
+        sa = case_dir / ".github" / "workflows" / "py-sapi.yml"
+        text = sa.read_text(encoding="utf-8")
+        start = text.index("      - id: legs")
+        end = text.index("  lint:")
+        sa.write_text(
+            text[:start]
+            + "      - id: legs\n"
+            + "        run: |\n"
+            + "          echo 'py_shims=[{\"name\":\"x86_64-gnu-py313\",\"minor\":\"3.13\",\"arch\":\"x86_64\",\"libc\":\"gnu\",\"shim\":\"libblastit_py313-x86_64-gnu.so\",\"runs_on\":\"ubuntu-24.04\",\"builder_image\":\"\",\"exports\":\"e\",\"undefined\":\"u\",\"python\":\"3.13\"}]' >> \"$GITHUB_OUTPUT\"\n"
+            + text[end:],
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1 and "--matrix py-shims" in res.stdout,
+            "a producer that does not run platform_matrix.py must be refused",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+    return cases_run
+
+
+def test_repack_cases() -> int:
+    """`scripts/repack_universal_wheel.py`: the `py3-none` layout, and its entry points.
+
+    A wheel is written here (a `.data/scripts/blastit`, the package, a `WHEEL` and a
+    `RECORD`), repacked, and read back: the name, the tag, `Root-Is-Purelib`, the
+    three console scripts, the relocated binary, the `RECORD` digests `pip` checks,
+    and that another `(arch, libc)`'s shim is *not* carried into a wheel.
+    """
+    import importlib
+
+    cases_run = 0
+    sys.path.insert(0, str(REPO / "scripts"))
+    try:
+        repack = importlib.import_module("repack_universal_wheel")
+    finally:
+        sys.path.remove(str(REPO / "scripts"))
+    with tempfile.TemporaryDirectory(prefix="blastit-repack-") as tmp:
+        case = Path(tmp)
+        built = case / "blastit-0.2.0-cp313-cp313-linux_x86_64.whl"
+        metadata = (
+            "Wheel-Version: 1.0\nGenerator: maturin (1.9.3)\nRoot-Is-Purelib: true\n"
+        )
+        with zipfile.ZipFile(built, "w") as archive:
+            archive.writestr("blastit/__init__.py", b"")
+            archive.writestr("blastit/__main__.py", b"")
+            archive.writestr("blastit-0.2.0.data/scripts/blastit", b"#!/bin/sh\n")
+            archive.writestr("blastit-0.2.0.dist-info/WHEEL", metadata)
+            archive.writestr("blastit-0.2.0.dist-info/METADATA", "Name: blastit\n")
+            archive.writestr("blastit-0.2.0.dist-info/RECORD", "")
+        blobs = case / "blobs"
+        blobs.mkdir()
+        (blobs / "blastit-lsp").write_bytes(b"#!/bin/sh\n")
+        (blobs / "libblastit_php84-x86_64-gnu.so").write_bytes(b"\x7fELF local")
+        foreign = blobs / "libblastit_php84-aarch64-gnu.so"
+        foreign.write_bytes(b"\x7fELF foreign")
+
+        # A shim of another `(arch, libc)` is **refused**, not silently skipped:
+        # skipping produced a wheel that shipped fewer shims than the leg
+        # promised while every count still said six (`MB.42.3.3` review).
+        try:
+            repack.repack(
+                built, case / "refused", platform="manylinux_2_28_x86_64", blobs=blobs
+            )
+        except ValueError as err:
+            _expect(
+                "aarch64-gnu" in str(err) and "x86_64-gnu" in str(err),
+                "a foreign shim must be refused, naming both targets",
+                str(err),
+            )
+            cases_run += 1
+        else:
+            _expect(False, "a foreign shim must be refused, not skipped", "")
+        foreign.unlink()
+
+        wheel = repack.repack(
+            built, case / "out", platform="manylinux_2_28_x86_64", blobs=blobs
+        )
+        _expect(
+            wheel.name == "blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+            "the repack must name the file <name>-<ver>-py3-none-<platform>.whl",
+            wheel.name,
+        )
+        cases_run += 1
+        with zipfile.ZipFile(wheel) as archive:
+            names = archive.namelist()
+            wheel_meta = archive.read("blastit-0.2.0.dist-info/WHEEL").decode()
+            entry_points = archive.read(
+                "blastit-0.2.0.dist-info/entry_points.txt"
+            ).decode()
+            record = archive.read("blastit-0.2.0.dist-info/RECORD").decode()
+            binary = archive.read("blastit/_bin/blastit")
+            local = [name for name in names if name.endswith("x86_64-gnu.so")]
+            foreign = [name for name in names if name.endswith("aarch64-gnu.so")]
+        _expect(
+            "Tag: py3-none-manylinux_2_28_x86_64" in wheel_meta
+            and "Root-Is-Purelib: false" in wheel_meta
+            and wheel_meta.count("Root-Is-Purelib") == 1,
+            "WHEEL must carry one Root-Is-Purelib: false and the py3-none tag",
+            wheel_meta,
+        )
+        cases_run += 1
+        _expect(
+            binary == b"#!/bin/sh\n" and not any(".data/scripts" in n for n in names),
+            "the binary must move out of .data/scripts/ into blastit/_bin/",
+            " ".join(names),
+        )
+        cases_run += 1
+        _expect(
+            local and not foreign,
+            "a wheel carries its own (arch, libc) shims and never another target's",
+            f"local={local} foreign={foreign}",
+        )
+        cases_run += 1
+        # MINOR 10: a real `stat` mode, not a bare `0o755` (which renders as
+        # `?rwxr-xr-x` to `zipinfo`, and `pip` reads a mode from here).
+        with zipfile.ZipFile(wheel) as archive:
+            modes = {
+                info.filename: (info.external_attr >> 16)
+                for info in archive.infolist()
+                if info.filename.startswith("blastit/_bin/")
+            }
+        _expect(
+            all(mode == 0o100755 for mode in modes.values()) and modes,
+            "every blastit/_bin member must carry 0100755 (a regular file, executable)",
+            str(modes),
+        )
+        cases_run += 1
+        # MINOR 11: an unknown platform is refused, never guessed as aarch64.
+        try:
+            repack.repack(built, case / "unknown", platform="linux_riscv64")
+        except ValueError as err:
+            _expect(
+                "names no architecture" in str(err),
+                "an unreadable platform must be refused, not guessed",
+                str(err),
+            )
+            cases_run += 1
+        else:
+            _expect(False, "an unreadable platform must be refused", "")
+        expected_scripts = {"blastit", "blastit-lsp", "blastit-manifest"}
+        _expect(
+            all(f"{name} = " in entry_points for name in sorted(expected_scripts)),
+            "entry_points.txt must carry the three console scripts (design §6.1)",
+            entry_points,
+        )
+        cases_run += 1
+        rows = {
+            line.split(",")[0]: line.split(",") for line in record.splitlines() if line
+        }
+        ok = "blastit/_bin/blastit" in rows and rows["blastit/_bin/blastit"][1]
+        digest, size = rows.get("blastit/_bin/blastit", ["", "", ""])[1:]
+        import base64
+        import hashlib
+
+        want = "sha256=" + base64.urlsafe_b64encode(
+            hashlib.sha256(binary).digest()
+        ).decode().rstrip("=")
+        _expect(
+            ok and digest == want and size == str(len(binary)),
+            "RECORD must carry the sha256 and size pip verifies",
+            f"{digest or '<missing>'} size={size} want={want}",
+        )
+        cases_run += 1
+        _expect(
+            rows["blastit-0.2.0.dist-info/RECORD"][1:] == ["", ""],
+            "RECORD must list itself with an empty digest and size",
+            record,
+        )
+        cases_run += 1
+
+        # Every console script target has to exist: a rename in `python/blastit/`
+        # would otherwise ship a dead entry point (`blastit-lsp` was one).
+        sys.path.insert(0, str(REPO / "python"))
+        try:
+            for name, target in repack.CONSOLE_SCRIPTS.items():
+                module_name, _, attribute = target.partition(":")
+                module = importlib.import_module(module_name)
+                _expect(
+                    callable(getattr(module, attribute, None)),
+                    f"console script {name} = {target} does not resolve",
+                    target,
+                )
+                cases_run += 1
+        finally:
+            sys.path.remove(str(REPO / "python"))
+    return cases_run
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
@@ -1873,11 +2102,13 @@ def main() -> int:
     ts = test_test_seam_cases()
     pe = test_portable_elf_shim_cases()
     pg = test_portable_elf_glibc_cases()
-    total = wf + pm + wt + ee + ts + pe + pg
+    rp = test_repack_cases()
+    mp = test_matrix_producer_cases()
+    total = wf + pm + wt + ee + ts + pe + pg + rp + mp
     print(
         f"packaging-gates-test: ok — {total} cases passed "
         f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts}, "
-        f"portable-elf={pe}, max-glibc={pg})"
+        f"portable-elf={pe}, max-glibc={pg}, repack={rp}, matrix-producer={mp})"
     )
     return 0
 

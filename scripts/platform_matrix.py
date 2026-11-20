@@ -40,6 +40,7 @@ Usage (stdlib only; `make platform-matrix-check` runs the first):
     scripts/platform_matrix.py --matrix wheels      # GitHub Actions matrix JSON
     scripts/platform_matrix.py --matrix binaries
     scripts/platform_matrix.py --matrix shims
+    scripts/platform_matrix.py --matrix py-shims   # the 8 per-minor CPython shims
     scripts/platform_matrix.py --matrix images
     scripts/platform_matrix.py --matrix lsp         # editor binaries (five targets)
     scripts/platform_matrix.py --summary            # Markdown, for a RESULT
@@ -127,7 +128,15 @@ LIBCS = {
     },
 }
 
-PYTHONS = ("3.13", "3.14")
+# The CPython minors one `py3-none` wheel is *smoked* in (design §6.1): the
+# artifact itself serves every CPython `>=3.12`, so three interpreted legs per
+# wheel is the promise, and one `cpNN` wheel per minor would be a second matrix.
+SMOKE_PYTHONS = ("3.12", "3.13", "3.14")
+
+# The CPython minors a **shim** exists for (`MB.42.2`, design §1): a WSGI view
+# `dlopen`s its own minor's shim, so `3.13` and `3.14` are two artifacts per
+# `(arch, libc)`, never one.
+PY_MINORS = {"3.14": "314", "3.13": "313"}
 
 # The two native package formats (`MB.42.3.1`), one artifact family each. The
 # `pattern` is the filename `scripts/build-{deb,rpm}.sh` writes, with the placeholders
@@ -281,10 +290,20 @@ PROVEN: dict[tuple, str] = {
     ("shims", "8.4", "x86_64", "musl"): "MB.3.18",
     ("shims", "8.3", "x86_64", "musl"): "MB.3.18",
     ("shims", "8.5", "x86_64", "musl"): "MB.3.65",
-    ("wheels", "3.13", "x86_64", "gnu"): "MB.3.18",
-    ("wheels", "3.14", "x86_64", "gnu"): "MB.3.18",
-    ("wheels", "3.13", "x86_64", "musl"): "MB.3.18",
-    ("wheels", "3.14", "x86_64", "musl"): "MB.3.18",
+    # `MB.42.3.3` built the `py3-none-manylinux_2_28_x86_64` wheel, repacked it
+    # from a `maturin build --bindings bin` wheel (4 PHP + 2 Python shims under
+    # `blastit/_bin/`) and installed it in `python:3.12-slim`, `3.13-slim` and
+    # `3.14-slim` — one artifact, three interpreters, `blastit --version`/`check`/
+    # `fold` and `blastit-lsp --help` in each. The four other legs are built by
+    # the release workflow on their native runners and stay unproven until it runs.
+    ("wheels", "x86_64", "gnu"): "MB.42.3.3",
+    # `MB.42.3.3` ran `make py-sapi PY_SAPI_REQUIRE_ALL=1` for both minors and
+    # asserted the artifact contract (`nm -D` exports, `DT_SONAME`,
+    # `UND Py_InitializeEx`, zero `NEEDED libpython`). The `musl` and `aarch64`
+    # legs are built and asserted by `.github/workflows/py-sapi.yml` on their own
+    # runners; until that run they are declared, unproven.
+    ("py_shims", "3.13", "x86_64", "gnu"): "MB.42.3.3",
+    ("py_shims", "3.14", "x86_64", "gnu"): "MB.42.3.3",
     ("archives", "x86_64", "gnu"): "MB.3.18",
     ("archives", "x86_64", "musl"): "MB.3.18",
     # `MB.42.3.1` built both archives from one manylinux+distro-shim bundle and
@@ -446,22 +465,44 @@ def enabled_legs() -> list[dict]:
 
 
 def wheel_legs() -> list[dict]:
-    """One wheel per enabled (arch, libc) and CPython in `PYTHONS`."""
-    return [
-        {
-            "name": f"{leg['id']}-cp{python.replace('.', '')}",
-            "arch": leg["arch"],
-            "libc": leg["libc"],
-            "python": python,
-            "python_tag": f"cp{python.replace('.', '')}",
-            "wheel_tag": LIBCS[leg["libc"]]["wheel_tag"],
-            "runtime_image": f"python:{python}-{'alpine' if leg['libc'] == 'musl' else 'slim'}",
-            "runs_on": ARCHES[leg["arch"]]["runs_on"],
-            "manylinux": LIBCS[leg["libc"]].get("manylinux", ""),
-        }
-        for leg in enabled_legs()
-        for python in PYTHONS
-    ]
+    """One `py3-none` wheel per enabled (arch, libc) (design §6.1, `MB.42.3.3`).
+
+    A wheel carries **no extension**: `maturin build --bindings bin` puts the
+    universal binary in it and `scripts/repack_universal_wheel.py` retags it
+    `py3-none-<platform>`, so four artifacts serve CPython 3.12, 3.13 and 3.14.
+    The keys are the ones the two consumers actually read: `wheel_tag` is the
+    platform half of the file name (`scripts/check_wheel_tag.py`),
+    `smoke_pythons`/`runtime_images` are the interpreters one wheel is installed
+    into (`e2e/prebuilt_wheel.py` takes the default from `E2E_PYTHON_VERSION`).
+    """
+    legs = []
+    for leg in enabled_legs():
+        libc = LIBCS[leg["libc"]]
+        tag = f"{libc['wheel_tag']}_{leg['arch']}"
+        legs.append(
+            {
+                "name": leg["id"],
+                "arch": leg["arch"],
+                "libc": leg["libc"],
+                # PEP 425's two non-platform halves, in one field: `pip` accepts
+                # this wheel on any CPython 3, and it is how the filename reads.
+                "python_tag": "py3-none",
+                "wheel_tag": tag,
+                "wheel": f"blastit-<version>-py3-none-{tag}.whl",
+                "smoke_pythons": ",".join(SMOKE_PYTHONS),
+                "runtime_images": ",".join(
+                    f"python:{minor}-{'alpine' if leg['libc'] == 'musl' else 'slim'}"
+                    for minor in SMOKE_PYTHONS
+                ),
+                "runs_on": ARCHES[leg["arch"]]["runs_on"],
+                "manylinux": libc.get("manylinux", ""),
+                "musllinux": libc.get("musllinux", ""),
+                # The glibc floor every embedded ELF must satisfy
+                # (`scripts/check-portable-elf.sh --max-glibc`, `MB.42.3.1`'s gate).
+                "glibc_floor": libc["glibc_floor"],
+            }
+        )
+    return legs
 
 
 def binary_legs() -> list[dict]:
@@ -566,6 +607,58 @@ def shim_legs() -> list[dict]:
 def shim_name(minor: str, arch: str, libc: str) -> str:
     """`libblastit_php84-x86_64-gnu.so` (`ADR-0010` §4.1)."""
     return f"libblastit_php{PHP_MINORS[minor]}-{arch}-{libc}.so"
+
+
+# The image a CPython shim of each libc is built in. gnu builds on the runner
+# itself (its `uv python` ships the shared `libpython` the `dlopen` probe needs);
+# musl must build in Alpine, because no `--target` makes a glibc linker emit a
+# musl binary — and the resulting `NEEDED libc.musl-<arch>.so.1` is asserted.
+PY_SHIM_BUILDER_IMAGES = {"gnu": "", "musl": "alpine:3.21"}
+
+
+def py_shim_legs() -> list[dict]:
+    """One CPython shim per (minor, arch, libc) — `8` legs (`MB.42.2`, §1).
+
+    The shim is `libblastit_py3<minor>-<arch>-<libc>.so`: a `cdylib` that exports
+    the frozen ABI (`blastit_py_abi_version`, `blastit_py_minor`,
+    `blastit_py_abi_v1`), carries `DT_SONAME` equal to its file name, leaves
+    `Py_InitializeEx` **undefined** (resolved by the host interpreter at
+    `dlopen`) and links zero `libpython`. Those four properties are what
+    `.github/workflows/py-sapi.yml` asserts on the built artifact, and they are
+    named here so the workflow, the `.deb`/`.rpm` bundle check and this matrix
+    cannot disagree about them.
+    """
+    return [
+        {
+            "name": f"{leg['id']}-py{digits}",
+            "arch": leg["arch"],
+            "libc": leg["libc"],
+            "minor": minor,
+            "digits": digits,
+            "shim": py_shim_name(minor, leg["arch"], leg["libc"]),
+            # The exports `nm -D --defined-only` must carry, and the one symbol
+            # that must stay undefined (the host interpreter's).
+            "exports": "blastit_py_abi_version,blastit_py_minor,blastit_py_abi_v1",
+            "undefined": "Py_InitializeEx",
+            # `make py-sapi` needs an interpreter of exactly this minor: it
+            # validates the pair and finds that minor's shared libpython for the
+            # `dlopen` probe (a shim never links it).
+            "python": minor,
+            # Where this shim can actually be **linked** for its libc
+            # (`MB.42.3.3` review): a musl shim built on a glibc runner was
+            # linked against `libc.so.6` and every assertion still passed, so the
+            # leg names the image its `NEEDED` line is a property of.
+            "builder_image": PY_SHIM_BUILDER_IMAGES[leg["libc"]],
+            "runs_on": ARCHES[leg["arch"]]["runs_on"],
+        }
+        for leg in enabled_legs()
+        for minor, digits in PY_MINORS.items()
+    ]
+
+
+def py_shim_name(minor: str, arch: str, libc: str) -> str:
+    """`libblastit_py313-x86_64-gnu.so` (design §1, `MB.42.2`)."""
+    return f"libblastit_py{PY_MINORS[minor]}-{arch}-{libc}.so"
 
 
 def lsp_legs() -> list[dict]:
@@ -826,8 +919,12 @@ def is_page(name: str, patterns: tuple[str, ...]) -> bool:
 MARK = r"[`*_]*"
 # The words that sit between a number and its noun, plus one inline code span:
 # `ADR-0009` says "up to `3` proven `libblastit_php{82,83,84}-…so` shims", where
-# the artifact name separates the count from the noun.
-QUALIFIER = r"(?:proven\s+|PHP\s+|native\s+|standalone\s+|`[^`\n]*`\s+)*"
+# the artifact name separates the count from the noun. `universal` is there for
+# the `py3-none` family's spelling ("`4` universal wheels").
+QUALIFIER = r"(?:proven\s+|PHP\s+|native\s+|standalone\s+|universal\s+|`[^`\n]*`\s+)*"
+# `python shims?` comes first: the per-minor CPython family is a different count
+# from the PHP shims it is always written next to (`MB.42.3.3`), and a regex that
+# read "8 Python shims" as the PHP family would compare it to the wrong number.
 CLAIM = re.compile(
     r"(?<![A-Za-z0-9._-])"
     + MARK
@@ -835,7 +932,7 @@ CLAIM = re.compile(
     + MARK
     + r"\s+"
     + QUALIFIER
-    + r"(?P<family>shims?|wheels?|archives?|tarballs?|lsp assets?)",
+    + r"(?P<family>python\s+shims?|shims?|wheels?|archives?|tarballs?|lsp assets?)",
     re.IGNORECASE,
 )
 PROVEN_CLAIM = re.compile(
@@ -845,9 +942,30 @@ PROVEN_CLAIM = re.compile(
     + MARK
     + r"\s+proven\s+"
     + QUALIFIER
-    + r"(?P<family>shims?|wheels?|archives?|tarballs?|lsp assets?)",
+    + r"(?P<family>python\s+shims?|shims?|wheels?|archives?|tarballs?|lsp assets?)",
     re.IGNORECASE,
 )
+
+# A count a page states **above** the matrix, with the node that lowers it.
+#
+# `MB.42.3.3` replaced eight `cp3NN` wheels with four `py3-none` ones, and the two
+# records that state the old number are documents: `ADR-0010` §4 and
+# `backend-runtimes.md` are the table of record a reviewer reads, and neither is
+# in this node's `paths`. Rather than pretend an eight-wheel matrix still exists,
+# the gate records the claim here, prints it as stale, and names the node that
+# rewrites the page (`MB.42.4`, the docs slice of this epic). An entry is checked
+# in **both** directions: if the page stops making the claim, `--check` refuses
+# the entry, so the list cannot outlive its reason.
+STALE_CLAIMS: dict[tuple[str, str], str] = {
+    (
+        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
+        "8 wheels",
+    ): "MB.42.4 rewrites §4 to the 4 `py3-none` wheels",
+    (
+        "docs/design/backend-runtimes.md",
+        "8 wheels",
+    ): "MB.42.4 rewrites the wheel row to the 4 `py3-none` wheels",
+}
 
 # The lines the gate must keep matching, quoted from the two records it exists to
 # guard. If a Markdown edit (or a regex change) makes the scanner miss them,
@@ -913,6 +1031,10 @@ def declared_of(family: str) -> int:
         "lsp asset": len(lsp_legs()),
         # `.deb` + `.rpm` per gnu arch (`MB.42.3.1`).
         "package": len(package_legs()),
+        # The per-minor CPython shims (`MB.42.3.3`). Spelled as its own noun so a
+        # page saying "`8` Python shims" is checked against this family and not
+        # against the PHP one it sits beside.
+        "python shim": len(py_shim_legs()),
         # `images` is not a count any page states yet; 0 refuses the claim.
         "image": 0,
     }[family]
@@ -927,6 +1049,7 @@ def proven_of(family: str) -> int:
         "tarball": proven_count("archives"),
         "lsp asset": proven_count("lsp"),
         "package": proven_count("packages"),
+        "python shim": proven_count("py_shims"),
         "image": 0,
     }[family]
 
@@ -1012,6 +1135,33 @@ def check(problems: list[str], notes: list[str]) -> None:
             r"libblastit_php8\d-(x86_64|aarch64)-(gnu|musl)\.so", leg["shim"]
         ):
             problems.append(f"{leg['name']}: {leg['shim']} is not the §4.1 name")
+
+    # The per-minor CPython shims (`MB.42.3.3`): one name per (minor, arch, libc),
+    # and the name is the `DT_SONAME` the workflow asserts — an artifact whose
+    # soname and file name disagree cannot be found by the loader the docs name.
+    py_shims = [leg["shim"] for leg in py_shim_legs()]
+    if len(set(py_shims)) != len(py_shims):
+        problems.append(f"py_shim_legs(): duplicate shim name in {py_shims}")
+    for leg in py_shim_legs():
+        expected = py_shim_name(leg["minor"], leg["arch"], leg["libc"])
+        if leg["shim"] != expected:
+            problems.append(f"{leg['name']}: shim {leg['shim']} != {expected}")
+        if not re.fullmatch(
+            r"libblastit_py3(13|14)-(x86_64|aarch64)-(gnu|musl)\.so", leg["shim"]
+        ):
+            problems.append(f"{leg['name']}: {leg['shim']} is not the §1 name")
+        # A musl shim cannot be linked on a glibc runner (`MB.42.3.3` review):
+        # without its image the artifact is named musl and needs libc.so.6.
+        if leg["libc"] == "musl" and not leg["builder_image"]:
+            problems.append(
+                f"{leg['name']}: a musl shim names no builder_image, so it would be "
+                "linked on a glibc runner and only *named* musl"
+            )
+        if leg["libc"] == "gnu" and leg["builder_image"]:
+            problems.append(
+                f"{leg['name']}: a gnu shim is built on the runner (its own "
+                "libpython is the probe's); naming a builder_image is stale"
+            )
 
     # The editor family (`MB.35.5`, `R74`): five legs, one asset name each, and a
     # format that is Windows' `.zip` and Unix's `.tar.gz` — the two the
@@ -1104,7 +1254,11 @@ def check(problems: list[str], notes: list[str]) -> None:
     # PROVEN key names an artifact the matrix actually builds.
     declared_keys = (
         {("shims", leg["minor"], leg["arch"], leg["libc"]) for leg in shim_legs()}
-        | {("wheels", leg["python"], leg["arch"], leg["libc"]) for leg in wheel_legs()}
+        | {
+            ("py_shims", leg["minor"], leg["arch"], leg["libc"])
+            for leg in py_shim_legs()
+        }
+        | {("wheels", leg["arch"], leg["libc"]) for leg in wheel_legs()}
         | {("archives", leg["arch"], leg["libc"]) for leg in binary_legs()}
         | {("lsp", leg["target"]) for leg in lsp_legs()}
         | {("packages", leg["arch"], leg["format"]) for leg in package_legs()}
@@ -1157,6 +1311,7 @@ def check(problems: list[str], notes: list[str]) -> None:
     # a document `zensical.toml` keeps out of the site (`MB.35.5`), except the two
     # records pinned above.
     patterns = site_exclusions()
+    stale_used: set[tuple[str, str]] = set()
     for name, text in texts.items():
         if not is_page(name, patterns):
             continue
@@ -1172,6 +1327,18 @@ def check(problems: list[str], notes: list[str]) -> None:
             ceiling = declared_of(family)
             line = text[: match.start()].count("\n") + 1
             if count > ceiling:
+                claim = f"{count} {family}"
+                stale = STALE_CLAIMS.get((name, claim))
+                if stale is not None:
+                    # A recorded over-claim: the page states an older matrix and
+                    # the entry names the node that rewrites it. Printed, never
+                    # silent, and refused below if it stops being true.
+                    stale_used.add((name, claim))
+                    notes.append(
+                        f"{name}:{line}: states {claim}, the matrix declares "
+                        f"{ceiling} — stale claim ({stale})"
+                    )
+                    continue
                 problems.append(
                     f"{name}:{line}: claims {count} {family}, the matrix declares "
                     f"{ceiling}: a page may not promise a leg that is not attempted"
@@ -1194,6 +1361,17 @@ def check(problems: list[str], notes: list[str]) -> None:
                 )
             notes.append(
                 f"{label} {name}:{line}: {count} proven {family} (proved {ceiling})"
+            )
+
+    # The stale-claim list is checked in the other direction too: an entry whose
+    # page no longer makes the claim is a permission nobody needs, and the next
+    # over-claim would be admitted under it.
+    for (name, claim), owner in STALE_CLAIMS.items():
+        if (name, claim) not in stale_used:
+            problems.append(
+                f"STALE_CLAIMS: {name} no longer states {claim!r} above the matrix: "
+                f"delete this entry ({owner}), because a stale-claim permission that "
+                "outlives its claim admits the next over-claim silently"
             )
 
 
@@ -1238,12 +1416,18 @@ def summary(family: str = "") -> str:
         ("wheels", "wheels", len(wheel_legs())),
         ("standalone archives", "archives", len(binary_legs())),
         ("PHP shims", "shims", len(shim_legs())),
+        # The per-minor CPython family (`MB.42.3.3`): four wheels, but eight
+        # shims, because a WSGI view `dlopen`s its own minor's shim.
+        ("CPython shims (per minor)", "py_shims", len(py_shim_legs())),
         # The editor family is counted on its own noun: an LSP archive is never an
         # "archive" here, because that count is the standalone family's (`R74`).
         ("lsp assets (editor)", "lsp", len(lsp_legs())),
         ("native packages (.deb/.rpm)", "packages", len(package_legs())),
     ):
-        if only and {"archives": "binaries"}.get(key, key) != only:
+        if (
+            only
+            and {"archives": "binaries", "py_shims": "py-shims"}.get(key, key) != only
+        ):
             continue
         lines.append(
             f"| {name} | {count} | {proven_count(key)} of {count} | "
@@ -1259,10 +1443,17 @@ def summary(family: str = "") -> str:
     lines.append("|---|---|---|")
     if wants("wheels"):
         for leg in wheel_legs():
-            node = PROVEN.get(("wheels", leg["python"], leg["arch"], leg["libc"]))
+            node = PROVEN.get(("wheels", leg["arch"], leg["libc"]))
             lines.append(
-                f"| wheel cp{leg['python'].replace('.', '')} `{leg['name']}` | "
+                f"| `{leg['wheel']}` (smoked in `{leg['smoke_pythons']}`) | "
                 f"{leg['runs_on']} | {'proved by ' + node if node else 'declared, unbuilt'} |"
+            )
+    if wants("py-shims"):
+        for leg in py_shim_legs():
+            node = PROVEN.get(("py_shims", leg["minor"], leg["arch"], leg["libc"]))
+            lines.append(
+                f"| `{leg['shim']}` | CPython {leg['minor']} on {leg['runs_on']} | "
+                f"{'proved by ' + node if node else 'declared, unbuilt'} |"
             )
     if wants("binaries"):
         for leg in binary_legs():
@@ -1366,6 +1557,7 @@ def _filtered_legs(
         "wheels": wheel_legs,
         "binaries": binary_legs,
         "shims": shim_legs,
+        "py-shims": py_shim_legs,
         "images": lambda: [dict(item) for item in IMAGES],
         "lsp": lsp_legs,
         "packages": package_legs,
@@ -1391,11 +1583,28 @@ def main(argv: list[str] | None = None) -> int:
         help="validate the matrix and every stated count",
     )
     parser.add_argument(
-        "--matrix", choices=("wheels", "binaries", "shims", "images", "lsp", "packages")
+        "--matrix",
+        choices=(
+            "wheels",
+            "binaries",
+            "shims",
+            "py-shims",
+            "images",
+            "lsp",
+            "packages",
+        ),
     )
     parser.add_argument(
         "--count",
-        choices=("wheels", "binaries", "shims", "images", "lsp", "packages"),
+        choices=(
+            "wheels",
+            "binaries",
+            "shims",
+            "py-shims",
+            "images",
+            "lsp",
+            "packages",
+        ),
         help="print how many enabled legs match the filters (exits 0 even when 0)",
     )
     parser.add_argument(
@@ -1403,11 +1612,21 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         const="",
         default=None,
-        choices=("", "wheels", "binaries", "shims", "images", "lsp", "packages"),
+        choices=(
+            "",
+            "wheels",
+            "binaries",
+            "shims",
+            "py-shims",
+            "images",
+            "lsp",
+            "packages",
+        ),
         help="print the Markdown report, or one family's section (`--summary lsp`)",
     )
     parser.add_argument(
-        "--leg", choices=("wheels", "binaries", "shims", "lsp", "packages")
+        "--leg",
+        choices=("wheels", "binaries", "shims", "py-shims", "lsp", "packages"),
     )
     parser.add_argument(
         "--shim-floor",
@@ -1417,12 +1636,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--minor",
         default="",
-        help="with --leg/--count shims: filter by PHP minor (8.3, 8.4, 8.5, 8.6)",
+        help="with shims: the PHP minor (8.3-8.6); with py-shims: the CPython minor (3.13, 3.14)",
     )
     parser.add_argument(
         "--python",
         default="",
-        help="with --leg/--count wheels: filter by CPython minor (3.13, 3.14)",
+        help="with py-shims: filter by CPython minor; a wheel serves every CPython >=3.12",
     )
     parser.add_argument(
         "--libc",
@@ -1500,10 +1719,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if len(legs) > 1:
             missing: list[str] = []
-            if args.leg == "shims" and not args.minor:
+            if args.leg in ("shims", "py-shims") and not args.minor:
                 missing.append("--minor")
-            if args.leg == "wheels" and not args.python:
-                missing.append("--python")
             if args.leg == "lsp" and not args.target:
                 missing.append("--target")
             if args.leg != "lsp" and not args.libc:
@@ -1528,10 +1745,11 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"platform-matrix: ok — {len(wheel_legs())} wheels, "
             f"{len(binary_legs())} archives, {len(shim_legs())} shims, "
-            f"{len(lsp_legs())} lsp assets declared; "
+            f"{len(py_shim_legs())} python shims, {len(lsp_legs())} lsp assets declared; "
             f"built and exercised: {proven_count('wheels')}/{len(wheel_legs())} wheels, "
             f"{proven_count('archives')}/{len(binary_legs())} archives, "
             f"{proven_count('shims')}/{len(shim_legs())} shims, "
+            f"{proven_count('py_shims')}/{len(py_shim_legs())} python shims, "
             f"{proven_count('lsp')}/{len(lsp_legs())} lsp assets; "
             f"reaches: {reaches_sentence()}; "
             f"{len([leg for leg in LEGS if not leg['enabled']])} leg(s) dropped"

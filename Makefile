@@ -639,6 +639,12 @@ PY_SAPI_PROFILE ?= release
 PY_SAPI_ARCH ?=
 PY_SAPI_LIBC ?=
 PY_SAPI_REQUIRE_ALL ?=
+# `PY_SAPI_PROBE=0` builds and asserts the shim but skips the `dlopen` probe,
+# which needs that minor's shared `libpython`. `scripts/build-wheel.sh` sets it
+# inside `manylinux_2_28` (the image ships no shared libpython) so the wheel's
+# embedded shims meet the floor the wheel claims;
+# `.github/workflows/py-sapi.yml` is where the probe runs.
+PY_SAPI_PROBE ?= 1
 PY_SAPI_PYTHON_313 ?=
 PY_SAPI_PYTHON_314 ?=
 
@@ -719,6 +725,9 @@ py-sapi: ## Build CPython shims per minor (PY_MINORS="3.14 3.13"; PY_SAPI_REQUIR
 				|| { echo "py-sapi: $$out does not export $$symbol" >&2; exit 1; }; \
 		done; \
 		echo "py-sapi: proving $$out with the self-contained dlopen probe"; \
+		if [ "$(PY_SAPI_PROBE)" = 0 ]; then \
+			echo "py-sapi: PY_SAPI_PROBE=0, artifact contract asserted; the dlopen probe runs in .github/workflows/py-sapi.yml"; \
+		else \
 		libdir="$$("$$interp" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")')"; \
 		libpython="$$(ls "$$libdir/libpython$${minor}"*.so* 2>/dev/null | head -n 1 || true)"; \
 		if [ -z "$$libpython" ]; then \
@@ -730,6 +739,7 @@ py-sapi: ## Build CPython shims per minor (PY_MINORS="3.14 3.13"; PY_SAPI_REQUIR
 			LD_LIBRARY_PATH="$$libdir$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" \
 			$(CARGO) test -p blastit-py-shim --locked --features extension-module \
 				--test abi_load -- --ignored --nocapture; \
+		fi; \
 		built=$$((built + 1)); \
 	done; \
 	if [ -n "$$skipped" ] && [ "$(PY_SAPI_REQUIRE_ALL)" = 1 ]; then \
@@ -737,6 +747,38 @@ py-sapi: ## Build CPython shims per minor (PY_MINORS="3.14 3.13"; PY_SAPI_REQUIR
 		exit 1; \
 	fi; \
 	echo "py-sapi: $$built shim(s) for $$arch-$$libc in $(PY_SAPI_OUT); skipped:$${skipped:- none}"
+
+# --- ecosystem wrappers: the universal wheel and the Composer pin (`MB.42.3.3`) ----
+
+# `make wheel` builds the **host** wheel: `linux_<arch>` tag, no release promise.
+# `make wheel-manylinux` is the release leg — it compiles inside the image whose
+# glibc *is* the wheel's floor and requires all six shims (design §6.1).
+WHEEL_OUT ?= dist
+
+wheel: ## Build the `py3-none` wheel for this host (host tag; developer artifact)
+	scripts/build-wheel.sh -o "$(WHEEL_OUT)"
+
+wheel-manylinux: ## Build the release py3-none-manylinux_2_28 wheel in the builder image (Docker, slow)
+	scripts/build-wheel.sh --manylinux 2_28 --require-shims all -o "$(WHEEL_OUT)"
+
+wheel-smoke: ## Install the built wheel in python:3.12/3.13/3.14-slim and drive it (Docker, slow)
+	scripts/wheel_container_smoke.sh "$(WHEEL_OUT)"
+
+composer-smoke: ## Prove packages/composer-blastit in composer:2 from a local fixture (Docker, slow)
+	scripts/composer_smoke.sh
+
+# The wrapper's SHA-256 table is generated, never typed (`MB.42.3.3` review: all
+# four rows sat `pending`, so a real `composer require` always refused). `stamp`
+# takes whatever archives exist; a *release* runs the same script with
+# `--require-complete` (in `publish-pypi.yml`) so a `pending` row can never ship.
+BLASTIT_VERSION ?= 0.2.0
+
+composer-stamp: ## Stamp packages/composer-blastit's digest table from dist/*.tar.gz
+	uv run --no-project scripts/composer_sha256.py \
+		--version "$(BLASTIT_VERSION)" --archives dist/*.tar.gz
+	@uv run --no-project scripts/composer_sha256.py \
+		--version "$(BLASTIT_VERSION)" --require-complete >/dev/null 2>&1 || \
+		echo "composer-stamp: note: a row is still \`pending\`; \`make composer-stamp\` again once every leg has an archive" >&2
 
 php-sapi-e2e: ## Docker: build one shim and prove it with the real-load probe (not in `check`)
 	$(UV) run --no-project e2e/php_sapi_probe.py \
