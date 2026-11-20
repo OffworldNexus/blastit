@@ -156,15 +156,17 @@ RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/no
     && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
          "$lib/blastit-init"
 
-ENV PYTHONUNBUFFERED=1
+ENV PYTHONUNBUFFERED=1 BLASTIT_EXEC=/usr/share/blastit/lib/blastit
 EXPOSE 8080
 ```
 
 A file with capabilities turns any process of that uid into init: Blastit refuses a deployment
 where a *shared* interpreter carries them ([security model](../security.md#the-mechanisms)). The
 copy sits beside the installed shims in `/usr/share/blastit/lib`, so it is the only capable file
-and `entrypoint php` still finds them. `python3.13` is there for a WSGI view; a static-only app
-drops it and `libphp` from the `apt-get` line and the rest is unchanged.
+and `entrypoint php` still finds them. `BLASTIT_EXEC` names that capability-free
+copy for the `dbproxy` child, which cannot exec a file carrying the capabilities,
+while `blastit-init` keeps them. `python3.13` is there for a WSGI view; a
+static-only app drops it and `libphp` from the `apt-get` line and the rest is unchanged.
 
 ### 5. Compose
 

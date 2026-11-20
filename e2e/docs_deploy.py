@@ -4,9 +4,9 @@ Both presets now assume a connection pooler: DigitalOcean's managed pool in
 `docs/deploy/digitalocean-paas.md`, PgBouncer in `docs/deploy/compose-traefik.md`.
 The documented trap is a recipe that says "use a pooler" while its snippet still
 points the app at the database, or swaps the two URLs. This reads the pages' own
-`compose.yaml` / `app.yaml` blocks and the DigitalOcean page's `Blastfile` store
-block, and asserts the wiring, so the recipe a developer copies matches what the
-page claims.
+`compose.yaml` / `app.yaml` blocks, the compose page's `Dockerfile` block, and
+the DigitalOcean page's `Blastfile` store block, and asserts the wiring, so the
+recipe a developer copies matches what the page claims.
 
 The session zone is the same trap one layer down, and `MB.18` moved it out of the
 index: `docs/deploy/index.md` sets the two-URL expectation, and
@@ -152,6 +152,13 @@ def compose_checks(checks: Checks) -> None:
         "ALLOWED_HOST: shop.example.com" in compose,
         "compose: Django's `ALLOWED_HOST` is the ingress host",
     )
+    dockerfile = block(COMPOSE, "Dockerfile")
+    checks.that(
+        "ENV PYTHONUNBUFFERED=1 BLASTIT_EXEC=/usr/share/blastit/lib/blastit"
+        in dockerfile,
+        "compose: the image's `ENV` line exports `BLASTIT_EXEC` for the "
+        "capability-free `--role=dbproxy` child",
+    )
 
 
 def digitalocean_checks(checks: Checks) -> None:
@@ -172,7 +179,10 @@ def digitalocean_checks(checks: Checks) -> None:
         "DATABASE_DATABASE": "DATABASE",
     }
     checks.that(
-        all(f'value: "${{db.shop-pool.{bindable}}}"' in services for bindable in pool.values()),
+        all(
+            f'value: "${{db.shop-pool.{bindable}}}"' in services
+            for bindable in pool.values()
+        ),
         "digitalocean: every connection value the web service gets is the pool's (25061)",
     )
     # The two-URL rule with the web on the split form: no `${db.…}` connection

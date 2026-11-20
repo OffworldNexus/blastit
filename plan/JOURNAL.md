@@ -4055,3 +4055,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T08:34 [MB.47.2] (lead) status review -> done
 - 2026-11-20T08:34 [MB.47.2] (lead) commit 0d3f434
 - 2026-11-20T08:40 [MB.47] (lead) status ready -> done
+- 2026-11-20T08:42 [MB.48] (conductor) created (task) Set BLASTIT_EXEC in docs/deploy/compose-traefik.md rootless Dockerfile and assert in docs_deploy.py
+- 2026-11-20T08:43 [MB.48] (lead) status ready -> active
+- 2026-11-20T08:43 [MB.48] (lead) attempt 1/3 started
+- 2026-11-20T08:43 [MB.48] (lead) base 3f7b2e4ed39275481927c6cb2f65fe9babd5453e
+- 2026-11-20T08:44 [MB.48] (lead) status active -> review
+- 2026-11-20T08:45 [MB.48] (lead) status review -> done
