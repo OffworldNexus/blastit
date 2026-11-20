@@ -36,17 +36,12 @@ use crate::logs::{Colour, Emitter, fail, output_event};
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
 #[cfg(feature = "php")]
 use blastit_view_php::discovery::{PhpBoot, PhpShimScope};
-// The discovery surface the `php_boot_gate` cases drive: their subjects are the
-// crate's, so the names are the tests' only.
 
 mod dev;
 mod fork_exec;
 mod gates;
 #[cfg(feature = "python")]
 mod project_python;
-
-#[cfg(test)]
-mod unit_tests;
 
 pub use dev::run_dev;
 

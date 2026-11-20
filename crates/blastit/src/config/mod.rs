@@ -34,11 +34,6 @@ mod types;
 mod validate;
 mod wire;
 
-#[cfg(test)]
-mod tests;
-#[cfg(all(test, feature = "php"))]
-mod tests_php;
-
 // `ManifestReadError` is reachable from every entry point, but its name is
 // never written down: `read_manifest`'s callers use `.sentence()` on the value
 // it returns. The path stays what it was when the module was one file.

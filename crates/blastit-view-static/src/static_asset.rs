@@ -250,9 +250,8 @@ impl StaticRoot {
 
     /// [`StaticRoot::open`] with the backend chosen explicitly.
     ///
-    /// `#[doc(hidden)] pub`, not `#[cfg(test)]`: an integration test compiles
-    /// the crate as a dependency, where `cfg(test)` is off, so the `Walk`
-    /// matrix could not run.
+    /// `#[doc(hidden)] pub` so a caller outside this crate can select the
+    /// backend explicitly; the crate-level default is [`StaticRoot::open`].
     #[doc(hidden)]
     pub fn open_with(
         manifest_dir: &Path,

@@ -23,15 +23,3 @@ pub enum OutputStream {
 /// in any number of calls, and the sink keeps this prefix and drops the rest
 /// rather than let one `echo` bury the log it lands in.
 pub const OUTPUT_LINE_CAP: usize = 2048;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_output_line_cap_is_the_documented_2048() {
-        // §4.1 documents `output`'s line cap as 2048 bytes; the WSGI sink
-        // `MB.3.24` builds and the PHP sink `MB.3.13` builds must not drift.
-        assert_eq!(OUTPUT_LINE_CAP, 2048);
-    }
-}

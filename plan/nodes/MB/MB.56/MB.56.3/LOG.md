@@ -7,3 +7,11 @@ created (task) Consolidate crates/blastit/tests/ (30+ files -> 4 crisp user-stor
 ## 2026-11-20T16:33 [lead]
 
 MUST DO: delete the temporary #[doc(hidden)] pub use check as audit_v1; shim in crates/blastit/src/lib.rs + check::learn::plan_learn_json (dead prod code kept only for 3 crates/blastit/tests suites), when consolidating into the 4 e2e suites
+
+## 2026-11-20T17:28 [lead]
+
+MB.56.2.1 inventory: crates/blastit-scheduler/tests/static_feature_off.rs stays (needs --no-default-features; keep as its own leg). Cases to re-prove E2E: per-view grant isolation, fair queueing+debt TTL, exit()/fatal DONE, static ../symlink/dotfile/.php matrix, live reload, PHP pinning+rewritten entry, CPU accounting, X-Forwarded-For trust, both openat2+Walk backends (StaticRoot::open_with)
+
+## 2026-11-20T17:28 [lead]
+
+MB.56.2.1 REVIEW-GAP (must re-cover E2E): (1) blastit check exit table 0 clean/1 findings/2 could-not-start/3 suite-failed incl pytest 5 = 3, docs/reference/cli.md:78-80; (2) pytest-django handshake: settings module/manage.py/test_<db>, owner-only never-reused handshake file removed however run ends, Django without postgres proxy + store with no inputs = exit 2 naming the block; (3) check --learn human line 'learn: N routes, M queries added -> /abs/Blastfile' and 'proposed (dry-run)' never 'added'/relative, to stderr under --json; (4) check finds its gate root from installed/repacked bundle (never a cargo tree), prefers project venv interpreter, prepends caller PYTHONPATH

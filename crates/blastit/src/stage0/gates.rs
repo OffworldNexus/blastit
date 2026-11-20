@@ -19,8 +19,6 @@ use crate::logs::{Emitter, fail};
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
 #[cfg(feature = "php")]
 use blastit_view_php::discovery::{Deployment, PhpBoot, PhpSearch, PhpShimScope, php_boot_in};
-// The discovery surface the `php_boot_gate` cases drive: their subjects are the
-// crate's, so the names are the tests' only.
 
 use super::current_uid;
 
@@ -163,13 +161,11 @@ impl ServeGates {
 /// worker with no interpreter anywhere near it, so this gate returns `None`
 /// for a PHP-only manifest (`MB.3.5.4`) — [`php_boot_gate`] is the separate
 /// gate that refuses such a boot when the host has no usable NTS `libphp`, and
-/// it must not be mistaken for this one. The
-/// `python` build has nothing to refuse; the function is compiled for the
-/// tests that keep the sentences honest.
+/// it must not be mistaken for this one.
 ///
 /// The retired external-PHP key (`MB.3.17`) needs no sentence here: the parser
 /// refuses it as an unknown key before a boot gets this far.
-#[cfg(any(not(feature = "python"), test))]
+#[cfg(not(feature = "python"))]
 pub(crate) fn no_python_support(
     config: &Config,
     manifest: &Manifest,
@@ -428,18 +424,6 @@ pub(super) fn tree_is_protected(init_uid: u32, path: &Path) -> Result<(), String
     .check_trees()
 }
 
-/// The same gate for a `dev`/`check` caller: no production provenance.
-///
-/// The unit tests use it as the seam they have always used; a boot reaches the
-/// gate through [`php_boot_gate`], which decides the scope. It took the
-/// per-view budget until `MB.21.4.10`: `ADR-0012` §12.3 removed `workers`, so a
-/// manifest carries no cap and the deployment's is the scheduler's, which is why
-/// the parameter is gone rather than ignored.
-#[cfg(all(test, feature = "php"))]
-pub(super) fn php_boot(manifest: &Manifest, search: &PhpSearch) -> PhpBoot {
-    php_boot_in(manifest, search, None)
-}
-
 /// `R7`/`B2-R5`: the **deployment** half of the `entrypoint php` gate, run over one
 /// manifest directory and one pair — the seam the protected suite needs.
 ///
@@ -449,13 +433,12 @@ pub(super) fn php_boot(manifest: &Manifest, search: &PhpSearch) -> PhpBoot {
 /// (`LESSONS.md`, `MB.1.6`). Driving [`Provenance`] directly — which the
 /// protected legs also do — pins the *decision* but not the *call*: with this
 /// seam deleted from `php_boot_in`, `tests/critical_php_embed.rs`'s
-/// `the_deployment_gate_is_invoked_behind_its_sentence` is the leg that fails,
-/// and without it only this module's unit tests would.
+/// `the_deployment_gate_is_invoked_behind_its_sentence` is the leg that fails.
 ///
 /// `Ok(())` is "the gate proceeds" — `Proceed` from the discovery *and* a
 /// a file with no `entrypoint php`, which a deployment boots like any
 /// other (the gate has nothing to authorise). `Err(message)` is a **refusal**:
-/// the sentence the boot prints, the same one `php_boot`'s callers print.
+/// the sentence the boot prints.
 ///
 /// Not part of the published API: the only caller is the protected suite, which
 /// reaches it through `blastit::host::deployment_boot_check`.

@@ -45,9 +45,6 @@ mod load;
 mod serve;
 mod spawn;
 
-#[cfg(test)]
-mod unit_tests;
-
 pub use boot::run;
 
 pub(crate) use adopt::Adoption;

@@ -781,23 +781,3 @@ pub(super) fn declared_content_length(head: &ReqHeadView<'_>) -> Option<u64> {
 fn slot_releasable(holds_slot: bool, pumping: bool) -> bool {
     holds_slot && !pumping
 }
-
-#[cfg(test)]
-mod tests {
-    use super::slot_releasable;
-
-    /// Design §4.6's table for the one predicate that frees a static slot.
-    ///
-    /// The protected `critical_rewrite.rs` cannot reach a private item, and
-    /// `lib.rs` (which would have to export it) is outside this leaf's paths,
-    /// so the three rows live here: a request that holds a slot and has no read
-    /// parked gives it back; one with a read parked gives it back only when
-    /// that read returns; one that never took a slot gives back nothing.
-    #[test]
-    fn a_static_slot_is_releasable_only_when_its_read_is_not_parked() {
-        assert!(slot_releasable(true, false), "(true, false) → true");
-        assert!(!slot_releasable(true, true), "(true, true) → false");
-        assert!(!slot_releasable(false, false), "(false, false) → false");
-        assert!(!slot_releasable(false, true), "(false, true) → false");
-    }
-}

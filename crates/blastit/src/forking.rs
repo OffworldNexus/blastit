@@ -136,39 +136,3 @@ pub fn fork(hooks: Option<PyForkHooks<'_>>) -> io::Result<Fork> {
     }
     outcome
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    /// The mismatch refusal, which is the mechanism `ForkProtocol` has instead
-    /// of a type that could prove the GIL is held: the protocol cannot be
-    /// checked at compile time, so the one implementation refuses the wrong
-    /// answer. No case here forks — a fork would leave a child that never
-    /// returns.
-    #[test]
-    fn a_fork_whose_protocol_disagrees_with_the_image_is_refused() {
-        // An interpreter-live fork where the image says there is none.
-        let err = agrees(ForkProtocol::InterpreterLive, false).unwrap_err();
-        assert!(err.to_string().contains("fork protocol mismatch"), "{err}");
-
-        // And the other way round: a bare fork while an interpreter is live.
-        let err = agrees(ForkProtocol::NoInterpreter, true).unwrap_err();
-        assert!(err.to_string().contains("fork protocol mismatch"), "{err}");
-        assert!(err.to_string().contains("PyOS_BeforeFork"), "{err}");
-    }
-
-    /// A `python`-less build has no interpreter behind the protocol at all, so
-    /// even a caller that claims one is live is refused: a bare `fork(2)` under
-    /// that spelling is the silent case the enum exists to make impossible.
-    #[cfg(not(feature = "python"))]
-    #[test]
-    fn a_build_without_the_python_feature_refuses_an_interpreter_live_fork() {
-        let err = agrees(ForkProtocol::InterpreterLive, true).unwrap_err();
-        assert!(
-            err.to_string().contains("without the `python` feature"),
-            "{err}"
-        );
-    }
-}

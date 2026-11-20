@@ -49,23 +49,3 @@ pub(crate) fn refusal_message(bytes: &[u8]) -> String {
     }
     String::from_utf8_lossy(bytes).into_owned()
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_refusal_document_names_the_shims_sentence() {
-        assert_eq!(
-            refusal_message(br#"{"error":"BLASTIT_APP (app:app): ModuleNotFoundError"}"#),
-            "BLASTIT_APP (app:app): ModuleNotFoundError"
-        );
-        assert_eq!(
-            refusal_message(b"not json"),
-            "not json",
-            "an unknown shape still reaches the operator"
-        );
-        assert!(!refusal_message(b"").is_empty());
-    }
-}

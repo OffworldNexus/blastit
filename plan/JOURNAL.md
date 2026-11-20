@@ -4187,3 +4187,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T17:15 [MB.56.2.3] (lead) created (task) Consolidate blastit-manifest §7 suite (15k -> <=1.5k LOC) incl. every docs/README Blastfile fence
 - 2026-11-20T17:15 [MB.56.2.4] (lead) created (task) Consolidate blastit-sqlpolicy (<=1.5k) and blastit-http (<=800) §7 suites
 - 2026-11-20T17:15 [MB.56.2.5] (lead) created (task) Consolidate blastit-lsp e2e_lsp.rs (<=600 LOC) over the real binary + keep zed-check
+- 2026-11-20T17:15 [MB.56.2.1] (lead) status ready -> active
+- 2026-11-20T17:15 [MB.56.2.1] (lead) attempt 1/3 started
+- 2026-11-20T17:15 [MB.56.2.1] (lead) base e6c8a89a19b8bf3c6061c7eea06ebbbdfb7c98aa
+- 2026-11-20T17:28 [MB.56.2.1] (lead) REVIEW FIX: restore crates/blastit-scheduler/tests/static_feature_off.rs (Makefile:239 rs-no-default target; only executable proof of TESTING_PLAN §6 feature-of
+- 2026-11-20T17:28 [MB.56.3] (lead) MB.56.2.1 inventory: crates/blastit-scheduler/tests/static_feature_off.rs stays (needs --no-default-features; keep as its own leg). Cases to re-prove E2E: per-v
+- 2026-11-20T17:28 [MB.56.5] (lead) crates/blastit-view-static::StaticRoot::open_with is the only seam that can prove the openat2+Walk matrix for MB.56.3 - do NOT prune it. Also candidate dead (no
+- 2026-11-20T17:28 [MB.56.3] (lead) MB.56.2.1 REVIEW-GAP (must re-cover E2E): (1) blastit check exit table 0 clean/1 findings/2 could-not-start/3 suite-failed incl pytest 5 = 3, docs/reference/cli
+- 2026-11-20T17:30 [MB.56.2.1] (lead) status active -> done

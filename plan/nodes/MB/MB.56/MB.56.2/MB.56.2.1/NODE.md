@@ -2,7 +2,7 @@
 id: MB.56.2.1
 title: "Delete non-§7 micro-tests in scheduler, dbproxy, view-* and crates/blastit/src"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
@@ -14,11 +14,11 @@ paths:
   - "crates/blastit-view-static/**"
   - "crates/blastit-view-php/**"
   - "crates/blastit/src/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T17:15"
-updated: "2026-11-20T17:15"
+updated: "2026-11-20T17:30"
 ---
 
 # Goal

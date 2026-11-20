@@ -23,8 +23,6 @@ use crate::logs::{Emitter, fail, output_event};
 // The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
-// The discovery surface the `php_boot_gate` cases drive: their subjects are the
-// crate's, so the names are the tests' only.
 
 use super::dev::{DevBoot, cstring_dev, fail_dev_root, fail_with_root, pipe_dev, reexec_argv_dev};
 use super::gates::{RESTART_MEMBER, config_document};
@@ -504,31 +502,6 @@ pub struct DbproxyHandover {
     pub stdout: OwnedFd,
     /// The read end of dbproxy's stderr pipe.
     pub stderr: OwnedFd,
-}
-
-/// Waits for dbproxy's ready byte, with a deadline (§4).
-///
-/// `timeout` is the whole budget, and it is a parameter so that a test can watch
-/// it expire in milliseconds instead of waiting out [`DBPROXY_READY_TIMEOUT`].
-///
-/// # Errors
-///
-/// A message saying how the wait ended — the deadline, a failed `poll`, or the
-/// child exiting first. The caller prints it together with whatever the child
-/// left in its output pipes.
-///
-/// Only the stage-0 unit tests call this: the boot itself goes through
-/// [`wait_ready_with_line`], because it also decides whether the wait is worth a
-/// phase line.
-#[cfg(test)]
-pub(super) fn wait_ready(ready: &OwnedFd, timeout: Duration) -> Result<(), String> {
-    if wait_ready_until(ready, Deadline::after(timeout))? {
-        return Ok(());
-    }
-    Err(format!(
-        "dbproxy did not report ready within {}s",
-        timeout.as_secs_f32()
-    ))
 }
 
 /// Waits for dbproxy's ready byte until `deadline` (§4).
