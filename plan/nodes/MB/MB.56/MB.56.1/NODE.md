@@ -2,7 +2,7 @@
 id: MB.56.1
 title: "Delete retired 0.1.0 Python/Rust code, --internal-json, blastit-audit crate, duplicate blastit-dbproxy bin & meta-linter scripts"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths:
@@ -25,7 +25,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:02"
-updated: "2026-11-20T16:03"
+updated: "2026-11-20T17:12"
 ---
 
 # Goal

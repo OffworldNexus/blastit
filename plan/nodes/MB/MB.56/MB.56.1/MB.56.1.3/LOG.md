@@ -51,3 +51,7 @@ REVIEW-ARCH FIX: (B) zed-check diff is red: editors/tree-sitter-blastfile/highli
 ## 2026-11-20T17:12 [lead]
 
 status active -> done
+
+## 2026-11-20T17:12 [lead]
+
+commit d6de59a

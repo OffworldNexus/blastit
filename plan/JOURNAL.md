@@ -4178,3 +4178,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T17:09 [MB.56.1.3] (lead) REVIEW-ARCH FIX: (B) zed-check diff is red: editors/tree-sitter-blastfile/highlights.scm (39) vs editors/zed/.../highlights.scm (54) are different BY DESIGN -> 
 - 2026-11-20T17:09 [MB.56.5] (lead) DEFERRED COMMENTS: crates/blastit/src/stage0/gates.rs:272 + crates/blastit-view-php/src/pinning.rs:268 still name the deleted scripts/check-no-test-seam.sh (now
 - 2026-11-20T17:12 [MB.56.1.3] (lead) status active -> done
+- 2026-11-20T17:12 [MB.56.1.3] (lead) commit d6de59a
+- 2026-11-20T17:12 [MB.56.1] (lead) status ready -> done: all 3 sub-slices done; full make check runs now at the MB.56.1 gate
