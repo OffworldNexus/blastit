@@ -23,3 +23,19 @@ MUST COVER in e2e_prod_refusals/e2e_dev (from MB.56.2.2 review): (a) env boot re
 ## 2026-11-20T18:33 [lead]
 
 MUST PORT before deleting crates/blastit/tests/critical_lsp.rs: (1) multi-error document -> multiple diagnostics (warning_sites_are_their_declarations / diagnostics_are_capped); (2) didClose publishes [] with no version; (3) formatting a BROKEN buffer answers null not an error; (4) non-BMP UTF-16 position (positions_are_utf16); (5) single-quoted query '\''... $1'\'' quick fix + nothing offered outside queries + context_diagnostics never trusted. MB.56.2.5 ports these.
+
+## 2026-11-20T18:44 [lead]
+
+status ready -> active
+
+## 2026-11-20T18:44 [lead]
+
+attempt 1/3 started
+
+## 2026-11-20T18:44 [lead]
+
+base d313856b4918afad5267c015b2ad87ed561b578a
+
+## 2026-11-20T18:45 [lead]
+
+edited fields
