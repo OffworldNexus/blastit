@@ -1,0 +1,9 @@
+/* The Django leg's hashed asset: one file the static mount answers for. */
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+}

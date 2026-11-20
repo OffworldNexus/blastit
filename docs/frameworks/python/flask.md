@@ -36,6 +36,7 @@ trait connection {
         query 'select current_schema()'
         query 'show standard_conforming_strings'
         query 'show transaction isolation level'
+        query 'SELECT typname AS name, oid, typarray AS array_oid, oid::regtype::text AS regtype, typdelim AS delimiter FROM pg_type t WHERE t.oid = to_regtype($1) ORDER BY t.oid'
     }
 }
 
@@ -55,6 +56,7 @@ view fallback GET "/*" {
 `app`. The `connection` trait carries the transaction control and the setup statements every view
 that opens the engine needs; `view products` adds the trait and the one `insert` its handler runs,
 and the catch-all shows "no database here" — it is not the shape for the app's other routes.
+psycopg's own `hstore` OID lookup on connect is part of the trait — or set `use_native_hstore=False`.
 
 ## Static assets
 

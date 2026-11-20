@@ -4339,3 +4339,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T21:07 [MB.56.5] (lead) edited fields
 - 2026-11-20T21:22 [MB.56.3.5] (lead) status active -> done
 - 2026-11-20T21:22 [MB.56.3] (lead) status active -> done: four BDD suites + common/; 26,643 -> 11,513 LOC
+- 2026-11-20T21:24 [MB.56.3] (lead) GATE: make check green (exit 0); tests/ 26,643 -> 11,513 LOC across 4 suites + common/; commit dbc8051
+- 2026-11-20T21:24 [MB.56.4.1] (lead) status ready -> active
+- 2026-11-20T21:24 [MB.56.4.1] (lead) attempt 1/3 started
+- 2026-11-20T21:24 [MB.56.4.1] (lead) base dbc80515940bca2602156779ecf2685a4ee9d688
+- 2026-11-20T21:49 [MB.56.4.1] (lead) edited fields
+- 2026-11-20T21:49 [MB.56.4.1] (lead) REVIEW FIX: (B) e2e/live.py + e2e/rootless/run.py still exec deleted scenario.py/check_logs.py -> delete both with an explicit handoff to MB.56.4.2's run_prod.p
+- 2026-11-20T21:49 [MB.56.4.1] (lead) REVIEW FIX 2 (ux fixtures): Flask trait needs psycopg's hstore OID query (+ prose: use_native_hstore=False alternative); Django static mount must follow django.
+- 2026-11-20T21:57 [MB.56.4.1] (lead) status active -> done

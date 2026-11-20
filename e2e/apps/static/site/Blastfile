@@ -1,0 +1,10 @@
+# A static site and SPA: one mount, no app, no interpreter.
+#
+# `immutable` pins the fingerprinted bundle for a year; `fallback` answers an SPA
+# history URL with `index.html` and `no-cache`. A refusal (`..`, a dotfile, a
+# symlink out of the root, a `.php` file) is final and never the fallback.
+static "/" {
+    root "public"
+    fallback "index.html"
+    immutable "/assets/*"
+}

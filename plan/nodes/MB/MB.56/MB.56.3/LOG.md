@@ -43,3 +43,7 @@ edited fields
 ## 2026-11-20T21:22 [lead]
 
 status active -> done: four BDD suites + common/; 26,643 -> 11,513 LOC
+
+## 2026-11-20T21:24 [lead]
+
+GATE: make check green (exit 0); tests/ 26,643 -> 11,513 LOC across 4 suites + common/; commit dbc8051

@@ -496,10 +496,10 @@ docs-serve-check: docs-serve-stage ## Bounded smoke test of the docs serve stack
 	fi; \
 	echo "docs-serve-check: 4/4 checks passed (server log: $$log)"
 
-e2e: ## Build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
-	scripts/build-wheel.sh --manylinux 2_28
-	E2E_DOCKERFILE=Dockerfile.prebuilt $(UV) run --no-project e2e/run.py
-	$(UV) run --no-project e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
+e2e: ## Run the application/runtime e2e suite (Docker, PostgreSQL, PHP, Django/Flask, static)
+	$(CARGO) build -p blastit --release --locked
+	$(MAKE) python-runtime
+	$(UV) run --no-project e2e/run_apps.py
 
 # One artifact, four runtimes (`MB.42.2.4`). Slow: it stages a release bundle,
 # builds a venv per interpreter and boots a real `blastit dev` per leg, so it is

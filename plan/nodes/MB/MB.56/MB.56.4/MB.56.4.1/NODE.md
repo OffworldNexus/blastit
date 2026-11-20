@@ -2,16 +2,16 @@
 id: MB.56.4.1
 title: "e2e/apps + run_apps.py: PHP/PostgreSQL/static, Django & Flask, interpreter-free Static"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: []
-paths: ["e2e/**"]
-attempts: 0
+paths: ["e2e/**", Makefile, .github/workflows/ci.yml, "docs/frameworks/**"]
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T21:07"
-updated: "2026-11-20T21:07"
+updated: "2026-11-20T21:57"
 ---
 
 # Goal

@@ -529,7 +529,7 @@ jobs:
           if-no-files-found: ignore
 
   e2e:
-    name: e2e (Django under blastit, Docker)
+    name: e2e (PHP, Django, Flask, static; Docker)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -540,61 +540,18 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The e2e scenario boots a real WSGI app through the wheel, so the wheel
-      # must carry both CPython shims: `--require-shims py` fails closed when it
-      # does not, and these steps are what put them in `target/py-sapi`
-      # (`MB.47.2`).
+      # The two WSGI legs run on the host's CPython 3.13/3.14 and load the
+      # per-minor shims, and `run_apps.py` mounts the release binary into every
+      # container: build both before the suite starts.
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the CPython minors the shims need
         run: uv python install 3.13 3.14
       - name: Build the per-minor CPython shims (fails closed)
         run: make python-runtime
-      - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh --require-shims py
-        env:
-          MATURIN: maturin
-      - name: Run the scenario under blastit
-        run: python e2e/run.py
-        env:
-          E2E_DOCKERFILE: Dockerfile.prebuilt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: e2e-app-log
-          path: e2e/app.log
-          if-no-files-found: ignore
-
-  rootless:
-    name: e2e rootless (capabilities, Docker)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        id: python
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Same wheel, same promise as the `e2e` job (`MB.47.2`): the rootless
-      # scenario serves a WSGI app, so the wheel must carry both CPython shims.
-      - uses: astral-sh/setup-uv@v10.3.2
-      - name: Install the CPython minors the shims need
-        run: uv python install 3.13 3.14
-      - name: Build the per-minor CPython shims (fails closed)
-        run: make python-runtime
-      - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh --require-shims py
-        env:
-          MATURIN: maturin
-      - name: Run the scenario with capabilities instead of root
-        run: python e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: rootless-app-log
-          path: e2e/rootless/out/
-          if-no-files-found: ignore
+      - name: Build the binary under test
+        run: cargo build -p blastit --release --locked
+      - name: Run the application suite
+        run: uv run --no-project e2e/run_apps.py
 
   # `MB.17`: a plain `cargo build -p blastit` must be the artifact you can copy
   # onto a server that never had Python. Two proofs, because they fail

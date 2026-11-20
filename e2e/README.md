@@ -1,99 +1,82 @@
-# End-to-end test
+# End-to-end tests
 
-A small Django app (`demo/`: log in, add and delete your own notes, log out) and
-a small Flask + SQLAlchemy app (`sqlalchemy/`) served by blastit against a real
-PostgreSQL. The Django app proves the concept rather than the parts:
-
-* the user flow works unchanged under blastit;
-* the notes route can't run a statement the manifest doesn't grant (reading
-  every user's password hash, `/notes/peek/`): it is refused and logged as
-  `sql.denied`;
-* the app's `DATABASE_URL` points at a local socket and holds no password,
-  and the password never appears in the logs.
-
-The Flask + SQLAlchemy app proves the same design for a framework that is not
-Django (E2b): it parses `DATABASE_URL` itself, and it does not percent-decode a
-host — so it is the check that blastit renders the socket directory as the
-`host` **query parameter** every client reads, not as a percent-encoded
-authority. It also runs connection statements of its own (`select
-pg_catalog.version()`, `select current_schema()`, two `show`s, a type lookup)
-and a `BEGIN`/`COMMIT` per request, which is what the file's `connection`
-trait and `transactions` are for (§6) — one view is refused a `DELETE`
-nobody granted, to show the limits are real.
+`run_apps.py` is the application and runtime suite: a real PostgreSQL 18, a real
+PHP front controller, Django and Flask on CPython 3.13 and 3.14, and a static
+site in a container with **neither Python nor PHP installed**.
 
 ```console
-$ uv run e2e/run.py                                   # both apps, in Docker
-$ uv run e2e/scenario.py http://127.0.0.1:8000 --expect baseline   # same app under gunicorn
+$ uv run --no-project e2e/run_apps.py        # every leg; free ports 28080+
+$ uv run --no-project e2e/run_apps.py --keep # keep the work directory
 ```
 
-`scenario.py` drives the Django app over HTTP and `check_logs.py` checks
-blastit's stdout afterwards; `sqlalchemy_check.py` does both for the second app
-(its port is `E2E_SQLALCHEMY_PORT`, `18081` by default). All three are
-stdlib-only.
+It checks the deploy pages' pooler promises first (`docs_deploy.py`), builds the
+fixtures it needs (`e2e/apps/`), starts one `postgres:18`, and prints one
+`PASS`/`FAIL`/`SKIP` line per leg. A missing host fact (Docker, a CPython minor,
+the shims) is a loud `SKIP` naming the command that installs it — never a silent
+pass. The binary under test is `--binary`, `$E2E_BLASTIT`,
+`target/release/blastit`, `target/debug/blastit`, or `PATH`; it is mounted into
+each container rather than rebuilt there.
 
-The static-assets page (`docs/frameworks/static-and-spa.md`) has a leg of its
-own, `static_assets.py`: a `static` mount fixture (`static_site/`) served by
-`blastit dev` in the same image, plus a second service whose mount declares no
-`fallback`.
-The driver runs inside the `static` container, so the page's
-`127.0.0.1:8080` commands are verbatim; it replays every `$ ` command in the
-page's console fences and asserts the documented statuses and headers, the
-traversal/NUL/dotfile/symlink refusals, `HEAD`, `POST` and the SPA fallback.
-`E2E_STATIC_PORT` is that container's port (`8080` by default).
+## The fixtures
 
-Two Dockerfiles, the same apps either way:
+| Path | What it serves |
+|---|---|
+| `apps/php/` | A Symfony-shaped `public/index.php` with `public/assets/`: a public catalogue read, a parameterised order write, routes that run SQL no view was granted (a cross-table read, two `INSERT`s), and `Blastfile.splitstore` for the `$DB_*` spelling. `Blastfile` is the shop; `Blastfile.php2shell` is the store-less probe manifest. |
+| `apps/python/django/` | A Django project using raw cursors, `manage.py collectstatic` into `staticfiles/`, `dj_database_url.config(conn_max_age=0)`, a shared `connection` trait, and the same refusals (cross-table read, customers insert, order insert with an ungranted `note`). |
+| `apps/python/flask/` | The same shop through SQLAlchemy with `NullPool`, whose own connection statements (including psycopg's `hstore` lookup) and `BEGIN`/`COMMIT` are the shared trait. |
+| `apps/static/site/` | A static + SPA mount: `immutable "/assets/*"`, `fallback "index.html"`, `ETag`/`304`, and the per-class refusals (`..`/NUL/backslash → `400`; dotfile, symlink, `.php` → `404`). |
+| `apps/static/nospa/` | The same mount without a `fallback`: a deep path is a 404. |
+| `apps/postgres/schema.sql` | The one schema every leg reads; applied with the real credentials, outside blastit. |
 
-* `Dockerfile` builds the wheel in the image (`scripts/build-wheel.sh`) and
-  installs it with pip, so the demo runs exactly the install `pip install
-  blastit` gives a project — the console script, on the image's interpreter.
-* `Dockerfile.prebuilt` installs a wheel built beforehand, and takes its base
-  image from the wheel's CPython tag (`dist/blastit-*-cp3*.whl`: `cp314` builds
-  on `python:3.14-slim-trixie`), so a developer's 3.14 works as well as the
-  runner's 3.13; it is what CI uses, one `maturin build` on the runner instead of
-  a Rust toolchain in the image. `dist/` must hold exactly one wheel — the build
-  says which ones it found rather than letting pip pick.
+## What the legs prove
 
-`venv-smoke.sh` is the other half of the packaging test: the wheel installed
-into a project's *virtualenv* (uv, on the `modelw/base` image the pilot uses),
-started as root through `sudo .venv/bin/blastit`, checked for a served request
-and for `boot`/`ready` in the event stream. Docker only:
+- **PHP (8.4):** the public read works, a parameterised `WHERE id = ?` and a
+  parameterised `INSERT` run, an ungranted cross-table `SELECT`, an ungranted
+  `INSERT` into `customers` and an order `INSERT` naming the ungranted `note`
+  column are refused with `403` and SQLSTATE `42501`, `exit()` and a fatal error
+  end only their own request, and the `php2shell` matrix (`e2e/php2shell.py`) is
+  neutral. A second container runs the same views from `$DB_HOST`/`$DB_PORT`/
+  `$DB_USERNAME`/`$DB_PASSWORD`/`$DB_DATABASE` and proves the worker sees no
+  password and no rendered URL.
+- **Django and Flask (CPython 3.13 and 3.14):** the catalogue and the order
+  write work through each framework's own parameter binding; each view runs only
+  its declared statements; the same five refusals answer `403` with SQLSTATE
+  `42501`; the rendered URL uses the libpq `host` query parameter (a wrong host
+  is a 500 for SQLAlchemy); the static mount (Django's `collectstatic` output,
+  Flask's `static/`) is served with the year-long cache; and every refusal
+  produces a `sql.denied` event without leaking the database password.
+- **Static (Debian trixie, no interpreter):** `GET /` carries an `ETag` and
+  `If-None-Match` answers `304`; a hashed asset is `immutable`; a deep history
+  path is the `index.html` fallback with `no-cache`; `..` (plain and
+  percent-encoded), NUL, a backslash and an escape attempt are `400`; a real
+  `.git/`, `.env`, out-of-root symlink and `index.php` are `404`; a secret file
+  is served only at its own path; `HEAD` works; the printed banner names the
+  mount as the page shows it; `blastit check --json` exits `0`; a mount without
+  `fallback` answers a deep path with `404`; and the image has no `python3` or
+  `php` to fall back to.
 
-```console
-$ scripts/build-wheel.sh && e2e/venv-smoke.sh
-```
+Range/`206` requests are deliberately **not** asserted here: they are open human
+item `H-017`.
 
-## The Blastfile
+Every leg uses ports from `28080`, writes its scratch trees under
+`${TMPDIR:-/tmp/opencode}/blastit-e2e-apps`, and removes only the containers,
+images, network and volumes it created — it never touches a foreign container.
 
-`demo/Blastfile` is generated, then committed. Run the app outside blastit
-with `DEMO_HARVEST=/tmp/harvest.jsonl` (the middleware in `notes/harvest.py`
-records each statement as psycopg sends it), run the baseline scenario
-against it, then:
+## Other harnesses
 
-```console
-$ uv run e2e/grants.py /tmp/harvest.jsonl > e2e/demo/Blastfile
-```
+These stay beside the app suite for the slices that own them:
 
-The views are listed in `grants.py`. `/notes/peek/`'s own statement is left
-out on purpose.
+| File | What |
+|---|---|
+| `universal_binary.py` | One staged bundle, four runtimes (`make e2e-universal`). |
+| `php2shell.py` | The CGI/FastCGI refusal matrix; replayed by the PHP leg and on its own. |
+| `php_sapi_probe.py` | The shim's real-load probe (`make php-sapi-e2e`). |
+| `docs_deploy.py` | The deploy pages' pooler promises; a leg of `run_apps.py`. |
+| `venv-smoke*`, `prebuilt_wheel.py`, `packages/` | Packaging and wheel checks. |
 
-`/debug/sql/`, `/notes/sql/` and `/deny/sql/` run `q` as raw SQL and report what
-happened. The first two are one view answering two paths, so the same
-text can be sent from two different processes: each one may run only the
-statements its own view was granted. `grants.py` gives the `sql` view exactly
-one statement (`SELECT count(*) FROM notes_note`) and nothing else, so the
-`notes` view is refused that same text and vice versa. The checks in
-`scenario.py` send the same text from both processes and from a third view that
-has no grants.
+The `php2shell` driver is stdlib-only and takes the fixture, probe matrix, docs
+page and port explicitly; the PHP leg runs it inside the `libphp` container so
+the page's `127.0.0.1` commands are verbatim.
 
-`/deny/sql/` is that third view: its entry in the file is an empty
-`postgres { }` and no trait, so blastit binds it a listener whose allowlist is
-empty — the connection is accepted and the ordinary statement is refused by the
-proxy with SQLSTATE `42501`, which `check_logs.py` reads out of the `sql.denied`
-event (the allowlist as the reason, not a database permission error).
-
-`/debug/egress/` and `/egress/probe/` run the same probe — create (and close) an
-`AF_INET` socket, and `ptrace(PTRACE_TRACEME)` this process — and report what
-happened. The first is on the `debug` view, the second on `egress` with
-`egress any` and no grants, so under blastit the §7.3 filters refuse the
-socket on one view and not the other. A view is marked egress with the fifth
-column of `grants.py`'s `ROUTES`.
+The production/deployment harness is `run_prod.py` in the next slice
+(`MB.56.4.2`); this suite covers the application and runtime stories only.

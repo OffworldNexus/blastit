@@ -182,12 +182,38 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def _unchunk(sock, buffer: bytes) -> bytes:
+    """The body of a `Transfer-Encoding: chunked` answer, chunk framing removed."""
+    body = b""
+    while True:
+        while b"\r\n" not in buffer:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return body
+            buffer += chunk
+        line, _, buffer = buffer.partition(b"\r\n")
+        try:
+            size = int(line.split(b";", 1)[0].strip(), 16)
+        except ValueError as error:
+            raise LegFailure(f"bad chunk size {line[:40]!r}") from error
+        if size == 0:
+            return body
+        while len(buffer) < size + 2:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buffer += chunk
+        body += buffer[:size]
+        buffer = buffer[size + 2 :]
+
+
 def http(
     port: int,
     target: str,
     method: str = "GET",
     body: bytes = b"",
     timeout: float = 10,
+    headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
     """One HTTP/1.1 exchange on a raw socket; the target is sent exactly."""
     lines = [
@@ -196,6 +222,7 @@ def http(
         "Connection: close",
         f"Content-Length: {len(body)}",
     ]
+    lines.extend(f"{name}: {value}" for name, value in (headers or {}).items())
     payload = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
     with socket.create_connection(("127.0.0.1", port), timeout=timeout) as sock:
         sock.settimeout(timeout)
@@ -218,8 +245,11 @@ def http(
             if separator:
                 headers[name.strip().lower()] = value.strip()
         data = rest
+        chunked = "chunked" in headers.get("transfer-encoding", "").lower()
         length = headers.get("content-length")
-        if length is not None:
+        if chunked:
+            data = _unchunk(sock, data)
+        elif length is not None:
             wanted = int(length)
             while len(data) < wanted:
                 chunk = sock.recv(65536)

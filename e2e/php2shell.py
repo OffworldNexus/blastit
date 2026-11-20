@@ -4,7 +4,7 @@
     php2shell.py --fixture /fixture --site /site --page /opt/e2e/php.md \
         --matrix /opt/e2e/probes.md
 
-`docs/frameworks/php/index.md` is the page of record and `e2e/php/probes.md` is the
+`docs/frameworks/php/index.md` is the page of record and `e2e/apps/php/probes.md` is the
 refusal matrix of record (a verbatim copy of the accepted §4.7 table, kept
 because the design corpus it lived in was deleted with `ADR-0010`). This driver
 is what turns both into evidence on the runtime a host actually installs.
@@ -37,7 +37,7 @@ What it does:
   (it serves, exits `0` on `SIGINT`, and one `EmbeddedView` worker starts per
   `view`, each with its own pid); `uv tool install blastit` and
   `blastit --preset compose-traefik` are explained — a published-wheel install
-  and a production preset owned by `e2e/rootless` — and an unknown `$ ` command
+  and a production preset owned by the production suite — and an unknown `$ ` command
   is a failure;
 * `blastit check` keeps the page's §8 sentence: exit `2` naming pytest, because
   a PHP manifest has no request audit in `0.2.0`;
@@ -73,9 +73,11 @@ from typing import Self
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "docs" / "frameworks" / "php" / "index.md"
-MATRIX = ROOT / "e2e" / "php" / "probes.md"
-FIXTURE = ROOT / "e2e" / "php" / "fixture"
+MATRIX = ROOT / "e2e" / "apps" / "php" / "probes.md"
+FIXTURE = ROOT / "e2e" / "apps" / "php"
 
+#: The port the fixture's `blastit dev` binds and the probes connect to. The
+#: consolidated runner (`e2e/run_apps.py`) passes one from its 28080+ range.
 PORT = 8080
 #: The hashed stylesheet `docs/frameworks/php/index.md` promises the static
 #: responder answers for a file under `public/`.
@@ -110,7 +112,7 @@ CANARIES = {
 #: other `$ ` command on the page is replayed; an unexplained one fails.
 SKIPS = {
     "uv tool install blastit": "installs the published wheel from PyPI; the container runs the wheel this build produced",
-    "blastit --preset compose-traefik": "a production preset; e2e/rootless (E1) proves it",
+    "blastit --preset compose-traefik": "a production preset; the production suite (MB.56.4.2) proves it",
 }
 
 _CONSOLE = re.compile(
@@ -739,7 +741,12 @@ class Server:
 
     def __init__(self, site: Path, log: Path, learn: bool = False) -> None:
         self.log_path = log
-        self.arguments = ["blastit", "dev"] + (["--learn"] if learn else [])
+        self.arguments = [
+            "blastit",
+            "dev",
+            "--port",
+            str(PORT),
+        ] + (["--learn"] if learn else [])
         environment = dict(os.environ)
         environment["BLASTIT_LOG_FORMAT"] = "json"
         self.log = open(log, "wb")  # noqa: SIM115 - closed in `stop`
@@ -1235,6 +1242,13 @@ def self_test(page: Path, matrix: Path) -> int:
 def prepare(fixture: Path, site: Path) -> None:
     shutil.rmtree(site, ignore_errors=True)
     shutil.copytree(fixture, site)
+    # The fixture carries the shop's manifest beside the store-less probe one:
+    # the matrix is about the request channel, so it runs with no database. The
+    # copy keeps `check_fmt` and the page's `--learn` fence on the same file the
+    # probes were served from.
+    probe_manifest = site / "Blastfile.php2shell"
+    if probe_manifest.is_file():
+        probe_manifest.replace(site / "Blastfile")
     # The canaries are installed at the paths the probes name: a `.php` under
     # the static root (refused), the polyglot the truncation row reaches, and
     # the prepend file an INI channel would load.
@@ -1251,17 +1265,26 @@ def prepare(fixture: Path, site: Path) -> None:
 
 
 def main() -> int:
+    global PORT
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--fixture", type=Path, default=FIXTURE)
     parser.add_argument("--site", type=Path, help="where the served copy is made")
     parser.add_argument("--page", type=Path, default=PAGE)
     parser.add_argument("--matrix", type=Path, default=MATRIX)
     parser.add_argument(
+        "--port",
+        type=int,
+        default=PORT,
+        help="the port `blastit dev` binds and the probes connect to",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="check the matrix, `PROBES` and the page's shape, then exit",
     )
     arguments = parser.parse_args()
+
+    PORT = arguments.port
 
     if arguments.self_test:
         return self_test(arguments.page, arguments.matrix)

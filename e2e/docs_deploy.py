@@ -15,8 +15,8 @@ direct-port read-back, the `dead_grant`). So the index is also asserted to *not*
 carry that material again — the duplication the restructure removed cannot come
 back silently.
 
-It runs first in `e2e/run.py`, before any container starts: no Docker, no
-network, ~1 ms. A page edit that breaks the two-URL rule fails the gate at the
+It runs as the first leg of `e2e/run_apps.py`, before any container starts: no
+Docker, no network, ~1 ms. A page edit that breaks the two-URL rule fails the gate at the
 line that names the rule.
 
     uv run --no-project e2e/docs_deploy.py
