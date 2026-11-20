@@ -434,7 +434,7 @@ DOCKER
             # **here**, inside the image whose glibc is the floor the wheel names
             # (`MB.42.3.3`, design §6.1): built on the host they need 2.34, and a
             # `manylinux_2_28` tag over a 2.34 binary is a promise `pip` cannot
-            # check. `make py-sapi` asserts each shim's own artifact contract
+            # check. `make py-sapi` asserts the artifact contract of each shim
             # (`DT_SONAME`, undefined `Py_Initialize*`, the three exports), which
             # needs no shared libpython.
             cargo build --release --locked -p blastit-lsp

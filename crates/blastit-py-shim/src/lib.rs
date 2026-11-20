@@ -58,7 +58,14 @@
 //! owns — is compiled out of that one build shape. The artifact itself never
 //! sees `cfg(test)`, and every other build compiles all five modules.
 
+// Both are reached only through `surface`: the request codec fills the structs
+// `boot`/`env`/`serve` consume, and every buffer helper writes the answers those
+// boundaries return. A test build that enabled `extension-module` compiles
+// `surface` out (see the crate documentation), so they leave with it instead of
+// sitting dead.
+#[cfg(not(all(test, feature = "extension-module")))]
 mod buffer;
+#[cfg(not(all(test, feature = "extension-module")))]
 mod request;
 
 #[cfg(not(all(test, feature = "extension-module")))]

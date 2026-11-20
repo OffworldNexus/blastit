@@ -165,11 +165,21 @@ jobs:
       # proves one bounded assertion instead of serialising a whole crate.
       - name: Build the e2e_cli test binary (runner user, no root)
         timeout-minutes: 10
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
           set -euo pipefail
-          cargo test -p blastit --locked --features python --test e2e_cli --no-run
-          binary=$(find target/debug/deps -maxdepth 1 -type f -name 'e2e_cli-*' \
-            -perm -u+x ! -name '*.d' | head -n 1)
+          # Rust 1.100 puts the harness under `target/debug/build/blastit/.../out`,
+          # not `target/debug/deps`: ask cargo for the artifact it just built
+          # instead of guessing at a path that moved.
+          binary=$(cargo test -p blastit --locked --features python --test e2e_cli --no-run \
+            --message-format=json \
+            | "$PYTHON" -c 'import json, sys; matches = [
+                message["executable"] for message in map(json.loads, sys.stdin)
+                if message.get("reason") == "compiler-artifact"
+                and message.get("profile", {}).get("test")
+                and message.get("executable")
+            ]; print(matches[-1] if matches else "")')
           if [ -z "$binary" ]; then
             echo "::error::cargo built no e2e_cli test binary: the root-only assertion would silently disappear"
             exit 1

@@ -38,23 +38,23 @@ mod pg_upstream;
 mod deployment;
 
 use std::fs;
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 use std::io::BufRead;
 use std::io::Read;
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 use std::process::Child;
 use std::process::{Command, Stdio};
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -67,7 +67,7 @@ const NO_HANG: Duration = Duration::from_secs(15);
 #[cfg(feature = "php")]
 const REAPED: Duration = Duration::from_secs(2);
 /// One request's whole exchange.
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 const REQUEST: Duration = Duration::from_secs(20);
 
 /// A counter for unique fixture directories.
@@ -254,12 +254,12 @@ fn announced_ready(stdout: &str) -> bool {
 }
 
 // ------------------------------------------------------------- dev harness
-// The `blastit dev` collector below is only reachable from the WSGI legs: a
-// zero-feature build has no view to boot, so the whole harness is gated with
-// them instead of failing closed on dead code.
+// The `blastit dev` collector below is reachable from the WSGI **and** the PHP
+// legs: a zero-feature build has no view to boot, so the whole harness is gated
+// with them instead of failing closed on dead code.
 
 /// A `libphp` and shim to move under a boot paused at the test rendezvous.
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 struct Swap {
     point: PathBuf,
     from: PathBuf,
@@ -267,7 +267,7 @@ struct Swap {
 }
 
 /// A running `blastit dev`, with both streams collected as they arrive.
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 struct Boot {
     child: Child,
     port: u16,
@@ -277,7 +277,7 @@ struct Boot {
     swapped: Option<Arc<AtomicBool>>,
 }
 
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 impl Boot {
     fn start(dir: &Path, env: &[(&str, &str)]) -> Self {
         Self::launch(dir, env, None)
@@ -463,7 +463,7 @@ impl Boot {
     }
 }
 
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 impl Drop for Boot {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -477,7 +477,7 @@ impl Drop for Boot {
 }
 
 /// Reads a child's pipe into `sink`, line by line.
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 fn spawn_reader(
     pipe: impl Read + Send + 'static,
     sink: Arc<Mutex<Vec<String>>>,
@@ -491,7 +491,7 @@ fn spawn_reader(
 }
 
 /// `<point>.<suffix>`, the two halves of the swap rendezvous.
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 fn sidecar(point: &Path, suffix: &str) -> PathBuf {
     let mut name = point.as_os_str().to_owned();
     name.push(".");
@@ -500,7 +500,7 @@ fn sidecar(point: &Path, suffix: &str) -> PathBuf {
 }
 
 /// A boot that must never have served: no `ready`, nothing on the port.
-#[cfg(feature = "python")]
+#[cfg(any(feature = "python", feature = "php"))]
 fn assert_never_served(boot: &mut Boot, what: &str) {
     let events = boot.events();
     for name in ["ready", "process.spawned", "request", "runtime"] {

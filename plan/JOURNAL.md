@@ -4400,3 +4400,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T23:17 [MB.56.5] (lead) status ready -> done: dead symbols pruned; 295 citations removed; make check + all three Docker suites green
 - 2026-11-20T23:20 [MB.56] (lead) status ready -> done: make check + zed/docs-check + run_apps 10 + run_prod 7 + run_packaging 4/3SKIP all green; prod 144,007->94,879 LOC, tests 83,472->19,238
 - 2026-11-20T23:21 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0 and H-017/H-018 review
+- 2026-11-20T23:33 [MB.57] (conductor) created (task) Fix 4 post-MB.56 CI items (build-wheel.sh quote, py-shim clippy cfg, e2e_dev php-only cfg & root-only Cargo JSON executable lookup)
+- 2026-11-20T23:34 AUTOPILOT on by conductor fixing 4 post-MB.56 CI items in MB.57
+- 2026-11-20T23:34 [MB.57] (lead) status ready -> active
+- 2026-11-20T23:34 [MB.57] (lead) attempt 1/3 started
+- 2026-11-20T23:34 [MB.57] (lead) base 351021b21eac0f0791b10d55d5c12ed28840773f
+- 2026-11-20T23:40 [MB.57] (lead) REVIEW: PASS (review-arch). build-wheel quote balance 12/12, py-shim cfg predicate consistent with existing 5 modules, 3 cfg attrs were inert inside doc comment
+- 2026-11-20T23:40 [MB.57] (lead) status active -> done
+- 2026-11-20T23:40 [MB.57] (lead) commit a4f9223

@@ -21,11 +21,13 @@ pub const WIDTH: usize = 4;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The serialized floor: four 200 ms requests, one at a time.
+#[cfg(feature = "python")]
 pub const CONTROL_FLOOR: Duration = Duration::from_millis(800);
 
 /// How much faster than the serialized control the parallel leg must be, so a
 /// fast host cannot pass on its own speed (`ADR-0015`'s measured promise is a
 /// comparison, not a constant).
+#[cfg(feature = "python")]
 pub const CONTROL_MARGIN: Duration = Duration::from_millis(400);
 
 /// One parsed response: the status and everything after the blank line.

@@ -529,6 +529,7 @@ impl Dev {
         })
     }
 
+    #[cfg(feature = "python")]
     fn json_request(&self, method: &str, path: &str) -> serde_json::Value {
         let response = self.request(method, path);
         serde_json::from_str(&response.body).unwrap_or_else(|err| {
@@ -1319,7 +1320,8 @@ fn start_php(
 }
 
 /// A PSR-style project: a front controller under `public/`, a static mount of
-/// the same directory, and two views with **distinct** PostgreSQL rights.#[cfg(feature = "php")]
+/// the same directory, and two views with **distinct** PostgreSQL rights.
+#[cfg(feature = "php")]
 const PHP_GRANT_MANIFEST: &str = "\
 entrypoint php \"public/index.php\"
 
@@ -2938,7 +2940,8 @@ fn a_non_loopback_host_needs_the_exposure_acknowledgement() {
 // ---------------------------------------------------------------------------
 
 /// §2: a `static` mount serves under its prefix with the prefix stripped, and
-/// the longest matching prefix answers (`docs/reference/blastfile.md`).#[cfg(feature = "static")]
+/// the longest matching prefix answers (`docs/reference/blastfile.md`).
+#[cfg(feature = "static")]
 #[test]
 fn a_prefix_mount_serves_under_its_prefix_and_the_longest_one_wins() {
     let project = Project::new("mounts");
@@ -2976,7 +2979,8 @@ fn a_missing_static_root_stops_the_boot_before_it_binds() {
     }
 }
 
-/// §4: the banner lists one row per view and per mount (`docs/local.md`).#[cfg(all(feature = "python", feature = "static"))]
+/// §4: the banner lists one row per view and per mount (`docs/local.md`).
+#[cfg(all(feature = "python", feature = "static"))]
 #[test]
 fn the_banner_names_every_view_and_mount() {
     let project = Project::new("banner");
