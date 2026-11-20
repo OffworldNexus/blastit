@@ -31,3 +31,7 @@ REVIEW FIX: tests: per-spelling preset message + --preset=NAME accepted/rejected
 ## 2026-11-20T18:54 [lead]
 
 status active -> done
+
+## 2026-11-20T18:54 [lead]
+
+commit eef8793

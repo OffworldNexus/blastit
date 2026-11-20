@@ -4261,3 +4261,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T18:50 [MB.56.3.1] (lead) edited fields
 - 2026-11-20T18:50 [MB.56.3.1] (lead) REVIEW FIX: tests: per-spelling preset message + --preset=NAME accepted/rejected, --port 8080 -> 2, TOCTOU swap adversarial test, self-image test observable or 
 - 2026-11-20T18:54 [MB.56.3.1] (lead) status active -> done
+- 2026-11-20T18:54 [MB.56.3.1] (lead) commit eef8793
+- 2026-11-20T18:54 [MB.56.3.2] (lead) status ready -> active
+- 2026-11-20T18:54 [MB.56.3.2] (lead) attempt 1/3 started
+- 2026-11-20T18:54 [MB.56.3.2] (lead) base eef8793da590e19b43eb36ee579f143fce19d18b
+- 2026-11-20T18:54 [MB.56.3.2] (lead) edited fields
+- 2026-11-20T18:54 [MB.56.3.2.1] (lead) created (task) e2e_dev.rs part 1: Python WSGI multi-view, host rules, venv activation
+- 2026-11-20T18:54 [MB.56.3.2.2] (lead) created (task) e2e_dev.rs part 2: embedded PHP front controller, per-view grants, php2shell, pinning
+- 2026-11-20T18:54 [MB.56.3.2.3] (lead) created (task) e2e_dev.rs part 3: static/SPA, live reload, learn, shutdown; absorb smoke
+- 2026-11-20T18:54 [MB.56.3.3] (lead) edited fields
+- 2026-11-20T18:54 [MB.56.3.2.1] (lead) status ready -> active
+- 2026-11-20T18:54 [MB.56.3.2.1] (lead) attempt 1/3 started
+- 2026-11-20T18:54 [MB.56.3.2.1] (lead) base eef8793da590e19b43eb36ee579f143fce19d18b
