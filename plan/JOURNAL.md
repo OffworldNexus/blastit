@@ -4082,3 +4082,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T10:42 [MB.50] (lead) REVIEW FIX (review-arch): (1) BLOCKER search() POSIX fallback finds /usr/bin/python3=3.12 -> UnsupportedMinor; prefer python3.<minor> from SUPPORTED_MINORS per 
 - 2026-11-20T10:50 [MB.50] (lead) status active -> done
 - 2026-11-20T10:50 [MB.50] (lead) commit a60d6c4
+- 2026-11-20T10:51 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
