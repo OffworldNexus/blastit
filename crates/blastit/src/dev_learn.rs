@@ -635,7 +635,7 @@ impl LearnRun {
         // The same reasoning forbids attributing them when *any* unrouted request
         // was one `--learn` refuses to turn into a view: a probe's `/.env` or
         // `/../etc/passwd` request has no path on its statement, so its SQL would
-        // land in the one legitimate view's `queries` (`MB.40.2`).
+        // land in the one legitimate view's `queries`.
         let unattributable = self.unrouted.iter().any(|(_, path)| {
             !crate::check::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some()
         });

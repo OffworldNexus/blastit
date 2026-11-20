@@ -19,7 +19,7 @@ use super::fail;
 
 /// Reads the configuration document stage 0 wrote into the pipe (§4), the
 /// `entrypoint php` probe timeout that travelled with it (`ADR-0010` §3), and —
-/// in a debug build — the test-only swap point (`MB.3.64`).
+/// in a debug build — the test-only swap point.
 ///
 /// The timeout is a **stage-0 decision**: `BLASTIT_PROBE_TIMEOUT_MS` is read
 /// before the `execve` that swaps this process's environment, because
@@ -33,14 +33,14 @@ pub(super) struct BootConfig {
     pub(super) config: Config,
     /// The `entrypoint php` probe's patience (`ADR-0010` §3).
     pub(super) probe_timeout: Duration,
-    /// The debug-only `BLASTIT_TEST_SWAP_POINT` rendezvous (`MB.3.64`).
+    /// The debug-only `BLASTIT_TEST_SWAP_POINT` rendezvous.
     pub(super) swap_point: Option<PathBuf>,
     /// The exact document bytes, re-supplied through a fresh pipe by a reload
     /// cycle (§4.6 step 6).
     pub(super) bytes: Vec<u8>,
     /// Stage 0's stage-1 program prefix, for the cycle.
     pub(super) restart: Option<Vec<String>>,
-    /// The debug-only reload fault seam (`MB.23.5.2.2`).
+    /// The debug-only reload fault seam.
     pub(super) reload_fault: Option<String>,
 }
 
@@ -85,7 +85,7 @@ pub(super) fn read_config(
                 .collect::<Vec<String>>()
         })
         .filter(|argv| !argv.is_empty());
-    // `MB.23.5.2.2`: the debug-only reload fault seam, read back where the swap
+    // The debug-only reload fault seam, read back where the swap
     // point is. A release build has neither the member's name nor this read.
     #[cfg(debug_assertions)]
     let reload_fault = value
@@ -415,7 +415,7 @@ pub(super) fn dev_root_from_cmdline() -> Result<std::path::PathBuf, String> {
 /// The adoption document's size bound (§4.6 step 6).
 pub(super) const MAX_ADOPTION_DOCUMENT: usize = 4096;
 
-/// `MB.3.64`: pauses stage 1 at the test-only rendezvous, when — and only when —
+/// Pauses stage 1 at the test-only rendezvous, when — and only when —
 /// a `debug_assertions` build with the `php` capability was handed one.
 ///
 /// Stage 0 read `BLASTIT_TEST_SWAP_POINT` before the barrier and carried the

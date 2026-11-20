@@ -15,7 +15,7 @@
 //! * a **wheel install** runs inside the interpreter the console script started,
 //!   and stage 0 (dbproxy) and stage 1 (http, scheduler) fork *while it is
 //!   live*. Those forks arrive here with `Some(hooks)`;
-//! * a build with `python` off (`MB.3.11`, ADR-0010 §4) has no interpreter in
+//! * a build with `python` off (`ADR-0010` §4) has no interpreter in
 //!   any role: the three hooks are a phantom and [`fork`] is `fork(2)`.
 //!
 //! This module names no interpreter API: the three entry points are function

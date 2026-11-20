@@ -1,4 +1,4 @@
-//! What a validated command line actually runs (`R2`, `R3`, `R19`, `MB.22.3`).
+//! What a validated command line actually runs (`R2`, `R3`, `R19`).
 //!
 //! Each entry point is one delegation: the grammar decided *what*; these hand
 //! the options to the stage, engine or session that owns the work, and return
@@ -30,7 +30,7 @@ pub(super) fn run_check(host: &Host, options: &CheckOptions, colour: Colour) -> 
 
 // The `blastit lsp` session lives in `cli.rs`, beside the dispatcher: a protected
 // test reads that file and asserts the capability check precedes the session
-// (`MB.22.3`, `critical_lsp.rs`).
+// (`critical_lsp.rs`).
 
 /// The `blastit fmt` command (§14.4).
 ///

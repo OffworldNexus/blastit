@@ -626,7 +626,7 @@ impl ReportTable {
     }
 
     /// Seeds the union with paths the **boot** already serves, before any
-    /// worker has reported (`MB.40.9`).
+    /// worker has reported.
     ///
     /// A view's first report is its `boot` batch, and that batch is what puts
     /// its files in the union — so an app whose front controller is edited
@@ -847,7 +847,7 @@ impl Policy {
         &mut self.reports
     }
 
-    /// Seeds the union with the paths the boot itself serves (`MB.40.9`).
+    /// Seeds the union with the paths the boot itself serves.
     ///
     /// Stage 1 calls this once, after the watcher exists and before the marking
     /// pass: an `entrypoint php` edited before the first request is watched from

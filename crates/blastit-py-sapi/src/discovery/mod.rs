@@ -284,7 +284,7 @@ fn production_interpreter(
 
 /// `_CS_PATH`'s default directories: what `libc::execvp` searches when `PATH`
 /// is unset. An empty environment must not collapse the search to zero
-/// directories (`env -i blastit dev`, `MB.50`).
+/// directories (`env -i blastit dev`).
 const POSIX_SEARCH_PATH: [&str; 3] = ["/usr/local/bin", "/usr/bin", "/bin"];
 
 /// Those defaults, as paths.

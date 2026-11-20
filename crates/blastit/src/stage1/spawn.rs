@@ -285,9 +285,9 @@ pub struct ViewChildPlans {
 ///
 /// # Errors
 ///
-/// The routing-table disagreement the binding builder used to refuse: a manifest
-/// route with no view slot means the manifest and the scheduler's table were
-/// built from different inputs, which is a boot refusal rather than a guess.
+/// A manifest route with no view slot means the manifest and the scheduler's
+/// table were built from different inputs, which is a boot refusal rather than a
+/// guess.
 #[cfg(feature = "php")]
 pub(super) fn php_slots(
     config: &Config,

@@ -14,7 +14,7 @@ use crate::config::{Config, view_dir};
 #[cfg(feature = "php")]
 use crate::host::{Claim, Provenance};
 use crate::logs::{Emitter, fail};
-// The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
+// The `entrypoint php` discovery gate: a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
 #[cfg(feature = "php")]
@@ -110,20 +110,16 @@ pub(crate) fn raw_ingress_gate(manifest: &Manifest) -> Result<(), String> {
     }
 }
 
-/// `MB.3.54`: the serve path's manifest gates, as a value [`bind_view_sockets`]
+/// The serve path's manifest gates, as a value [`bind_view_sockets`]
 /// will not accept any other way.
 ///
-/// The gate used to be a bare `if let Err(..)` statement in [`run`], between the
-/// manifest parse and the first listener: deleting it — or letting it drift
-/// after the bind — left every test green, because an unprivileged `cargo test`
-/// cannot run stage 0 past [`blastit_sys::caps::detect`] (the suite that
-/// measures the gate spells that out:
-/// `crates/blastit/tests/critical_raw_ingress.rs`). The witness is the type
-/// system instead: [`ServeGates::clear`] is the only constructor and it *is*
+/// [`ServeGates::clear`] is the only constructor and it *is*
 /// [`raw_ingress_gate`], and [`bind_view_sockets`] takes `&ServeGates`, so no
 /// boot can bind a view socket without the gate having passed first in this
 /// process — and removing the call site is a compile error rather than a silent
-/// fail-open.
+/// fail-open. An unprivileged `cargo test` cannot run stage 0 past
+/// [`blastit_sys::caps::detect`], so the type is what carries the witness
+/// (`crates/blastit/tests/critical_raw_ingress.rs` measures the rest).
 ///
 /// Crate-private on purpose, which is stronger than a `#[doc(hidden)] pub` seam:
 /// nothing outside this crate can hold the proof or mint one, so the ordering
@@ -145,7 +141,7 @@ impl ServeGates {
 }
 
 /// `ADR-0009` §5: what a build with no Python support cannot serve, and the
-/// sentence that names the artifact which can (`MB.3.11`).
+/// sentence that names the artifact which can.
 ///
 /// A build with `python` off — the standalone archive of `ADR-0010` §4 — has no
 /// interpreter in any role, so a manifest that needs one is refused **here, in
@@ -159,11 +155,11 @@ impl ServeGates {
 /// [`static_app_refusal`], which keeps its `BLASTIT_APP`-on-a-static-tree
 /// sentence in both builds. So does an `entrypoint php` file: it runs in a `view`
 /// worker with no interpreter anywhere near it, so this gate returns `None`
-/// for a PHP-only manifest (`MB.3.5.4`) — [`php_boot_gate`] is the separate
+/// for a PHP-only manifest — [`php_boot_gate`] is the separate
 /// gate that refuses such a boot when the host has no usable NTS `libphp`, and
 /// it must not be mistaken for this one.
 ///
-/// The retired external-PHP key (`MB.3.17`) needs no sentence here: the parser
+/// An external-PHP key needs no sentence here: the parser
 /// refuses it as an unknown key before a boot gets this far.
 #[cfg(not(feature = "python"))]
 pub(crate) fn no_python_support(
@@ -219,7 +215,7 @@ pub(crate) const PROBE_TIMEOUT_DEFAULT: Duration = Duration::from_millis(5000);
 pub(crate) const PROBE_TIMEOUT_MEMBER: &str = "php_probe_timeout_ms";
 
 /// The document member that carries the stage-1 **program prefix** across the
-/// `execve` (`MB.23.5.2.2`, design §4.6 step 6).
+/// `execve` (design §4.6 step 6).
 ///
 /// A reload cycle re-execs the program this image was started with — the
 /// standalone binary for a container, `python -I -m blastit` for a wheel — and
@@ -258,14 +254,14 @@ pub(super) fn probe_timeout() -> Result<Option<Duration>, String> {
     Ok(Some(Duration::from_millis(millis)))
 }
 
-/// `MB.3.64`: the test-only rendezvous that gives `critical_php_embed`'s
+/// The test-only rendezvous that gives `critical_php_embed`'s
 /// inode-pin legs a deterministic window between stage 0's record and stage 1's
 /// re-open.
 ///
 /// This is a **test seam, not a setting**. It exists only in a
 /// `debug_assertions` build — every `cargo test` binary — and the constant
 /// itself does not exist in a release build, so a shipped artifact has no name
-/// to read: `scripts/check-no-test-seam.sh` measures that absence on the
+/// to read: `scripts/build-standalone.sh` measures that absence on the
 /// packaged binary instead of trusting the gate.
 ///
 /// It is read *here*, in the composition root, because the stage 0→1 `execve`
@@ -276,7 +272,7 @@ pub(super) fn probe_timeout() -> Result<Option<Duration>, String> {
 #[cfg(debug_assertions)]
 pub(crate) const TEST_SWAP_POINT_VAR: &str = "BLASTIT_TEST_SWAP_POINT";
 
-/// `MB.23.5.2.2`: the debug-only fault seam that makes the live-reload boot
+/// The debug-only fault seam that makes the live-reload boot
 /// take a ladder row on purpose.
 ///
 /// `BLASTIT_TEST_RELOAD_FAULT=open` makes stage 1's watcher construction fail
@@ -319,7 +315,7 @@ pub(super) fn config_document(config: &Config) -> Result<serde_json::Value, Stri
             serde_json::Value::from(millis),
         );
     }
-    // `MB.3.64`: a path a test owns, carried across the `execve` for the same
+    // A path a test owns, carried across the `execve` for the same
     // reason the probe timeout is. Compiled out of every release build, so the
     // variable cannot name anything a shipped binary would act on.
     #[cfg(debug_assertions)]
@@ -331,7 +327,7 @@ pub(super) fn config_document(config: &Config) -> Result<serde_json::Value, Stri
             serde_json::Value::from(point.to_string_lossy().into_owned()),
         );
     }
-    // `MB.23.5.2.2`: the reload ladder's fault seam, carried the same way and
+    // The reload ladder's fault seam, carried the same way and
     // compiled out of every release build.
     #[cfg(debug_assertions)]
     if let Some(fault) = std::env::var_os(TEST_RELOAD_FAULT_VAR)
@@ -430,7 +426,7 @@ pub(super) fn tree_is_protected(init_uid: u32, path: &Path) -> Result<(), String
 /// It runs the same function a deployment boot runs, `php_boot_in` with a
 /// `Deployment`, because an unprivileged test process cannot reach a deployment
 /// boot at all: `caps::detect` refuses it before `Config::from_env`
-/// (`LESSONS.md`, `MB.1.6`). Driving [`Provenance`] directly — which the
+/// (`LESSONS.md`). Driving [`Provenance`] directly — which the
 /// protected legs also do — pins the *decision* but not the *call*: with this
 /// seam deleted from `php_boot_in`, `tests/critical_php_embed.rs`'s
 /// `the_deployment_gate_is_invoked_behind_its_sentence` is the leg that fails.
@@ -468,9 +464,9 @@ pub fn deployment_boot_check(
     };
     match php_boot_in(&manifest, &search, Some(&deployment)) {
         // Nothing to authorise is not a refusal: a manifest with no PHP route
-        // boots (`MB.3.44` — reporting this as an error let a caller read a
+        // boots. Reporting this as an error let a caller read a
         // *proceeding* manifest as a refused one, the confusion this seam
-        // exists to prevent).
+        // exists to prevent.
         PhpBoot::Proceed(_) | PhpBoot::Absent => Ok(()),
         PhpBoot::Refused(message) => Err(message),
     }
@@ -494,7 +490,7 @@ pub(crate) fn no_php_support(manifest: &Manifest) -> Option<String> {
     })
 }
 
-/// §8.1's `runtime` line for a boot whose entrypoint is **not** PHP (`MB.25.2`).
+/// §8.1's `runtime` line for a boot whose entrypoint is **not** PHP.
 ///
 /// PHP's own line is emitted by the probe below the fork
 /// ([`blastit_view_php::probe::probe_bindings`]): only a process that ran
@@ -591,7 +587,7 @@ pub(crate) fn static_root_permission(
     };
     for (index, path) in manifest.static_roots(manifest_dir) {
         // Stage 0 runs no interpreter (the universal binary starts none), so the
-        // probe's forks carry no CPython protocol (`MB.42.2.2.2`).
+        // probe's forks carry no CPython protocol.
         let refused =
             match crate::visibility::unreadable(std::slice::from_ref(&path), &dropped, None) {
                 Ok(None) => false,
@@ -665,7 +661,7 @@ pub(super) fn layout_collision(
 /// per-proxy assignment, so every process derives the same number from the same
 /// manifest (§5.2).
 ///
-/// `_serve_gates` is the point of the signature (`MB.3.54`): it can only be
+/// `_serve_gates` is the point of the signature: it can only be
 /// built by [`ServeGates::clear`], which runs [`raw_ingress_gate`], so no caller
 /// can reach a bound view socket without the `ADR-0011` gate having run first.
 /// The ordering is checked by the compiler — an unprivileged test cannot stand

@@ -180,7 +180,7 @@ fn child_main(
 }
 
 /// A `python`-less build never forks a WSGI view: the boot gate refused every
-/// route that would need one (`MB.3.11`).
+/// route that would need one.
 ///
 /// # Errors
 ///

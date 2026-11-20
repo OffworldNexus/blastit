@@ -109,7 +109,7 @@ pub fn run(options: Options, colour: Colour) -> ! {
     // Warnings are stage 0's: it reads and validates the manifest first, and
     // printing them twice would be noise (§8.1).
     //
-    // `ADR-0011` (`MB.3.53`): the gate stage 0 refuses with, repeated here
+    // `ADR-0011`: the gate stage 0 refuses with, repeated here
     // because this is the re-read. `config` carries the manifest's *path* and no
     // digest of what stage 0 approved, so a file swapped between the two stages
     // would otherwise serve a `body = "raw"` route stage 0 never saw. Gated on
@@ -191,7 +191,7 @@ pub fn run(options: Options, colour: Colour) -> ! {
     // child-side choice would be forgeable. [`view_child_plans`] is that
     // decision, and its unit cases are the pin the design asks for.
     let plans = view_child_plans(&routes, &egress, dev.as_ref(), config.seccomp);
-    // `MB.3.64`: the debug-only test seam. Stage 0 recorded `(st_dev, st_ino)`
+    // The debug-only test seam. Stage 0 recorded `(st_dev, st_ino)`
     // for the pair and carried `BLASTIT_TEST_SWAP_POINT` in the configuration
     // document; this is the one point between that record and the re-open below,
     // so a `cargo test` boot pauses here until the test has renamed an object.
@@ -226,7 +226,7 @@ pub fn run(options: Options, colour: Colour) -> ! {
     // the scheduler) and the PHP probe carry no CPython protocol; the per-view
     // forks after `load::embed` take their hooks from the runtime it loaded
     // (`supervise`). There is no second installation whose stage 1 runs inside
-    // CPython already (`MB.42.2.2.2`).
+    // CPython already.
     let hooks = None;
     // `ADR-0010` §3: stage 1 re-opens the NTS `libphp` and the shim stage 0
     // inspected, asserts `(st_dev, st_ino)` against that record, renders the INI
@@ -235,7 +235,7 @@ pub fn run(options: Options, colour: Colour) -> ! {
     // listener binds — never by a worker that loads something nobody inspected.
     // A host with no usable library never reaches stage 1: stage 0 refused it.
     //
-    // `MB.36.5`: the two values travel as data (`PhpSlot`s), because a view
+    // The two values travel as data (`PhpSlot`s), because a view
     // crate may not name this module's `Config` or the scheduler's `RouteInfo`
     // (`view-crates-architecture` §4.4 D2). The slots are keyed by **view
     // slot**, so a `--learn` boot's fallback slot 0 keeps its numbering.
@@ -655,7 +655,7 @@ pub fn run(options: Options, colour: Colour) -> ! {
     // forks above were the last thing that had to happen while init was
     // single-threaded (§2.1). A build with no interpreter supervises exactly
     // the roles it forked: the boot gate refused every route that would need a
-    // view, so the scheduler asks for none (`MB.3.11`).
+    // view, so the scheduler asks for none.
     #[cfg(feature = "python")]
     serve(&emitter, serving);
     #[cfg(not(feature = "python"))]
@@ -663,13 +663,13 @@ pub fn run(options: Options, colour: Colour) -> ! {
 }
 
 /// Supervises the forked roles in a build that carries no interpreter
-/// (`MB.3.11`). Never returns.
+/// Never returns.
 ///
 /// Nothing here can start a WSGI view: [`crate::stage0::no_python_support`]
 /// refused every route that would need one before a listener was bound. It can
 /// and does serve `entrypoint php` (the standalone artifact's default feature
 /// set is `php,static`), which is why this path boots the same live-reload
-/// watcher a WSGI `dev` boot does (`MB.40.9`): a PHP worker needs no
+/// watcher a WSGI `dev` boot does: a PHP worker needs no
 /// interpreter to fork, and a save is served by repinning the entry, not by
 /// re-execing an image.
 ///
@@ -678,7 +678,7 @@ pub fn run(options: Options, colour: Colour) -> ! {
 #[cfg(not(feature = "python"))]
 pub(super) fn serve_without_interpreter(emitter: &Emitter, serving: Serving) -> ! {
     // The same construction, PHP boot-file seeding, marking pass, boot line and
-    // §4.6 step 7 `reconcile` a WSGI `dev` boot runs (`MB.40.9`): a PHP worker
+    // §4.6 step 7 `reconcile` a WSGI `dev` boot runs: a PHP worker
     // needs no interpreter, so this build reloads saves the same way. The no-op
     // `between` is the one difference — there is no `preload` import here.
     let (reload, ()) = boot_and_seed_reload(emitter, &serving, |_| ());
@@ -728,7 +728,7 @@ pub(super) struct Serving {
     /// Number of views declared in the `Blastfile` (reported on `ready`).
     pub(super) declared_routes: usize,
     /// Whether each route may keep `AF_INET`/`AF_INET6`, by route index (§7.3).
-    /// Only a build that forks a view reads it (`MB.3.11`).
+    /// Only a build that forks a view reads it.
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub(super) egress: Vec<bool>,
     /// The identity and filter each route's view child keeps

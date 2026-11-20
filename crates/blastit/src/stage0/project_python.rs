@@ -154,7 +154,7 @@ fn discovery_env(boot: Boot) -> DiscoveryEnv {
     let blastit_python = std::env::var_os("BLASTIT_PYTHON")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    // `// transitional (MB.42.2.1.4)`: a linked build's own interpreter is the
+    // A linked build's own interpreter is the
     // *last* dev candidate (§2.2 puts `<manifest>/.venv` first), so a project
     // venv still wins and an `env -i` shell still finds one.
     let wheel_python = std::env::var_os("BLASTIT_WHEEL_PYTHON")
@@ -186,7 +186,7 @@ fn discovery_env(boot: Boot) -> DiscoveryEnv {
 /// `<PYTHONHOME>/bin/python3`, when a dev shell (or its harness) activated a prefix.
 ///
 /// `PYTHONHOME` names an interpreter prefix the caller already chose, so probing it
-/// is not a build-host path baked into the artifact (`MB.42.2.1.4` deleted those):
+/// is not a build-host path baked into the artifact:
 /// it is a *dev* candidate only, and a deployment still reads `BLASTIT_PYTHON`, the
 /// manifest venv, the wheel's interpreter or the system directories (design §2.2).
 fn prefix_python(boot: Boot) -> Option<PathBuf> {

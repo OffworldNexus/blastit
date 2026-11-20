@@ -2,7 +2,7 @@
 id: MB.56.5
 title: "Run make coverage to delete uncovered dead Rust code, strip historical diary comments & pass full E2E gates"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.56.4.4]
 paths:
@@ -17,7 +17,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:02"
-updated: "2026-11-20T22:57"
+updated: "2026-11-20T23:17"
 ---
 
 # Goal

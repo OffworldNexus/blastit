@@ -2,16 +2,16 @@
 id: MB.56.5.2.2
 title: "Diary-comment strip: crates/blastit + stale refs + final gates"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.5.2.1]
 paths: ["crates/**", "scripts/**", "e2e/**", docs/knowledge/LESSONS.md, ARCHITECTURE.md]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T23:06"
-updated: "2026-11-20T23:06"
+updated: "2026-11-20T23:17"
 ---
 
 # Goal

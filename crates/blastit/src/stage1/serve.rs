@@ -50,7 +50,7 @@ pub(super) fn after_preload_marks(
 }
 
 /// Boots the one live-reload watcher of a `dev` boot with reload on, seeds the
-/// paths only the boot knows, and settles it (`MB.40.9`; `ADR-0014` §4.1).
+/// paths only the boot knows, and settles it (`ADR-0014` §4.1).
 ///
 /// `between` runs while the watcher exists and **before** the marking pass: the
 /// WSGI boot's `preload` lives there, so the files it opens are reported and
@@ -75,7 +75,7 @@ pub(super) fn boot_and_seed_reload<T>(
         }
         false => None,
     };
-    // `MB.40.9`: a view reports its files in its first batch, and that batch is
+    // A view reports its files in its first batch, and that batch is
     // what marks them — so a front controller edited **before** the first
     // request was not watched at all. Every PHP slot's entry and root are seeded
     // here, before the marking pass below, so a save at any point after boot is
@@ -137,7 +137,7 @@ fn settle_reload(reload: &mut Option<Reload>, serving: &Serving, emitter: &Emitt
 ///
 /// Every boot with a Python view pinned its runtime in stage 0; this function
 /// `dlopen`s it **after** the `http`/scheduler forks, so no half-initialised
-/// interpreter is inherited (`MB.42.2.2.2`).
+/// interpreter is inherited.
 #[cfg(feature = "python")]
 pub(super) fn serve(emitter: &Emitter, mut serving: Serving) -> ! {
     // The watcher exists **before** the first import, so the `preload` phase's

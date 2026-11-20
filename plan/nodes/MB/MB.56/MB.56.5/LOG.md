@@ -43,3 +43,7 @@ edited fields
 ## 2026-11-20T22:57 [lead]
 
 edited fields
+
+## 2026-11-20T23:17 [lead]
+
+status ready -> done: dead symbols pruned; 295 citations removed; make check + all three Docker suites green

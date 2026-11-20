@@ -19,7 +19,7 @@ use crate::dev_learn::{DevRoot, PRIVILEGE};
 use crate::host::{Host, Reexec};
 use crate::logs::{Colour, Emitter, fail, output_event};
 use crate::mem_usage;
-// The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
+// The `entrypoint php` discovery gate: a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
 #[cfg(feature = "php")]
@@ -202,7 +202,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, colour: Colour) -> ! {
         Err(errors) => dev_fail(&format!("{errors}")),
     };
     // `R13`: a site whose mounts answer every request needs no `app`; anything
-    // else still names the setting as before (`MB.1.6`), and a `BLASTIT_APP`
+    // else still names the setting, and a `BLASTIT_APP`
     // that could never run is refused rather than ignored.
     //
     // Before it: `ADR-0009` §5's capability gate, so a python-less build says
@@ -229,7 +229,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, colour: Colour) -> ! {
         PhpBoot::Refused(message) => dev_fail(&message),
         PhpBoot::Proceed(runtime) => {
             // The line naming what was resolved is the probe's
-            // (`php_view::probe_bindings`, `MB.25.2`): only the process that ran
+            // (`php_view::probe_bindings`): only the process that ran
             // `php_module_startup` can say which `php.ini` the workers read, and
             // it says so once the boot is known-good. A pre-banner lane would
             // have to keep that sentence on descriptor 2 and still could not
@@ -263,7 +263,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, colour: Colour) -> ! {
         .map(|(name, names)| (name.as_str().to_string(), names.clone()))
         .collect();
     config.sys_path = host.sys_path().to_vec();
-    // `MB.40.8`, design §2.1/§2.4: a `dev` Python boot resolves its
+    // Design §2.1/§2.4: a `dev` Python boot resolves its
     // interpreter, `libpython` and shim the same way a deployment does, but may
     // honour `$VIRTUAL_ENV`, `PATH` and `BLASTIT_PY_SHIM_DIR`. A PHP-only or
     // static-only boot returns before any search.
@@ -323,7 +323,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, colour: Colour) -> ! {
         None
     };
 
-    // The dev policy channel (`MB.23.5.3`, §4.6 step 2): one socketpair, stage
+    // The dev policy channel (§4.6 step 2): one socketpair, stage
     // 1's end carried across the `execve` as `--dev-policy-fd` and dbproxy's end
     // in its configuration document. `--no-reload` creates neither end, exactly
     // like the watcher, the marks and the report sockets.
@@ -443,7 +443,7 @@ pub fn run_dev(host: &Host, options: &DevOptions, colour: Colour) -> ! {
     })
 }
 
-/// The dev-only dbproxy policy channel (`MB.23.5.3`, `ADR-0014` §4).
+/// The dev-only dbproxy policy channel (`ADR-0014` §4).
 ///
 /// One `AF_UNIX`/`SOCK_STREAM` socketpair, created here and nowhere else: stage
 /// 1's end travels across the `execve` as `--dev-policy-fd`, dbproxy's end

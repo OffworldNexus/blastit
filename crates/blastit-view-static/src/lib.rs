@@ -1,5 +1,5 @@
 //! The static view kind: the one responder the scheduler calls for a `static`
-//! mount, and no process of its own (ADR-0016, design `MB.36` §4.2.4).
+//! mount, and no process of its own (ADR-0016, design §4.2.4).
 //!
 //! A static route owns no uid, no `view.chan` and no seccomp role: the answer is
 //! one `openat2` beneath a dirfd the scheduler opened at boot, and one `pread`

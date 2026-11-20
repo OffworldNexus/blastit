@@ -84,7 +84,7 @@ pub struct Options {
     pub dev_adopt_fd: Option<RawFd>,
     /// `--dev-policy-fd`: this image's end of the dev-only dbproxy policy
     /// socket (§4.6 step 2). Carried into the next adoption document; the
-    /// refresh itself is `MB.23.5.3`'s.
+    /// refresh itself is the policy channel's.
     pub dev_policy_fd: Option<RawFd>,
     /// `--dev-reload-since`: the unix-nanosecond instant a reload cycle began,
     /// for the one-shot `Policy::reconcile` after this image's boot report

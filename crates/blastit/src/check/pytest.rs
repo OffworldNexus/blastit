@@ -66,7 +66,7 @@ pub fn imports(
     }
 }
 
-/// Everything one `pytest` spawn reads (`MB.40.8`).
+/// Everything one `pytest` spawn reads.
 ///
 /// A struct rather than eight positional arguments: the output-stream flag, the
 /// optional control descriptor and the optional paths read as one document, and
@@ -103,11 +103,11 @@ pub fn run_pytest(spawn: PytestSpawn<'_>) -> Result<i32, String> {
     for (name, value) in prepared.app_env() {
         command.env(name, value);
     }
-    // `MB.40.8`: the bundle `make install` stages carries the gate itself at
+    // The bundle `make install` stages carries the gate itself at
     // `<exe_dir>/../python`, so `-p blastit._check_pytest` imports even when
     // `blastit` was never installed into the application's own venv. The caller's
-    // explicit `PYTHONPATH` stays first and the bundle's directory follows it
-    // (`MB.53`): Python keeps `PYTHONPATH` in order and searches it before the
+    // explicit `PYTHONPATH` stays first and the bundle's directory follows it:
+    // Python keeps `PYTHONPATH` in order and searches it before the
     // interpreter's own `site-packages`, so the caller's entry wins a name
     // collision — `blastit check`'s contract hands the child a project
     // `stub/pytest` that must shadow the real one — while the bundle still
@@ -159,7 +159,7 @@ pub fn run_pytest(spawn: PytestSpawn<'_>) -> Result<i32, String> {
     Ok(status.code().unwrap_or(-1))
 }
 
-/// The interpreter `pytest` runs on (`MB.40.8`, `MB.42.2.2.2`).
+/// The interpreter `pytest` runs on.
 ///
 /// A wheel's console script hands the command line to the universal binary, so
 /// there is no interpreter in this process to inherit: it records the one it ran
@@ -227,17 +227,17 @@ fn path_python() -> Option<PathBuf> {
 }
 
 /// `<exe_dir>/../python`, or the wheel root two levels up, when it holds the
-/// staged `blastit` gate (`MB.40.8`, `MB.42.2.2.2`, `MB.42.11`, `MB.42.3.3`).
+/// staged `blastit` gate.
 ///
 /// Two layouts, one marker pair. `make install` puts the binary at
 /// `<prefix>/share/blastit/lib/blastit` and the package at
 /// `<prefix>/share/blastit/python/blastit`, so `<exe_dir>/../python` is the
-/// package root. The published `py3-none-*` wheel (`MB.42.3.3`) puts the binary
+/// package root. The published `py3-none-*` wheel puts the binary
 /// at `<site-packages>/blastit/_bin/blastit` with the package's own modules
 /// beside it, so `<exe_dir>/../..` is `<site-packages>` — the root that holds
-/// `blastit/`. (`MB.42.11`'s `../../..` resolved one level *above*
-/// `site-packages`, which can never hold the gate: it was a dead fallback, and
-/// `MB.42.3.3` replaced it with the root the repacked wheel actually has.)
+/// `blastit/`. The older `../../..` candidate resolved one level *above*
+/// `site-packages`, which can never hold the gate — a dead fallback, replaced
+/// by the root the repacked wheel actually has.
 ///
 /// Both markers have to be there — `_check_pytest.py` is the gate `-p` imports
 /// and `__main__.py` is the package's entry point, and every bundle ships both —
@@ -250,7 +250,7 @@ fn bundled_python() -> Option<String> {
 }
 
 /// The `PYTHONPATH` a `pytest` child receives: the caller's entries first, the
-/// bundle's package root last (`MB.53`).
+/// bundle's package root last.
 ///
 /// Python searches `PYTHONPATH` in order and ahead of the interpreter's own
 /// stdlib and `site-packages`, so the caller's explicit directory keeps the

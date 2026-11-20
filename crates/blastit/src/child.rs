@@ -6,7 +6,7 @@
 //! needs (`child_exit`, the `poll` waits, the deadline, `panic_message`,
 //! `set_env`). It lives there because the view forks are moving out of this
 //! crate: the WSGI one is `blastit-view-python`'s today, and the two PHP ones
-//! (`blastit-view-php`'s `spawn` and `probe`) follow in `MB.36.5`. A view crate
+//! (`blastit-view-php`'s `spawn` and `probe`) follow. A view crate
 //! may not depend on `blastit`, so the sequence they share cannot stay here.
 //!
 //! This module stays so that every `crate::child::…` call site in `stage0`,

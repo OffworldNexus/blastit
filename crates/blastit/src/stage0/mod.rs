@@ -31,7 +31,7 @@ use crate::config::{Config, LogFormat, Mode, Privilege};
 // stage 0 names neither.
 use crate::host::{EXEC, FILE_NOUN, Host};
 use crate::logs::{Colour, Emitter, fail, output_event};
-// The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
+// The `entrypoint php` discovery gate: a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
 #[cfg(feature = "php")]
@@ -429,7 +429,7 @@ pub fn run(host: &Host, preset: Option<&str>, colour: Colour) -> ! {
     // `R13`: `BLASTIT_APP` is required unless the file answers every request
     // itself (§9.5). The manifest is parsed first, because that is a property of
     // the file, not of the environment — and a missing `./Blastfile` is still
-    // named before the setting (`MB.1.6`).
+    // named before the setting.
     // `ADR-0009` §5: a build with no Python support (`ADR-0010` §4's standalone
     // archive) refuses a manifest that needs an interpreter here, before any
     // listener is bound, naming the artifact that has one. Ahead of `app_rule`
@@ -457,7 +457,7 @@ pub fn run(host: &Host, preset: Option<&str>, colour: Colour) -> ! {
         PhpBoot::Refused(message) => fail(&emitter, &message),
         PhpBoot::Proceed(runtime) => {
             // The line naming what was resolved is the probe's
-            // (`php_view::probe_bindings`, `MB.25.2`): it is the process that
+            // (`php_view::probe_bindings`): it is the process that
             // runs `php_module_startup`, so it is the only one that can say
             // which `php.ini` the workers will read. Stage 0 records the pair
             // here and says nothing about it in the log.
@@ -476,9 +476,9 @@ pub fn run(host: &Host, preset: Option<&str>, colour: Colour) -> ! {
     // acknowledgement is the whole of the decision. On **this** path — the serve
     // path, which `dev` does not take — an unacknowledged one is a boot refusal
     // before any listener is bound. `dev` keeps its warning and `check` keeps
-    // its finding (`MB.3.53`).
+    // its finding.
     //
-    // `MB.3.54`: the gate returns the proof `bind_view_sockets` demands, so this
+    // The gate returns the proof `bind_view_sockets` demands, so this
     // statement cannot be deleted or moved after the bind without a compile
     // error — the witness an unprivileged test cannot be here, because `run`'s
     // first act (`caps::detect`) refuses an unprivileged boot before the
@@ -510,7 +510,7 @@ pub fn run(host: &Host, preset: Option<&str>, colour: Colour) -> ! {
             EventKind::ManifestWarning(WarningEvent::new(warning.to_string())),
         ));
     }
-    // `MB.40.8`, design §2.1/§2.4: a Python WSGI boot resolves its interpreter,
+    // Design §2.1/§2.4: a Python WSGI boot resolves its interpreter,
     // `libpython` and shim here and pins both descriptors; a PHP-only or
     // static-only boot returns before any search (`plan`). The three refusal
     // families are `blastit-py-sapi`'s sentences, printed here, before any
@@ -568,7 +568,7 @@ pub fn run(host: &Host, preset: Option<&str>, colour: Colour) -> ! {
     // environment: stage 1 is `execve`'d as an interpreter of its own (§4), and
     // a wheel re-executes it with `-I`, which drops `PYTHONPATH` and the
     // working directory. Empty for the standalone binary — whose project's
-    // `site-packages` stage 0 discovered above (`MB.40.8`).
+    // `site-packages` stage 0 discovered above.
     config.sys_path = host.sys_path().to_vec();
     #[cfg(feature = "python")]
     if let Some(python) = &python {

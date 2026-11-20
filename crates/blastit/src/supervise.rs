@@ -219,9 +219,9 @@ struct Spawn<'a> {
 ///
 /// One shape for both backends, and it is the transport's own
 /// [`blastit_view::LoadedReport`] — the write end of a `SOCK_DGRAM` socketpair
-/// and the source its batches name. `MB.36.5` deleted the PHP crate's duplicate
-/// of that type, so neither fork converts anything at its boundary. `None` is
-/// every boot with nothing to report to — production, `check`, `--no-reload`.
+/// and the source its batches name, so neither fork converts anything at its
+/// boundary. `None` is every boot with nothing to report to — production,
+/// `check`, `--no-reload`.
 type ViewReport = Option<blastit_view::LoadedReport>;
 
 /// A freshly forked worker of either runtime, as the parent sees it.
@@ -432,9 +432,9 @@ pub struct Parts<'a> {
     /// reload on. `None` for every production boot, for `check`, and for a dev
     /// boot with reload off. A `php`-only standalone build gets one too: a PHP
     /// worker needs no interpreter, so its saves are served by repinning the
-    /// entry (`MB.40.9`).
+    /// entry.
     ///
-    /// It is the live-reload gate **itself** (`MB.40.10`): a boot with no
+    /// It is the live-reload gate **itself**: a boot with no
     /// watcher — `--no-reload`, or a `fanotify_mark` that could not run, which
     /// Docker's `overlayfs` answers with `EPERM` — has nothing that will ever
     /// report the save, so the boot's `EntryPin` has to stand.
@@ -448,7 +448,7 @@ pub struct Parts<'a> {
     pub chan: Option<OwnedFd>,
     /// This image's end of the dev-only dbproxy policy socket
     /// (`--dev-policy-fd`). Carried into the adoption document; the refresh
-    /// itself is `MB.23.5.3`'s.
+    /// itself is the policy channel's.
     pub policy: Option<OwnedFd>,
     /// The `(route, proxy)` pairs dbproxy's **listeners** were bound for at boot
     /// (`§4.8`): the set a save's document is compared against, so a store that
@@ -469,7 +469,7 @@ pub struct Supervisor<'a> {
     #[cfg(feature = "php")]
     php: Vec<Option<blastit_view_php::PhpBinding>>,
     /// Whether each route's view may reach the network: only the view fork
-    /// reads it, and only a build with an interpreter forks one (`MB.3.11`).
+    /// reads it, and only a build with an interpreter forks one.
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     egress: Vec<bool>,
     /// The identity and the filter each route's view child is forked with
@@ -510,7 +510,7 @@ pub struct Supervisor<'a> {
     /// Exactly one `Source` in the poll set, one armed deadline and no second
     /// event loop: a boot that never constructed it (production, `check`,
     /// `--no-reload`) costs the poll loop nothing. It is also the live-reload
-    /// gate: while it is `None` no save may move a PHP `EntryPin` (`MB.40.10`).
+    /// gate: while it is `None` no save may move a PHP `EntryPin`.
     reload: Option<Reload>,
     /// What a reload cycle re-execs with; `None` on every boot that cannot
     /// cycle (§4.6).
@@ -751,8 +751,7 @@ impl<'a> Supervisor<'a> {
             // The number of log sources **in the poll set**, read here while it
             // is being built: `read_ctl` below can fork a view and push two
             // more, and the reload's descriptors sit after the ones that were
-            // polled, not after the ones init now owns (a same-wakeup `SPAWN`
-            // used to shift them, so report datagrams were never drained).
+            // polled, not after the ones init now owns.
             let polled_sources = self.sources.len();
             let flags: Vec<rustix::event::PollFlags> =
                 match rustix::event::poll(&mut pollfds, timespec.as_ref()) {
@@ -876,7 +875,7 @@ impl<'a> Supervisor<'a> {
     fn reload_all(&mut self, fire: &dev_reload::Fire) {
         let routes: Vec<String> = self.routes.iter().map(|route| route.name.clone()).collect();
         self.emit_reload(&routes, fire.files.as_slice(), fire.reason);
-        // `MB.40.9`: the file every worker will run was just saved, so the
+        // The file every worker will run was just saved, so the
         // boot's `EntryPin` is stale by definition. Re-record it **before** the
         // old workers are retired: a replacement worker forked from the old pin
         // would answer every request with "changed since this boot recorded it",
@@ -886,10 +885,9 @@ impl<'a> Supervisor<'a> {
         self.send_ctl(&Ctl::Reload);
     }
 
-    /// Re-records every PHP slot's `entrypoint php` after a save (§4.6,
-    /// `MB.40.9`).
+    /// Re-records every PHP slot's `entrypoint php` after a save (§4.6).
     ///
-    /// Only a boot whose watcher is live gets here (`MB.40.10`): `--no-reload`
+    /// Only a boot whose watcher is live gets here: `--no-reload`
     /// and a `fanotify_mark` that could not run (Docker's `overlayfs` answers
     /// `EPERM`, so `boot_reload` publishes `dev.reload.unavailable` and hands
     /// back `None`) are one thing — no live reload is running, so the boot's pin
@@ -1466,12 +1464,12 @@ impl<'a> Supervisor<'a> {
             Some(dev) => (dev.view_dir(index), false),
             None => (crate::config::view_dir(info.uid), true),
         };
-        // `MB.40.9`: a save can land before the watcher's debounce fired, or
+        // A save can land before the watcher's debounce fired, or
         // before this boot's very first request. A PHP worker forked from a
         // stale `EntryPin` answers every request with "changed since this boot
         // recorded it", so the entry is recorded again here — and a refusal (a
         // file mid-save, or a symlink out of the tree) is one warning, never a
-        // failed boot. With no watcher (`MB.40.10`: `--no-reload`, or
+        // failed boot. With no watcher (`--no-reload`, or
         // `fanotify_mark` refused on Docker's `overlayfs`) nothing will ever
         // report the save, so the boot's pin stands and no repin runs.
         #[cfg(feature = "php")]
@@ -1539,7 +1537,7 @@ impl<'a> Supervisor<'a> {
     ///
     /// `None` is every production boot, `check` and a dev boot with reload off.
     /// Both backends report — a WSGI view's loader and a PHP worker's file sink
-    /// are the same wire (`MB.23.4.2`) — so a slot gets its socket whatever
+    /// are the same wire — so a slot gets its socket whatever
     /// runtime serves it, and a fresh reporter is created **per boot** (this
     /// call) because a source's first batch is its `boot` set (`loaded.rs`).
     fn open_report(&mut self, index: usize) -> std::io::Result<(ViewReport, Option<u16>)> {
@@ -1594,7 +1592,7 @@ impl<'a> Supervisor<'a> {
         #[cfg(feature = "php")]
         if let Some(binding) = self.php.get(index).and_then(Option::as_ref) {
             // The same wire the WSGI arm gets, and the same value
-            // (`MB.23.4.2`'s sink is the PHP half): the worker reports the
+            // (the PHP worker's sink is the other half): the worker reports the
             // files each request included, and its first batch is the source's
             // `boot` set.
             // `view-crates-architecture` §4.4 D2: the boot data travels as
@@ -2215,7 +2213,7 @@ pub fn boot_reload(cfg: &Config, emitter: &Emitter, fault: Option<&str>) -> Opti
     let filesystem = blastit_sys::fanotify::filesystem_type(&root)
         .unwrap_or("unknown")
         .to_string();
-    // `MB.23.5.2.2`'s debug-only fault seam: `BLASTIT_TEST_RELOAD_FAULT=open`
+    // The debug-only fault seam: `BLASTIT_TEST_RELOAD_FAULT=open`
     // makes the boot take the ladder's `EPERM` row, so a critical test can
     // witness "one `dev.reload.unavailable`, then serve" against real
     // processes. Stage 0 read the variable before the environment was stripped

@@ -20,7 +20,7 @@ use crate::config::Config;
 // stage 0 names neither.
 use crate::host::{Host, Placement, Reexec};
 use crate::logs::{Emitter, fail, output_event};
-// The `entrypoint php` discovery gate (`MB.36.5`): a stage-0 dependency that
+// The `entrypoint php` discovery gate: a stage-0 dependency that
 // names no SAPI type and no `dlopen`, so `init` can answer "can this host embed
 // PHP?" without loading anything (`ADR-0010` §3, design §4.4 D5).
 
@@ -80,7 +80,7 @@ pub(super) fn fork_dbproxy_dev(
     // when the whole suite runs as root, and then it *is* the view's uid.
     document.allow_root_listener = uid == 0;
     document.obs_fd = obs_fd;
-    // The dev policy channel's dbproxy end (`MB.23.5.3`): the document is the
+    // The dev policy channel's dbproxy end: the document is the
     // only way dbproxy learns the descriptor, and `dev_policy` is what makes it
     // legal. Both are `None`/`false` on every boot this function is not called
     // for, which is what keeps a production dbproxy unable to acquire it.
@@ -298,7 +298,7 @@ pub(super) fn exec_stage1_dev(request: DevExec<'_>) -> ! {
         keep.push(lib);
         keep.push(shim);
     }
-    // The dev policy channel's stage-1 end (`MB.23.5.3`): the supervisor writes
+    // The dev policy channel's stage-1 end: the supervisor writes
     // the document a `Blastfile` save produced and waits for the one-byte ack,
     // and carries this descriptor into the reload adoption document.
     if let Some(policy) = &policy {
@@ -737,7 +737,7 @@ pub(super) fn pipe_ok(emitter: &Emitter, what: &str) -> (OwnedFd, OwnedFd) {
 
 /// `fork()`, fatal on failure.
 ///
-/// Stage 0 runs no interpreter (`MB.42.2.2.2`), so the fork is a plain one: no
+/// Stage 0 runs no interpreter, so the fork is a plain one: no
 /// CPython protocol has to be stopped and restarted around it, and stage 1's own
 /// forks take their hooks from the runtime it `dlopen`ed.
 pub(super) fn fork_ok(emitter: &Emitter) -> Fork {

@@ -13,7 +13,7 @@
 //! `environ` from the original target, so the scheduler never rewrites the
 //! request it forwards.
 //!
-//! This is the tree's **only** request-target decoder (design `MB.36` D3): the
+//! This is the tree's **only** request-target decoder (design D3): the
 //! scheduler routes on [`percent_decode`] and `blastit-view-static` resolves a
 //! file on it, so what `%2F` means has one implementation and no crate carries
 //! a second.

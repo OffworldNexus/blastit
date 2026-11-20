@@ -34,7 +34,7 @@
 //! This module is the whole binary. `crates/blastit`'s `main` calls it with a
 //! [`Host`] that re-executes `/proc/self/exe` (§4), and a wheel's console script
 //! `exec`s that same binary (`blastit/_bin/blastit`), so there is one shape of
-//! every role and no interpreter hosts a stage (`MB.42.2.2.2`).
+//! every role and no interpreter hosts a stage.
 
 use std::net::IpAddr;
 use std::os::fd::RawFd;
@@ -69,7 +69,7 @@ pub enum Command {
     Check,
     /// `blastit fmt`: rewrite a `Blastfile` in the canonical layout (`R19`).
     Fmt,
-    /// `blastit lsp`: speak LSP on stdin/stdout for an editor (`MB.22.3`).
+    /// `blastit lsp`: speak LSP on stdin/stdout for an editor.
     Lsp,
 }
 
@@ -338,7 +338,7 @@ const FMT_NOT_CANONICAL: u8 = 1;
 /// error, not a session (`docs/design/blastfile-lsp-zed.md` §2.4).
 const LSP_FAILURE: u8 = 2;
 
-/// The `blastit lsp` session (`MB.22.3`).
+/// The `blastit lsp` session.
 ///
 /// The capability check comes **first**, before a byte of the editor's input is
 /// read: a binary carrying `CAP_*` would grant them to this process image, and a

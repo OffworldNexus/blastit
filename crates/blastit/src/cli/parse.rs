@@ -215,7 +215,7 @@ pub(super) fn parse_fmt(arguments: &[String]) -> Result<Subcommand<FmtOptions>, 
     Ok(Subcommand::Run(FmtOptions { check, path }))
 }
 
-/// Parses and validates `blastit lsp` (`MB.22.3`).
+/// Parses and validates `blastit lsp`.
 ///
 /// The session has no argument: the editor writes the protocol on stdin and
 /// reads it on stdout, so anything else on the command line is a CLI error
@@ -244,7 +244,7 @@ pub(super) fn parse_lsp(arguments: &[String]) -> Result<Subcommand<()>, String> 
     }
 }
 
-/// The one flag an operator carries over from `blastit dev` (`MB.17`).
+/// The one flag an operator carries over from `blastit dev`.
 ///
 /// `blastit --port 4242` is the command an owner actually typed, and the
 /// generic "`…` is not `--key=value`" names neither the command that has the

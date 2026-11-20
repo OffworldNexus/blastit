@@ -153,7 +153,7 @@ pub(super) fn fmt_usage() -> String {
     FMT_USAGE.replace("{env}", crate::config::MANIFEST_ENV)
 }
 
-/// `blastit lsp --help` (`MB.22.3`; `docs/reference/cli.md` `## blastit lsp`).
+/// `blastit lsp --help` (`docs/reference/cli.md` `## blastit lsp`).
 pub(super) const LSP_USAGE: &str = "\
 usage: blastit lsp
 

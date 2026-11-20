@@ -103,8 +103,7 @@ struct Verified {
     /// Whether the pair [`verify`] compared is `/proc/self/exe`'s — the answer it
     /// already computed. Carried rather than re-derived: a second `stat` of
     /// `/proc/self/exe` in [`attempt`] could fail transiently (`/proc` hidden by a
-    /// sandbox) and `execve` the image that is already running for no reason
-    /// (`MB.49` review).
+    /// sandbox) and `execve` the image that is already running for no reason.
     is_self: bool,
 }
 
@@ -258,7 +257,7 @@ fn verify(path: &Path) -> Result<Verified, String> {
     //
     // The comparison is made once, here, and its answer travels on `Verified`: a
     // second `stat` in `attempt` could fail and `execve` the image that is
-    // already running for nothing (`MB.49` review).
+    // already running for nothing.
     let is_self = is_running_image(meta.dev(), meta.ino());
     if is_self {
         return Ok(Verified {

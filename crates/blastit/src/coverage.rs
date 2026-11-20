@@ -1,4 +1,4 @@
-//! LLVM coverage profiles for an image that ends with `_exit` (§8, `MB.40.2`).
+//! LLVM coverage profiles for an image that ends with `_exit` (§8).
 //!
 //! Every role of a `blastit` boot ends with [`libc::_exit`](libc::_exit): init
 //! cannot unwind, because it may be running with the GIL held or inside a

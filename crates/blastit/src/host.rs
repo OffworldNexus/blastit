@@ -9,7 +9,7 @@
 //! * the **binary** re-executes `/proc/self/exe`, exactly as §4 describes;
 //! * a **wheel install** starts no interpreter at all: `blastit.__main__` hands
 //!   the command line to the universal binary the wheel ships at
-//!   `blastit/_bin/blastit` (`MB.42.2.2.2`). One `py3-none-*` artifact serves
+//!   `blastit/_bin/blastit`. One `py3-none-*` artifact serves
 //!   every CPython `>=3.12`, and the Python side never hosts stage 1.
 //!
 //! dbproxy holds the real credentials (§2.2), so it never runs an interpreter:
@@ -59,11 +59,11 @@ pub const EXEC: &str = "BLASTIT_EXEC";
 /// function a deployment boot runs, with a `Deployment`. Without it a leg can
 /// only drive [`Provenance`] — the decision — so deleting the call *inside*
 /// `php_boot_in` would leave the protected tier green, which is the defect this
-/// seam closes (`MB.3.43`).
+/// seam closes.
 ///
 /// Hidden because it is not part of the published API: a `dev`/`check` boot
 /// never passes a deployment, and an unprivileged process cannot reach a
-/// `Production` boot at all (`LESSONS.md`, `MB.1.6`), so no other caller can
+/// `Production` boot at all (`LESSONS.md`), so no other caller can
 /// exist. It lives in `host` because [`Provenance`] is the decision it applies.
 // A build without the `php` feature has no gate to expose: the deployable form
 // of it refuses an `entrypoint php` with one sentence instead
@@ -121,7 +121,7 @@ pub struct Host {
 
 /// D6: the noun a capability refusal uses for the file to copy and `setcap`.
 ///
-/// The program is one binary now (`MB.42.2.2.2`): a wheel starts it through
+/// The program is one binary: a wheel starts it through
 /// `blastit/_bin/blastit`, so no refusal anywhere names an interpreter.
 pub const FILE_NOUN: &str = "binary";
 
@@ -702,7 +702,7 @@ impl Provenance {
     /// `setxattr` on `security.capability` needs `CAP_SETFCAP`, so no
     /// unprivileged test can put the attribute on a file it made — and a test
     /// that early-returns when it is not root leaves the `!has_file_caps`
-    /// refusal with no witness in `make check` (`MB.3.43`). Private on purpose:
+    /// refusal with no witness in `make check`. Private on purpose:
     /// the only caller besides [`check_objects`](Self::check_objects) is this
     /// module's tests, and the boot always reads the real attribute.
     fn check_objects_with(

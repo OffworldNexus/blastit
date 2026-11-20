@@ -1,12 +1,11 @@
 # The `php2shell` refusal matrix this driver replays
 
-Provenance: this is §4.7 of `docs/design/php-fastcgi.md` **verbatim** — the design
-of record when the matrix was accepted — copied here because `MB.3.32` deleted
-that design corpus (18 files) when `ADR-0010` replaced `php-fpm` with embedded
-`libphp`. The `E` column, the `php2shell #` column (`docs/research/php2shell.md`
-§B, `#1`–`#20`) and the row numbering are unchanged: they are what
-`e2e/php2shell.py --self-test` checks `PROBES` against, so a `PROBES` row that
-drifts from the accepted matrix fails the run.
+Provenance: this is §4.7 of the retired FastCGI design, the design of record
+when the matrix was accepted, copied here when `ADR-0010` replaced `php-fpm`
+with embedded `libphp`. The `E` column, the `php2shell #` column
+(`docs/research/php2shell.md` §B, `#1`–`#20`) and the row numbering are
+unchanged: they are what `e2e/php2shell.py --self-test` checks `PROBES` against,
+so a `PROBES` row that drifts from the accepted matrix fails the run.
 
 The three columns that no longer describe the implementation (`Blastit handling`,
 `Outcome`, `Owner file::fn`) are kept for the record: `ADR-0010` deleted the
@@ -22,10 +21,9 @@ column (`E1`–`E17`, `E19`–`E25`: 24 client-reachable probes; row 18 is an in
 builder-API `500` guard with no client HTTP path and is marked `—`, excluded from
 `PROBES`). The `Owner` column is **historical**: it names the FastCGI-era Rust
 test that asserted the same observable, and that suite
-(`critical_fastcgi_lockdown`) was deleted with the FastCGI param channel
-(`MB.3.17`, swept again by `MB.56`). No `critical_fastcgi_lockdown::` test exists
-today — a row's owner is its probe, and `--self-test` keeps the matrix and
-`PROBES` in step.
+(`critical_fastcgi_lockdown`) went with the FastCGI param channel. No
+`critical_fastcgi_lockdown::` test exists today — a row's owner is its probe, and
+`--self-test` keeps the matrix and `PROBES` in step.
 
 | # | E | Attack (`php2shell` #) | Bytes where | Blastit handling | Outcome | Design-era test (deleted) | P |
 |---|---|---|---|---|---|---|---|

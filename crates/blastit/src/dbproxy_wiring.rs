@@ -4,7 +4,7 @@
 //! The three boots differed in exactly one field — the per-store connection cap
 //! — and in nothing else, so the mapping lives here once: a field added to
 //! [`ProxySpec`] is added here and every boot inherits it, instead of three
-//! copies that can drift apart (`MB.40.3`).
+//! copies that can drift apart.
 
 use blastit_dbproxy::ProxySpec;
 

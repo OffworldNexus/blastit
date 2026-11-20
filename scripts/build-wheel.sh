@@ -597,11 +597,11 @@ if not zipfile.is_zipfile(wheel):
 problems: list[str] = []
 with zipfile.ZipFile(wheel) as archive:
     infos = {info.filename: info for info in archive.infolist()}
-    # Everything the repack relocated into `blastit/_bin/`: the binary, the
-    # editor binary and each shim. One directory, one loop. The allow-list reads
-    # the archive rather than grepping its bytes, so a retired
-    # `_bin/blastit-dbproxy` and a third program a caller staged by hand are both
-    # refused by name — an image nobody builds and nobody proves.
+    # Everything the repack relocated into `blastit/_bin/`: the single `blastit`
+    # binary, the editor binary and each shim. One directory, one loop. The
+    # allow-list reads the archive rather than grepping its bytes, so a third
+    # program a caller staged by hand is refused by name — an image nobody
+    # builds and nobody proves.
     prefix = "blastit/_bin/"
     allowed = {"blastit", "blastit-lsp"}
     members = []

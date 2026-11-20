@@ -16,8 +16,8 @@
 //! This crate used to record the linked interpreter's prefix and to emit an
 //! `rpath` into it, because the binary linked `libpython`. It links neither now:
 //! stage 1 `dlopen`s the host's `libpython` and the per-minor shim from pinned
-//! descriptors, so a build-host path in the artifact would be exactly the
-//! `MB.17` defect (a binary that only runs in the checkout that produced it).
+//! descriptors, so a build-host path in the artifact would be the classic
+//! defect: a binary that only runs in the checkout that produced it.
 //! `PYO3_PYTHON`, `BLASTIT_PYTHON_HOME` and `BLASTIT_PYTHON_MM` are therefore
 //! **not** read here at all.
 

@@ -17,7 +17,7 @@
 //!
 //! Nothing here asks whether CPython is already running: the universal binary is
 //! the only installation, it starts no interpreter, and stage 1's `dlopen` is the
-//! one place an interpreter enters this process tree (`MB.42.2.2.2`).
+//! one place an interpreter enters this process tree.
 
 /// The interpreter token a build with the `python` capability carries.
 #[cfg(feature = "python")]

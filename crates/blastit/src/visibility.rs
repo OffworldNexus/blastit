@@ -53,12 +53,12 @@
 //!
 //! # Builds without an interpreter
 //!
-//! A `python`-less build (`MB.3.11`) serves no WSGI view, so nothing calls the
+//! A `python`-less build serves no WSGI view, so nothing calls the
 //! writability half — [`writable`], [`Writable`] and the helpers behind them —
 //! and the read/execute checks keep running for `dbproxy` and the scheduler.
 //! Those items stay **compiled** in that build (`cfg_attr(…allow(dead_code))`
 //! per item, never a `cfg` on the module): a check that stops being compiled is a
-//! check nobody notices changing, and `MB.3.13`'s embedded-PHP worker imports
+//! check nobody notices changing, and the embedded-PHP worker imports
 //! through `sys.path` exactly as a view does.
 
 use std::collections::BTreeSet;

@@ -219,7 +219,7 @@ pub struct Config {
     /// (`docs/knowledge/LESSONS.md`).
     pub libphp: Option<PathBuf>,
     /// `BLASTIT_PHP_SHIM_DIR`: the directory holding the `libblastit_php*.so`
-    /// shims when they are not beside the executable (`MB.3.12`), `dev` and
+    /// shims when they are not beside the executable, `dev` and
     /// `check` only (`R8`).
     pub php_shim_dir: Option<PathBuf>,
     /// What stage 0 resolved for the file's `entrypoint php`: the NTS
