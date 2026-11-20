@@ -14,6 +14,8 @@
 #   make e2e-universal    # one staged bundle, four runtimes: CPython 3.13/3.14, PHP 8.4, static, handoff (slow)
 #   make install          # stage a self-contained release bundle under PREFIX (default ~/.local)
 #   make uninstall        # remove the bundle `make install` staged under PREFIX
+#   make packages         # build blastit_<ver>_<arch>.deb + blastit-<ver>-<rel>.<arch>.rpm (slow)
+#   make packages-test    # install those packages in debian:trixie-slim / rockylinux:9 (slow, Docker)
 #   make php-sapi         # build the per-minor C SAPI shims this host has headers for
 #   make php-sapi-e2e     # Docker: build one shim and prove it with the real-load probe
 #   make rs-test-php      # real-pair PHP suites against host libphp + shim
@@ -47,6 +49,34 @@ PYO3_PREFIX := $(if $(PYO3_BIN),$(abspath $(dir $(PYO3_BIN))/..),)
 RUST_ENV = $(if $(PYO3_PREFIX),PYTHONHOME="$(PYO3_PREFIX)") PYO3_PYTHON="$(PYO3_BIN)" LD_LIBRARY_PATH="$(PYO3_LIBDIR)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"
 # Standalone builds link zero libpython and strip PYO3_PYTHON/PYTHONHOME from the build environment.
 STANDALONE_ENV = env -u PYO3_PYTHON -u PYTHONHOME
+
+# Native packages (`MB.42.3.1`): built from a bundle assembled by
+# `scripts/build-package-bundle.sh`, which compiles `blastit`/`blastit-lsp` inside
+# `manylinux_2_28` and takes the already-probed `make py-sapi` / PHP distro shims.
+# A host `make install` build is deliberately *not* the input: its glibc floor is
+# whatever machine ran it, and a package is a claim about other machines.
+#
+# The floor is a *promise to the oldest advertised distribution*:
+# `PACKAGES_SHIM_FLOOR` (2.34, Rocky/RHEL 9) is the ceiling `--bundle-floor` and
+# both builders enforce, and the `Depends:`/`Requires:` they write is the measured
+# number. A shim above the ceiling is rebuilt on an older base (Surý/bookworm for
+# PHP, `manylinux_2_28` for the rest) — never accommodated by dropping a
+# distribution.
+#
+# Staging, the built files and the container proof all live under `/tmp/opencode`;
+# nothing is installed on the host. Both targets are slow (a container build,
+# Docker, dnf) and stay out of `check`. `MB.42.3.4` wires `packages.yml`/`nightly.yml`;
+# until then they run by hand (and are the commands that gate will call).
+# The `.deb` keeps `blastit_<ver>_<arch>.deb` (no Debian revision by default);
+# the `.rpm` needs a release, which is what a nightly stamps.
+PACKAGES_SCRATCH ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/opencode/blastit-packages
+PACKAGES_PREFIX  ?= $(PACKAGES_SCRATCH)/prefix
+PACKAGES_OUT     ?= $(PACKAGES_SCRATCH)
+# The declared ceiling for a package bundle, `<major>_<minor>`, from the matrix
+# that states it — never a literal here.
+PACKAGES_SHIM_FLOOR ?= $(shell $(UV) run --no-project scripts/platform_matrix.py --shim-floor)
+BLASTIT_VERSION  ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+BLASTIT_RELEASE  ?= 1
 
 # cargo-mutants scratch on disk (never tmpfs /tmp) with a 12 GiB cgroup v2 cap and 5 GiB free-space preflight.
 MUTANTS_TMP ?= $(or $(XDG_CACHE_HOME),$(HOME)/.cache)/blastit-mutants
@@ -86,7 +116,8 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
         universal-smoke py-format py-lint test-critical docs-check docs-unit docs-test e2e e2e-universal mutants-rust \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image python-runtime platform-matrix-check standalone standalone-glibc workflow-check \
-        packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp
+        packaging-gates-test zed-check mutants-clean mutants-scope-probe print-mutants-tmp \
+        packages packages-test
 
 help: ## Show available Make targets
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -234,6 +265,31 @@ standalone-glibc: ## Build gnu standalone archive inside manylinux_2_28 image (a
 		--image "$(STANDALONE_BUILDER)" \
 		--target "$(STANDALONE_TARGET)" \
 		--max-glibc 2_28
+
+packages: py-sapi php-sapi ## Build the .deb + .rpm from a manylinux bundle (slow; Docker for the bundle and rpmbuild when absent)
+	scripts/build-package-bundle.sh --out "$(PACKAGES_PREFIX)" \
+		--bundle-floor "$(PACKAGES_SHIM_FLOOR)"
+	scripts/build-deb.sh --version "$(BLASTIT_VERSION)" \
+		--bundle "$(PACKAGES_PREFIX)" --out "$(PACKAGES_OUT)" \
+		--max-glibc "$(PACKAGES_SHIM_FLOOR)"
+	scripts/build-rpm.sh --version "$(BLASTIT_VERSION)" --release "$(BLASTIT_RELEASE)" \
+		--bundle "$(PACKAGES_PREFIX)" --out "$(PACKAGES_OUT)" \
+		--max-glibc "$(PACKAGES_SHIM_FLOOR)"
+
+packages-test: ## Install the built .deb/.rpm in debian:trixie (WSGI), debian:bookworm-slim and rockylinux:9 (slow, Docker; not in `check`)
+	@set -eu; \
+	newest() { \
+		find "$(PACKAGES_OUT)" -maxdepth 1 -name "$$1" -type f 2>/dev/null \
+			| while IFS= read -r file; do printf '%s %s\n' "$$(stat -c %Y "$$file")" "$$file"; done \
+			| sort -nr | head -n 1 | cut -d' ' -f2-; \
+	}; \
+	deb=$$(newest '*.deb'); rpm=$$(newest '*.rpm'); \
+	if [ -z "$$deb" ] && [ -z "$$rpm" ]; then \
+		echo "packages-test: no package under $(PACKAGES_OUT): run \`make packages\` first" >&2; \
+		exit 1; \
+	fi; \
+	echo "packages-test: deb=$${deb:-none} rpm=$${rpm:-none}"; \
+	BLASTIT_DEB="$$deb" BLASTIT_RPM="$$rpm" scripts/test_packages.sh
 
 rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite standalone
 	@set -e; found=0; for file in crates/*/tests/critical_*.rs; do \
@@ -827,6 +883,12 @@ install: ## Install a self-contained release bundle under PREFIX (default ~/.loc
 	ln -sfn "../share/blastit/lib/blastit" "$(INSTALL_BINDIR)/blastit"; \
 	ln -sfn "../share/blastit/lib/blastit-lsp" "$(INSTALL_BINDIR)/blastit-lsp"; \
 	scripts/check-bundle-layout.sh "$(PREFIX)"; \
+	for shim in "$(INSTALL_LIBDIR)"/libblastit_*.so; do \
+		[ -e "$$shim" ] || continue; \
+		if [ "$(CURDIR)/target/release/blastit" -nt "$$shim" ]; then \
+			echo "install: WARNING: $$shim predates target/release/blastit: run \`make py-sapi php-sapi\` so the bundle matches the binary" >&2; \
+		fi; \
+	done; \
 	py=0; php=0; \
 	for shim in "$(INSTALL_LIBDIR)"/libblastit_*.so; do \
 		[ -e "$$shim" ] || continue; \

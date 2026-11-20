@@ -3946,3 +3946,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T01:51 [MB.42.11] (lead) base 2176a531f079a6696bfbe29068d0719686a7969b
 - 2026-11-20T01:59 [MB.42.11] (lead) status active -> done
 - 2026-11-20T01:59 [MB.42.11] (lead) commit next; note for MB.42.3.3: check.rs's exe_dir.join("../../..") candidate is dead - it resolves one level ABOVE a wheel's site-packages/blastit/_bin, so it
+- 2026-11-20T01:59 [MB.42.3.1] (lead) MB.42.11 landed (bundled_python marker). Now apply this node's own review fixes: payload assertion, manylinux staging + explicit ceiling, WSGI smoke leg, AutoRe
+- 2026-11-20T02:36 [MB.42.3.1] (lead) status review -> done
+- 2026-11-20T02:36 [MB.42.3.1] (lead) commit next; note: platform_matrix.py:499 doc comment still says the PHP shims come from shim_floor 2_41 - stale (measured 2.17, ceiling 2.34). Cosmetic drift t

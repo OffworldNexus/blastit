@@ -1,0 +1,4 @@
+entrypoint python "hello:application"
+
+view app GET "/" {
+}

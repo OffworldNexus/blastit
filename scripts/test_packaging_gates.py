@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1656,6 +1658,213 @@ def test_portable_elf_shim_cases() -> int:
     return cases_run
 
 
+def mark_verneed_weak(path: Path, version: str) -> bool:
+    """Set `VER_FLG_WEAK` on one `.gnu.version_r` entry (`Elf64_Vernaux`).
+
+    GNU ld does not set the flag for a C `__attribute__((weak))` reference even
+    when every reference is weak; LLVM's lld — the linker `rustc` uses for
+    `blastit` — does, and that is the shape the package floor has to survive. The
+    fixture is patched rather than argued about, and the caller re-reads it with
+    `readelf` to prove the patch landed.
+    """
+    sections_out = subprocess.run(
+        ["readelf", "-S", "-W", str(path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    sections: dict[str, tuple[int, int]] = {}
+    for line in sections_out.splitlines():
+        match = re.match(
+            r"\s*\[\s*\d+\]\s+(\S+)\s+\S+\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)",
+            line,
+        )
+        if match:
+            sections[match.group(1)] = (
+                int(match.group(3), 16),
+                int(match.group(4), 16),
+            )
+    if ".gnu.version_r" not in sections or ".dynstr" not in sections:
+        return False
+    data = bytearray(path.read_bytes())
+    verneed_offset, verneed_size = sections[".gnu.version_r"]
+    dynstr_offset, dynstr_size = sections[".dynstr"]
+    dynstr = bytes(data[dynstr_offset : dynstr_offset + dynstr_size])
+    position = verneed_offset
+    while position < verneed_offset + verneed_size:
+        _, count, _, aux_offset, next_offset = struct.unpack_from(
+            "<HHIII", data, position
+        )
+        aux = position + aux_offset
+        for _ in range(count):
+            _, flags, _, name_offset, aux_next = struct.unpack_from("<IHHII", data, aux)
+            end = dynstr.find(b"\0", name_offset)
+            if dynstr[name_offset:end].decode("ascii", "replace") == version:
+                struct.pack_into("<H", data, aux + 4, flags | 0x2)
+                path.write_bytes(data)
+                return True
+            aux += aux_next
+        if not next_offset:
+            break
+        position += next_offset
+    return False
+
+
+def test_portable_elf_glibc_cases() -> int:
+    """`--max-glibc` measures the *loader-enforced* floor, and only that.
+
+    Two fixtures, because the two shapes are what the `2.34` in
+    `build-{deb,rpm}.sh` rests on:
+
+      * a **strong** `GLIBC_2.39` reference must fail `--max-glibc 2_28` (that is
+        the assertion; it names the file and the number);
+      * the same symbol referenced **weakly** must pass at `2.28` and report a
+        *lower* number, because glibc prints `weak version … not found` and runs.
+
+    If the host libc predates 2.39, the fixtures cannot carry the version need and
+    the cases are skipped with the reason printed (like `cc`-less hosts already
+    are).
+    """
+    cc = shutil.which("cc")
+    if cc is None:
+        print("portable-elf --max-glibc: skipped (no cc to build the fixtures)")
+        return 0
+
+    def run(*args: str):
+        return subprocess.run(
+            [str(CHECK_PORTABLE_ELF), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    cases_run = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        strong_c = tmp / "strong.c"
+        strong_c.write_text(
+            "extern int pidfd_spawnp(void);\n"
+            "void blastit_strong(void) { pidfd_spawnp(); }\n",
+            encoding="utf-8",
+        )
+        strong = tmp / "libblastit_strong.so"
+        subprocess.run(
+            [cc, "-shared", "-fPIC", "-o", str(strong), str(strong_c)], check=True
+        )
+        version_info = subprocess.run(
+            ["readelf", "--version-info", str(strong)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        if "GLIBC_2.39" not in version_info:
+            print(
+                "portable-elf --max-glibc: skipped — this libc predates 2.39, so a "
+                "2.39 need cannot be built"
+            )
+            return 0
+
+        res = run("--max-glibc", "2_28", str(strong))
+        _expect(
+            res.returncode == 1
+            and "needs glibc 2.39" in res.stderr
+            and "weak version needs are excluded" in res.stderr,
+            "a strong GLIBC_2.39 need must fail --max-glibc 2_28 and say which file; "
+            f"got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        res = run("--max-glibc", "auto", str(strong))
+        _expect(
+            res.returncode == 0 and "max-glibc: 2.39 (" in res.stdout,
+            f"a strong 2.39 need must measure 2.39; got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        weak_c = tmp / "weak.c"
+        weak_c.write_text(
+            "extern int write(int, const void *, unsigned long);\n"
+            "extern int pidfd_getpid(void) __attribute__((weak));\n"
+            "void blastit_weak(const char *s) { (void)write(1, s, 1); if (pidfd_getpid) pidfd_getpid(); }\n",
+            encoding="utf-8",
+        )
+        weak = tmp / "libblastit_weak.so"
+        subprocess.run(
+            [cc, "-shared", "-fPIC", "-o", str(weak), str(weak_c)], check=True
+        )
+        # GNU ld records the 2.39 entry as strong even when every reference is weak;
+        # LLVM's lld (what `rustc` links `blastit` with) records `VER_FLG_WEAK`, and
+        # that is the shape the floor logic must handle. Mark the entry the way lld
+        # does, then assert `readelf` agrees: the fixture has to *be* the shape.
+        _expect(
+            mark_verneed_weak(weak, "GLIBC_2.39"),
+            "could not mark the fixture's GLIBC_2.39 version need weak",
+        )
+        weak_info = subprocess.run(
+            ["readelf", "--version-info", str(weak)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        _expect(
+            "GLIBC_2.39  Flags: WEAK" in weak_info,
+            "the patched fixture must show a WEAK GLIBC_2.39 need, or the case proves "
+            "nothing",
+            weak_info,
+        )
+        res = run("--max-glibc", "2_28", str(weak))
+        measured = [
+            line for line in res.stdout.splitlines() if line.startswith("max-glibc: ")
+        ]
+        _expect(
+            res.returncode == 0 and measured and "2.39" not in measured[0],
+            "a WEAK 2.39 need must pass at 2.28 and report the older number (the "
+            f"loader does not require it); got exit {res.returncode}: {measured}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+    # The `NEEDED` allowlist: a real ELF that links something other than
+    # libc/libm/libgcc/loader is refused, or a package could declare `Depends:
+    # libc6` while `needing` libselinux. `/bin/ls` is that shape on most hosts.
+    ls_needed = subprocess.run(
+        ["readelf", "-d", "/bin/ls"], capture_output=True, text=True, check=False
+    ).stdout
+    foreign = [
+        line.split("[", 1)[1].rstrip("]")
+        for line in ls_needed.splitlines()
+        if "(NEEDED)" in line
+    ]
+    allowed = (
+        "libc.so.6",
+        "libm.so.6",
+        "libgcc_s.so.1",
+        # glibc libraries that were separate objects before their 2.34 merge:
+        # still part of libc6/glibc, so not a package dependency.
+        "libdl.so.2",
+        "libpthread.so.0",
+        "librt.so.1",
+    )
+    if any(
+        not name.startswith(("ld-linux-", "libc.musl-")) and name not in allowed
+        for name in foreign
+    ):
+        res = run("--max-glibc", "auto", "/bin/ls")
+        _expect(
+            res.returncode == 1
+            and "which no supported distribution guarantees" in res.stderr,
+            "an ELF needing an unlisted library must be refused (the allowlist is the "
+            f"package's dependency contract); got exit {res.returncode}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+    return cases_run
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
@@ -1663,11 +1872,12 @@ def main() -> int:
     ee = test_exec_env_cases()
     ts = test_test_seam_cases()
     pe = test_portable_elf_shim_cases()
-    total = wf + pm + wt + ee + ts + pe
+    pg = test_portable_elf_glibc_cases()
+    total = wf + pm + wt + ee + ts + pe + pg
     print(
         f"packaging-gates-test: ok — {total} cases passed "
         f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts}, "
-        f"portable-elf={pe})"
+        f"portable-elf={pe}, max-glibc={pg})"
     )
     return 0
 

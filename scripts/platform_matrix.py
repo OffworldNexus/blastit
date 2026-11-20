@@ -81,6 +81,21 @@ LIBCS = {
         # archive that needs glibc 2.39 are two different promises about one
         # program, and only the lower one is true.
         "glibc_floor": "2_28",
+        # The ceiling a **package** bundle may measure. It is not the newest base a
+        # PHP leg builds on: a package is a promise about other machines, so the
+        # number is the oldest target the release claims — RHEL/Rocky 9 (2.34),
+        # Debian 12 (2.36) and Ubuntu 22.04 (2.35) all satisfy it. `build-{deb,rpm}.sh
+        # --max-glibc` takes this value and refuses a bundle above it.
+        #
+        # A shim that measures higher is **rebuilt on an older base**, never
+        # accommodated by dropping a distribution: Ondřej Surý publishes PHP 8.3,
+        # 8.4, 8.5 and 8.6 for `bookworm` (glibc 2.36, the repository the 8.6 gnu
+        # leg already uses), and `manylinux_2_28` is the floor for `blastit`,
+        # `blastit-lsp` and the Python shims. The measured needs of the shipped
+        # shims are far below this ceiling today (the PHP shims are 2.17), so the
+        # declared `Depends:`/`Requires:` is the measured number, and this is only
+        # the gate that keeps it there.
+        "shim_floor": "2_34",
         # Where a glibc artifact is **built**: the image whose glibc *is* the
         # floor, so the floor is a property of the build rather than of whichever
         # runner happened to pick up the job (`MB.3.60`: `ubuntu-24.04` gave
@@ -113,6 +128,22 @@ LIBCS = {
 }
 
 PYTHONS = ("3.13", "3.14")
+
+# The two native package formats (`MB.42.3.1`), one artifact family each. The
+# `pattern` is the filename `scripts/build-{deb,rpm}.sh` writes, with the placeholders
+# a caller substitutes; `image` is where `scripts/test_packages.sh` installs it.
+PACKAGE_FORMATS = {
+    "deb": {
+        "arch": {"x86_64": "amd64", "aarch64": "arm64"},
+        "pattern": "blastit_<version>_{package_arch}.deb",
+        "image": "debian:trixie",
+    },
+    "rpm": {
+        "arch": {"x86_64": "x86_64", "aarch64": "aarch64"},
+        "pattern": "blastit-<version>-<release>.{package_arch}.rpm",
+        "image": "rockylinux:9",
+    },
+}
 
 # The distro that carries the headers *and* the embedded SAPI for each
 # (minor, libc). Every entry is a signed distro package on a distro that ships
@@ -256,6 +287,10 @@ PROVEN: dict[tuple, str] = {
     ("wheels", "3.14", "x86_64", "musl"): "MB.3.18",
     ("archives", "x86_64", "gnu"): "MB.3.18",
     ("archives", "x86_64", "musl"): "MB.3.18",
+    # `MB.42.3.1` built both archives from one manylinux+distro-shim bundle and
+    # installed them in `debian:trixie` (WSGI leg) and `rockylinux:9` (static leg).
+    ("packages", "x86_64", "deb"): "MB.42.3.1",
+    ("packages", "x86_64", "rpm"): "MB.42.3.1",
     # `MB.35.5` built the `manylinux_2_28` archive, unpacked it and drove a real
     # `initialize → didOpen → shutdown → exit` session with `scripts/lsp_smoke.py`
     # (`0` stderr bytes). The four other legs are built by the first CI run on
@@ -454,6 +489,45 @@ def binary_legs() -> list[dict]:
             }
         )
     return legs
+
+
+def package_legs() -> list[dict]:
+    """One `.deb` and one `.rpm` per enabled gnu arch (`MB.42.3.1`).
+
+    A package is built from **one** §6.1 bundle: `blastit`, `blastit-lsp` and the
+    `gnu` Python shims come from the manylinux builder (`glibc_floor`, `2_28`), and
+    the four PHP shims come from their distro legs (`shim_floor`, `2_41`). Both
+    numbers are here because they are different, and the packaging scripts must be
+    handed the *bundle's* ceiling — `--max-glibc 2_41` — not the binaries' floor.
+    """
+    return [
+        {
+            "name": f"{leg['arch']}-{fmt}",
+            "arch": leg["arch"],
+            "format": fmt,
+            "libc": "gnu",
+            "package_arch": spec["arch"][leg["arch"]],
+            "pattern": spec["pattern"],
+            "image": spec["image"],
+            "builder_image": LIBCS["gnu"]["builder_image"].format(arch=leg["arch"]),
+            # `<major>_<minor>`: what `build-{deb,rpm}.sh --max-glibc` is given.
+            "bundle_ceiling": LIBCS["gnu"]["shim_floor"],
+            "binary_floor": LIBCS["gnu"]["glibc_floor"],
+            "runs_on": ARCHES[leg["arch"]]["runs_on"],
+        }
+        for leg in enabled_legs()
+        if leg["libc"] == "gnu"
+        for fmt, spec in PACKAGE_FORMATS.items()
+    ]
+
+
+def shim_floor() -> str:
+    """The declared ceiling for the distro-built PHP shims, `<major>_<minor>`.
+
+    `scripts/build-{deb,rpm}.sh --max-glibc` and the `packages` Make target take it
+    from here so the number is stated once, beside the matrix legs that produce it.
+    """
+    return LIBCS["gnu"]["shim_floor"]
 
 
 def shim_legs() -> list[dict]:
@@ -837,6 +911,8 @@ def declared_of(family: str) -> int:
         # `family.lower().rstrip("s")` of the page noun `lsp assets` (`R74`): the
         # family key is `lsp asset`, or `--count lsp` would `KeyError`.
         "lsp asset": len(lsp_legs()),
+        # `.deb` + `.rpm` per gnu arch (`MB.42.3.1`).
+        "package": len(package_legs()),
         # `images` is not a count any page states yet; 0 refuses the claim.
         "image": 0,
     }[family]
@@ -850,6 +926,7 @@ def proven_of(family: str) -> int:
         "archive": proven_count("archives"),
         "tarball": proven_count("archives"),
         "lsp asset": proven_count("lsp"),
+        "package": proven_count("packages"),
         "image": 0,
     }[family]
 
@@ -1030,6 +1107,7 @@ def check(problems: list[str], notes: list[str]) -> None:
         | {("wheels", leg["python"], leg["arch"], leg["libc"]) for leg in wheel_legs()}
         | {("archives", leg["arch"], leg["libc"]) for leg in binary_legs()}
         | {("lsp", leg["target"]) for leg in lsp_legs()}
+        | {("packages", leg["arch"], leg["format"]) for leg in package_legs()}
     )
     for key in PROVEN:
         if key not in declared_keys:
@@ -1163,6 +1241,7 @@ def summary(family: str = "") -> str:
         # The editor family is counted on its own noun: an LSP archive is never an
         # "archive" here, because that count is the standalone family's (`R74`).
         ("lsp assets (editor)", "lsp", len(lsp_legs())),
+        ("native packages (.deb/.rpm)", "packages", len(package_legs())),
     ):
         if only and {"archives": "binaries"}.get(key, key) != only:
             continue
@@ -1212,6 +1291,14 @@ def summary(family: str = "") -> str:
             lines.append(
                 f"| `{leg['archive']}` | {leg['runs_on']} | "
                 f"{status}; the command CI runs is `{leg['ci_command']}` |"
+            )
+    if wants("packages"):
+        for leg in package_legs():
+            node = PROVEN.get(("packages", leg["arch"], leg["format"]))
+            lines.append(
+                f"| `{leg['pattern']}` ({leg['format']}) | {leg['image']} on "
+                f"{leg['runs_on']} | {'proved by ' + node if node else 'declared, unbuilt'}; "
+                f"bundle ceiling glibc {leg['bundle_ceiling']}, binaries {leg['binary_floor']} |"
             )
     lines.append("")
     if wants("lsp"):
@@ -1281,6 +1368,7 @@ def _filtered_legs(
         "shims": shim_legs,
         "images": lambda: [dict(item) for item in IMAGES],
         "lsp": lsp_legs,
+        "packages": package_legs,
     }[family]()
     if minor:
         legs = [leg for leg in legs if leg.get("minor") == minor]
@@ -1303,11 +1391,11 @@ def main(argv: list[str] | None = None) -> int:
         help="validate the matrix and every stated count",
     )
     parser.add_argument(
-        "--matrix", choices=("wheels", "binaries", "shims", "images", "lsp")
+        "--matrix", choices=("wheels", "binaries", "shims", "images", "lsp", "packages")
     )
     parser.add_argument(
         "--count",
-        choices=("wheels", "binaries", "shims", "images", "lsp"),
+        choices=("wheels", "binaries", "shims", "images", "lsp", "packages"),
         help="print how many enabled legs match the filters (exits 0 even when 0)",
     )
     parser.add_argument(
@@ -1315,10 +1403,17 @@ def main(argv: list[str] | None = None) -> int:
         nargs="?",
         const="",
         default=None,
-        choices=("", "wheels", "binaries", "shims", "images", "lsp"),
+        choices=("", "wheels", "binaries", "shims", "images", "lsp", "packages"),
         help="print the Markdown report, or one family's section (`--summary lsp`)",
     )
-    parser.add_argument("--leg", choices=("wheels", "binaries", "shims", "lsp"))
+    parser.add_argument(
+        "--leg", choices=("wheels", "binaries", "shims", "lsp", "packages")
+    )
+    parser.add_argument(
+        "--shim-floor",
+        action="store_true",
+        help="print the declared PHP shim glibc ceiling (`2_41`) for `--max-glibc`",
+    )
     parser.add_argument(
         "--minor",
         default="",
@@ -1363,6 +1458,9 @@ def main(argv: list[str] | None = None) -> int:
         for problem in problems:
             print(f"platform-matrix: {problem}", file=sys.stderr)
         return 1
+
+    if args.shim_floor:
+        print(shim_floor())
 
     if args.matrix:
         legs = _filtered_legs(

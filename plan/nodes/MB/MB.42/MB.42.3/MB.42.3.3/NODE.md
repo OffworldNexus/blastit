@@ -45,3 +45,6 @@ Authoritative detail: `plan/nodes/MB/MB.42/MB.42.3/NODE.md` §3 and §5, and `do
 - `make py-sapi PY_SAPI_REQUIRE_ALL=1` green, and `py-sapi.yml` proof lines pasted
 - Composer wrapper installed and `bin/blastit --version` runs in `composer:2` from a local fixture
 - `make fast-check`
+
+# Carried in from MB.42.11
+`crates/blastit/src/check.rs`'s third bundle root, `exe_dir.join("../../..")`, is **dead**: from a wheel's `<site-packages>/blastit/_bin` it resolves one level *above* `site-packages`, so it can never contain a `blastit/` package (`../..` is what a wheel root would need). Either make it load-bearing for the repacked `py3-none` wheel layout (and prove it with a test), or delete it as a dead fallback — the charter forbids keeping unexercised fallbacks. State which in `RESULT.md`.

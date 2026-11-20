@@ -23,3 +23,15 @@ status active -> review
 ## 2026-11-20T01:51 [lead]
 
 REVIEW FIX (filtered) - the top finding is a FUNCTIONAL bug, split to MB.42.11: bundled_python() demands _bin/blastit-dbproxy which no bundle ships, so blastit check exits 3 ('No module named blastit') from every .deb/.rpm/tar.gz/make-install tree (both reviewers reproduced). Remaining for this node: BLOCKER payload not asserted (a package with zero shims passes) -> run check-bundle-layout.sh with BUNDLE_REQUIRE_*; BLOCKER make packages stages a HOST build not manylinux_2_28 so the floor is per-machine and stale shims raise it; BLOCKER test_packages never loads a .so (static-only fixture) so the floor+shims are untested; MAJOR packages.yml/nightly.yml do not exist but the Makefile claims they run these; MAJOR AutoReqProv:no + no NEEDED allowlist; MAJOR rpm payload ownership unasserted; MAJOR --max-glibc has no lab test; minors: 3-component GLIBC_2.2.5 invisible, xargs -0 needs -r, no SOURCE_DATE_EPOCH, dpkg-deb preflight, ceiling error omits the weak rule, packages help hides Docker.
+
+## 2026-11-20T01:59 [lead]
+
+MB.42.11 landed (bundled_python marker). Now apply this node's own review fixes: payload assertion, manylinux staging + explicit ceiling, WSGI smoke leg, AutoReqProv/NEEDED, rpm ownership, --max-glibc lab test, minors.
+
+## 2026-11-20T02:36 [lead]
+
+status review -> done
+
+## 2026-11-20T02:36 [lead]
+
+commit next; note: platform_matrix.py:499 doc comment still says the PHP shims come from shim_floor 2_41 - stale (measured 2.17, ceiling 2.34). Cosmetic drift to clean whenever that file is next touched.

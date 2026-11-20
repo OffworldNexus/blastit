@@ -142,7 +142,14 @@ if [ "$problems" -eq 0 ]; then
 fi
 
 # --- the entry point really runs, from the prefix it was staged into --------
-if [ "$problems" -eq 0 ]; then
+# `BUNDLE_SKIP_VERSION=1` is for the *packaging* builders: they assert the shape
+# of an archive for `--arch arm64` on an x86_64 host, where the staged binary is
+# the right file and the wrong machine. The container smoke runs `--version`
+# there, on the arch it installs.
+version=""
+if [ "$problems" -eq 0 ] && [ "${BUNDLE_SKIP_VERSION:-0}" = 1 ]; then
+    echo "ok   $prefix/bin/blastit --version: skipped (BUNDLE_SKIP_VERSION=1: the package may be another arch)"
+elif [ "$problems" -eq 0 ]; then
     version="$("$prefix/bin/blastit" --version 2>&1)" || {
         fail "$prefix/bin/blastit --version exited $?"
         version=""
@@ -160,4 +167,4 @@ if [ "$problems" -ne 0 ]; then
 fi
 
 echo "ok   $share: bin/{blastit,blastit-lsp} -> lib/, $(plural "$py_shims" 'Python shim'), $(plural "$php_shims" 'PHP shim'), python/blastit/*.py"
-echo "ok   $prefix/bin/blastit --version: $version"
+[ -z "$version" ] || echo "ok   $prefix/bin/blastit --version: $version"
