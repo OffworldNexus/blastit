@@ -6,14 +6,14 @@
 //! `libphp` worker runs exactly one request, so the composition root writes
 //! `per_process_cap = Some(1)` + `process_pool = true` on every route whose
 //! binding slot is bound and the scheduler forks one worker per concurrent
-//! request. A WSGI route keeps the threaded shape (`None` + `false`, one
-//! process) — decision 9 says both are unchanged where it counts.
+//! request. (The WSGI half of this proof — a threaded route, one process — is
+//! `tests/e2e_dev.rs`'s, which owns the Python story.)
 //!
 //! Each leg measures its **own control in the same function**
 //! (`BLASTIT_MAX_WORKERS=1`, the same four requests one at a time, `>= 800 ms`)
-//! and asserts `parallel <= control - 400 ms` beside `< 450 ms`, so neither a
-//! fast host nor a deleted pool can pass: `ADR-0015`'s promise is a comparison,
-//! not a constant. No `static`, no env var and no second test carries a number
+//! and asserts `parallel <= control - 400 ms`, so neither a fast host
+//! nor a deleted pool can pass: `ADR-0015`'s promise is a comparison, not a
+//! constant (no absolute millisecond ceiling: it would cap the host, not the pool). No `static`, no env var and no second test carries a number
 //! across a leg.
 //!
 //! **"Warm" is part of the claim, not a footnote.** A `libphp` worker `dlopen`s
@@ -45,8 +45,9 @@
 //! no usable pair asserts that documented refusal first and only then returns,
 //! so no run of this file is a no-op and no test here is marked ignored.
 //!
-//! The WSGI leg runs on every `make check` (`rs-test-critical` passes
-//! `--features python` for this crate). The PHP legs run there too — a CI
+//! The WSGI concurrency proof lives in `tests/e2e_dev.rs` (the Python story's
+//! owner; this file keeps the PHP half). The PHP legs run on every `make check`
+//! (`rs-test-critical` passes `--features python` for this crate) — a CI
 //! `check` host has no PHP, so they assert the refusal — and against the real
 //! pair through `make rs-test-php` (`PHP_SUITE_ARGS` now names this file). The
 //! `php-sapi` **image** leg still builds only `critical_php_backend` and
@@ -56,11 +57,10 @@
 //! claim of this file.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -69,32 +69,14 @@ use std::time::{Duration, Instant};
 #[path = "common/libphp_probes.rs"]
 mod libphp_probes;
 
-/// How many requests a wall-clock leg sends at once: `ADR-0015`'s promise is
-/// about four, and the PHP warm-up is four wide for the same reason.
-const WIDTH: usize = 4;
+/// The HTTP client, burst and calibration shared with `e2e_dev.rs`.
+#[path = "common/views.rs"]
+mod views;
 
-/// The serialized floor: four 200 ms requests, one at a time.
-const CONTROL_FLOOR: Duration = Duration::from_millis(800);
-
-/// The measured promise: four concurrent 200 ms requests on one warm route.
-const PARALLEL_BUDGET: Duration = Duration::from_millis(450);
-
-/// How much faster than the serialized control the parallel leg must be, so a
-/// deleted pool cannot pass on a fast host (`ADR-0015`, the measured promise).
-const CONTROL_MARGIN: Duration = Duration::from_millis(400);
-
-/// How far apart the WSGI app's own per-request `t0` stamps may be for the four
-/// requests to count as concurrent, in seconds (`docs/design/parallel-views.md`
-/// §7): the app stamps itself, so a leg that quietly staged its requests one
-/// after another cannot pass on a fast machine.
-#[cfg(feature = "python")]
-const CONTENTION_SPAN: f64 = 0.100;
+use views::{Client, Response, assert_200, burst};
 
 /// How long a boot may take to bind, refuse, or answer.
 const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
-
-/// How long one request may take once the port accepts connections.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long init's event stream must be quiet before a `process.spawned` set is
 /// read as complete: the event travels on init's own stdout pipe, so "no new
@@ -113,35 +95,6 @@ const ROUTE: &str = "app";
 
 /// The PHP front controller, as `entrypoint php` spells it.
 const ENTRY: &str = "public/index.php";
-
-/// A WSGI view: one process, `BLASTIT_VIEW_MAX_WORKERS` requests at once
-/// (`ADR-0015` decision 9 — unchanged).
-#[cfg(feature = "python")]
-const WSGI_MANIFEST: &str = "\
-app \"app\"
-entrypoint python \"app:app\"
-
-view app regex '.*' {}
-";
-
-/// The WSGI fixture: 200 ms in `time.sleep` (which releases the GIL, so a
-/// threaded process really overlaps them), the last path segment back as its own
-/// marker, and the request's own `t0` (`docs/design/parallel-views.md` §7) so the
-/// suite can assert the four requests really left together instead of trusting
-/// the barrier alone.
-#[cfg(feature = "python")]
-const WSGI_APP: &str = "\
-import time
-
-def app(environ, start_response):
-    t0 = time.monotonic()
-    time.sleep(0.2)
-    marker = environ.get(\"PATH_INFO\", \"/\").rsplit(\"/\", 1)[-1] or \"root\"
-    body = (\"wsgi:%s:%.6f\" % (marker, t0)).encode()
-    start_response(\"200 OK\", [(\"Content-Type\", \"text/plain\"),
-                              (\"Content-Length\", str(len(body)))])
-    return [body]
-";
 
 /// A PHP route that warms one worker at boot (`prefork`): the measured legs
 /// send a four-wide burst first, because `prefork` warms exactly one.
@@ -174,66 +127,35 @@ echo \"php:$m:\" . getmypid() . \"\\n\";
 
 // ------------------------------------------------------------- assertions
 
-/// A response that is not a `200` fails with what the server actually said.
-fn assert_200(what: &str, body: &str) {
-    assert!(
-        body.starts_with("HTTP/1.1 200"),
-        "{what}: expected a `200`, got:\n{body}"
-    );
-}
-
-/// The marker and the request's own `t0` a WSGI response carries
-/// (`wsgi:<marker>:<t0>`).
-#[cfg(feature = "python")]
-fn wsgi_answer(response: &str) -> Option<(&str, f64)> {
-    let rest = response.split("wsgi:").nth(1)?;
-    let mut fields = rest.split_whitespace().next()?.split(':');
-    let marker = fields.next()?;
-    let t0 = fields.next()?.parse().ok()?;
-    Some((marker, t0))
-}
-
 /// The marker and the pid a PHP response carries (`php:<marker>:<pid>`).
-fn php_answer(response: &str) -> Option<(&str, u32)> {
-    let rest = response.split("php:").nth(1)?;
+fn php_answer(response: &Response) -> Option<(&str, u32)> {
+    let rest = response.body.split("php:").nth(1)?;
     let (marker, rest) = rest.split_once(':')?;
     Some((marker, rest.split_whitespace().next()?.parse().ok()?))
 }
 
-/// Asserts four `200`s, each carrying its **own** request's marker and `t0`, and
-/// returns the four `t0`s: a swapped or shared response is a failure, not a
-/// coincidence, and the `t0`s are what prove the four left together.
-#[cfg(feature = "python")]
-fn assert_wsgi_burst(what: &str, bodies: &[String]) -> Vec<f64> {
-    assert_eq!(bodies.len(), WIDTH, "{what}: one response per request");
-    let mut starts = Vec::with_capacity(bodies.len());
-    for (index, body) in bodies.iter().enumerate() {
-        assert_200(what, body);
-        let expected = format!("w{index}");
-        let (marker, t0) = wsgi_answer(body)
-            .unwrap_or_else(|| panic!("{what}: request {index} carried no app body:\n{body}"));
-        assert_eq!(
-            marker, expected,
-            "{what}: request {index} answered for someone else:\n{body}"
-        );
-        starts.push(t0);
-    }
-    starts
-}
-
-/// Asserts `WIDTH` `200`s with their own markers and returns the pids that
+/// Asserts one `200` per request with its own markers and returns the pids that
 /// served them, in request order.
-fn assert_php_burst(what: &str, bodies: &[String]) -> Vec<u32> {
-    assert_eq!(bodies.len(), WIDTH, "{what}: one response per request");
+fn assert_php_burst(what: &str, bodies: &[Response]) -> Vec<u32> {
+    assert_eq!(
+        bodies.len(),
+        views::WIDTH,
+        "{what}: one response per request"
+    );
     let mut pids = Vec::with_capacity(bodies.len());
     for (index, body) in bodies.iter().enumerate() {
         assert_200(what, body);
-        let (marker, pid) = php_answer(body)
-            .unwrap_or_else(|| panic!("{what}: request {index} carried no page body:\n{body}"));
+        let (marker, pid) = php_answer(body).unwrap_or_else(|| {
+            panic!(
+                "{what}: request {index} carried no page body:\n{:?}",
+                body.body
+            )
+        });
         let expected = format!("p{index}");
         assert_eq!(
             marker, expected,
-            "{what}: request {index} answered for someone else:\n{body}"
+            "{what}: request {index} answered for someone else:\n{:?}",
+            body.body
         );
         pids.push(pid);
     }
@@ -519,32 +441,6 @@ fn boot_lock() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// The client half of a boot: only the port, so the request threads need no lock
-/// on the process the main thread owns.
-#[derive(Clone, Copy)]
-struct Client {
-    /// The port `blastit dev` bound.
-    port: u16,
-}
-
-impl Client {
-    /// `GET <path>` over a fresh connection, as the raw response.
-    fn get(&self, path: &str) -> String {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connecting");
-        stream
-            .set_read_timeout(Some(REQUEST_TIMEOUT))
-            .expect("a read timeout");
-        write!(
-            stream,
-            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
-        )
-        .expect("writing the request");
-        let mut response = Vec::new();
-        stream.read_to_end(&mut response).expect("the response");
-        String::from_utf8_lossy(&response).into_owned()
-    }
-}
-
 /// A `blastit dev` boot under test: its process, both streams, and its port.
 struct Boot {
     child: Child,
@@ -793,31 +689,6 @@ impl Drop for Boot {
 
 // ---------------------------------------------------------------- helpers
 
-/// Sends one `GET` per path **released together**: a barrier of `paths.len() + 1`
-/// so the clock starts before the first request can leave.
-///
-/// Returns the wall time from the release to the last body, and the raw
-/// responses in path order.
-fn burst(client: Client, paths: &[String]) -> (Duration, Vec<String>) {
-    let barrier = Arc::new(Barrier::new(paths.len() + 1));
-    let mut handles = Vec::with_capacity(paths.len());
-    for path in paths {
-        let barrier = Arc::clone(&barrier);
-        let path = path.clone();
-        handles.push(std::thread::spawn(move || {
-            barrier.wait();
-            client.get(&path)
-        }));
-    }
-    let started = Instant::now();
-    barrier.wait();
-    let bodies: Vec<String> = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("a request thread"))
-        .collect();
-    (started.elapsed(), bodies)
-}
-
 /// Waits until `check` says the world has moved, failing with `what` if it never
 /// does. Polling, never a fixed sleep: the bound is on the pool, not on a guess
 /// about how fast a pump runs.
@@ -886,101 +757,6 @@ fn refused_without_a_host(what: &str, scratch: &Scratch) {
     println!("{what}: refused (no usable libphp + shim on this host): {stderr}");
 }
 
-// ------------------------------------------------------------------ WSGI
-
-/// One WSGI route: the serialized control, then the parallel leg on a fresh boot
-/// (`ADR-0015` decision 9 — the Python path is unchanged, and this is its
-/// witness).
-///
-/// Both numbers come from this one function, so no `static` or env var crosses
-/// tests, and the parallel boot is new: the control's `BLASTIT_MAX_WORKERS=1`
-/// cannot make the parallel leg pass by accident.
-#[cfg(feature = "python")]
-#[test]
-fn serialized_then_parallel_wsgi() {
-    let scratch = Scratch::new("wsgi");
-    scratch.write("Blastfile", WSGI_MANIFEST);
-    scratch.write("app.py", WSGI_APP);
-    let paths: Vec<String> = (0..WIDTH).map(|index| format!("/m/w{index}")).collect();
-
-    // The control: one live request slot, four requests one at a time. The floor
-    // is the fixture's own 4 × 200 ms, so a fast host cannot below it.
-    let mut control = Boot::start(&scratch.dir, &[("BLASTIT_MAX_WORKERS", "1")]);
-    assert!(
-        control.await_boot().is_none(),
-        "a WSGI route must serve: {}",
-        control.stderr_text()
-    );
-    let started = Instant::now();
-    let mut control_bodies = Vec::with_capacity(WIDTH);
-    for path in &paths {
-        control_bodies.push(control.client().get(path));
-    }
-    let control_wall = started.elapsed();
-    assert_wsgi_burst("wsgi control", &control_bodies);
-    assert!(
-        control_wall >= CONTROL_FLOOR,
-        "the serialized control took {control_wall:?}, below the {CONTROL_FLOOR:?} floor the \
-         fixture's own sleeps set — the fixture does not sleep, so the parallel leg would prove \
-         nothing"
-    );
-    control.stop();
-    drop(control);
-
-    // The parallel leg: a fresh boot at the scheduler's own width.
-    let mut boot = Boot::start(&scratch.dir, &[]);
-    assert!(
-        boot.await_boot().is_none(),
-        "a WSGI route must serve: {}",
-        boot.stderr_text()
-    );
-    let spawned_before = boot.settled_spawned();
-    assert!(
-        spawned_before.is_empty(),
-        "a lazy boot forks nothing before the first request, saw {spawned_before:?}"
-    );
-    let (wall, bodies) = burst(boot.client(), &paths);
-    let starts = assert_wsgi_burst("wsgi parallel", &bodies);
-    assert!(
-        wall < PARALLEL_BUDGET,
-        "four concurrent 200 ms requests to one WSGI route took {wall:?}, which is not under \
-         {PARALLEL_BUDGET:?}: the route is serializing them"
-    );
-    assert!(
-        wall + CONTROL_MARGIN <= control_wall,
-        "the parallel leg took {wall:?} against a serialized control of {control_wall:?}: it must \
-         be at least {CONTROL_MARGIN:?} faster, or this host's own speed is doing the work"
-    );
-    // The app's own `t0`s: the four requests were really in flight together, not
-    // staged one behind another by this suite (`docs/design/parallel-views.md`
-    // §7).
-    let span = starts.iter().copied().fold(f64::MIN, f64::max)
-        - starts.iter().copied().fold(f64::MAX, f64::min);
-    assert!(
-        span <= CONTENTION_SPAN,
-        "the four requests entered the app within {:.1} ms of each other, more than the {:.0} ms \
-         this leg allows: it is measuring how fast the client can send, not the pool",
-        span * 1000.0,
-        CONTENTION_SPAN * 1000.0
-    );
-    // `ADR-0015` decision 9: the Python path is unchanged — one process, however
-    // many requests it runs at once.
-    let spawned_after = boot.settled_spawned();
-    assert_eq!(
-        spawned_after.len(),
-        1,
-        "a threaded WSGI route owns exactly one process however many requests it runs at once, \
-         saw {spawned_after:?}"
-    );
-    boot.stop();
-    println!(
-        "wsgi: serialized control {control_wall:?} (BLASTIT_MAX_WORKERS=1), parallel {wall:?} \
-         over {} spawned process(es), four t0s spanning {:.1} ms",
-        spawned_after.len(),
-        span * 1000.0
-    );
-}
-
 // ------------------------------------------------------------------ PHP
 
 /// One PHP route: the serialized control, the four-wide **warm-up** burst, then
@@ -996,7 +772,9 @@ fn serialized_then_parallel_php() {
     let scratch = Scratch::new("php");
     scratch.write("Blastfile", PHP_MANIFEST);
     scratch.write(ENTRY, PHP_PAGE);
-    let paths: Vec<String> = (0..WIDTH).map(|index| format!("/php?m=p{index}")).collect();
+    let paths: Vec<String> = (0..views::WIDTH)
+        .map(|index| format!("/php?m=p{index}"))
+        .collect();
 
     let Some(host) = host_php() else {
         // No usable pair on this host: the documented refusal **is** this leg's
@@ -1028,7 +806,7 @@ fn serialized_then_parallel_php() {
         control.stderr_text()
     );
     let started = Instant::now();
-    let mut control_bodies = Vec::with_capacity(WIDTH);
+    let mut control_bodies = Vec::with_capacity(views::WIDTH);
     for path in &paths {
         control_bodies.push(control.client().get(path));
     }
@@ -1040,10 +818,10 @@ fn serialized_then_parallel_php() {
         "with BLASTIT_MAX_WORKERS=1 one worker serves all four serially, saw {control_pids:?}"
     );
     assert!(
-        control_wall >= CONTROL_FLOOR,
-        "the serialized control took {control_wall:?}, below the {CONTROL_FLOOR:?} floor the \
-         fixture's own sleeps set — the fixture does not sleep, so the parallel leg would prove \
-         nothing"
+        control_wall >= views::CONTROL_FLOOR,
+        "the serialized control took {control_wall:?}, below the {:?} floor the fixture's own \
+         sleeps set — the fixture does not sleep, so the parallel leg would prove nothing",
+        views::CONTROL_FLOOR
     );
     control.stop();
     drop(control);
@@ -1070,14 +848,14 @@ fn serialized_then_parallel_php() {
     let warm_workers = worker_set(&warm_pids);
     assert_eq!(
         warm_workers.len(),
-        WIDTH,
+        views::WIDTH,
         "the warm-up burst is four wide: it must have used four processes, saw {warm_pids:?} \
          (a narrower warm-up would leave a cold worker inside the measured window)"
     );
     let spawned_before = boot.settled_spawned();
     assert_eq!(
         spawned_before.len(),
-        WIDTH.max(spawned_at_boot.len()),
+        views::WIDTH.max(spawned_at_boot.len()),
         "the warm-up burst must have forked one worker per request: spawned {spawned_before:?} \
          for pids {warm_pids:?}"
     );
@@ -1097,14 +875,12 @@ fn serialized_then_parallel_php() {
          {spawned_after:?}"
     );
     assert!(
-        wall < PARALLEL_BUDGET,
-        "four concurrent 200 ms requests to one warm PHP route took {wall:?}, which is not under \
-         {PARALLEL_BUDGET:?}: the route is running one request per process but not in parallel"
-    );
-    assert!(
-        wall + CONTROL_MARGIN <= control_wall,
+        wall + views::CONTROL_MARGIN <= control_wall,
         "the parallel leg took {wall:?} against a serialized control of {control_wall:?}: it must \
-         be at least {CONTROL_MARGIN:?} faster, or this host's own speed is doing the work"
+         be at least {:?} faster, or this host's own speed is doing the work (an absolute \
+         millisecond ceiling is deliberately not asserted: it caps the host, not the route's \
+         parallelism)",
+        views::CONTROL_MARGIN
     );
     boot.stop();
     println!(
@@ -1187,8 +963,12 @@ fn the_cap_holds_and_the_pool_shrinks() {
     let mut pids = Vec::with_capacity(CONCURRENT);
     for (index, body) in bodies.iter().enumerate() {
         assert_200("php cap", body);
-        let (marker, pid) = php_answer(body)
-            .unwrap_or_else(|| panic!("php cap: request {index} carried no page body:\n{body}"));
+        let (marker, pid) = php_answer(body).unwrap_or_else(|| {
+            panic!(
+                "php cap: request {index} carried no page body:\n{:?}",
+                body.body
+            )
+        });
         markers.push(marker.to_string());
         pids.push(pid);
     }
@@ -1236,8 +1016,9 @@ fn the_cap_holds_and_the_pool_shrinks() {
     );
     let follow_up = boot.client().get("/php?m=follow");
     assert_200("php shrink", &follow_up);
-    let (marker, fresh) = php_answer(&follow_up)
-        .unwrap_or_else(|| panic!("php shrink: the follow-up carried no page body:\n{follow_up}"));
+    let (marker, fresh) = php_answer(&follow_up).unwrap_or_else(|| {
+        panic!("php shrink: the follow-up carried no page body:\n{follow_up:?}")
+    });
     assert_eq!(marker, "follow", "the follow-up is its own request");
     assert!(
         !workers.contains(&fresh),

@@ -366,20 +366,8 @@ fn sys_path(venv: Option<&Path>, minor: u32) -> Vec<Vec<u8>> {
 
 /// §2.3's `libpython` search: `.so.1.0` then `.so`, across the prefix first.
 fn libpython(home: &Path, minor: u32, command: &str) -> Result<PathBuf, DiscoveryError> {
-    let triplet = lib_triplet();
-    let directories = [
-        home.join("lib").join(&triplet),
-        home.join("lib64"),
-        home.join("lib"),
-        PathBuf::from("/usr/lib").join(&triplet),
-        PathBuf::from("/usr/lib64"),
-        PathBuf::from("/usr/lib"),
-        PathBuf::from("/usr/local/lib"),
-    ];
-    for name in [
-        format!("libpython3.{minor}.so.1.0"),
-        format!("libpython3.{minor}.so"),
-    ] {
+    let directories = libpython_directories(home);
+    for name in libpython_file_names(minor) {
         for directory in &directories {
             let candidate = directory.join(&name);
             if candidate.is_file() {
@@ -392,6 +380,57 @@ fn libpython(home: &Path, minor: u32, command: &str) -> Result<PathBuf, Discover
         python_home: home.to_path_buf(),
         minor: format!("3.{minor}"),
     })
+}
+
+/// Every directory §2.3's `libpython` search looks in, in order: the
+/// interpreter's own prefix first, then the absolute distro locations.
+///
+/// This is the one owner of the order — the private search walks it — and a
+/// suite that has to answer "does this host ship one?" asks
+/// [`system_has_libpython`] rather than copying the list and drifting from it.
+#[must_use]
+pub fn libpython_directories(home: &Path) -> Vec<PathBuf> {
+    let triplet = lib_triplet();
+    let mut directories = vec![
+        home.join("lib").join(&triplet),
+        home.join("lib64"),
+        home.join("lib"),
+    ];
+    directories.extend(system_libpython_directories());
+    directories
+}
+
+/// The absolute directories the search falls back to when a prefix holds none.
+#[must_use]
+pub fn system_libpython_directories() -> Vec<PathBuf> {
+    let triplet = lib_triplet();
+    vec![
+        PathBuf::from("/usr/lib").join(&triplet),
+        PathBuf::from("/usr/lib64"),
+        PathBuf::from("/usr/lib"),
+        PathBuf::from("/usr/local/lib"),
+    ]
+}
+
+/// The file names the search tries for `minor`, in order.
+#[must_use]
+pub fn libpython_file_names(minor: u32) -> [String; 2] {
+    [
+        format!("libpython3.{minor}.so.1.0"),
+        format!("libpython3.{minor}.so"),
+    ]
+}
+
+/// Whether this host ships `minor`'s shared `libpython` where a boot looks.
+///
+/// The project's own prefix is not consulted: this is the distro-level answer a
+/// suite needs to pick a minor no host-wide library can rescue.
+#[must_use]
+pub fn system_has_libpython(minor: u32) -> bool {
+    let names = libpython_file_names(minor);
+    system_libpython_directories()
+        .iter()
+        .any(|directory| names.iter().any(|name| directory.join(name).is_file()))
 }
 
 /// §2.3's shim search: a deployment looks beside the executable only.

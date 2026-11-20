@@ -2,16 +2,22 @@
 id: MB.56.3.2.1
 title: "e2e_dev.rs part 1: Python WSGI multi-view, host rules, venv activation"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: []
-paths: ["crates/blastit/tests/**"]
+paths:
+  - "crates/blastit/tests/**"
+  - "crates/blastit-sys/tests/**"
+  - "crates/blastit-py-sapi/src/**"
+  - docs/reference/settings.md
+  - "docs/reference/log-events.md"
+  - docs/troubleshooting.md
 attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:54"
-updated: "2026-11-20T18:54"
+updated: "2026-11-20T19:43"
 ---
 
 # Goal

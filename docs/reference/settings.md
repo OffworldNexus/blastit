@@ -25,6 +25,7 @@ the process environment only; `set -a; . ./.env; set +a` before `blastit dev` lo
 | Setting | Default | What it does |
 |---|---|---|
 | `BLASTIT_LIBPHP` | the distro package's library | names the NTS `libphp` to embed for `entrypoint php` |
+| `BLASTIT_PYTHON` | the project `.venv`'s interpreter | the CPython 3.13/3.14 that serves WSGI views: an **absolute** path to an executable file. `dev` and `check` also accept the activated `$VIRTUAL_ENV` and `PATH`; `serve` reads only absolute overrides |
 
 ## Port and health
 

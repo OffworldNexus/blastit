@@ -4273,3 +4273,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T18:54 [MB.56.3.2.1] (lead) status ready -> active
 - 2026-11-20T18:54 [MB.56.3.2.1] (lead) attempt 1/3 started
 - 2026-11-20T18:54 [MB.56.3.2.1] (lead) base eef8793da590e19b43eb36ee579f143fce19d18b
+- 2026-11-20T19:31 [MB.56.3.2.2] (lead) CAP REVISED: e2e_dev.rs may reach <=2,600 LOC total (parent cap is 5,500 across all four suites); file is 1,453 after the Python slice.
+- 2026-11-20T19:31 [MB.56.3.2.3] (lead) CAP REVISED: e2e_dev.rs <=2,600 LOC total (parent cap 5,500 across four suites).
+- 2026-11-20T19:34 [MB.56.3.2.1] (lead) REVIEW FIX: (B) stage1 pin/adopt descriptor-identity check lost its only witness (critical_python_shim.rs:731 deleted) -> restore as an E2E leg or a minimal foc
+- 2026-11-20T19:34 [MB.56.3.2.1] (lead) edited fields
+- 2026-11-20T19:34 [MB.56.3.2.1] (lead) REVIEW FIX 2 (ux): (F1) docs/reference/log-events.md:104 environment cell contradicts what the test proves; (F2) settings.md has no BLASTIT_PYTHON row + trouble
+- 2026-11-20T19:34 [MB.56.3.2.1] (lead) REVIEW FIX 2 (ux): (F1) docs/reference/log-events.md:104 environment cell contradicts the test; (F2) settings.md lacks a BLASTIT_PYTHON row and troubleshooting 
+- 2026-11-20T19:43 [MB.56.3.2.1] (lead) status active -> done

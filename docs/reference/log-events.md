@@ -101,7 +101,7 @@ serving. A resolved runtime is not a problem.
 | `entrypoint` | Fields |
 |---|---|
 | `php` | `version` (`"8.5.4"`), `libphp` (the resolved path), `php_ini` (the file opened, or `null` when none is) |
-| `python` | `version` (`"3.14.0"`), `environment` (`VIRTUAL_ENV` when set, else `sys.prefix`) |
+| `python` | `version` (`"3.14.0"`), `environment` (the environment **actually serving**: an activated `$VIRTUAL_ENV` when its `pyvenv.cfg` makes it a venv — `dev`/`check` only — else the project `.venv`'s root, else the interpreter prefix) |
 | `static` | `entrypoint` only: no language runtime is loaded |
 
 A field a row does not list is absent from the object, never `null`. Blastit
