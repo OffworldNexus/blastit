@@ -3923,3 +3923,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-19T23:41 [MB.42.5] (lead) attempt 1/3 started
 - 2026-11-19T23:41 [MB.42.5] (lead) base a9a23cc423fb12f65066957ac1b0e8b8c722bcfc
 - 2026-11-20T00:27 [MB.42.5] (lead) status active -> done
+- 2026-11-20T00:27 [MB.42.10] (unknown) created (task) Make blastit compile for musl: libc::execveat is gnu-only (kills both musl archives, musllinux wheels and every musl PHP suite)
+- 2026-11-20T00:27 [MB.42] (lead) MB.42.10 created (release-blocking): libc 0.2.190 declares execveat only in linux/gnu/mod.rs, so crates/blastit does not compile for *-unknown-linux-musl - kill
+- 2026-11-20T00:27 [MB.42.10] (lead) status ready -> active
+- 2026-11-20T00:27 [MB.42.10] (lead) attempt 1/3 started
+- 2026-11-20T00:27 [MB.42.10] (lead) base 27c5af2261e5046ac78796e6c962e305dd49e45e
+- 2026-11-20T01:33 [MB.42.10] (lead) status active -> done

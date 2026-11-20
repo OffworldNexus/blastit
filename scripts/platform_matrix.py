@@ -146,23 +146,16 @@ PHP_BUILDS = {
     },
     ("8.6", "musl"): {
         # `apk info -L php86-embed` in `alpine:edge` after appending
-        # `edge/testing`: `/usr/lib/php86/libphp.so`. The shim and the probe run
-        # here; the worker-level suites cannot compile `blastit` on this image
-        # yet — see `suites_because`.
+        # `edge/testing`: `/usr/lib/php86/libphp.so`. The shim, the probe and —
+        # since `MB.42.10` gave the handoff a musl-declared `execveat` — the
+        # worker-level suites all build and run here.
         "base": "alpine:edge",
         "extra_repo": "alpine-edge-testing",
         "dev": "php86-dev",
         "embed": "php86-embed",
         "curl": "php86-curl",
         "libphp": "/usr/lib/php86/libphp.so",
-        "suites": False,
-        "suites_because": (
-            "`crates/blastit/src/cli/handoff.rs` calls `libc::execveat`, which "
-            '`libc 0.2.191` does not declare for `target_env = "musl"`, so '
-            "`cargo test -p blastit` cannot compile on any musl leg until that "
-            "call is given a musl declaration; the shim and the real-load probe "
-            "still build and run here (`MB.42.5` follow-up)"
-        ),
+        "suites": True,
     },
     ("8.5", "gnu"): {
         # `dpkg -L libphp8.5-embed` in `ubuntu:26.04`: `/usr/lib/libphp8.5.so`.
@@ -298,12 +291,14 @@ SHIM_REACHES: dict[tuple[str, str, str], tuple[str, str]] = {
         "and `critical_php_embed` pass in the same image",
     ),
     ("8.6", "musl", "x86_64"): (
-        "probed",
-        "measured by MB.42.5 in the `alpine:edge` image with `edge/testing` "
+        "served",
+        "measured by MB.42.10 in the `alpine:edge` image with `edge/testing` "
         "appended: with `BLASTIT_LIBPHP` unset the boot reaches "
-        "`/usr/lib/php86/libphp.so` through the per-minor directory and the "
-        "real-load probe serves `GET / → 200`; the worker-level suites cannot "
-        "compile on this image yet (`suites_because`)",
+        "`/usr/lib/php86/libphp.so` through the per-minor directory and serves "
+        "`GET / → 200`; `critical_php_backend` 9/9, `critical_php_embed` 29/29 and "
+        "`critical_file_sink` 8/8 pass in the same image (MB.42.5's `suites: False` "
+        "was only the handoff's gnu-only `libc::execveat`, fixed by MB.42.10), and "
+        "the unprivileged `PR_SET_DUMPABLE(0)` witness denies 2 roles",
     ),
     ("8.5", "gnu", "x86_64"): (
         "served",

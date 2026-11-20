@@ -370,17 +370,37 @@ fn exec_verified(verified: &Verified, arguments: &[String]) -> io::Error {
     env_ptrs.push(ptr::null_mut());
 
     if magic == *b"\x7fELF" {
+        // The kernel starts the **verified descriptor** —
+        // `execveat(bin_fd, "", …, AT_EMPTY_PATH)` — so the file `fstat`ed above
+        // is the file that runs and no path is resolved a second time.
+        //
+        // It goes through `libc::syscall` rather than the `libc::execveat`
+        // wrapper because that wrapper is declared **only** for glibc
+        // (`libc-0.2.190/src/unix/linux_like/linux/gnu/mod.rs:1205`); there is
+        // no `execveat` in the musl module, which is what left every
+        // `*-unknown-linux-musl` build of this crate uncompilable. The syscall
+        // *number* is declared for both libcs (`…/musl/b64/x86_64/mod.rs:490`
+        // and `…/musl/b64/aarch64/mod.rs:566`: `SYS_execveat` is 322 and 281),
+        // and `AT_EMPTY_PATH` is the shared `…/linux_like/mod.rs:1218` `0x1000`
+        // (`include/uapi/linux/fcntl.h`), so one code path serves both libcs
+        // with no `cfg(target_env)` fork.
+        //
+        // Every argument is widened to `c_long`: `syscall` is C-variadic and the
+        // libc reads each one back as `long`, so passing a `c_int` would leave
+        // the upper half of the argument register unspecified.
+        //
         // SAFETY: `argv_ptrs` and `env_ptrs` are NUL-terminated arrays of
         // pointers into `argv`/`entries`, all alive for the call; `bin_fd` is
         // open and refers to the ELF image checked above, and `c""` is the empty
         // path `AT_EMPTY_PATH` requires.
         unsafe {
-            libc::execveat(
-                verified.bin.as_raw_fd(),
+            libc::syscall(
+                libc::SYS_execveat,
+                verified.bin.as_raw_fd() as libc::c_long,
                 c"".as_ptr(),
                 argv_ptrs.as_ptr(),
                 env_ptrs.as_ptr(),
-                libc::AT_EMPTY_PATH,
+                libc::AT_EMPTY_PATH as libc::c_long,
             );
         }
     } else if magic[..2] == *b"#!" {

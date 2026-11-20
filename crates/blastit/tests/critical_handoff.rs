@@ -657,6 +657,11 @@ fn the_two_switches_control_the_handoff() {
 /// reads `src/cli.rs` for its ordering promise: an ELF image is started from
 /// `verified.bin`'s descriptor, and nothing inside that function resolves a
 /// path again.
+///
+/// The assertion is on the **syscall number** (`libc::SYS_execveat`) and not on
+/// the `libc::execveat` wrapper, which `libc` declares for glibc only: the
+/// syscall form is the one that compiles on glibc *and* musl (`MB.42.10`), and
+/// it is exactly as strong — `AT_EMPTY_PATH` on the verified descriptor.
 #[test]
 fn the_exec_never_reopens_the_verified_path() {
     let source = include_str!("../src/cli/handoff.rs");
@@ -667,9 +672,22 @@ fn the_exec_never_reopens_the_verified_path() {
     let end = tail.find("\n}\n").expect("the end of exec_verified");
     let body = &tail[..end];
     assert_eq!(
-        body.matches("libc::execveat").count(),
+        body.matches("libc::SYS_execveat").count(),
         1,
-        "one descriptor-based exec"
+        "one descriptor-based exec, by syscall number (the form both libcs declare)"
+    );
+    assert!(
+        body.contains("libc::syscall("),
+        "execveat goes through `libc::syscall`: `libc::execveat` is gnu-only"
+    );
+    assert!(
+        body.contains("AT_EMPTY_PATH"),
+        "the exec starts the verified descriptor (`AT_EMPTY_PATH`), never a path"
+    );
+    assert_eq!(
+        body.matches("unsafe {").count(),
+        2,
+        "one `unsafe` per branch: the ELF syscall and the `#!` execve"
     );
     assert!(
         body.contains("verified.bin.as_raw_fd()"),

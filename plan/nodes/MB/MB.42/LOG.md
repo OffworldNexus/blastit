@@ -15,3 +15,7 @@ created MB.42.7 from conductor diagnostic: blastit-sys seccomp::tests forks insi
 ## 2026-11-19T23:26 [lead]
 
 MB.42.9 created: handoff treats ambient $VIRTUAL_ENV as 'explicit' so an unsafe active venv exits 1 - reproduced on this repo (parent dir 0775) where every blastit dev|check|fmt|lsp refuses; make test-critical needed BLASTIT_NO_LOCAL_HANDOFF=1 to pass. Must fix before MB.42.2 gate; also needs a design \)4 amendment ($VIRTUAL_ENV is ambient, not explicit).
+
+## 2026-11-20T00:27 [lead]
+
+MB.42.10 created (release-blocking): libc 0.2.190 declares execveat only in linux/gnu/mod.rs, so crates/blastit does not compile for *-unknown-linux-musl - killing both musl archives, both musllinux wheels, and the worker suites on every musl PHP leg (MB.42.5 had to set suites:False for 8.6 musl). libc::SYS_execveat IS declared for musl, so libc::syscall is the portable fix.
