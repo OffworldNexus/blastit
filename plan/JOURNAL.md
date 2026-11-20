@@ -4221,3 +4221,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T18:02 [MB.56.2.3] (lead) OWNER GUARDRAIL: canonicalise unformatted public docs Blastfile examples YES; NO per-page fence-count tables (brittle). Discover title="Blastfile" (incl. title=
 - 2026-11-20T18:03 [MB.56.5] (lead) tools/coverage_report.py does not expand FILES globs and reports 'no instrumented coverage' for manifest files even when profdata covers them; coverage for craw
 - 2026-11-20T18:09 [MB.56.2.3] (lead) status active -> done
+- 2026-11-20T18:09 [MB.56.2.3] (lead) commit 6bcd3d9
+- 2026-11-20T18:09 [MB.56.2.4] (lead) status ready -> active
+- 2026-11-20T18:09 [MB.56.2.4] (lead) attempt 1/3 started
+- 2026-11-20T18:09 [MB.56.2.4] (lead) base 6bcd3d9857e17b23b156eedcaf53cc6ef31f94de
+- 2026-11-20T18:22 [MB.56.2.4] (lead) REVIEW FIX (ux): http: 431 header-cap, 408 head timeout, 417 bad Expect, 408 body_timeout+cancel, 503 over max_connections, 100-continue interim (and none for C
+- 2026-11-20T18:22 [MB.56.5] (lead) blastit-sqlpolicy: StatementClass::is_plain + Analysis::is_plain (analysis/types.rs:83,113) have NO production consumer -> delete. tools/coverage_report.py mis-
+- 2026-11-20T18:27 [MB.56.2.4] (lead) status active -> done

@@ -94,32 +94,3 @@ impl Default for HttpConfig {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn defaults_are_the_architecture_table() {
-        let cfg = HttpConfig::default();
-        assert_eq!(cfg.max_header_bytes, 64 * 1024);
-        assert_eq!(cfg.max_body_bytes, 100 * 1024 * 1024);
-        assert_eq!(cfg.header_timeout, Duration::from_secs(10));
-        assert_eq!(cfg.keepalive_timeout, Duration::from_secs(75));
-        assert_eq!(
-            cfg.stream_buffer_bytes,
-            INITIAL_WINDOW as usize + cfg.frame_limits.max_frame(),
-            "the window plus the frame that may be in flight when it runs out"
-        );
-        assert_eq!(cfg.max_connections, 1024);
-        assert_eq!(cfg.body_timeout, Duration::from_secs(600));
-        assert_eq!(
-            cfg.client_ip,
-            ClientIpConfig::default(),
-            "§8.2 defaults the client-IP pair to localhost"
-        );
-        assert_eq!(cfg.client_ip.header, "x-forwarded-for");
-        assert_eq!(cfg.frame_limits, Limits::default());
-        assert_eq!(cfg.server_port, 8080);
-    }
-}

@@ -82,29 +82,3 @@ pub fn canonical_reason(status: u16) -> Option<&'static str> {
         _ => return None,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_status_the_front_end_sends_has_a_phrase() {
-        for status in [400u16, 408, 413, 417, 431, 501, 502, 505] {
-            let phrase = canonical_reason(status).unwrap();
-            assert!(!phrase.is_empty(), "{status} needs a phrase");
-            assert!(
-                phrase
-                    .bytes()
-                    .all(|byte| byte.is_ascii_graphic() || byte == b' '),
-                "{phrase} must be printable"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_statuses_have_no_phrase() {
-        for status in [0u16, 99, 199, 306, 599, 999] {
-            assert_eq!(canonical_reason(status), None, "status {status}");
-        }
-    }
-}

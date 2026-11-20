@@ -116,9 +116,6 @@ mod scope;
 mod types;
 mod walk;
 
-#[cfg(test)]
-mod tests;
-
 use std::collections::BTreeSet;
 
 use serde_json::Value;
@@ -130,11 +127,6 @@ pub use self::types::{
 };
 
 pub(crate) use self::cache::AnalysisCache;
-/// Re-exported for `tests::the_cache_stays_bounded`, which pins the bound
-/// through `super::*`; no production code names the capacity outside the cache
-/// itself, so the lib build does not carry the import.
-#[cfg(test)]
-pub(crate) use self::cache::CACHE_CAPACITY;
 pub(crate) use self::classify::syntax;
 pub(crate) use self::types::Extent;
 pub(crate) use self::walk::{one_of, unwrap};

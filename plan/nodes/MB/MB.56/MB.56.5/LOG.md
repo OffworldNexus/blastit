@@ -27,3 +27,7 @@ PRE-EXISTING DX BUG (found by MB.56.2.3 review): docs/reference/blastfile.md:662
 ## 2026-11-20T18:03 [lead]
 
 tools/coverage_report.py does not expand FILES globs and reports 'no instrumented coverage' for manifest files even when profdata covers them; coverage for craws/blastit-manifest/src/blastfile/sites.rs is 0.0% only because it is reached through the LSP path (crates/blastit/tests/critical_lsp.rs) - keep it.
+
+## 2026-11-20T18:22 [lead]
+
+blastit-sqlpolicy: StatementClass::is_plain + Analysis::is_plain (analysis/types.rs:83,113) have NO production consumer -> delete. tools/coverage_report.py mis-reports multi-crate/multi-file FILES invocations ('no instrumented coverage') - fix or document. sqlpolicy coverage reachable-but-untested: analysis/mod.rs 26.9%, resolve/mod.rs 50%, classify.rs 16.3%, statements.rs 72% ; blastit-http server.rs 22.6% (accept/503), reason.rs 13.6%

@@ -31,3 +31,7 @@ OWNER GUARDRAIL: canonicalise unformatted public docs Blastfile examples YES; NO
 ## 2026-11-20T18:09 [lead]
 
 status active -> done
+
+## 2026-11-20T18:09 [lead]
+
+commit 6bcd3d9

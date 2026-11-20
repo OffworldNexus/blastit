@@ -2,16 +2,16 @@
 id: MB.56.2.4
 title: "Consolidate blastit-sqlpolicy (<=1.5k) and blastit-http (<=800) §7 suites"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.2.3]
 paths: ["crates/blastit-sqlpolicy/**", "crates/blastit-http/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T17:15"
-updated: "2026-11-20T17:15"
+updated: "2026-11-20T18:27"
 ---
 
 # Goal
