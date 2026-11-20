@@ -4368,3 +4368,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T22:53 [MB.56.4.4] (lead) REVIEW FIX 2 (ux): (B) make packages-test expands $(deb)/$(rpm) at make level -> runs all six legs and passes no artifact (fix with set --); (M) e2e/README + 'm
 - 2026-11-20T22:55 [MB.56.4.4] (lead) status active -> done
 - 2026-11-20T22:55 [MB.56.4] (lead) status ready -> done
+- 2026-11-20T22:56 [MB.56.4.3] (lead) REGRESSION FOUND AT THE GATE: e2e/universal_binary.py still points at e2e/php/fixture (deleted in MB.56.4.1) -> make check fails at e2e-universal with FileNotFo
+- 2026-11-20T22:56 [MB.56.4.3] (lead) status done -> active
+- 2026-11-20T22:57 [MB.56.4.3] (implementer) status active -> done
+- 2026-11-20T22:57 [MB.56.4.3] (lead) status done -> done
+- 2026-11-20T22:57 [MB.56.4.3] (lead) GATE FIX: universal_binary php leg repointed at e2e/apps/php (BLASTIT_MANIFEST=Blastfile.php2shell, store-less); make e2e-universal 6/6; make check EXIT=0

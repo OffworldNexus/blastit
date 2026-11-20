@@ -594,8 +594,14 @@ def leg_php(ctx: Context, minor: str) -> str:
         )
 
     project = ctx.work / f"php-{minor}"
-    shutil.copytree(ROOT / "e2e" / "php" / "fixture", project, dirs_exist_ok=True)
-    env = {"BLASTIT_LIBPHP": str(libphp)}
+    shutil.copytree(ROOT / "e2e" / "apps" / "php", project, dirs_exist_ok=True)
+    # `Blastfile.php2shell` is the app suite's own store-less manifest for this
+    # front controller, so the leg needs no PostgreSQL: what it proves is that
+    # *one artifact* serves PHP `minor`, not the shop's grants (`run_apps.py`).
+    env = {
+        "BLASTIT_LIBPHP": str(libphp),
+        "BLASTIT_MANIFEST": str(project / "Blastfile.php2shell"),
+    }
     with Dev(ctx.binary, project, env) as server:
         status, _headers, body = server.get("/")
     expect(status == 200, f"GET / answered {status}, not 200")

@@ -123,6 +123,29 @@ Notes for the reviewer:
   musl build on the host the archive is a stand-in whose `--version` says so. Pass
   `--musl-binary`/`--musl-archive` to make `fmt`/`check` real there too.
 
+## Gate regression: the universal PHP leg (`MB.56.4.1` fallout)
+
+`e2e/universal_binary.py`'s `php 8.4` leg still copied the deleted
+`e2e/php/fixture`. It now copies the current fixture, `e2e/apps/php/`, and runs
+`blastit dev` with the app suite's own store-less manifest
+(`BLASTIT_MANIFEST=…/Blastfile.php2shell`), so the leg needs no PostgreSQL and
+still proves what it is for: one artifact serves PHP 8.4 through the bundle's
+shim and the host's NTS `libphp` (`GET /` → `200`, body carries
+`front-controller`). The leg was kept rather than deleted — it is expressible,
+and it is the only leg that proves the *staged bundle's* PHP shim.
+
+```
+$ make e2e-universal
+PASS  python 3.13    200 from CPython 3.13 (python-3.13/.venv), same artifact (0.1s)
+PASS  python 3.14    200 from CPython 3.14 (python-3.14/.venv), same artifact (0.1s)
+PASS  php 8.4        200 from PHP 8.4 (libblastit_php84-x86_64-gnu.so) (0.1s)
+PASS  static         200 with the file's own bytes (0.0s)
+PASS  handoff        `dev` handed off silently; production and `--version` did not (0.0s)
+PASS  check 3.12     check --json ok on CPython 3.12, no per-minor .so (0.1s)
+
+6 passed, 0 skipped, 0 failed
+```
+
 ## Follow-ups
 
 - `docs/design/universal-distribution.md` (the `wheels` row) and
