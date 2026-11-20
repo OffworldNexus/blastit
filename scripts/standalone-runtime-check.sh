@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Runs a built `blastit dev` against a static fixture on a host with **no
-# CPython** and proves the three responses the standalone artifact promises
-# (`MB.17`, `ADR-0010` §4): `200` with `Cache-Control: no-cache`, `404` for a
-# path no route matches, and a boot that never needed an interpreter.
+# CPython**, and proves what the universal artifact promises there (`MB.17`,
+# `ADR-0017` decision 1): `200` with `Cache-Control: no-cache`, `404` for a path
+# no route matches, and — because no interpreter exists on this host — a WSGI
+# manifest refused at boot, exit 1, by stage-0 discovery rather than by a build
+# that lacks the capability.
 #
 # `readelf` (scripts/check-portable-elf.sh) proves the artifact does not *link*
 # an interpreter. This script is the execution proof: CI runs it inside
-# `debian:trixie-slim`, which ships no Python at all, so a manifest that worked
-# only because a `libpython` happened to be present fails here instead of on a
-# user's server.
+# `debian:trixie-slim`, which ships no Python at all, so a build that served only
+# because a `libpython` happened to be present fails here instead of on a user's
+# server.
 #
 # It uses bash's `/dev/tcp` and no `curl`: the image is deliberately bare.
 #
@@ -28,8 +30,12 @@ if [ ! -x "$binary" ]; then
     exit 1
 fi
 if [ "$require_no_python" -eq 1 ]; then
-    # Without this the script would pass on a host where a CPython is installed,
-    # which is exactly the false green `MB.17` exists to remove.
+    # The guard exists so the closing "3/3 passed on a host with no CPython" is
+    # not a lie about the host: with a CPython present the WSGI half below would
+    # refuse with `NoShim` (no CPython shim beside this binary), which is a
+    # different sentence and would read as a mystery failure. Everything `dev`
+    # discovery reads is refused here, not only `PATH`
+    # (`crates/blastit/src/stage0/project_python.rs`).
     for candidate in python python3 python3.13 python3.14; do
         if command -v "$candidate" >/dev/null 2>&1; then
             echo "error: $candidate is on PATH ($(command -v "$candidate")), so this run would not" >&2
@@ -37,7 +43,14 @@ if [ "$require_no_python" -eq 1 ]; then
             exit 1
         fi
     done
-    echo "host: no CPython on PATH"
+    for variable in BLASTIT_PYTHON VIRTUAL_ENV BLASTIT_WHEEL_PYTHON BLASTIT_PY_SHIM_DIR; do
+        if [ -n "${!variable:-}" ]; then
+            echo "error: $variable is set (${!variable}), so interpreter discovery would" >&2
+            echo "  read it; unset it, or run this where no CPython is reachable at all" >&2
+            exit 1
+        fi
+    done
+    echo "host: no CPython on PATH, no BLASTIT_PYTHON/VIRTUAL_ENV/BLASTIT_WHEEL_PYTHON, no BLASTIT_PY_SHIM_DIR"
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/blastit-standalone.XXXXXX")"
@@ -151,11 +164,15 @@ if [ "$fail" -ne 0 ]; then
 fi
 echo "ok   2/2 static responses without touching an interpreter"
 
-# The second half of the promise: a manifest that *needs* Python is refused at
-# exit 1 by the capability gate — on this artifact, not only in the integration
-# test that builds one from source (`crates/blastit/tests/no_python_build.rs`).
-# A shipped archive that silently served a WSGI route would mean `python` leaked
-# back into the release build.
+# The second half of the promise (`ADR-0017` decision 1): the artifact carries
+# `python`, so the refusal is no longer a build gate — it is stage-0 interpreter
+# discovery, and it must still fail closed. Exit 1, before a listener binds, with
+# the one sentence that says how to get an interpreter
+# (`blastit-py-sapi`'s `DiscoveryError::NoInterpreter`).
+#
+# `BLASTIT_APP` is exported so the boot gets past `app_rule` ("the WSGI callable
+# is required") and actually reaches discovery: without an app the refusal would
+# be about the manifest and prove nothing about the interpreter.
 mkdir -p "$work/wsgi"
 cat > "$work/wsgi/Blastfile" <<'BLASTFILE'
 view web regex '.*' {
@@ -174,26 +191,54 @@ if [ -z "$wsgi_port" ]; then
     exit 1
 fi
 
+if [ "$require_no_python" -eq 1 ]; then
+    echo "standalone-runtime-check: $binary dev --port $wsgi_port (no CPython on this host)"
+else
+    echo "standalone-runtime-check: $binary dev --port $wsgi_port"
+fi
+# In the background, not in the foreground: a build that *did* serve a WSGI route
+# on a host with no interpreter is the leak this proves absent, and a blocked
+# foreground call would look like a hung check instead of a failure.
+BLASTIT_MANIFEST="$work/wsgi/Blastfile" BLASTIT_APP=app:application \
+    "$binary" dev --port "$wsgi_port" > "$work/wsgi.out" 2> "$work/wsgi.err" &
+wsgi_pid=$!
+
 set +e
-BLASTIT_MANIFEST="$work/wsgi/Blastfile" "$binary" dev --port "$wsgi_port" \
-    > "$work/wsgi.out" 2> "$work/wsgi.err"
+waited=0
+while kill -0 "$wsgi_pid" 2>/dev/null; do
+    if [ "$waited" -ge 80 ]; then
+        echo "FAIL a WSGI manifest stayed up for 20 s on a host with no CPython" >&2
+        kill -KILL "$wsgi_pid" 2>/dev/null
+        wait "$wsgi_pid" 2>/dev/null
+        tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
+        exit 1
+    fi
+    sleep 0.25
+    waited=$((waited + 1))
+done
+wait "$wsgi_pid"
 wsgi_rc=$?
 set -e
 
 if [ "$wsgi_rc" -ne 1 ]; then
-    echo "FAIL a WSGI manifest wanted exit 1 from the capability gate, got $wsgi_rc" >&2
+    echo "FAIL a WSGI manifest wanted exit 1 from interpreter discovery, got $wsgi_rc" >&2
     tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
     exit 1
 fi
-if ! grep -q 'this build has no Python support' "$work/wsgi.err" "$work/wsgi.out"; then
-    echo "FAIL the WSGI refusal does not name the capability gate:" >&2
+if ! grep -q 'no CPython 3.13 or 3.14 interpreter was found' "$work/wsgi.err" "$work/wsgi.out"; then
+    echo "FAIL the WSGI refusal does not name the missing interpreter:" >&2
+    echo "  (run this where no CPython is reachable — CI uses debian:trixie-slim)" >&2
     tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
     exit 1
 fi
-if ! grep -q 'uv add blastit' "$work/wsgi.err" "$work/wsgi.out"; then
-    echo "FAIL the WSGI refusal does not name the artifact that can serve it:" >&2
+if ! grep -q 'run uv python install 3.14' "$work/wsgi.err" "$work/wsgi.out"; then
+    echo "FAIL the WSGI refusal does not say how to get an interpreter:" >&2
     tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
     exit 1
 fi
-echo "ok   exit 1 for a WSGI manifest (capability gate, names 'uv add blastit')"
-echo "standalone-runtime-check: 3/3 passed without touching an interpreter"
+echo "ok   exit 1 before binding: no CPython 3.13/3.14 (discovery names 'uv python install 3.14')"
+if [ "$require_no_python" -eq 1 ]; then
+    echo "standalone-runtime-check: 3/3 passed on a host with no CPython"
+else
+    echo "standalone-runtime-check: 3/3 passed"
+fi

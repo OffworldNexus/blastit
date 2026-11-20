@@ -251,13 +251,15 @@ jobs:
           pattern: shim-${{ matrix.name }}-*
           path: dist/shims
           merge-multiple: true
-      # `--no-default-features --features php,static` is the standalone artifact
-      # (`ADR-0010` §4, `ADR-0016` decision 6): no `python`, so no `libpython`, and
-      # a WSGI manifest is refused at exit 1 by the capability gate instead of
-      # failing later; `static` is named because it is a default feature and
-      # `--no-default-features` would otherwise ship an archive that compiles and
-      # then refuses every `static` mount. `scripts/build-standalone.sh` is the
-      # one place that spelling lives; this leg only chooses the builder image.
+      # The archive is the *universal* binary (`ADR-0017` decision 1):
+      # `blastit`'s default features (`python`, `php`, `static`) link no
+      # `libpython` and no `libphp` — `python` is a `dlopen` loader — so one
+      # artifact serves a WSGI app (given the host's CPython 3.13/3.14 and that
+      # minor's shim *beside the binary*), embedded PHP through `dlopen`, and
+      # `static` mounts. The archive carries PHP shims only; it stages no
+      # `libblastit_py3*` (that is the per-`(arch, libc)` packaging slice).
+      # `scripts/build-standalone.sh` is the one place that spelling lives; this
+      # leg only chooses the builder image.
       #
       # `MB.3.60`: the archive is built **inside `matrix.builder_image`**, whose
       # glibc *is* `matrix.glibc_floor`, and `--max-glibc` refuses the build if

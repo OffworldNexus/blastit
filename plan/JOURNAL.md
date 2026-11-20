@@ -4022,3 +4022,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T06:35 [MB.45] (lead) REVIEW FIX: (1) no post-repack/publish shim proof for musl -> scripts/check_wheel_shims.py called from action + verify job; (2) no rule gates require-shims: all
 - 2026-11-20T06:50 [MB.45] (lead) status active -> done
 - 2026-11-20T06:50 [MB.45] (lead) commit 6051af2
+- 2026-11-20T06:53 [MB.46] (conductor) created (task) Fix PyPI sdist workspace Cargo.lock build & universal feature set in build-standalone.sh
+- 2026-11-20T06:54 [MB.46] (lead) status ready -> active
+- 2026-11-20T06:54 [MB.46] (lead) attempt 1/3 started
+- 2026-11-20T06:54 [MB.46] (lead) base 0806d229c4b175ead498e348b3eb0aa0633f77c9
+- 2026-11-20T07:04 [MB.46] (lead) edited fields
+- 2026-11-20T07:04 [MB.46] (lead) acceptance literal corrected: normalize() preserves case (sqlpolicy doctest), so 'select 1' -> 'select 1'; added 'SELECT 1  ;' -> 'SELECT 1'. paths extended wit
+- 2026-11-20T07:23 [MB.46] (lead) status active -> done
+- 2026-11-20T07:23 [MB.46] (lead) REVIEW FIX (review-arch+review-ux, both changes-requested): (1) BLOCKER archive README advertised non-existent 'blastit serve' -> 'blastit [--preset NAME]'; (2)

@@ -113,4 +113,30 @@ include = [
     # so the sdist has to be told about it: without this file, `pip install` of
     # that sdist has no `blastit_build` module to import.
     { path = "blastit_build.py", format = "sdist" },
+    # **Every** workspace member, not just the graph `crates/blastit` reaches.
+    # The workspace is `members = ["crates/*"]`, and a source install runs
+    # `cargo build --release --locked -p blastit-dbproxy` inside the unpacked
+    # sdist (`blastit_build.py`), which resolves the whole workspace first. Two
+    # members no shipped binary depends on — `blastit-py-shim` (the per-minor
+    # cdylib `make py-sapi` builds) and `blastit-view-python` (which only that
+    # shim links) — are not on that graph, so maturin's walk drops them and
+    # `cargo metadata --locked` dies before the build starts with "cannot update
+    # the lock file because --locked was passed". The glob keeps a future member
+    # in the sdist without a second edit here.
+    #
+    # An `include` glob is **not** `.gitignore`-filtered (unlike maturin's walk
+    # of `python-source`): from a dirty checkout the same glob would carry
+    # `crates/*/target`, `__pycache__` and profiler output into the sdist — and
+    # those reach `pip install .` here and every local rehearsal. Hence the
+    # `exclude` list below, which is the price of the glob.
+    { path = "crates/**/*", format = "sdist" },
+]
+
+exclude = [
+    # A directories' *contents* need `/**` here: a bare `crates/**/target` does
+    # not drop the files underneath it (checked against maturin 1.16).
+    { path = "crates/**/target/**", format = "sdist" },
+    { path = "crates/**/__pycache__/**", format = "sdist" },
+    { path = "crates/**/.venv/**", format = "sdist" },
+    { path = "crates/**/*.profraw", format = "sdist" },
 ]

@@ -1,26 +1,40 @@
 #!/usr/bin/env bash
-# Builds one standalone archive — the artifact a host installs without Python
-# (`ADR-0010` §4, node MB.3.18).
+# Builds one standalone archive — the universal artifact a host installs without
+# a wheel (`ADR-0010` §4, `ADR-0017` decision 1, node MB.3.18).
 #
 # The archive is `blastit-<target>.tar.gz` and holds:
 #
-#   * `blastit` — the interpreter-free binary. It is built with
-#     `--no-default-features --features php,static`, which is what makes "no
-#     Python" a property of the *artifact* and not of the manifest it is given:
-#     the capability is off, so a WSGI manifest is refused at exit 1 instead of
-#     failing later (see `crates/blastit/tests/no_python_build.rs`). `static` is
-#     named too: it is a default feature of `blastit`, and
-#     `--no-default-features` would silently drop it, shipping an archive that
-#     compiles and then refuses every `static` mount
-#     (`SchedulerError::StaticNotCompiled`, `ADR-0016` decision 6).
-#   * `libblastit_php<digits>-<arch>-<libc>.so` — one shim per PHP minor this
-#     leg has built *and* probed (`scripts/platform_matrix.py` is the list).
+#   * `blastit` — the universal binary, built from `blastit`'s **default**
+#     features (`python`, `php`, `static`). None of the three links an
+#     interpreter: on glibc `DT_NEEDED` names libc, libm, libgcc_s and the
+#     dynamic loader, on musl `libc.musl-<arch>` and libgcc_s — and that one file
+#     serves every backend, because each runtime is `dlopen`ed: embedded PHP from
+#     the distro's NTS `libphp` plus the PHP shims below, a WSGI app from the
+#     host's CPython 3.13/3.14 plus `libblastit_py3<minor>` (which this archive
+#     does **not** stage, see below), and `static` mounts (`ADR-0017` decision 1,
+#     `ADR-0016` decision 6). There is no Python-less variant of this artifact
+#     any more.
+#   * `libblastit_php<digits>-<arch>-<libc>.so` — one PHP shim per minor this leg
+#     has built *and* probed (`scripts/platform_matrix.py` is the list). PHP
+#     shims are the **only** shims in this archive.
 #   * `LICENSE`, and `SHA256SUMS` over everything in the archive.
 #
+# **The CPython shim is the operator's to put beside the binary.** The
+# `blastit-py-sapi` loader is compiled in, and a deployment resolves
+# `libblastit_py3<minor>-<arch>-<libc>.so` beside the `blastit` executable and
+# nowhere else — no `PATH`, no environment variable
+# (`crates/blastit-py-sapi/src/discovery/mod.rs`). So a WSGI view on this archive
+# needs that file copied next to `blastit`: take it from the wheel (`uv add --dev
+# blastit` puts it in `.venv/lib/python3*/site-packages/blastit/_bin/`) or build
+# it in a checkout with `make py-sapi`. Without it the boot refuses with
+# `NoShim`, naming the file and the directory. Stage them in the archive and the
+# matrix also has to build them per `(arch, libc)` for the tarball
+# (`MB.42.3.3`), which is a packaging slice of its own.
+#
 # `scripts/check-portable-elf.sh` runs on the binary before packaging: no
-# `libpython` `NEEDED` entry, no `RPATH`/`RUNPATH` into a build host. That is the
-# difference between an archive that runs on a server and one that only runs in
-# the checkout that produced it.
+# `libpython`/`libphp` `NEEDED` entry, no `RPATH`/`RUNPATH` into a build host.
+# That is the difference between an archive that runs on a server and one that
+# only runs in the checkout that produced it.
 #
 # **The C-library floor is measured, not assumed.** `--max-glibc` reads the
 # highest `GLIBC_<major>.<minor>` the finished binary requires and refuses the
@@ -99,7 +113,7 @@ host=$("${RUSTC:-rustc}" -vV | sed -n 's/^host: //p')
 target_args=()
 [ "$target" = "$host" ] || target_args=(--target "$target")
 
-echo "build-standalone: cargo build --release --no-default-features --features php,static ${target_args[*]:-}"
+echo "build-standalone: cargo build --release --locked -p blastit --bin blastit ${target_args[*]:-}"
 if [ -n "$musl" ]; then
     # Dynamic musl, because a static musl binary cannot `dlopen` (`Dynamic loading
     # not supported`), and `dlopen(libphp)` is the whole `[route.php]` story.
@@ -113,10 +127,10 @@ if [ -n "$musl" ]; then
     echo "build-standalone: musl target, forcing a dynamic binary (crt-static off)"
     RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=-crt-static" \
         cargo build --release --locked -p blastit --bin blastit \
-        --no-default-features --features php,static ${target_args[@]+"${target_args[@]}"}
+        ${target_args[@]+"${target_args[@]}"}
 else
     cargo build --release --locked -p blastit --bin blastit \
-        --no-default-features --features php,static ${target_args[@]+"${target_args[@]}"}
+        ${target_args[@]+"${target_args[@]}"}
 fi
 
 # No host fallback: a `--target aarch64-...` whose artifact is missing must fail,
@@ -226,13 +240,13 @@ fi
 
 # The capability, not the manifest: `cargo tree -e normal` is "what the binary
 # links", so a `pyo3` here is a `libpython` the archive does not have — and the
-# absence of `blastit-view-static` is a `static` mount this archive would refuse
-# with `SchedulerError::StaticNotCompiled` after a green build (`MB.36.6`).
-# Both directions are asserted: the negative (no interpreter) and the positive
-# (the responder is in the graph), because `--no-default-features` drops a
-# capability the spelling forgot.
-tree=$(cargo tree -p blastit -e normal --no-default-features --features php,static \
-    --target "$target" --prefix none)
+# absence of `blastit-py-sapi` or `blastit-view-static` is a capability compiled
+# out, which is a boot refusal after a green build: a WSGI manifest that cannot
+# embed CPython (`ADR-0017` decision 1), a `static` mount that refuses with
+# `SchedulerError::StaticNotCompiled` (`MB.36.6`). Both directions are asserted:
+# the negative (no interpreter linked) and the positive (each capability's crate
+# is in the graph), on the artifact's real feature set — the defaults.
+tree=$(cargo tree -p blastit -e normal --target "$target" --prefix none)
 pyo3=$(printf '%s\n' "$tree" | grep -c pyo3 || true)
 if [ "$pyo3" -ne 0 ]; then
     echo "error: the standalone build depends on pyo3 ($pyo3): it would link libpython" >&2
@@ -240,12 +254,29 @@ if [ "$pyo3" -ne 0 ]; then
 fi
 echo "build-standalone: 0 pyo3 dependencies (no libpython linked)"
 
+py=$(printf '%s\n' "$tree" | grep -c '^blastit-py-sapi v' || true)
+if [ "$py" -eq 0 ]; then
+    echo "error: this archive cannot serve a WSGI app: blastit-py-sapi is not in its dependency graph" >&2
+    echo "  fix: the default features must carry \`python\` — a \`dlopen\` loader for the" >&2
+    echo "  host's CPython, never a linked interpreter (\`ADR-0017\` decision 1)" >&2
+    exit 1
+fi
+echo "build-standalone: blastit-py-sapi present (the dlopen loader: a WSGI view also needs the host's CPython 3.13/3.14 and that minor's shim beside the binary)"
+
+php=$(printf '%s\n' "$tree" | grep -c '^blastit-view-php v' || true)
+if [ "$php" -eq 0 ]; then
+    echo "error: this archive cannot serve an \`entrypoint php\` route: blastit-view-php is not in its dependency graph" >&2
+    echo "  fix: the default features must carry \`php\` — a \`dlopen\` view of the distro's" >&2
+    echo "  NTS \`libphp\`, never a linked one (\`ADR-0010\`, \`ADR-0017\` decision 1)" >&2
+    exit 1
+fi
+echo "build-standalone: blastit-view-php present (an \`entrypoint php\` route is served)"
+
 static=$(printf '%s\n' "$tree" | grep -c '^blastit-view-static v' || true)
 if [ "$static" -eq 0 ]; then
     echo "error: this archive cannot serve a \`static\` mount: blastit-view-static is not in its dependency graph" >&2
-    echo "  fix: name every capability the artifact needs — this build is" >&2
-    echo "  \`--no-default-features --features php,static\`, and a dropped \`static\` is a boot refusal" >&2
-    echo "  (\`SchedulerError::StaticNotCompiled\`) a green build cannot see" >&2
+    echo "  fix: the default features must carry \`static\`, and a dropped one is a boot" >&2
+    echo "  refusal (\`SchedulerError::StaticNotCompiled\`) a green build cannot see" >&2
     exit 1
 fi
 echo "build-standalone: blastit-view-static present (a static mount is served)"
@@ -282,12 +313,13 @@ for shim in "$shim_dir"/libblastit_php*-"$arch"-"$libc".so; do
     fi
 done
 if [ "$shims" -eq 0 ]; then
-    shim_lines="No shims in this archive. Build them with \`make php-sapi\` (or use the
-wheel, which ships the interpreter and no shims)."
+    shim_lines="No PHP shims in this archive. Get them from the wheel (\`uv add --dev blastit\`
+ships all four beside its binary), or build them here with \`make php-sapi\`."
 fi
-echo "build-standalone: $shims shim(s) for $arch-$libc from $shim_dir"
+if [ "$shims" -eq 1 ]; then shim_word="shim"; else shim_word="shims"; fi
+echo "build-standalone: $shims $shim_word for $arch-$libc from $shim_dir"
 if [ "$shims" -lt "$require_shims" ]; then
-    echo "error: $shims shim(s) in $shim_dir, this artifact must carry $require_shims:" >&2
+    echo "error: $shims $shim_word in $shim_dir, this artifact must carry $require_shims:" >&2
     echo "  build them first (make php-sapi PHP_MINORS=... or the per-leg CI job)" >&2
     exit 1
 fi
@@ -303,15 +335,30 @@ package:
     apk add libgcc
 
 The binary is dynamically linked on purpose: a static musl build cannot \`dlopen\`,
-and \`dlopen(libphp)\` is how \`[route.php]\` works."
+and \`dlopen\` is how \`[route.php]\` reaches the distro's \`libphp\` (with the PHP
+shims in this archive) and how a WSGI view reaches the host's \`libpython\`.
+
+**This archive carries PHP shims only.** A WSGI view needs that minor's CPython
+shim *beside the binary*: copy \`libblastit_py3<minor>-$arch-$libc.so\` next to
+\`blastit\` — the only place a deployment looks — from the wheel
+(\`uv add --dev blastit\` puts it in \`.venv/lib/python3*/site-packages/blastit/_bin/\`)
+or from a checkout with \`make py-sapi\`. Without it the boot refuses with
+\`NoShim\` and names the file."
 else
     requirements="**glibc $floor or newer.** That is the floor measured in this binary:
 
     readelf --version-info blastit | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1
 
-Check a host with \`getconf GNU_LIBC_VERSION\` before deploying. There is no other
-runtime requirement: no Python, no \`libpython\`, no PHP unless you declare
-\`[route.php]\` (then the distro's NTS \`libphp\` for the shim above)."
+Check a host with \`getconf GNU_LIBC_VERSION\` before deploying. Nothing is linked
+against an interpreter: no \`libpython\`, no \`libphp\`. \`[route.php]\` works with the
+distro's NTS \`libphp\` and the PHP shims in this archive.
+
+**This archive carries PHP shims only.** A WSGI view needs that minor's CPython
+shim *beside the binary*: copy \`libblastit_py3<minor>-$arch-$libc.so\` next to
+\`blastit\` — the only place a deployment looks — from the wheel
+(\`uv add --dev blastit\` puts it in \`.venv/lib/python3*/site-packages/blastit/_bin/\`)
+or from a checkout with \`make py-sapi\`. Without it the boot refuses with
+\`NoShim\` and names the file."
 fi
 if [ -n "$builder_image" ]; then
     built_in="Built inside \`$builder_image\`."
@@ -321,16 +368,30 @@ fi
 cat > "$stage/$name/README.md" <<README
 # blastit — $target
 
-The interpreter-free artifact from \`ADR-0010\` §4 and \`ADR-0016\` decision 6: the
-\`php\` and \`static\` capabilities, no \`libpython\`. \`[route.php]\` works, a
-\`static\` mount is served, and a WSGI manifest is refused at exit 1 with
-\`uv add blastit\` as the fix, because this build has no Python by design.
+The universal artifact from \`ADR-0017\` decision 1: one \`blastit\` binary serves
+Python WSGI apps, embedded PHP routes and \`static\` mounts, and links neither
+\`libpython\` nor \`libphp\`. Python arrives at run time through \`dlopen\` of the
+host's \`libpython\` plus a per-minor shim, PHP through \`dlopen\` of the distro's
+NTS \`libphp\` plus the PHP shims below. There is no Python-less build of this
+binary to install instead.
 
 ## Contents
 
-- \`blastit\` — the server (\`blastit dev\`, \`blastit check\`)
-- \`libblastit_php<minor>-$arch-$libc.so\` — PHP SAPI shim(s), $shims in this archive
+- \`blastit\` — the server (\`blastit [--preset NAME]\` for a production boot, \`blastit dev\`, \`blastit check\`)
+- \`libblastit_php<minor>-$arch-$libc.so\` — PHP SAPI $shim_word, $shims in this archive
 - \`LICENSE\`, \`SHA256SUMS\` (verify with \`sha256sum -c SHA256SUMS\`)
+
+PHP shims are the **only** shims here: there is no \`libblastit_py3*\` file. A WSGI
+view needs one beside the binary — see “What it needs at run time”.
+
+## Try it
+
+    printf 'hello from blastit\\n' > index.html
+    printf 'static "/" { root "." }\\n' > Blastfile
+    ./blastit dev --port 8080
+
+Then open http://127.0.0.1:8080. A WSGI layout needs the CPython shim described
+below first.
 
 ## What it needs at run time
 

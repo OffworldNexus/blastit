@@ -296,9 +296,12 @@ echo "build-standalone-in-image: building as uid $(id -u):$(id -g), cache $CARGO
 echo "build-standalone-in-image: glibc $(getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version | head -1)"
 build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
        --max-glibc "$MAX_GLIBC" --builder-image "$BUILDER_IMAGE")
-# `scripts/build-standalone.sh` owns the feature spelling (`--no-default-features
-# --features php,static`): this script chooses *where* the archive is built, never
-# *what* it carries, so the shipped capabilities have one home.
+# `scripts/build-standalone.sh` owns the feature spelling: this script chooses
+# *where* the archive is built, never *what* it carries. What it carries is the
+# universal binary from the default features of `blastit` (`python`, `php`,
+# `static`, `ADR-0017` decision 1): no `libpython` and no `libphp` in
+# `DT_NEEDED`, and a WSGI app still served when the host has CPython 3.13/3.14
+# with its shim.
 if [ -n "$SHIM_DIR" ]; then
     build+=(--shim-dir "$SHIM_DIR")
 fi
