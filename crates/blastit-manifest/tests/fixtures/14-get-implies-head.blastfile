@@ -1,8 +1,0 @@
-# `GET` implies `HEAD`, once, at lower time (§8.4, §7.2 row 7).
-view home GET "/" {
-    body none
-}
-
-view search GET, POST "/search" {
-    body json
-}

@@ -1,7 +1,0 @@
-# A static-only file: one mount, no view (§7.2 row 1, §9.5).
-static "/" {
-    root "public"
-    index "index.html"
-    fallback "index.html"
-    immutable "/assets/*", "/fonts/*"
-}

@@ -1,9 +1,0 @@
-# A store declared by its URL variable: the one-line form is the `url` slot
-# (§7.4), and the value is the variable's *name*, never its value.
-postgres $DATABASE_URL
-
-view products "/products" {
-    postgres {
-        select products
-    }
-}

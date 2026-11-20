@@ -19,3 +19,11 @@ From MB.56.2.2 coverage sweep: blastit-sys/src/mem.rs (13 pub, 3 used outside), 
 ## 2026-11-20T17:40 [lead]
 
 From MB.56.2.2 coverage sweep: blastit-sys/src/mem.rs (13 pub items, 3 referenced outside crate), blastit-sys/src/proc.rs thread_count/chdir only reachable via stage0 fork_exec/gates; god-files >500 LOC: blastit-events/src/lib.rs 1813, json.rs 1402, blastit-lsp/src/lib.rs 1386, blastit-php-sapi/src/loader.rs 1075, blastit-sys/src/fanotify.rs 1031, crates/blastit/src/supervise.rs 2767, blastit-scheduler worker 1611, discovery 1576
+
+## 2026-11-20T18:01 [lead]
+
+PRE-EXISTING DX BUG (found by MB.56.2.3 review): docs/reference/blastfile.md:662 promises '<file>:<line>:<col>:' but blastit check prints 'blastit check: manifest ./Blastfile: 2:10: ...' (space breaks editor error matchers); and :665 promises an unset $IDENT 'names the view and the fix' but the CLI prints 'environment rewrite has 1 error(s) - proxy "db" input "url": ... is not set' with no position/view/fix
+
+## 2026-11-20T18:03 [lead]
+
+tools/coverage_report.py does not expand FILES globs and reports 'no instrumented coverage' for manifest files even when profdata covers them; coverage for craws/blastit-manifest/src/blastfile/sites.rs is 0.0% only because it is reached through the LSP path (crates/blastit/tests/critical_lsp.rs) - keep it.

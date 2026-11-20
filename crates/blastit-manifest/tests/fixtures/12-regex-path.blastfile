@@ -1,5 +1,0 @@
-# A raw regex path: `regex '…'` is the escape hatch, and its text is kept
-# verbatim (§7.2 row 5, §8.1).
-view items regex '/v[0-9]+/items' {
-    body json
-}

@@ -1,7 +1,0 @@
-# A route matching everything, with the two route-level opt-outs (§7.1):
-# `prefork` and `egress any`.
-view app "/*" {
-    body none
-    prefork
-    egress any
-}

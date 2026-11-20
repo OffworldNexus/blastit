@@ -1,4 +1,0 @@
-# One view, several patterns: one route with two path rules (§7.2 row 6).
-view products GET "/products", "/products/{id:uuid}" {
-    body json
-}

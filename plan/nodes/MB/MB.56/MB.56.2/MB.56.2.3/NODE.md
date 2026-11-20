@@ -2,16 +2,16 @@
 id: MB.56.2.3
 title: "Consolidate blastit-manifest §7 suite (15k -> <=1.5k LOC) incl. every docs/README Blastfile fence"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.2.2]
-paths: ["crates/blastit-manifest/**"]
-attempts: 0
+paths: ["crates/blastit-manifest/**", "docs/**", README.md]
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T17:15"
-updated: "2026-11-20T17:15"
+updated: "2026-11-20T18:09"
 ---
 
 # Goal

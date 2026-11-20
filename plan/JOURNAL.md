@@ -4211,3 +4211,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T17:41 [MB.56.2.2] (lead) REVIEW FIX 2: crates/blastit-ingress/tests/critical_ingress.rs is a TESTING_PLAN §7 'body policies' suite (JSON/form/none/raw refusals) and was deleted by mista
 - 2026-11-20T17:43 [MB.56.2.4] (lead) NOTE from MB.56.2.2: 'body policies' §7 stays owned by crates/blastit-ingress/tests/critical_ingress.rs (blastit-http does not depend on blastit-ingress, so cod
 - 2026-11-20T17:45 [MB.56.2.2] (lead) status active -> done
+- 2026-11-20T17:45 [MB.56.2.2] (lead) commit ba279d8
+- 2026-11-20T17:45 [MB.56.2.3] (lead) status ready -> active
+- 2026-11-20T17:45 [MB.56.2.3] (lead) attempt 1/3 started
+- 2026-11-20T17:45 [MB.56.2.3] (lead) base ba279d8115788c8f0b0ec17a7a500b392047f836
+- 2026-11-20T18:01 [MB.56.2.3] (lead) edited fields
+- 2026-11-20T18:01 [MB.56.2.3] (lead) REVIEW FIX: (B) fence walker only matches 'text title="Blastfile"' -> misses 15/32 fences incl. all of docs/reference/blastfile.md; implement design's 3 fence c
+- 2026-11-20T18:01 [MB.56.5] (lead) PRE-EXISTING DX BUG (found by MB.56.2.3 review): docs/reference/blastfile.md:662 promises '<file>:<line>:<col>:' but blastit check prints 'blastit check: manife
+- 2026-11-20T18:02 [MB.56.2.3] (lead) OWNER GUARDRAIL: canonicalise unformatted public docs Blastfile examples YES; NO per-page fence-count tables (brittle). Discover title="Blastfile" (incl. title=
+- 2026-11-20T18:03 [MB.56.5] (lead) tools/coverage_report.py does not expand FILES globs and reports 'no instrumented coverage' for manifest files even when profdata covers them; coverage for craw
+- 2026-11-20T18:09 [MB.56.2.3] (lead) status active -> done

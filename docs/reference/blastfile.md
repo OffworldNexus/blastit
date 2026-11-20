@@ -87,14 +87,21 @@ Every view in the file reaches it, so a PHP app is at least one catch-all view:
 
 ```text
 app "shop"
+
 entrypoint php "public/index.php"
 
-static "/" { root "public" }
+static "/" {
+    root "public"
+}
 
 view app {
     GET, DELETE, OPTIONS "/*"
-    POST "/*" { body form }
-    PUT, PATCH "/*" { body json }
+    POST "/*" {
+        body form
+    }
+    PUT, PATCH "/*" {
+        body json
+    }
 }
 ```
 
@@ -110,11 +117,14 @@ The protocol is the keyword. Without a name a store is the default one, and its
 name in `check` output is `db`; a name declares a second store.
 
 ```text
-postgres $DATABASE_URL               # the default store, one libpq URL
+# The default store, one libpq URL.
+postgres $DATABASE_URL
 
-postgres analytics $ANALYTICS_URL    # a named second store
+# A named second store.
+postgres analytics $ANALYTICS_URL
 
-postgres {                           # the default store, split slots
+# The default store, split slots.
+postgres {
     host $DB_HOST
     port $DB_PORT
     user $DB_USERNAME
@@ -160,7 +170,9 @@ order written, and the first match wins.
 ```text
 view products GET "/products", "/products/{id:int}" {
     body none
-    postgres { select products(id, name, price) }
+    postgres {
+        select products(id, name, price)
+    }
 }
 ```
 
@@ -174,10 +186,14 @@ is one of those methods, so add it when a browser sends a preflight.
 ```text
 view cart {
     GET "/cart"
-    POST "/cart/items" { body json }
+    POST "/cart/items" {
+        body json
+    }
     DELETE "/cart/items/{id:int}"
-
-    postgres { select carts(id); insert cart_items(product_id, quantity) }
+    postgres {
+        select carts(id)
+        insert cart_items(product_id, quantity)
+    }
 }
 ```
 
@@ -387,7 +403,9 @@ trait session {
 ```text
 view products GET "/products" {
     use session
-    postgres { select products(id) }
+    postgres {
+        select products(id)
+    }
 }
 ```
 
