@@ -598,3 +598,380 @@ fn the_argv_surface_is_the_probe_the_refusal_and_the_session() {
     assert!(stdout.is_empty(), "{stdout:?}");
     assert!(stderr.is_empty(), "{stderr:?}");
 }
+
+// ---------------------------------------------------------------------------
+// §7.4 framing and §7.5 hygiene: the wire contract an editor depends on, and
+// the two promises that keep a document local — nothing it names is opened,
+// nothing it contains is executed, and nothing of it reaches stderr.
+// ---------------------------------------------------------------------------
+
+impl Session {
+    /// Writes one frame whose body is not necessarily JSON: the declared length
+    /// is the body's **UTF-8 byte** length, which is the whole contract.
+    fn send_body(&mut self, body: &[u8]) {
+        let stdin = self.stdin.as_mut().expect("stdin is open");
+        write!(stdin, "Content-Length: {}\r\n\r\n", body.len()).expect("a header");
+        stdin.write_all(body).expect("a body");
+        stdin.flush().expect("a flush");
+    }
+
+    /// One raw write of header bytes, so a cap can be asserted without a body.
+    fn send_raw(&mut self, bytes: &[u8]) {
+        let stdin = self.stdin.as_mut().expect("stdin is open");
+        stdin.write_all(bytes).expect("raw bytes");
+        stdin.flush().expect("a flush");
+    }
+
+    /// The next frame, which must be a JSON-RPC error of `code`; its id is
+    /// returned so `null` and a real id can be told apart.
+    fn recv_error(&self, code: i64) -> Value {
+        let reply = self.recv();
+        assert_eq!(reply["jsonrpc"], "2.0", "{reply}");
+        assert_eq!(reply["error"]["code"], code, "{reply}");
+        assert!(reply.get("result").is_none(), "{reply}");
+        reply["id"].clone()
+    }
+
+    /// Ends the session by closing stdin (no `shutdown`) and returns the status
+    /// and everything stderr holds.
+    fn end_without_shutdown(mut self) -> (ExitStatus, String) {
+        self.stdin.take();
+        let status = wait_or_kill(&mut self.child);
+        let mut stderr = String::new();
+        if let Some(mut pipe) = self.stderr.take() {
+            pipe.read_to_string(&mut stderr).expect("read stderr");
+        }
+        (status, stderr)
+    }
+}
+
+/// §7.4: the declared length is the body's UTF-8 **byte** count, so a `uri` with
+/// a two-byte character still lands on the next frame's offset.
+#[test]
+fn the_declared_length_is_the_body_s_byte_length() {
+    let uri = "file:///tmp/Blåstfile";
+    let mut session = Session::spawn(&[]);
+    session.initialize();
+    let published = session.open(uri, CLEAN, 1);
+    assert_eq!(published["uri"], uri, "{published}");
+    assert!(
+        session.formatting(uri).is_array(),
+        "the session is still in step after a non-ASCII frame"
+    );
+    session.finish();
+}
+
+/// §7.4: an id is echoed verbatim (`null` is refused, a notification gets no
+/// reply at all), and a `$/…` **request** is an unknown method — never silence,
+/// which would hang the editor.
+#[test]
+fn ids_are_echoed_and_notifications_get_no_reply() {
+    let mut session = Session::spawn(&[]);
+    session.initialize();
+
+    session.notify("$/setTrace", json!({"value": "messages"}));
+    session.notify("some/unknownNotification", json!({"x": 1}));
+    session.send(
+        &json!({"jsonrpc": "2.0", "id": "abc", "method": "window/workDoneProgress/create",
+                         "params": {"token": "t"}}),
+    );
+    let reply = session.recv();
+    assert_eq!(
+        reply["id"], "abc",
+        "the id is echoed verbatim, not renumbered: {reply}"
+    );
+    assert!(reply.get("result").is_some(), "{reply}");
+
+    session.send(&json!({"jsonrpc": "2.0", "id": null, "method": "initialize", "params": {}}));
+    assert_eq!(session.recv_error(-32600), Value::Null);
+
+    session.send(&json!({"jsonrpc": "2.0", "id": 5, "method": "$/something", "params": {}}));
+    assert_eq!(session.recv_error(-32601), 5);
+    session.finish();
+}
+
+/// §7.4: the reachable errors of the table, each with its own trigger: before
+/// `initialize`, a second `initialize`, a wrong `jsonrpc`, an unknown method, bad
+/// params, and any request after `shutdown`.
+#[test]
+fn the_error_table_is_what_an_editor_reads() {
+    let mut session = Session::spawn(&[]);
+    session.send(&json!({"jsonrpc": "2.0", "id": 1, "method": "textDocument/hover", "params": {}}));
+    assert_eq!(
+        session.recv_error(-32002),
+        1,
+        "a request before `initialize`"
+    );
+
+    session.initialize();
+    session.send(&json!({"jsonrpc": "2.0", "id": 3, "method": "initialize", "params": {}}));
+    assert_eq!(session.recv_error(-32600), 3, "`initialize` twice");
+    session.send(&json!({"jsonrpc": "1.0", "id": 4, "method": "shutdown"}));
+    assert_eq!(session.recv_error(-32600), 4, "`jsonrpc` is not 2.0");
+    session
+        .send(&json!({"jsonrpc": "2.0", "id": 5, "method": "textDocument/rename", "params": {}}));
+    assert_eq!(session.recv_error(-32601), 5, "an unknown method");
+    session.send(
+        &json!({"jsonrpc": "2.0", "id": 7, "method": "textDocument/hover",
+                         "params": {"textDocument": {"uri": "file:///x"}}}),
+    );
+    assert_eq!(session.recv_error(-32602), 7, "`hover` without a position");
+    session.send(
+        &json!({"jsonrpc": "2.0", "id": 8, "method": "textDocument/formatting",
+                         "params": {}}),
+    );
+    assert_eq!(session.recv_error(-32602), 8, "`formatting` without a uri");
+
+    session.send(&json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}));
+    let reply = session.recv();
+    assert_eq!(reply["id"], 9, "{reply}");
+    assert_eq!(reply["result"], Value::Null, "{reply}");
+    session.send(
+        &json!({"jsonrpc": "2.0", "id": 10, "method": "window/workDoneProgress/create",
+                         "params": {}}),
+    );
+    assert_eq!(session.recv_error(-32600), 10, "after `shutdown`");
+    session.notify("exit", Value::Null);
+    session.stdin.take();
+    let status = wait_or_kill(&mut session.child);
+    assert_eq!(status.code(), Some(0), "shutdown then exit is 0");
+}
+
+/// §7.4: a body that is not JSON, not UTF-8, or not an object gets its own code
+/// and the loop keeps serving — the length was known, so the offset is too.
+#[test]
+fn a_malformed_body_is_answered_and_the_session_survives() {
+    let mut session = Session::spawn(&[]);
+    session.initialize();
+    for (body, code) in [
+        (b"{".as_slice(), -32700),
+        (
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\"}".as_slice(),
+            -32700,
+        ),
+        (b"[]".as_slice(), -32600),
+        (b"3".as_slice(), -32600),
+    ] {
+        session.send_body(body);
+        assert_eq!(
+            session.recv_error(code),
+            Value::Null,
+            "{}: {body:?}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    assert!(
+        session
+            .request("window/workDoneProgress/create", json!({"token": "t"}),)
+            .is_null(),
+        "still serving"
+    );
+    session.finish();
+}
+
+/// §7.4: a declared body over the cap is refused **before it is read**, so the
+/// answer arrives even though the client never sends the bytes.
+#[test]
+fn an_oversized_body_is_refused_before_it_is_read() {
+    let mut session = Session::spawn(&[]);
+    session.send_raw(b"Content-Length: 33619969\r\n\r\n");
+    assert_eq!(
+        session.recv_error(-32700),
+        Value::Null,
+        "the declared length is refused, not awaited"
+    );
+    let (status, stderr) = session.end_without_shutdown();
+    assert_eq!(status.code(), Some(1), "{stderr:?}");
+    assert!(stderr.contains("the body is too long"), "{stderr:?}");
+
+    // A length that cannot even be a `usize` body is the same answer.
+    let mut session = Session::spawn(&[]);
+    session.send_raw(b"Content-Length: 4294967295\r\n\r\n");
+    assert_eq!(session.recv_error(-32700), Value::Null);
+    let (status, stderr) = session.end_without_shutdown();
+    assert_eq!(status.code(), Some(1));
+    assert!(!stderr.is_empty(), "the reason goes to stderr");
+}
+
+/// §7.4: the header cap includes its terminator, so 8 192 bytes are read and
+/// 8 193 are refused by name.
+#[test]
+fn the_header_block_cap_is_eight_thousand_one_hundred_ninety_two() {
+    fn header_block(size: usize) -> Vec<u8> {
+        let mut block = b"Content-Length: 2\r\n".to_vec();
+        let padding = size - block.len() - 2 - "X-Pad: \r\n".len();
+        block.extend_from_slice(format!("X-Pad: {}\r\n", "0".repeat(padding)).as_bytes());
+        block.extend_from_slice(b"\r\n");
+        assert_eq!(block.len(), size);
+        block
+    }
+
+    let mut at_cap = header_block(8_192);
+    at_cap.extend_from_slice(b"{}");
+    let mut session = Session::spawn(&[]);
+    session.send_raw(&at_cap);
+    assert_eq!(
+        session.recv_error(-32600),
+        Value::Null,
+        "the maximal header was accepted"
+    );
+    session.initialize();
+    session.finish();
+
+    let mut session = Session::spawn(&[]);
+    session.send_raw(&header_block(8_193));
+    assert_eq!(session.recv_error(-32700), Value::Null);
+    let (status, stderr) = session.end_without_shutdown();
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        stderr.contains("the header block is too long"),
+        "{stderr:?}"
+    );
+}
+
+/// §7.5: a `uri` is an opaque string — a document whose `uri` names a FIFO with
+/// no writer is answered at once, so the path was never opened.
+#[test]
+fn nothing_a_document_names_is_opened() {
+    let path = std::env::temp_dir().join(format!("blastit-lsp-e2e-fifo-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let created = std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(&path)
+        .status()
+        .expect("run mkfifo");
+    assert!(created.success(), "mkfifo {}", path.display());
+    let uri = format!("file://{}", path.display());
+
+    let mut session = Session::spawn(&[]);
+    session.initialize();
+    let started = Instant::now();
+    let published = session.open(&uri, CLEAN, 1);
+    assert_eq!(published["diagnostics"], json!([]), "{published}");
+    assert_eq!(session.formatting(&uri), json!([]), "no read, no hang");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the uri was never opened"
+    );
+    session.finish();
+    let _ = std::fs::remove_file(&path);
+}
+
+/// §7.5: a document is parsed, never executed — a `query` that grants
+/// `COPY … FROM PROGRAM 'sh'` is one diagnostic, the server spawns no child, and
+/// no document text reaches stderr.
+#[test]
+fn a_document_is_parsed_and_never_executed() {
+    const TEXT: &str = "postgres $DATABASE_URL\n\n\
+                        view v \"/x\" {\n\
+                            postgres {\n\
+                                query \"SELECT secret_token FROM api_keys\"\n\
+                                query \"COPY x FROM PROGRAM 'sh'\"\n\
+                            }\n\
+                        }\n";
+    let mut session = Session::spawn(&[]);
+    session.initialize();
+    let pid = session.child.id().to_string();
+    let children = || -> Vec<String> {
+        let mut all = Vec::new();
+        let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("the task table");
+        for task in tasks.flatten() {
+            let file = task.path().join("children");
+            let text = std::fs::read_to_string(&file).expect("a readable children file");
+            all.extend(text.split_whitespace().map(str::to_owned));
+        }
+        all
+    };
+    assert!(children().is_empty(), "the server starts no child");
+    let published = session.open("file:///exec", TEXT, 1);
+    let list = published["diagnostics"].as_array().expect("diagnostics");
+    assert_eq!(
+        list.len(),
+        1,
+        "one diagnostic for the statement that inlines a literal: {published}"
+    );
+    for diagnostic in list {
+        let message = diagnostic["message"].as_str().expect("a message");
+        assert!(message.contains("inlines a quoted literal"), "{message}");
+        assert!(
+            !message.contains("secret_token") && !message.contains("api_keys"),
+            "never the statement: {message}"
+        );
+        assert!(!message.contains("COPY"), "never the entry: {message}");
+    }
+    assert!(children().is_empty(), "still no child");
+    let (status, stderr) = session.end_without_shutdown();
+    assert_eq!(status.code(), Some(1));
+    for needle in ["secret_token", "COPY", "api_keys", "file:///exec"] {
+        assert!(!stderr.contains(needle), "{stderr:?} holds {needle}");
+    }
+    assert!(stderr.is_empty(), "{stderr:?}");
+}
+
+/// §7.5: every framed body a client can send leaves the loop alive, with exactly
+/// one well-formed reply per body — `result` or `error`, never both, never none.
+#[test]
+fn fuzz_shaped_bodies_leave_the_loop_alive() {
+    let methods = [
+        "initialize",
+        "textDocument/hover",
+        "textDocument/formatting",
+        "textDocument/didOpen",
+        "textDocument/definition",
+        "$/cancelRequest",
+        "fuzz/unknown",
+    ];
+    let mut session = Session::spawn(&[]);
+    session.initialize();
+    session.open("file:///fuzz", CLEAN, 0);
+
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    for index in 0..2_000_u64 {
+        let pick = next();
+        let body: Vec<u8> = match pick % 6 {
+            0 => b"{\"jsonrpc\":\"2.0\"".to_vec(),
+            1 => b"not json at all".to_vec(),
+            2 => b"[1,2,3]".to_vec(),
+            3 => vec![b'{', 0xff, b'}'],
+            4 => b"null".to_vec(),
+            _ => {
+                let id = match index % 3 {
+                    0 => json!(index),
+                    1 => json!(format!("id-{index}")),
+                    _ => Value::Null,
+                };
+                let method = methods[(pick as usize) % methods.len()];
+                let params = json!({
+                    "textDocument": {"uri": "file:///fuzz"},
+                    "position": {"line": 0, "character": 0},
+                });
+                serde_json::to_vec(&json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                }))
+                .expect("a body")
+            }
+        };
+        session.send_body(&body);
+        let reply = session.recv();
+        assert_eq!(reply["jsonrpc"], "2.0", "{reply}");
+        assert!(
+            reply.get("result").is_some() != reply.get("error").is_some(),
+            "exactly one of result and error: {reply}"
+        );
+    }
+    assert_eq!(
+        session.formatting("file:///fuzz"),
+        json!([]),
+        "still serving after 2 000 fuzz-shaped bodies"
+    );
+    session.finish();
+}
