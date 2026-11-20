@@ -114,8 +114,9 @@ exits `2` with one `line:col` per problem on stderr and an empty stdout — a re
 
 ## Bootstrap an existing project
 
-`check --learn` discovers unrouted views and their statements; `entrypoint`, `preload`
-and the store's variable names are yours to write (`--dry-run` writes nothing).
+`check --learn` discovers unrouted views *and the exact `query` lines the audit
+reports missing on existing views*; `entrypoint`, `preload` and the store's
+variable names are yours to write (`--dry-run` writes nothing).
 
 ## For agents: `--json`
 

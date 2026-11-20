@@ -50,10 +50,6 @@
 // `check` and `dev --learn` read one implementation of "executed but not
 // granted / dead grant".
 pub mod check;
-// The name the integration suites still call that engine by; `check` is its
-// home, and they are consolidated onto it directly (`MB.56.3`).
-#[doc(hidden)]
-pub use check as audit_v1;
 pub mod cli;
 pub mod config;
 // The `dev` live-reload policy (`MB.23.5.2`, `ADR-0014`). `pub` for now because

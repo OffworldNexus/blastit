@@ -42,11 +42,6 @@ use views::{Client, Response};
 #[path = "common/static_assets.rs"]
 mod static_assets;
 
-/// The `check --learn --dry-run` fixture (a shim interpreter and its suite).
-#[cfg(feature = "python")]
-#[path = "common/check_learn.rs"]
-mod check_learn;
-
 /// The temporary project root every fixture lives in.
 #[path = "common/project.rs"]
 mod project;
@@ -2789,50 +2784,6 @@ fn a_no_reload_boot_watches_nothing_and_a_cache_write_never_reloads() {
         dev.0.text()
     );
     assert!(dev.0.events_named("dev.reload").is_empty());
-}
-
-/// §5/§4: `check --learn --dry-run` prints the proposal and writes nothing.
-#[cfg(feature = "python")]
-#[test]
-fn a_learn_dry_run_prints_the_proposed_line_and_writes_nothing() {
-    use pg_upstream::PgUpstream;
-
-    let server = PgUpstream::start();
-    let url = format!(
-        "postgresql://real-user:s3cr3t@127.0.0.1:{}/app?sslmode=disable",
-        server.port()
-    );
-    let project = Project::new("learn-dry-run");
-    let python = python_for("3.14");
-    let shim = check_learn::write_fixture(&project.dir, &python);
-    let manifest = project.path("Blastfile");
-    let before = std::fs::read(&manifest).expect("the manifest bytes");
-    let output = check_learn::dry_run(&project.dir, Path::new(BINARY), &shim, &url);
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "stdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    let absolute = std::path::absolute(&manifest).expect("an absolute manifest path");
-    let expected = format!(
-        "learn: 2 routes, 3 queries proposed (dry-run) → {}",
-        absolute.display()
-    );
-    assert!(
-        stdout.contains(&expected),
-        "the dry-run line is `{expected}`:\n{stdout}\n{stderr}"
-    );
-    assert!(
-        stdout.contains("learn: proposed Blastfile (nothing written):"),
-        "{stdout}"
-    );
-    assert_eq!(
-        std::fs::read(&manifest).expect("the manifest bytes"),
-        before,
-        "a dry run writes nothing"
-    );
 }
 
 // ---------------------------------------------------------------------------

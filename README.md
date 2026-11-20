@@ -97,9 +97,10 @@ blastit check: 4 requests, 2 statements, 3/4 views, 2 proxies
 blastit check: 6 problems · `--json` for the machine-readable list
 ```
 
-A clean run is one line — `blastit check: 412 requests, 977 statements, 3/3
-views, clean` — and that is the deploy gate. `--json` is the same document for an
-agent.
+A clean run with requests is one line — `blastit check: 412 requests, 977
+statements, 3/3 views, clean` — and that is the deploy gate. An all-static file
+prints nothing: it audits every `root` and runs no suite. `--json` is the same
+document for an agent.
 
 ## Where it sits
 

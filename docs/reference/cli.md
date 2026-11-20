@@ -66,7 +66,7 @@ $ blastit check -- -k products
 |---|---|---|
 | *(none)* | — | run `pytest -q`, then check every request and statement against the `Blastfile`; an all-static file audits every `root` and runs no `pytest` |
 | `--json` | off | one JSON document on stdout; everything else on stderr |
-| `--learn` | off | record instead of failing, and write missing unrouted views and their exact `query` lines (`dev --learn` adds statements to existing views); an all-static file has nothing to learn (`2`) |
+| `--learn` | off | record instead of failing: write the exact `query '<sql>'` for every statement the audit reports missing into the `view`/`trait` that owns it, plus a `view` for an unrouted path; never widen a view it did not have to edit; an all-static file has nothing to learn (`2`) |
 | `--dry-run` | off | with `--learn`: print the proposal, write nothing |
 | `-- ARGS…` | — | pass `ARGS` to pytest; Blastit's own `--blastit-manifest` and `--blastit-live-server` are refused (`2`) |
 

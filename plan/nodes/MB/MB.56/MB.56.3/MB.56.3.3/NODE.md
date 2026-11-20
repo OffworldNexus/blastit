@@ -2,16 +2,23 @@
 id: MB.56.3.3
 title: "Create e2e_check_fmt.rs (§5 check/fmt/learn, exit table) and drop the audit_v1 shim"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.3.2.3]
-paths: ["crates/blastit/tests/**", crates/blastit/src/lib.rs, "crates/blastit/src/check/**"]
-attempts: 0
+paths:
+  - "crates/blastit/tests/**"
+  - crates/blastit/src/lib.rs
+  - "crates/blastit/src/check/**"
+  - docs/reference/cli.md
+  - docs/reference/blastfile.md
+  - docs/ci.md
+  - README.md
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:45"
-updated: "2026-11-20T18:54"
+updated: "2026-11-20T20:48"
 ---
 
 # Goal

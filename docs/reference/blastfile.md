@@ -563,8 +563,7 @@ because a table grant takes at least one.
 goes to stderr. `--learn --json` prints the proposal instead:
 `{"proposed": {"routes": N, "queries": N}, "wrote": true}` — `wrote` is `false`
 under `--dry-run` or when a statement was refused, and the document has neither
-`schema_version` nor `findings`. On an existing view `check --learn` proposes no
-statement grant; that is the 0.2.x gap.
+`schema_version` nor `findings`.
 
 An all-static file runs no suite: `check` audits every `root` and exits `0`, or `2`
 naming a root it cannot read. For a PHP app the gate is `blastit fmt --check`: the

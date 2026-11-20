@@ -4306,3 +4306,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T20:20 [MB.56.3.2.3] (lead) OPENED HUMAN ITEM: Range header (TESTING_PLAN 2 promises byte-range; blastit answers full 200). e2e_dev drops the Range assertion until answered.
 - 2026-11-20T20:28 [MB.56.3.2.3] (lead) status active -> done
 - 2026-11-20T20:28 [MB.56.3.2] (lead) status active -> done
+- 2026-11-20T20:28 [MB.56.3.2.3] (lead) commit 5552b5a
+- 2026-11-20T20:28 [MB.56.3.3] (lead) status ready -> active
+- 2026-11-20T20:28 [MB.56.3.3] (lead) attempt 1/3 started
+- 2026-11-20T20:28 [MB.56.3.3] (lead) base 5552b5aedb505225c47a7bcbc885c17f23b779c7
+- 2026-11-20T20:40 [MB.56.3.3] (lead) edited fields
+- 2026-11-20T20:40 [MB.56.3.3] (lead) REVIEW FIX 2 (ux): raw_ingress+ingress_mismatch kinds + ', N proxies' header; docs contradict --learn widening (blastfile.md:566-567 roadmap apology, cli.md:69,
+- 2026-11-20T20:48 [MB.56.3.3] (lead) status active -> done

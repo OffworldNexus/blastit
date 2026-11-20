@@ -19,7 +19,6 @@ use serde_json::json;
 
 use super::diff::{GrantCheck, grant_of};
 use super::error::ObsError;
-use super::evaluate::parse_manifest;
 use super::infer_routes::{RoutePlan, infer, is_learnable_path};
 use super::obs::{CheckObsV1, SCHEMA_VERSION};
 use super::patterns::writable_pattern;
@@ -290,25 +289,4 @@ fn granted_already(manifest: &Manifest, route: usize, proxy: &str, sql: &str) ->
         .and_then(Grant::as_postgresql)
         .is_some_and(|grant| grant.queries().iter().any(|query| normalize(query) == sql));
     granted || manifest.is_query_covered_by_tables_or_groups(route, &proxy, sql)
-}
-
-/// `plan_learn` + [`LearnPlan::json`]: the `--learn --json` document over the
-/// two JSONL streams.
-///
-/// Prints the transaction-control hints to stderr, then returns the document.
-///
-/// # Errors
-///
-/// Every [`ObsError`] of [`parse_manifest`] and [`plan_learn`].
-pub fn plan_learn_json(
-    manifest_text: &str,
-    http_jsonl: &str,
-    sql_jsonl: &str,
-    dry_run: bool,
-) -> Result<String, ObsError> {
-    let manifest = parse_manifest(manifest_text)?;
-    let observations = CheckObsV1::from_jsonl(http_jsonl, sql_jsonl)?;
-    let plan = plan_learn(&manifest, &observations)?;
-    plan.emit_hints();
-    Ok(plan.json(dry_run))
 }

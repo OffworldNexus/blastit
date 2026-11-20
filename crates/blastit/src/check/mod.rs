@@ -99,7 +99,7 @@ pub use self::error::ObsError;
 pub use self::evaluate::{evaluate, parse_manifest};
 pub use self::findings::{Finding, Fix, ProxyCounts, Report, RouteCounts, Severity};
 pub use self::human::{human, plural};
-pub use self::learn::{LearnPlan, plan_learn, plan_learn_json};
+pub use self::learn::{LearnPlan, plan_learn};
 pub use self::obs::{CheckObsV1, HttpObsLine, SCHEMA_VERSION, parse_http_obs, parse_sql_obs};
 pub use self::patterns::pattern_is_writable;
 pub use self::static_roots::{unrequested_static_root_line, unrequested_static_roots};
