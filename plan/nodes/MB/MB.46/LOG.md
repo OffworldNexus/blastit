@@ -31,3 +31,7 @@ status active -> done
 ## 2026-11-20T07:23 [lead]
 
 REVIEW FIX (review-arch+review-ux, both changes-requested): (1) BLOCKER archive README advertised non-existent 'blastit serve' -> 'blastit [--preset NAME]'; (2) MAJOR WSGI claim outran the artifact (staging glob is libblastit_php* only; production resolves libblastit_py3<minor> beside the binary only) -> header/README/echo/workflow comment now say PHP shims only + how to place the CPython shim, shim staging pinned as next node (MB.42.3.3 slice); (3) MINOR maturin include glob is not gitignore-filtered -> exclude crates/**/{target,__pycache__,.venv}/**, *.profraw; (4) MINOR php capability unasserted -> blastit-view-php presence check; (5) MINOR --require-no-python narrower than discovery -> also refuse BLASTIT_PYTHON/VIRTUAL_ENV/BLASTIT_WHEEL_PYTHON/BLASTIT_PY_SHIM_DIR; (6) DX polish (shim plural, libc-aware DT_NEEDED, wheel-first fallback, ## Try it). Rehearsals green: sdist 439 entries + install + normalize; tarball in debian:trixie-slim --require-no-python 3/3; make fast-check/workflow-check/packaging-gates-test.
+
+## 2026-11-20T07:23 [lead]
+
+commit c25e751
