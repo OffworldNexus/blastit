@@ -2,7 +2,7 @@
 id: MB.42.3.4
 title: "Signed-repo publishing: packages.yml (main) + nightly.yml (stamps, prune 7) + Forgejo mirror"
 kind: task
-status: active
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.3.3]
@@ -11,7 +11,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T01:33"
-updated: "2026-11-20T04:23"
+updated: "2026-11-20T04:52"
 ---
 
 # Goal
@@ -36,8 +36,9 @@ Authoritative detail: `plan/nodes/MB/MB.42/MB.42.3/NODE.md` §A–§C and §5 (w
 - Never touch `docs/**`.
 
 # Acceptance
-- `uv run --no-project scripts/check_workflows.py` green (and it fails if you delete a matrix leg from the workflow)
-- `uv run --no-project scripts/test_packaging_gates.py` green
+- `uv run --no-project scripts/check_workflows.py` green (and it fails if you delete a matrix leg from the workflow, or name one with a literal `install_matrix.sh --leg`)
+- `uv run --no-project scripts/test_packaging_gates.py` green (rule 20/21 negatives included)
+- `uv run --no-project scripts/test_publish_gates.py` green (the publish/retention suite; the entry point above calls it)
 - the token-unset path proven locally (paste the `::notice::` line and exit 0)
 - nightly version stamps printed by the same script the workflow calls (paste both formats)
-- `make fast-check`
+- `make fast-check workflow-check packaging-gates-test` (`workflow-check` is in `fast-check`; the packaging gates spawn ~20 auditors and stay in the epic gate)

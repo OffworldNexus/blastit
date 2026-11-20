@@ -43,11 +43,14 @@ Usage (stdlib only; `make platform-matrix-check` runs the first):
     scripts/platform_matrix.py --matrix py-shims   # the 8 per-minor CPython shims
     scripts/platform_matrix.py --matrix images
     scripts/platform_matrix.py --matrix lsp         # editor binaries (five targets)
+    scripts/platform_matrix.py --matrix packages    # the 4 .deb/.rpm legs
+    scripts/platform_matrix.py --matrix install     # the 6 container install legs
     scripts/platform_matrix.py --summary            # Markdown, for a RESULT
     scripts/platform_matrix.py --count shims --libc gnu --arch x86_64
     scripts/platform_matrix.py --count lsp
     scripts/platform_matrix.py --leg lsp --target x86_64-unknown-linux-gnu
     scripts/platform_matrix.py --leg shims --minor 8.3 --libc gnu --arch x86_64
+    scripts/platform_matrix.py --leg install --name debian-13
 """
 
 from __future__ import annotations
@@ -153,6 +156,82 @@ PACKAGE_FORMATS = {
         "image": "rockylinux:9",
     },
 }
+
+# The container install matrix (`MB.42.3.4`): every distribution the signed
+# repositories advertise, and the package a machine of that distribution
+# installs. One leg per distribution — a machine has one package manager and
+# installs one of the four packages — and `format` says which. `modes` is what
+# `scripts/test_packages.sh` drives in that image: every leg installs the package
+# and serves a static route, and only `debian:trixie` also runs the WSGI gate,
+# because the other five ship no CPython 3.13/3.14 (Rocky 9 has 3.9, Ubuntu 22.04
+# has 3.10) and a WSGI leg there would test an interpreter the product never
+# claims. `installer` is the package manager the image has.
+#
+# `packages.yml` and `nightly.yml` take this list with `--matrix install`, and a
+# literal `debian:...`/`fedora:...` in either workflow is refused by
+# `scripts/check_workflows.py`: the second list is the one that goes stale when a
+# distribution is added or dropped. `install_legs()` expands each entry over the
+# two architectures the release ships, so an `aarch64` package is installed
+# natively too rather than being a promise.
+INSTALL_LEGS = (
+    {
+        "name": "debian-12",
+        "distro": "debian",
+        "release": "12",
+        "image": "debian:bookworm-slim",
+        "format": "deb",
+        "installer": "apt",
+        "modes": "install static",
+    },
+    {
+        "name": "debian-13",
+        "distro": "debian",
+        "release": "13",
+        "image": "debian:trixie",
+        "format": "deb",
+        "installer": "apt",
+        # The one leg that also runs the WSGI gate: Debian 13 ships the
+        # `python3-pytest` + `libpython3.13` the packaged shim needs, so the
+        # package's own `python/blastit` tree is imported by a real gate.
+        "modes": "install static wsgi",
+    },
+    {
+        "name": "ubuntu-22.04",
+        "distro": "ubuntu",
+        "release": "22.04",
+        "image": "ubuntu:22.04",
+        "format": "deb",
+        "installer": "apt",
+        "modes": "install static",
+    },
+    {
+        "name": "ubuntu-24.04",
+        "distro": "ubuntu",
+        "release": "24.04",
+        "image": "ubuntu:24.04",
+        "format": "deb",
+        "installer": "apt",
+        "modes": "install static",
+    },
+    {
+        "name": "rocky-9",
+        "distro": "rocky",
+        "release": "9",
+        "image": "rockylinux:9",
+        "format": "rpm",
+        "installer": "dnf",
+        "modes": "install static",
+    },
+    {
+        "name": "fedora",
+        "distro": "fedora",
+        "release": "latest",
+        "image": "fedora:latest",
+        "format": "rpm",
+        "installer": "dnf",
+        "modes": "install static",
+    },
+)
 
 # The distro that carries the headers *and* the embedded SAPI for each
 # (minor, libc). Every entry is a signed distro package on a distro that ships
@@ -559,6 +638,38 @@ def package_legs() -> list[dict]:
         for leg in enabled_legs()
         if leg["libc"] == "gnu"
         for fmt, spec in PACKAGE_FORMATS.items()
+    ]
+
+
+def install_legs() -> list[dict]:
+    """One container install leg per (distribution, architecture).
+
+    `INSTALL_LEGS` declares the six distributions once; this expands each over
+    the two architectures the release ships, because a `.deb`/`.rpm` for
+    `aarch64` that was never installed is a promise, not a package — and the
+    `aarch64` legs run on the native `ubuntu-24.04-arm` runner rather than under
+    emulation. `scripts/install_matrix.sh --leg <name>` reads one row through
+    `--leg install --name <name>`, and both package workflows iterate the whole
+    table as a GitHub matrix, so "which distributions does this release support"
+    is answered here and executed before anything is published.
+    """
+    return [
+        {
+            "name": f"{leg['name']}-{arch}",
+            "distro": leg["distro"],
+            "release": leg["release"],
+            "image": leg["image"],
+            "format": leg["format"],
+            "installer": leg["installer"],
+            "modes": leg["modes"],
+            "arch": arch,
+            # The filename half `build-{deb,rpm}.sh` writes for this arch, so a
+            # leg picks its package by the table rather than by a glob.
+            "package_arch": PACKAGE_FORMATS[leg["format"]]["arch"][arch],
+            "runs_on": ARCHES[arch]["runs_on"],
+        }
+        for leg in INSTALL_LEGS
+        for arch in ARCHES
     ]
 
 
@@ -1031,6 +1142,9 @@ def declared_of(family: str) -> int:
         "lsp asset": len(lsp_legs()),
         # `.deb` + `.rpm` per gnu arch (`MB.42.3.1`).
         "package": len(package_legs()),
+        # The container install matrix (`MB.42.3.4`): one leg per
+        # (distribution, architecture) the release claims.
+        "install": len(install_legs()),
         # The per-minor CPython shims (`MB.42.3.3`). Spelled as its own noun so a
         # page saying "`8` Python shims" is checked against this family and not
         # against the PHP one it sits beside.
@@ -1050,6 +1164,10 @@ def proven_of(family: str) -> int:
         "lsp asset": proven_count("lsp"),
         "package": proven_count("packages"),
         "python shim": proven_count("py_shims"),
+        # No install leg is "proved" by `PROVEN`: a container install runs in CI
+        # on every release, so there is no artifact to keep a proof of. A page may
+        # therefore not claim a proven install.
+        "install": 0,
         "image": 0,
     }[family]
 
@@ -1274,6 +1392,46 @@ def check(problems: list[str], notes: list[str]) -> None:
         if not image.get("tag"):
             problems.append("an image entry has no tag")
 
+    # The container install matrix (`MB.42.3.4`): every distribution the release
+    # claims is installed before a package is published, so a leg must name a
+    # package this matrix builds and the package manager that distribution has.
+    seen_install: list[str] = []
+    built_formats = {leg["format"] for leg in package_legs()}
+    for leg in install_legs():
+        where = f"INSTALL_LEGS {leg['name']}"
+        if leg["name"] in seen_install:
+            problems.append(
+                f"{where}: declared twice: one (distribution, arch) is one leg"
+            )
+        seen_install.append(leg["name"])
+        if leg["format"] not in built_formats:
+            problems.append(
+                f"{where}: installs a {leg['format']!r} package, which this matrix does "
+                f"not build ({sorted(built_formats)}): a leg nothing produces never runs"
+            )
+        expected_installer = {"deb": "apt", "rpm": "dnf"}.get(leg["format"], "")
+        if leg["installer"] != expected_installer:
+            problems.append(
+                f"{where}: a {leg['format']} package is installed with {leg['installer']!r}, "
+                f"not {expected_installer!r}: the image would have no such command"
+            )
+        modes = leg["modes"].split()
+        for mode in modes:
+            if mode not in ("install", "static", "wsgi"):
+                problems.append(
+                    f"{where}: unknown smoke mode {mode!r} (install, static, wsgi)"
+                )
+        if "install" not in modes:
+            problems.append(
+                f"{where}: never installs the package: the leg proves nothing"
+            )
+        if "wsgi" in modes and leg["image"] != "debian:trixie":
+            problems.append(
+                f"{where}: runs the WSGI gate in {leg['image']}, which ships no CPython "
+                "3.13/3.14 (the `debian:trixie` leg is the one image that does), so the "
+                "leg would import through an interpreter the packaged shim never binds to"
+            )
+
     # The pinned lines first: if the scanner no longer sees them, every count
     # below is being read from a document it does not understand, and an `ok`
     # would be a lie.
@@ -1423,6 +1581,9 @@ def summary(family: str = "") -> str:
         # "archive" here, because that count is the standalone family's (`R74`).
         ("lsp assets (editor)", "lsp", len(lsp_legs())),
         ("native packages (.deb/.rpm)", "packages", len(package_legs())),
+        # The container install matrix (`MB.42.3.4`): every distribution the
+        # repositories advertise, on both architectures.
+        ("container install legs", "install", len(install_legs())),
     ):
         if (
             only
@@ -1491,6 +1652,13 @@ def summary(family: str = "") -> str:
                 f"{leg['runs_on']} | {'proved by ' + node if node else 'declared, unbuilt'}; "
                 f"bundle ceiling glibc {leg['bundle_ceiling']}, binaries {leg['binary_floor']} |"
             )
+    if wants("install"):
+        for leg in install_legs():
+            lines.append(
+                f"| `{leg['image']}` ({leg['format']}, {leg['package_arch']}) | "
+                f"{leg['runs_on']} | {', '.join(leg['modes'].split())} under "
+                f"{leg['installer']}; runs before anything is published |"
+            )
     lines.append("")
     if wants("lsp"):
         lines.append(
@@ -1552,6 +1720,7 @@ def _filtered_legs(
     libc: str = "",
     arch: str = "",
     target: str = "",
+    name: str = "",
 ) -> list[dict]:
     legs = {
         "wheels": wheel_legs,
@@ -1561,7 +1730,10 @@ def _filtered_legs(
         "images": lambda: [dict(item) for item in IMAGES],
         "lsp": lsp_legs,
         "packages": package_legs,
+        "install": install_legs,
     }[family]()
+    if name:
+        legs = [leg for leg in legs if leg.get("name") == name]
     if minor:
         legs = [leg for leg in legs if leg.get("minor") == minor]
     if python:
@@ -1592,6 +1764,7 @@ def main(argv: list[str] | None = None) -> int:
             "images",
             "lsp",
             "packages",
+            "install",
         ),
     )
     parser.add_argument(
@@ -1604,6 +1777,7 @@ def main(argv: list[str] | None = None) -> int:
             "images",
             "lsp",
             "packages",
+            "install",
         ),
         help="print how many enabled legs match the filters (exits 0 even when 0)",
     )
@@ -1621,12 +1795,21 @@ def main(argv: list[str] | None = None) -> int:
             "images",
             "lsp",
             "packages",
+            "install",
         ),
         help="print the Markdown report, or one family's section (`--summary lsp`)",
     )
     parser.add_argument(
         "--leg",
-        choices=("wheels", "binaries", "shims", "py-shims", "lsp", "packages"),
+        choices=(
+            "wheels",
+            "binaries",
+            "shims",
+            "py-shims",
+            "lsp",
+            "packages",
+            "install",
+        ),
     )
     parser.add_argument(
         "--shim-floor",
@@ -1662,6 +1845,11 @@ def main(argv: list[str] | None = None) -> int:
         help="with --leg/--count/--matrix lsp: filter by Rust triple",
     )
     parser.add_argument(
+        "--name",
+        default="",
+        help="filter by leg name (e.g. `--leg install --name debian-13-x86_64`)",
+    )
+    parser.add_argument(
         "--quiet", action="store_true", help="--check without the per-document notes"
     )
     args = parser.parse_args(argv)
@@ -1689,6 +1877,7 @@ def main(argv: list[str] | None = None) -> int:
             libc=args.libc,
             arch=args.arch,
             target=args.target,
+            name=args.name,
         )
         print(json.dumps({"include": legs}, indent=None, separators=(",", ":")))
     if args.count:
@@ -1699,6 +1888,7 @@ def main(argv: list[str] | None = None) -> int:
             libc=args.libc,
             arch=args.arch,
             target=args.target,
+            name=args.name,
         )
         print(len(legs))
     if args.leg:
@@ -1709,6 +1899,7 @@ def main(argv: list[str] | None = None) -> int:
             libc=args.libc,
             arch=args.arch,
             target=args.target,
+            name=args.name,
         )
         if len(legs) == 0:
             print(
@@ -1751,6 +1942,8 @@ def main(argv: list[str] | None = None) -> int:
             f"{proven_count('shims')}/{len(shim_legs())} shims, "
             f"{proven_count('py_shims')}/{len(py_shim_legs())} python shims, "
             f"{proven_count('lsp')}/{len(lsp_legs())} lsp assets; "
+            f"{len(package_legs())} packages installed in {len(install_legs())} "
+            f"container legs; "
             f"reaches: {reaches_sentence()}; "
             f"{len([leg for leg in LEGS if not leg['enabled']])} leg(s) dropped"
         )

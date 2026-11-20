@@ -2,7 +2,7 @@
 id: MB.42.3
 title: "Build & container-verify signed APT/RPM repository publishing (Cloudsmith + Forgejo, main/nightly), docs/install.sh, universal py3-none wheels, Composer wrapper & CI/release workflows"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: [MB.42.2, MB.42.5]
 paths:
@@ -18,7 +18,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T14:30"
-updated: "2026-11-20T01:33"
+updated: "2026-11-20T04:52"
 ---
 
 # Goal

@@ -60,6 +60,14 @@ static_fixture="${BLASTIT_PACKAGE_FIXTURE:-$root/e2e/packages/fixture}"
 wsgi_fixture="${BLASTIT_PACKAGE_WSGI_FIXTURE:-$root/e2e/packages/fixture-wsgi}"
 port="${BLASTIT_PACKAGE_TEST_PORT:-8099}"
 
+# Which phases run in each image (`MB.42.3.4`). `scripts/install_matrix.sh` passes
+# the leg's own `modes` from `scripts/platform_matrix.py --leg install`, so the
+# matrix — not this script — decides whether an image is asked to import a WSGI
+# app; the defaults are the `make packages-test` survey, where the trixie leg is
+# the only image that ships the CPython the packaged shim binds to.
+deb_modes="${BLASTIT_PACKAGE_MODES:-install static wsgi}"
+rpm_modes="${BLASTIT_PACKAGE_MODES:-install static}"
+
 usage() {
     cat >&2 <<'USAGE'
 usage: scripts/test_packages.sh [--deb PATH] [--rpm PATH]
@@ -70,6 +78,10 @@ against §6.1, and run `blastit --version`, `blastit check` and `blastit dev`.
   BLASTIT_DEB   path to blastit_<ver>_<arch>.deb (debian:trixie; static + WSGI)
   BLASTIT_RPM   path to blastit-<ver>-<rel>.<arch>.rpm (rockylinux:9; static)
   BLASTIT_DEB_IMAGE / BLASTIT_RPM_IMAGE   override the container images
+  BLASTIT_PACKAGE_MODES                    phases to run there (default:
+                                           `install static wsgi` for a .deb,
+                                           `install static` for a .rpm; the
+                                           install matrix passes the leg's own)
   BLASTIT_PACKAGE_TEST_PORT                loopback port the dev leg binds (8099)
 
 At least one of --deb/--rpm (or BLASTIT_DEB/BLASTIT_RPM) is required.
@@ -277,7 +289,7 @@ PROBE
 # packaged shim `dlopen`s), so it has network; the RPM leg is static-only and runs
 # with `--network none`.
 if [ -n "$deb" ]; then
-    echo "package-test: deb — installing $(basename "$deb") in $deb_image (static + WSGI)"
+    echo "package-test: deb — installing $(basename "$deb") in $deb_image ($deb_modes)"
     docker run --rm --network bridge \
         --env DEBIAN_FRONTEND=noninteractive \
         --volume "$(dirname "$deb"):/pkg:ro" \
@@ -287,15 +299,26 @@ if [ -n "$deb" ]; then
         --tmpfs /work:exec \
         "$deb_image" \
         bash -euc '
-            apt-get update -qq >/dev/null
-            apt-get install -y -qq --no-install-recommends python3-pytest libpython3.13 >/dev/null
-            bash /probe/probe.sh deb "/pkg/$1" "$2" install
-            bash /probe/probe.sh deb "/pkg/$1" "$2" static
-            bash /probe/probe.sh deb "/pkg/$1" "$2" wsgi
-        ' _ "$(basename "$deb")" "$port"
+            # Only a leg whose matrix row carries `wsgi` installs the interpreter
+            # and its shared library; the other five distributions ship no CPython
+            # 3.13/3.14 and are not asked to import anything through a shim.
+            case " $3 " in
+                *" wsgi "*)
+                    apt-get update -qq >/dev/null
+                    apt-get install -y -qq --no-install-recommends python3-pytest libpython3.13 >/dev/null
+                    ;;
+            esac
+            for mode in $3; do
+                bash /probe/probe.sh deb "/pkg/$1" "$2" "$mode"
+            done
+        ' _ "$(basename "$deb")" "$port" "$deb_modes"
 fi
 
-if [ -n "$deb" ]; then
+# The default survey installs the same `.deb` in Debian 12 as well, because 2.36
+# is the oldest glibc the release claims. An explicit `BLASTIT_DEB_IMAGE` means
+# exactly that image (an install-matrix leg), so the second leg only runs when the
+# caller did not name one.
+if [ -n "$deb" ] && [ -z "${BLASTIT_DEB_IMAGE:-}" ]; then
     bookworm_image="${BLASTIT_DEB_BOOKWORM_IMAGE:-debian:bookworm-slim}"
     echo "package-test: deb — installing $(basename "$deb") in $bookworm_image (static, network none: Debian 12 is the oldest supported glibc)"
     docker run --rm --network none \
@@ -312,7 +335,7 @@ if [ -n "$deb" ]; then
 fi
 
 if [ -n "$rpm" ]; then
-    echo "package-test: rpm — installing $(basename "$rpm") in $rpm_image (static, network none)"
+    echo "package-test: rpm — installing $(basename "$rpm") in $rpm_image ($rpm_modes, network none)"
     docker run --rm --network none \
         --volume "$(dirname "$rpm"):/pkg:ro" \
         --volume "$static_fixture:/fixture:ro" \
@@ -321,9 +344,10 @@ if [ -n "$rpm" ]; then
         --tmpfs /work:exec \
         "$rpm_image" \
         bash -euc '
-            bash /probe/probe.sh rpm "/pkg/$1" "$2" install
-            bash /probe/probe.sh rpm "/pkg/$1" "$2" static
-        ' _ "$(basename "$rpm")" "$port"
+            for mode in $3; do
+                bash /probe/probe.sh rpm "/pkg/$1" "$2" "$mode"
+            done
+        ' _ "$(basename "$rpm")" "$port" "$rpm_modes"
 fi
 
 echo "package-test: ok"

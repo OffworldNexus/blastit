@@ -27,3 +27,7 @@ REVIEW PENDING (ux): BLOCKER exec loop hidden not fixed (RO site-packages -> _ex
 ## 2026-11-20T04:23 [lead]
 
 status review -> done
+
+## 2026-11-20T04:25 [lead]
+
+follow-up commit 725188171b80ce896b59e7d84780fcc9653f81e4: the check.rs wheel-root fix (../../.. -> ../..) was left unstaged by the lead's earlier commit; now committed and attributed here.

@@ -103,6 +103,28 @@ What it checks across `.github/workflows/*.yml` and `.github/actions/*/action.ym
     renamed (`MB.35.5`). A leg arrives as `${{ matrix.* }}` or as an OS shape
     (`*-apple-darwin`). Scanned over `.github/**/*.yml` and `scripts/build-lsp.sh`
     — the two places a producer could re-spell the table — and self-tested first.
+
+19. a job whose `strategy.matrix` comes from `fromJSON(needs.<producer>.outputs.<key>)`
+    is only believed when a step of `<producer>` really runs
+    `scripts/platform_matrix.py --matrix <family>`: a hand-written one-leg array
+    has exactly the shape a generator output has, and replacing a producer with
+    one kept every other rule green (`MB.42.3.3` review).
+
+20. in the two package workflows (`packages.yml`, `nightly.yml`) every leg is the
+    matrix's: a `strategy.matrix` written in the file, a distribution image named
+    in a step (`docker run debian:…`), or `install_matrix.sh --leg <literal>` —
+    which runs one of the twelve install legs while `publish` still reads
+    `needs.install.result == 'success'` — is refused. That second list is how a
+    distribution stays "supported" in the repository after the matrix dropped it,
+    or is silently skipped after the matrix added it (`MB.42.3.4`). Self-tested
+    first, and it refuses to report `ok` when one of the two files is missing.
+
+21. the five jobs the two package workflows share (`matrix`, `shims`, `py_shims`,
+    `packages`, `install`) are **identical** after folding the version job's name
+    (`plan`/`stamp`). The graphs are duplicated because rule 9 only reads
+    artifacts inside one file, so this is the only place a one-sided edit — a
+    bumped `--max-glibc`, a dropped `--arch` — becomes visible (`MB.42.3.4`
+    review). Self-tested first.
 """
 
 from __future__ import annotations
@@ -169,6 +191,13 @@ OUTPUT_SPECS: dict[str, tuple[str, str]] = {
     # `MB.42.3.3`: the per-minor CPython shims have their own family and their own
     # workflow (`.github/workflows/py-sapi.yml`).
     "py_shims": ("py-shims", ""),
+    # `MB.42.3.4`: the two package workflows take the four `.deb`/`.rpm` legs
+    # (`--matrix packages`), the container install matrix (`--matrix install`) and
+    # the `gnu` shim legs a package bundle is assembled from.
+    "packages": ("packages", ""),
+    "install": ("install", ""),
+    "shims_gnu": ("shims", "gnu"),
+    "py_shims_gnu": ("py-shims", "gnu"),
     "wheels_gnu": ("wheels", "gnu"),
     "wheels_musl": ("wheels", "musl"),
     "binaries_gnu": ("binaries", "gnu"),
@@ -318,16 +347,35 @@ def check_platform_matrix_calls(run_text: str, scope: str, report: Report) -> No
                 # job itself expands, so there is no literal here to judge.
                 continue
             report.check(
-                family in {"shims", "py-shims", "binaries", "wheels", "images", "lsp"},
+                family
+                in {
+                    "shims",
+                    "py-shims",
+                    "binaries",
+                    "wheels",
+                    "images",
+                    "lsp",
+                    "packages",
+                    "install",
+                },
                 f"{scope}: platform_matrix.py --matrix {family!r} names a family the "
-                "generator does not have (wheels, binaries, shims, py-shims, images, lsp)",
+                "generator does not have (wheels, binaries, shims, py-shims, images, lsp, "
+                "packages, install)",
             )
             continue
         leg_match = re.search(r"--leg\s+(\S+)", tail)
         if leg_match is None:
             continue
         family = leg_match.group(1).strip("'\"")
-        if family not in {"shims", "py-shims", "binaries", "wheels", "lsp"}:
+        if family not in {
+            "shims",
+            "py-shims",
+            "binaries",
+            "wheels",
+            "lsp",
+            "packages",
+            "install",
+        }:
             report.fail(
                 f"{scope}: platform_matrix.py --leg {family!r} names an unknown family"
             )
@@ -945,6 +993,316 @@ def self_test_rule18() -> list[str]:
     return problems
 
 
+# `MB.42.3.4`: the two package workflows publish to repositories that are only
+# right if every distribution they advertise installs. Their leg lists are
+# `scripts/platform_matrix.py`'s (`--matrix install` and `--matrix packages`), so
+# a distribution image spelled in the YAML is a second list — the one that keeps
+# claiming a release the matrix dropped, or silently skips one it added.
+PACKAGE_WORKFLOWS = frozenset({"packages.yml", "nightly.yml"})
+DISTRO_IMAGE = re.compile(
+    r"\b(?:debian|ubuntu|rockylinux|almalinux|centos|fedora|amazonlinux)"
+    r"(?::|/)[A-Za-z0-9][A-Za-z0-9._@/-]*"
+)
+# A leg named in the workflow rather than taken from the matrix. `install_matrix.sh`
+# is the one command whose `--leg` takes a leg name, so that is where a literal
+# would hide: `--leg debian-13-x86_64` runs **one** of the twelve install legs and
+# every other rule stays green while `publish` reads "install succeeded".
+INSTALL_LEG = re.compile(
+    r"install_matrix\.sh[^\n]*?--leg\s+(?P<value>\"[^\"]*\"|'[^']*'|\S+)"
+)
+INSTALL_ALL = re.compile(r"install_matrix\.sh[^\n]*?(?:^|\s)--matrix(?:\s|$)")
+# The package workflows duplicate their build graph (rule 9 reads artifacts inside
+# one file, so a `workflow_call` would hide the producers from it). These are the
+# jobs that must not drift: the legs, the packages and the installs.
+PACKAGE_SHARED_JOBS = ("matrix", "shims", "py_shims", "packages", "install")
+
+
+def _command_lines(text: str) -> str:
+    """A `run:` body without blank lines or `#` comments — the commands only.
+
+    The comment lines inside a `run: |` block are part of the YAML *value*, so a
+    prose-only difference between the two files would otherwise read as drift.
+    What must match is the command sequence.
+    """
+    return "\n".join(
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    )
+
+
+def _normalise_value(value: object) -> object:
+    if isinstance(value, str):
+        return _command_lines(value)
+    if isinstance(value, list):
+        return [_normalise_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalise_value(item) for key, item in value.items()}
+    return value
+
+
+def _normalise_shared_job(job: dict) -> str:
+    """A job body with the plan/stamp job's name folded and prose dropped."""
+    normalised = {key: _normalise_value(value) for key, value in job.items()}
+    needs = normalised.get("needs")
+    if isinstance(needs, list):
+        normalised["needs"] = [
+            "version" if item in ("plan", "stamp") else item for item in needs
+        ]
+    text = yaml.safe_dump(normalised, sort_keys=True)
+    for alias in ("needs.plan.", "needs.stamp."):
+        text = text.replace(alias, "needs.version.")
+    return text
+
+
+def package_graph_problems(first: dict, second: dict) -> list[str]:
+    """Rule 21: the two package workflows build the same legs with the same commands.
+
+    `packages.yml` and `nightly.yml` are separate files on purpose — a reusable
+    `workflow_call` would move the producers into a file rule 9 does not read
+    artifacts across — so the duplicate graph needs something that *sees* drift.
+    The five shared jobs are compared after folding the version job's name
+    (`plan` in one file, `stamp` in the other): a command changed on one side only
+    is a release that builds something different from the nightly it was rehearsed
+    as.
+    """
+    problems: list[str] = []
+    jobs_first = first.get("jobs") or {}
+    jobs_second = second.get("jobs") or {}
+    for job_name in PACKAGE_SHARED_JOBS:
+        if job_name not in jobs_first or job_name not in jobs_second:
+            missing = "nightly.yml" if job_name in jobs_first else "packages.yml"
+            problems.append(
+                f"packages.yml/nightly.yml: the shared job {job_name!r} is missing from "
+                f"{missing}: both graphs must build the same legs with the same commands"
+            )
+            continue
+        if _normalise_shared_job(jobs_first[job_name]) != _normalise_shared_job(
+            jobs_second[job_name]
+        ):
+            problems.append(
+                f"packages.yml and nightly.yml disagree on the shared job {job_name!r}: "
+                "the build graph is duplicated by necessity, so this is where drift has "
+                "to be visible. Change both, or move the difference into a job that is "
+                "not shared"
+            )
+    return problems
+
+
+def package_leg_problems(name: str, document: dict) -> list[str]:
+    """Every leg `document` writes instead of taking from the matrix.
+
+    Two shapes, because a leg can arrive either way: a `strategy.matrix` written
+    in the workflow (a literal `include:` list has exactly the shape a generator
+    output has), and a distribution image named in a step (`docker run
+    debian:…`, a `container:` field). The generator's output is the only list
+    that cannot be missing a leg the table declares, so both are refused and the
+    fix named is `--matrix install` / `--matrix packages`.
+    """
+    problems: list[str] = []
+    for job_name, job in (document.get("jobs") or {}).items():
+        matrix = (job.get("strategy") or {}).get("matrix")
+        if matrix is not None and not (
+            isinstance(matrix, str) and "fromJSON(" in matrix
+        ):
+            problems.append(
+                f"{name}: job {job_name} writes its own `strategy.matrix`: the legs are "
+                "`scripts/platform_matrix.py`'s (`--matrix install` / `--matrix "
+                "packages`) and arrive as `fromJSON(needs.<job>.outputs.<family>)`, so a "
+                "leg the table declares can never be missing from the run"
+            )
+        dumped = yaml.safe_dump(job)
+        for match in DISTRO_IMAGE.finditer(dumped):
+            line = dumped[: match.start()].count("\n") + 1
+            problems.append(
+                f"{name}: job {job_name} (line {line} of the job) names the distribution "
+                f"{match.group(0)!r}: that is a second copy of the table, and the copy is "
+                "what keeps advertising a release after it is dropped. Declare it in "
+                "`INSTALL_LEGS` (scripts/platform_matrix.py) and take the leg from "
+                "`--matrix install`"
+            )
+        for index, step in enumerate(job.get("steps") or [], 1):
+            run = str(step.get("run") or "")
+            for match in INSTALL_LEG.finditer(run):
+                value = match.group("value").strip("\"'")
+                if "${{" in value:
+                    continue
+                problems.append(
+                    f"{name}: job {job_name} step {index} runs install_matrix.sh with the "
+                    f"literal leg {value!r}: that runs one of the twelve install legs and "
+                    "every other distribution goes uninstalled, while `publish` still "
+                    "reads `needs.install.result == 'success'`. Use "
+                    '`--leg "${{ matrix.name }}"` and the matrix from `--matrix install`'
+                )
+            if INSTALL_ALL.search(run):
+                problems.append(
+                    f"{name}: job {job_name} step {index} runs install_matrix.sh --matrix: "
+                    "one leg per job, so a red distribution names itself. Iterate "
+                    "`--matrix install` as the job's strategy.matrix instead"
+                )
+    return problems
+
+
+def check_package_workflow_legs(documents: dict[Path, dict], report: Report) -> None:
+    """Rule 20: both package workflows take every leg from the table.
+
+    Self-tested first (`self_test_rule20`), and it also refuses to report `ok`
+    when one of the two files is missing: a rule that scans nothing is a rule that
+    passes everything.
+    """
+    scanned = 0
+    found: dict[str, dict] = {}
+    for path, document in documents.items():
+        if path.name not in PACKAGE_WORKFLOWS:
+            continue
+        scanned += 1
+        found[path.name] = document
+        for problem in package_leg_problems(path.name, document):
+            report.fail(problem)
+    if set(found) == PACKAGE_WORKFLOWS:
+        for problem in package_graph_problems(
+            found["packages.yml"], found["nightly.yml"]
+        ):
+            report.fail(problem)
+    report.check(
+        scanned == len(PACKAGE_WORKFLOWS),
+        "the package workflows "
+        f"({', '.join(sorted(PACKAGE_WORKFLOWS))}) were not all scanned ({scanned}): a "
+        "leg list outside the matrix would go unread",
+    )
+
+
+def self_test_rule20() -> list[str]:
+    """Prove rule 20 still refuses a leg written into a package workflow.
+
+    The negative is the shape the rule exists for (`docker run debian:stretch`,
+    and a literal `include:` matrix); the positive is a matrix-driven job, so the
+    rule cannot pass by refusing every `run:` block.
+    """
+    problems: list[str] = []
+    literal_step = {
+        "jobs": {
+            "install": {
+                "runs-on": "ubuntu-24.04",
+                "steps": [
+                    {"run": "docker run --rm debian:stretch dpkg -i blastit.deb"}
+                ],
+            }
+        }
+    }
+    literal_matrix = {
+        "jobs": {
+            "install": {
+                "strategy": {"matrix": {"include": [{"image": "fedora:latest"}]}},
+                "runs-on": "ubuntu-24.04",
+                "steps": [{"run": "scripts/install_matrix.sh --leg x"}],
+            }
+        }
+    }
+    fixed = {
+        "jobs": {
+            "install": {
+                "strategy": {"matrix": "${{ fromJSON(needs.matrix.outputs.install) }}"},
+                "runs-on": "${{ matrix.runs_on }}",
+                "steps": [
+                    {"run": 'scripts/install_matrix.sh --leg "${{ matrix.name }}"'}
+                ],
+            }
+        }
+    }
+    literal_leg = {
+        "jobs": {
+            "install": {
+                "runs-on": "ubuntu-24.04",
+                "steps": [
+                    {
+                        "run": "scripts/install_matrix.sh --leg debian-13-x86_64 "
+                        "--dir dist"
+                    }
+                ],
+            }
+        }
+    }
+    literal_all = {
+        "jobs": {
+            "install": {
+                "runs-on": "ubuntu-24.04",
+                "steps": [{"run": "scripts/install_matrix.sh --matrix --dir dist"}],
+            }
+        }
+    }
+    for document, what in (
+        (literal_step, "a distribution image in a step"),
+        (literal_matrix, "a literal strategy.matrix"),
+        (literal_leg, "a literal install leg name"),
+        (literal_all, "one job running the whole install survey"),
+    ):
+        if not package_leg_problems("packages.yml", document):
+            problems.append(f"rule 20 no longer refuses {what}")
+    refused = package_leg_problems("packages.yml", fixed)
+    if refused:
+        problems.append(f"rule 20 refused a matrix-driven leg: {refused}")
+    return problems
+
+
+def self_test_rule21() -> list[str]:
+    """Prove rule 21 still sees the two package graphs drift apart."""
+    problems: list[str] = []
+    shared = {
+        "jobs": {
+            "packages": {
+                "needs": ["plan", "matrix"],
+                "runs-on": "${{ matrix.runs_on }}",
+                "steps": [
+                    {
+                        "run": "scripts/build-deb.sh --version "
+                        "${{ needs.plan.outputs.deb_version }}"
+                    }
+                ],
+            }
+        }
+    }
+    night = {
+        "jobs": {
+            "packages": {
+                "needs": ["stamp", "matrix"],
+                "runs-on": "${{ matrix.runs_on }}",
+                "steps": [
+                    {
+                        "run": "scripts/build-deb.sh --version "
+                        "${{ needs.stamp.outputs.deb_version }}"
+                    }
+                ],
+            }
+        }
+    }
+    for job_name in PACKAGE_SHARED_JOBS:
+        if job_name == "packages":
+            continue
+        for document in (shared, night):
+            document["jobs"][job_name] = {"runs-on": "ubuntu-24.04", "steps": []}
+    # A comment inside a `run:` block is prose, not a command: it must not count
+    # as drift, or the rule would forbid documenting either file.
+    night["jobs"]["packages"]["steps"][0]["run"] += "\n# the nightly's own note"
+    if package_graph_problems(shared, night):
+        problems.append(
+            "rule 21 refused two graphs that only differ by the version job's name: "
+            f"{package_graph_problems(shared, night)}"
+        )
+    drifted = yaml.safe_load(yaml.safe_dump(night))
+    drifted["jobs"]["packages"]["steps"][0]["run"] = (
+        "scripts/build-deb.sh --version ${{ needs.stamp.outputs.deb_version }} "
+        "--max-glibc 9_99"
+    )
+    if not package_graph_problems(shared, drifted):
+        problems.append("rule 21 no longer sees the two package graphs drift apart")
+    missing = yaml.safe_load(yaml.safe_dump(night))
+    del missing["jobs"]["install"]
+    if not package_graph_problems(shared, missing):
+        problems.append("rule 21 no longer notices a shared job missing from one graph")
+    return problems
+
+
 def self_test_rule15() -> list[str]:
     """Prove rule 15 still recognises a host standalone build (`MB.3.61`).
 
@@ -1135,6 +1493,39 @@ def main(argv: list[str] | None = None) -> int:
             "workflow-check: rule 18 self-test ok — an editor target triple outside the table is a copy"
         )
 
+    package_problems = self_test_rule20()
+    if package_problems:
+        for problem in package_problems:
+            print(f"FAIL {problem}")
+        print(
+            f"workflow-check: FAIL — rule 20's own self-test is broken "
+            f"({len(package_problems)} problem(s)); the package-workflow leg scan below "
+            "it would not be worth anything",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.quiet:
+        print(
+            "workflow-check: rule 20 self-test ok — a distribution written in a package "
+            "workflow is a second copy of the table"
+        )
+
+    graph_problems = self_test_rule21()
+    if graph_problems:
+        for problem in graph_problems:
+            print(f"FAIL {problem}")
+        print(
+            f"workflow-check: FAIL — rule 21's own self-test is broken "
+            f"({len(graph_problems)} problem(s)); the graph-parity verdict below it would "
+            "not be worth anything",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.quiet:
+        print(
+            "workflow-check: rule 21 self-test ok — the two package graphs must not drift"
+        )
+
     repo = Path(args.repo).resolve()
     report = Report(args.quiet)
     check_container_caches(repo, report)
@@ -1188,6 +1579,17 @@ def main(argv: list[str] | None = None) -> int:
                     f"{action_name}/action.yml: uses inputs.{key}, undeclared ({sorted(declared_names)})",
                 )
 
+    # Rule 20 over the two package workflows: every leg they run is the table's.
+    workflow_paths = set(workflows)
+    check_package_workflow_legs(
+        {
+            path: document
+            for path, document in documents.items()
+            if path in workflow_paths
+        },
+        report,
+    )
+
     for path in workflows:
         document = documents.get(path)
         if document is None:
@@ -1207,8 +1609,11 @@ def main(argv: list[str] | None = None) -> int:
             needs_list = [needs] if isinstance(needs, str) else list(needs)
             jobs_needing[job_name] = [str(item) for item in needs_list]
             check_matrix_producers(
-                jobs, job_name, (job.get("strategy") or {}).get("matrix"),
-                str(path.name), report,
+                jobs,
+                job_name,
+                (job.get("strategy") or {}).get("matrix"),
+                str(path.name),
+                report,
             )
             entries = matrix_entries(job, repo, report)
             job_matrices[job_name] = entries

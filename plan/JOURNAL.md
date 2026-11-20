@@ -3966,3 +3966,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T04:23 [MB.42.3.4] (lead) status ready -> active
 - 2026-11-20T04:23 [MB.42.3.4] (lead) attempt 1/3 started
 - 2026-11-20T04:23 [MB.42.3.4] (lead) base 7537f48652fffac7801efc2b807cb1bdbf662012
+- 2026-11-20T04:25 [MB.42.3.3] (lead) follow-up commit 725188171b80ce896b59e7d84780fcc9653f81e4: the check.rs wheel-root fix (../../.. -> ../..) was left unstaged by the lead's earlier commit; now c
+- 2026-11-20T04:38 [MB.42.3.4] (lead) status active -> review
+- 2026-11-20T04:38 [MB.42.3.4] (lead) review scope: review-arch only (lead decision) - CI workflows + publish scripts, no user-facing runtime surface beyond one ::notice:: line; secret handling is t
+- 2026-11-20T04:52 [MB.42.3.4] (lead) status review -> done
+- 2026-11-20T04:52 [MB.42.3] (lead) status ready -> done
+- 2026-11-20T04:52 [MB.42.3] (lead) epic closed on leaf evidence (4 slices): .deb/.rpm with measured 2.34 floor + 3 static + WSGI container legs; install.sh with fd-0 closed, symlink-member refusa

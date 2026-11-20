@@ -1,0 +1,297 @@
+name: Nightly
+
+# The nightly channel of the signed APT/RPM repositories (design §6.1, `MB.42.3.4`).
+#
+# Every night (and on demand) `develop` is built as four stamped packages,
+# installed in every distribution the repositories advertise, published to the
+# `nightly` component of Cloudsmith and mirrored to Forgejo, and then pruned to
+# the newest seven. `packages.yml` is this file's sibling: same graph, release
+# versions, the `main` component and no retention.
+#
+# The two stamps are `scripts/publish_packages.py stamp`'s, and they are the two
+# the package formats need:
+#
+#   .deb   0.2.0~nightly20261120.r12+gabc1234      (`~` sorts below 0.2.0)
+#   .rpm   0.2.0-0.nightly.20261120.r12.gabc1234   (`-0.` release prefix)
+#
+# Every leg — the six distributions × two architectures, the four packages, the
+# shim legs — comes from `scripts/platform_matrix.py`; a literal distribution
+# image in this file is refused by `scripts/check_workflows.py`.
+#
+# Secrets: `CLOUDSMITH_API_KEY` (required, never printed) and
+# `FORGEJO_PACKAGES_TOKEN` (optional: the mirror skips with one `::notice::`).
+
+on:
+  schedule:
+    # 03:17 UTC: after the release window, before the European morning.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  stamp:
+    name: the nightly stamps
+    runs-on: ubuntu-24.04
+    outputs:
+      deb_version: ${{ steps.stamp.outputs.deb_version }}
+      deb_release: ${{ steps.stamp.outputs.deb_release }}
+      rpm_version: ${{ steps.stamp.outputs.rpm_version }}
+      rpm_release: ${{ steps.stamp.outputs.rpm_release }}
+      should_publish: ${{ steps.stamp.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Stamp the nightly from the run number and the commit
+        id: stamp
+        env:
+          REF: ${{ github.ref }}
+          RUN_NUMBER: ${{ github.run_number }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/develop" ]; then
+              echo "::error::nightlies are cut from develop (this run is $REF): merge there, or dispatch this workflow on develop"
+              exit 1
+          fi
+          # Both stamps are printed: the log is the record of what was published,
+          # and the same lines become the `$GITHUB_OUTPUT` the build jobs read.
+          stamps=$(uv run --no-project scripts/publish_packages.py stamp --format both \
+              --run "$RUN_NUMBER" --sha "$COMMIT_SHA")
+          printf '%s\n' "$stamps" | tee -a "$GITHUB_OUTPUT"
+          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+
+  matrix:
+    name: the legs (scripts/platform_matrix.py)
+    runs-on: ubuntu-24.04
+    outputs:
+      install: ${{ steps.legs.outputs.install }}
+      packages: ${{ steps.legs.outputs.packages }}
+      shims_gnu: ${{ steps.legs.outputs.shims_gnu }}
+      py_shims_gnu: ${{ steps.legs.outputs.py_shims_gnu }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
+      - id: legs
+        run: |
+          set -euo pipefail
+          # A package is built from a `gnu` bundle (§6.1), so the shim legs this
+          # workflow needs are that libc's — and they are still the matrix's list.
+          echo "install=$(uv run --no-project scripts/platform_matrix.py --matrix install)" >> "$GITHUB_OUTPUT"
+          echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages)" >> "$GITHUB_OUTPUT"
+          echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu)" >> "$GITHUB_OUTPUT"
+          echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu)" >> "$GITHUB_OUTPUT"
+
+  shims:
+    name: shim (${{ matrix.shim }})
+    needs: [matrix]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.shims_gnu) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: build the shim and run the real-load probe
+        run: >-
+          make php-sapi-e2e PHP_MINOR=${{ matrix.minor }} PHP_SAPI_LIBC=${{ matrix.libc }}
+          PHP_SAPI_KEEP=1 PHP_SAPI_IMAGE=blastit-php-sapi-e2e:${{ matrix.name }}
+      - name: take the probed shim out of its image
+        run: >-
+          scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
+          target/proven-shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }}
+          --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-${{ matrix.name }}
+          path: target/proven-shims/*.so
+          if-no-files-found: error
+
+  py_shims:
+    name: python shim (${{ matrix.shim }})
+    needs: [matrix]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.py_shims_gnu) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: the interpreter this shim binds to
+        run: uv python install ${{ matrix.python }}
+      - name: build the shim and assert its ELF contract
+        run: make py-sapi PY_SAPI_REQUIRE_ALL=1 PY_MINORS="${{ matrix.minor }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: py-shim-${{ matrix.name }}
+          path: target/py-sapi/${{ matrix.shim }}
+          if-no-files-found: error
+
+  packages:
+    name: package (${{ matrix.name }})
+    needs: [stamp, matrix, shims, py_shims]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.arch }}-gnu-*
+          path: target/proven-shims
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: py-shim-${{ matrix.arch }}-gnu-*
+          path: target/py-sapi
+          merge-multiple: true
+      - name: Assemble the §6.1 bundle from its floor images
+        run: |
+          set -euo pipefail
+          uv run --no-project scripts/build-package-bundle.sh \
+              --out "$RUNNER_TEMP/bundle" \
+              --arch "${{ matrix.arch }}" \
+              --shim-dir target/proven-shims \
+              --py-shim-dir target/py-sapi \
+              --bundle-floor "$(uv run --no-project scripts/platform_matrix.py --shim-floor)"
+      - name: ${{ matrix.format }} from that bundle
+        env:
+          DEB_VERSION: ${{ needs.stamp.outputs.deb_version }}
+          DEB_RELEASE: ${{ needs.stamp.outputs.deb_release }}
+          RPM_VERSION: ${{ needs.stamp.outputs.rpm_version }}
+          RPM_RELEASE: ${{ needs.stamp.outputs.rpm_release }}
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/bundle"
+          floor=$(uv run --no-project scripts/platform_matrix.py --shim-floor)
+          case "${{ matrix.format }}" in
+              deb)
+                  # The nightly's `~nightly…` stamp is part of the version, so the
+                  # `.deb` carries no Debian revision unless the stamp names one.
+                  args=(--version "$DEB_VERSION" --bundle "$bundle" --out dist --max-glibc "$floor")
+                  [ -z "$DEB_RELEASE" ] || args+=(--release "$DEB_RELEASE")
+                  scripts/build-deb.sh "${args[@]}"
+                  ;;
+              rpm)
+                  scripts/build-rpm.sh --version "$RPM_VERSION" --release "$RPM_RELEASE" \
+                      --bundle "$bundle" --out dist --max-glibc "$floor"
+                  ;;
+              *)
+                  echo "::error::${{ matrix.format }} is not a package format this workflow builds"
+                  exit 1
+                  ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.name }}
+          path: dist/blastit*
+          if-no-files-found: error
+
+  install:
+    name: install (${{ matrix.name }})
+    needs: [matrix, packages]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.install) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - name: install in ${{ matrix.image }} and drive it
+        run: scripts/install_matrix.sh --leg "${{ matrix.name }}" --dir dist
+
+  publish:
+    name: the nightly component
+    needs: [stamp, packages, install]
+    if: >-
+      !cancelled() &&
+      github.repository == 'offworld-nexus/blastit' &&
+      needs.stamp.result == 'success' &&
+      needs.packages.result == 'success' &&
+      needs.install.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      # No third-party binary runs beside the credential: `publish_packages.py`
+      # uploads over Cloudsmith's own endpoint (the same one `cloudsmith push`
+      # calls), so a nightly installs nothing from PyPI before it holds the key.
+      - name: Publish to the nightly component and mirror to Forgejo
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          FORGEJO_PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_TOKEN }}
+          FORGEJO_URL: ${{ vars.FORGEJO_URL }}
+          COMPONENT: nightly
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for file in dist/*.deb; do
+              uv run --no-project scripts/publish_packages.py push \
+                  --format deb --file "$file" --component "$COMPONENT"
+          done
+          for file in dist/*.rpm; do
+              uv run --no-project scripts/publish_packages.py push \
+                  --format rpm --file "$file" --component "$COMPONENT"
+          done
+          for file in dist/*.deb; do
+              uv run --no-project scripts/publish_packages.py forgejo \
+                  --format deb --file "$file" --component "$COMPONENT"
+          done
+          for file in dist/*.rpm; do
+              uv run --no-project scripts/publish_packages.py forgejo \
+                  --format rpm --file "$file" --component "$COMPONENT"
+          done
+
+  prune:
+    name: keep the newest 7 nightly runs
+    needs: [stamp, publish]
+    if: >-
+      !cancelled() &&
+      needs.publish.result == 'success' &&
+      needs.stamp.outputs.should_publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # The API list is read newest-first by the two numbers the stamp encodes
+      # (date, then run), because `r12` sorts below `r9` as a string. Only
+      # `~nightly`/`.nightly.` versions are candidates: the `main` component in
+      # the same repository is never pruned. `--keep 7` counts **runs**: a run
+      # ships one package per architecture, and a per-package sort deleted
+      # `r2-arm64` while keeping `r2-amd64` (review MAJOR 2).
+      - name: Prune the nightlies (Cloudsmith API — list, newest first, delete)
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          set -euo pipefail
+          for format in deb rpm; do
+              uv run --no-project scripts/publish_packages.py prune --format "$format" --keep 7
+          done

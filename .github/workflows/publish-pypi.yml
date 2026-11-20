@@ -54,7 +54,11 @@ on:
       - ".github/workflows/publish-pypi.yml"
 
 concurrency:
-  group: publish-${{ github.ref }}
+  # One group with `.github/workflows/packages.yml`: both run from the same tag
+  # push and both reseal the GitHub release's `SHA256SUMS`, so they must never
+  # overlap — a group each is how the packages job resealed a checksum file that
+  # this workflow then overwrote with one that has no `.deb`/`.rpm` in it.
+  group: release-${{ github.ref }}
   # Never cancel a run on `develop` or a `v*` tag — either can be halfway through
   # an upload, and queuing serialises back-to-back pushes to `develop` so the
   # second sees the tag the first just created. Rehearsals (PR, dispatch) cancel.

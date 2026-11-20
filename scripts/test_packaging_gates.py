@@ -358,7 +358,11 @@ def test_workflow_auditor_cases() -> int:
             "          args: --release --compatibility manylinux_2_28\n"
         )
         for text, needle, what in (
-            (two_tags, "passes both `manylinux:` and `--compatibility`", "two platform tags"),
+            (
+                two_tags,
+                "passes both `manylinux:` and `--compatibility`",
+                "two platform tags",
+            ),
             (no_image, "sets no `manylinux:`", "no manylinux image"),
         ):
             case_dir = Path(tmp) / f"maturin-{what.replace(' ', '-')}"
@@ -1912,7 +1916,7 @@ def test_matrix_producer_cases() -> int:
             text[:start]
             + "      - id: legs\n"
             + "        run: |\n"
-            + "          echo 'py_shims=[{\"name\":\"x86_64-gnu-py313\",\"minor\":\"3.13\",\"arch\":\"x86_64\",\"libc\":\"gnu\",\"shim\":\"libblastit_py313-x86_64-gnu.so\",\"runs_on\":\"ubuntu-24.04\",\"builder_image\":\"\",\"exports\":\"e\",\"undefined\":\"u\",\"python\":\"3.13\"}]' >> \"$GITHUB_OUTPUT\"\n"
+            + '          echo \'py_shims=[{"name":"x86_64-gnu-py313","minor":"3.13","arch":"x86_64","libc":"gnu","shim":"libblastit_py313-x86_64-gnu.so","runs_on":"ubuntu-24.04","builder_image":"","exports":"e","undefined":"u","python":"3.13"}]\' >> "$GITHUB_OUTPUT"\n'
             + text[end:],
             encoding="utf-8",
         )
@@ -2094,6 +2098,221 @@ def test_repack_cases() -> int:
     return cases_run
 
 
+# --- `MB.42.3.4`: the two publishing workflows and the legs they run ----------
+
+
+def _workflow_step_script(path: Path, step_id: str) -> str:
+    """The `run: |` body of the step whose `id:` is `step_id`, read line by line.
+
+    `test_packaging_gates.py` has no YAML dependency (the auditor owns that), and
+    the point of this helper is to execute the **shipped** `run:` text rather than
+    a paraphrase of it.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = next(
+        index for index, line in enumerate(lines) if line.strip() == f"id: {step_id}"
+    )
+    run_at = next(
+        index for index in range(start, len(lines)) if lines[index].strip() == "run: |"
+    )
+    body: list[str] = []
+    for line in lines[run_at + 1 :]:
+        if line.strip() and not line.startswith(" " * 10):
+            break
+        body.append(line[10:] if line.startswith(" " * 10) else "")
+    return "\n".join(body)
+
+
+def test_package_workflow_cases() -> int:
+    """`MB.42.3.4`: a leg hand-removed from, or written into, a package workflow.
+
+    Two failures the publishing workflows have to make loud, mutated on a
+    throwaway copy and therefore reverted by construction:
+
+    * the `--matrix install` producer line deleted by hand. The `install` job
+      still reads `needs.matrix.outputs.install`, so without rule 19 a release
+      would publish with five of six distributions installed and read as green;
+    * a distribution written into the YAML (`docker run debian:stretch`). That is
+      the second list, the one that keeps advertising a release after the matrix
+      dropped it — and it is the thing `packages.yml`/`nightly.yml` are not
+      allowed to have.
+
+    Plus the install family itself: 12 legs (six distributions × two
+    architectures), and a leg that asks an image for a WSGI import it cannot
+    carry is refused by `--check`.
+    """
+    cases_run = 0
+    with tempfile.TemporaryDirectory(prefix="blastit-pkg-wf-") as tmp:
+        base = _copy_workflow_fixture(Path(tmp))
+        clean = _run_auditor(base)
+        _expect(
+            clean.returncode == 0,
+            "the two package workflows must pass the leg rules",
+            clean.stdout + clean.stderr,
+        )
+        cases_run += 1
+
+        case_dir = Path(tmp) / "install-leg-removed"
+        shutil.copytree(base, case_dir)
+        nightly = case_dir / ".github" / "workflows" / "nightly.yml"
+        text = nightly.read_text(encoding="utf-8")
+        producer = (
+            '          echo "install=$(uv run --no-project scripts/platform_matrix.py '
+            '--matrix install)" >> "$GITHUB_OUTPUT"\n'
+        )
+        _expect(
+            producer in text,
+            "the nightly fixture no longer generates the install matrix",
+        )
+        nightly.write_text(text.replace(producer, "", 1), encoding="utf-8")
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1
+            and "--matrix install" in res.stdout
+            and "needs.matrix.outputs.install" in res.stdout,
+            "deleting the `--matrix install` producer line by hand must fail the audit",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        case_dir = Path(tmp) / "install-leg-hardcoded"
+        shutil.copytree(base, case_dir)
+        packages = case_dir / ".github" / "workflows" / "packages.yml"
+        packages.write_text(
+            packages.read_text(encoding="utf-8")
+            + "\n  legacy_install:\n"
+            + "    runs-on: ubuntu-24.04\n"
+            + "    steps:\n"
+            + "      - run: docker run --rm debian:stretch dpkg -i blastit.deb\n",
+            encoding="utf-8",
+        )
+        res = _run_auditor(case_dir)
+        _expect(
+            res.returncode == 1
+            and "debian:stretch" in res.stdout
+            and "second copy" in res.stdout,
+            "a distribution written into a package workflow must fail the audit",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+        for family, expected in (("install", "12"), ("packages", "4")):
+            res = subprocess.run(
+                [sys.executable, str(PLATFORM_MATRIX), "--count", family],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            _expect(
+                res.returncode == 0 and res.stdout.strip() == expected,
+                f"--count {family} must be {expected}",
+                res.stdout + res.stderr,
+            )
+            cases_run += 1
+
+        generated = subprocess.run(
+            [sys.executable, str(PLATFORM_MATRIX), "--matrix", "install"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        _expect(
+            generated.returncode == 0,
+            "the install matrix must generate",
+            generated.stderr,
+        )
+        legs = {leg["name"]: leg for leg in json.loads(generated.stdout)["include"]}
+        _expect(
+            len(legs) == 12
+            and legs["debian-13-x86_64"]["image"] == "debian:trixie"
+            and "wsgi" in legs["debian-13-x86_64"]["modes"]
+            and legs["fedora-aarch64"]["installer"] == "dnf",
+            "the install matrix must carry both architectures and the WSGI leg",
+            generated.stdout,
+        )
+        cases_run += 1
+
+        # A leg that asks an image without CPython 3.13 for a WSGI import is a
+        # promise the distribution cannot keep, so `--check` refuses it.
+        matrix_fixture = _copy_matrix_fixture(Path(tmp) / "wsgi-leg")
+        pm_file = matrix_fixture / "scripts" / "platform_matrix.py"
+        text = pm_file.read_text(encoding="utf-8")
+        anchor = (
+            '        "image": "ubuntu:24.04",\n'
+            '        "format": "deb",\n'
+            '        "installer": "apt",\n'
+            '        "modes": "install static",\n'
+        )
+        _expect(anchor in text, "the matrix fixture no longer carries ubuntu:24.04")
+        pm_file.write_text(
+            text.replace(
+                anchor, anchor.replace('"install static"', '"install static wsgi"'), 1
+            ),
+            encoding="utf-8",
+        )
+        res = _run_matrix(matrix_fixture, "--check", "--quiet")
+        _expect(
+            res.returncode == 1 and "runs the WSGI gate in ubuntu:24.04" in res.stderr,
+            "a WSGI leg on an image without CPython 3.13 must be refused",
+            res.stderr,
+        )
+        cases_run += 1
+
+        # MAJOR 1 of the review: `gh workflow run packages.yml --ref v0.2.0`
+        # reports `ref_type=tag`, so a `ref_type`-only test publishes from a
+        # dispatch. The **shipped** plan step is executed here, four ways.
+        plan = _workflow_step_script(
+            REPO / ".github" / "workflows" / "packages.yml", "plan"
+        )
+        base = subprocess.run(
+            [
+                sys.executable,
+                str(REPO / "scripts" / "publish_packages.py"),
+                "base-version",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        for event, ref_type, publish_input, expected in (
+            ("push", "tag", "", "true"),
+            ("workflow_dispatch", "tag", "", "false"),
+            ("workflow_dispatch", "tag", "true", "true"),
+            ("workflow_dispatch", "branch", "", "false"),
+        ):
+            output = (
+                Path(tmp) / f"plan-{event}-{ref_type}-{publish_input or 'unset'}.txt"
+            )
+            output.write_text("", encoding="utf-8")
+            res = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", plan],
+                cwd=REPO,
+                capture_output=True,
+                text=True,
+                check=False,
+                env={
+                    **os.environ,
+                    "GITHUB_OUTPUT": str(output),
+                    "EVENT_NAME": event,
+                    "REF_TYPE": ref_type,
+                    "REF_NAME": f"v{base}" if ref_type == "tag" else "develop",
+                    "PUBLISH_INPUT": publish_input,
+                },
+            )
+            written = output.read_text(encoding="utf-8")
+            _expect(
+                res.returncode == 0
+                and f"should_publish={expected}" in written
+                and f"tag=v{base}" in written,
+                f"the shipped plan step must publish={expected} for "
+                f"{event}/{ref_type}/publish={publish_input or 'unset'} "
+                "(a dispatch on a tag may never publish by accident)",
+                written + res.stdout + res.stderr,
+            )
+            cases_run += 1
+    return cases_run
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
@@ -2104,11 +2323,21 @@ def main() -> int:
     pg = test_portable_elf_glibc_cases()
     rp = test_repack_cases()
     mp = test_matrix_producer_cases()
-    total = wf + pm + wt + ee + ts + pe + pg + rp + mp
+    pk = test_package_workflow_cases()
+    # The publishing suite lives in its own module (a 2 700-line gate is where a
+    # case hides); this file stays its entry point, so one command still runs all.
+    sys.path.insert(0, str(REPO / "scripts"))
+    try:
+        import test_publish_gates
+    finally:
+        sys.path.remove(str(REPO / "scripts"))
+    pub = test_publish_gates.cases()
+    total = wf + pm + wt + ee + ts + pe + pg + rp + mp + pk + pub
     print(
         f"packaging-gates-test: ok — {total} cases passed "
         f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts}, "
-        f"portable-elf={pe}, max-glibc={pg}, repack={rp}, matrix-producer={mp})"
+        f"portable-elf={pe}, max-glibc={pg}, repack={rp}, matrix-producer={mp}, "
+        f"package-workflow={pk}, publish={pub})"
     )
     return 0
 
