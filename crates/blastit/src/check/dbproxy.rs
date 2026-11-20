@@ -11,7 +11,7 @@
 use std::io::Read;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -106,13 +106,14 @@ pub struct Inherited {
     pub ready: OwnedFd,
 }
 
-/// The running `blastit-dbproxy`.
+/// The running credentials-holding role.
 pub struct Dbproxy {
     child: Child,
 }
 
 impl Dbproxy {
-    /// Forks and `execve`s `blastit-dbproxy` with an empty environment.
+    /// Forks and `execve`s this same binary as `--role=dbproxy`, with an empty
+    /// environment.
     ///
     /// Its events go to a pipe of their own rather than to stderr: `pytest -q`
     /// is drawing its progress line there, and a JSON line written into it
@@ -165,8 +166,8 @@ impl Dbproxy {
             clear_cloexec(*fd)?;
         }
 
-        let program = dbproxy_program(host);
-        let mut command = Command::new(&program);
+        let program = &host.dbproxy().program;
+        let mut command = Command::new(program);
         command.args(host.dbproxy().prefix.iter());
         command.arg("--role=dbproxy");
         command.arg(format!("--secrets-fd={}", secrets_read.as_raw_fd()));
@@ -182,8 +183,8 @@ impl Dbproxy {
         crate::coverage::inherit(&mut command);
         let child = command.spawn().map_err(|error| {
             format!(
-                "{}: {error} (the check needs the `blastit-dbproxy` binary this \
-                 installation ships)",
+                "{}: {error} (the check runs the credentials-holding role as this same \
+                 binary, `--role=dbproxy`)",
                 program.display()
             )
         })?;
@@ -364,15 +365,4 @@ impl Drop for EventDrain {
     fn drop(&mut self) {
         self.drain();
     }
-}
-
-/// The `blastit-dbproxy` program this installation runs.
-fn dbproxy_program(host: &Host) -> PathBuf {
-    let program = &host.dbproxy().program;
-    if program.is_file() {
-        return program.clone();
-    }
-    std::env::current_exe()
-        .map(|exe| exe.with_file_name("blastit-dbproxy"))
-        .unwrap_or_else(|_| program.clone())
 }

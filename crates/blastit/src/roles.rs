@@ -155,8 +155,8 @@ pub fn scheduler(
 ///
 /// dbproxy holds the real credentials, so it runs no interpreter — not even
 /// this one (§2.2, §4). The role therefore lives in the crate that does not
-/// link CPython, [`blastit_dbproxy::role`], and both this binary and the
-/// Python-free `blastit-dbproxy` a wheel installs call the same function
+/// link CPython, [`blastit_dbproxy::role`], and it is reached by the same image
+/// every other role runs: stage 0 `execve`s this binary with `--role=dbproxy`
 /// (§4, [`crate::cli`]).
 pub use blastit_dbproxy::role::dbproxy;
 

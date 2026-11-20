@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 # Builds the wheel a project installs with `pip install blastit` / `uv add blastit`.
 #
-# Three artifacts, in this order:
+# Two artifacts, in this order:
 #
-#   1. `blastit-dbproxy`, the Python-free binary that holds the real credentials
-#      (§2.2, §4). It is built from this workspace and copied into the wheel's
-#      Python package at `blastit/_bin/blastit-dbproxy`, mode 0755, because that
-#      is where stage 0 `execve`s it from.
-#   2. the universal `blastit` binary (`bindings = "bin"`), which is the program
-#      the wheel's console script `exec`s. It links no `libpython` and no
-#      `libphp`: stage 1 `dlopen`s a per-minor shim and a host `libphp`.
-#   3. `python/blastit/*.py`, the pure-stdlib package that ships with them.
+#   1. the universal `blastit` binary (`bindings = "bin"`), which is the program
+#      the wheel's console script `exec`s — and the one image every role is: the
+#      credentials-holding role is that same binary as `--role=dbproxy` (§2.2,
+#      §4). It links no `libpython` and no `libphp`: stage 1 `dlopen`s a
+#      per-minor shim and a host `libphp`.
+#   2. `python/blastit/*.py`, the pure-stdlib package that ships with it.
 #
 # `MB.42.3` repacks this into the published `py3-none-*` layout, moving the
 # binary and the shims under `blastit/_bin/`.
@@ -43,7 +41,7 @@
 # Platform tag & glibc floor:
 #
 #   * `--manylinux 2_28` (or `BLASTIT_MANYLINUX=2_28`, used by `make e2e`) builds
-#     both `blastit-dbproxy` and the wheel inside `quay.io/pypa/manylinux_2_28_<arch>`,
+#     the wheel inside `quay.io/pypa/manylinux_2_28_<arch>`,
 #     passes `--compatibility manylinux_2_28` to maturin, and enforces `Tag <= 2_28`
 #     on `*.dist-info/WHEEL` via `scripts/check_wheel_tag.py` — so a wheel built on
 #     a glibc 2.41 developer host still installs on glibc >= 2.28.
@@ -455,8 +453,6 @@ DOCKER
                 chown -R "$HOST_UID:$HOST_GID" /wheel-out "/src/target/manylinux_'"${manylinux_ver}"'" /src/python/blastit/_bin 2>/dev/null || true
             }
             trap cleanup_owner EXIT
-            cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
-            install -D -m 0755 "/src/target/manylinux_'"${manylinux_ver}"'/release/blastit-dbproxy" /src/python/blastit/_bin/blastit-dbproxy
             # The editor binary and the per-minor CPython shims are compiled
             # **here**, inside the image whose glibc is the floor the wheel names
             # (`MB.42.3.3`, design §6.1): built on the host they need 2.34, and a
@@ -478,8 +474,6 @@ DOCKER
 else
     mkdir -p "$out_dir"
     rm -f "$out_dir"/blastit-*.whl
-    cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
-    install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
 
     # `blastit`'s default features carry `python`, `php` and `static`; naming the
     # capability here is what keeps the wheel and `cargo build -p blastit`
@@ -588,18 +582,23 @@ if [ "$built" != "$wheel" ]; then
     rm -f "$built"
 fi
 
-# The wheel is useless without the dbproxy binary — a blastit started from it
-# refuses to boot — and the payloads the repack promises are named *in* the zip
-# (file names are stored uncompressed, so this needs no zip tool).
-for required in blastit/_bin/blastit blastit/_bin/blastit-dbproxy blastit/_bin/blastit-lsp \
+# The wheel is useless without the program — a blastit started from it refuses to
+# boot — and the payloads the repack promises are named *in* the zip (file names
+# are stored uncompressed, so this needs no zip tool).
+for required in blastit/_bin/blastit blastit/_bin/blastit-lsp \
     blastit/__main__.py .dist-info/entry_points.txt; do
     if ! grep -qa "$required" "$wheel"; then
         echo "error: $wheel carries no $required" >&2
         exit 1
     fi
 done
-# Every ELF the repacked wheel carries — `blastit`, `blastit-lsp`,
-# `blastit-dbproxy` and each shim, all in `blastit/_bin/` — is measured on the
+# One ELF per install (`MB.56.1.2.2`): the credentials-holding role is
+# `_bin/blastit --role=dbproxy`, so `_bin/` is an exact allow-list — `blastit`,
+# `blastit-lsp` and the per-ABI shims — and any other member is refused below,
+# by name, once the archive's own member list is read (a name-only `grep` catches
+# the retired `_bin/blastit-dbproxy` and nothing else a caller staged by hand).
+# Every ELF the repacked wheel carries — `blastit`, `blastit-lsp` and each shim,
+# all in `blastit/_bin/` — is measured on the
 # *file in the wheel* (`MB.17`, `MB.42.3.3`): zero `libpython`/`libphp`
 # `DT_NEEDED`, no `RUNPATH` into this machine's uv cache, and (for a `manylinux`
 # wheel) nothing above the floor the tag claims. (The call lives inside the `-s`
@@ -624,8 +623,37 @@ if not zipfile.is_zipfile(wheel):
     sys.exit(0)
 with zipfile.ZipFile(wheel) as archive:
     # Everything the repack relocated into `blastit/_bin/`: the binary, the
-    # editor binary, dbproxy and each shim. One directory, one loop.
+    # editor binary and each shim. One directory, one loop.
     prefix = "blastit/_bin/"
+    # The allow-list, read from the archive rather than grepped out of its bytes:
+    # one program per role (`blastit` plays every role, the credentials-holding
+    # one as `--role=dbproxy`), the editor binary and the per-ABI shims the
+    # repack relocates. A stale `python/blastit/_bin/` can stage a retired
+    # `blastit-dbproxy`, and a caller can stage a third program: both are an
+    # image nobody builds and nobody proves, so both are refused by name.
+    allowed = {"blastit", "blastit-lsp"}
+    strays = []
+    for name in archive.namelist():
+        if not name.startswith(prefix) or name.endswith("/"):
+            continue
+        member = name[len(prefix) :]
+        if member in allowed:
+            continue
+        if member.startswith(("libblastit_py", "libblastit_php")) and member.endswith(
+            ".so"
+        ):
+            continue
+        strays.append(name)
+    if strays:
+        print(
+            f"error: {wheel} carries {', '.join(sorted(strays))}: `{prefix}` holds "
+            "exactly the wheel's payload — `blastit` (every role, the "
+            "credentials-holding one as `--role=dbproxy`), `blastit-lsp` and the "
+            "shims (`libblastit_py*.so`, `libblastit_php*.so`). Remove the stray "
+            "file from python/blastit/_bin/ (a leftover `blastit-dbproxy` from an "
+            "older build is the usual one) and rebuild"
+        )
+        sys.exit(1)
     members = [
         name
         for name in archive.namelist()

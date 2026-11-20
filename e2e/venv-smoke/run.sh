@@ -30,10 +30,9 @@ mkdir -p "$work"
 #
 # The directory has to stay traversable by the uids blastit drops to: every view
 # imports the app and loads the CPython shim as uid B+1000+i, and the role child
-# is this image re-executed as `/proc/self/exe --role=dbproxy` (uid B+3) — the
-# wheel's `_bin/blastit-dbproxy` copy is on neither path (§4). A 0700 directory
-# is the one realistic layout that would hide the interpreter or the wheel from
-# the sandbox — and /app, /srv/app or a project checkout are all 0755.
+# is this image re-executed as `/proc/self/exe --role=dbproxy` (uid B+3), so a
+# 0700 directory would hide the wheel's one program from the sandbox — and
+# /app, /srv/app or a project checkout are all 0755.
 chmod 0755 "$work"
 
 # **The project — and its virtualenv — is root's.** Production `blastit` applies
@@ -58,7 +57,7 @@ uv venv "$app/.venv" --python "$interpreter"
 # site-packages and nowhere else. A real project would `uv add` something here.
 site_packages=$(ls -d "$app"/.venv/lib/python*/site-packages)
 printf 'VALUE = "blastit-venv-smoke"\n' >"$site_packages/venv_marker.py"
-dbproxy=$site_packages/blastit/_bin/blastit-dbproxy
+program=$site_packages/blastit/_bin/blastit
 
 uv pip install --python "$app/.venv/bin/python" "$wheel"
 
@@ -109,8 +108,8 @@ assert threading.active_count() == 1, f"importing blastit started a thread: {thr
 print(f"  ok   importing blastit starts no thread ({threading.active_count()} thread)")
 PY
 
-echo "--- the wheel's dbproxy binary, as installed"
-ls -l "$dbproxy"
+echo "--- the wheel's program, as installed"
+ls -l "$program"
 
 # The environment the platform gives PID 1 (§8.2). `DATABASE_URL` is a
 # credential for dbproxy — the app never sees it — and it is never dialled: the
@@ -233,21 +232,20 @@ echo "--- private.log"
 cat "$work/private.log"
 
 # E2b: the credentials-holding role's binary has to be executable by the uids
-# blastit drops to. dbproxy runs as uid B+3, so a `_bin/` member `pip` installed
-# as `0700` is a wheel that is dead on the platform while every other check
-# stays green — the mode is what the wheel records (`0100755`, asserted by
-# `scripts/check_wheel_shims.py` and `scripts/test_packaging_gates.py`).
+# blastit drops to. dbproxy runs as uid B+3 in that same image, so a `_bin/`
+# member `pip` installed as `0700` is a wheel that is dead on the platform while
+# every other check stays green — the mode is what the wheel records (`0100755`,
+# asserted by `scripts/check_wheel_shims.py` and `scripts/test_packaging_gates.py`).
 #
 # This leg measures the **packaged mode**: `-x` here is this uid's `access(2)` on
 # a root-owned file, so it answers the "other" bit for the uid this shell runs as. It cannot
-# show a boot refusal by itself — measured under `MB.49` with the
-# `_bin/blastit-dbproxy` copy at `0700`: the boot still serves, because the child
-# that runs the role is this image (`/proc/self/exe --role=dbproxy`), not that
-# copy. The next leg drives the refusal through the seam the boot really reads.
-if [ -x "$dbproxy" ]; then
-    echo "  ok   the wheel's dbproxy is executable by uid $(id -u) ($(stat -c '%a %U:%G' "$dbproxy"))"
+# show a boot refusal by itself — the child that runs the role is this image
+# (`/proc/self/exe --role=dbproxy`), and it is the same file this leg measures.
+# The next leg drives the refusal through the seam the boot really reads.
+if [ -x "$program" ]; then
+    echo "  ok   the wheel's program is executable by uid $(id -u) ($(stat -c '%a %U:%G' "$program"))"
 else
-    echo "  FAIL the wheel's dbproxy is not executable by uid $(id -u) ($(stat -c '%a %U:%G' "$dbproxy"))"
+    echo "  FAIL the wheel's program is not executable by uid $(id -u) ($(stat -c '%a %U:%G' "$program"))"
     status=1
 fi
 
@@ -280,9 +278,8 @@ cat "$work/unexecutable.log"
 # (§8.1). The child that runs the credentials role is this image
 # (`/proc/self/exe --role=dbproxy`), so the stub is handed over the supported
 # seam — `BLASTIT_EXEC`, the capability-free binary the child `execve`s — rather
-# than by replacing `blastit/_bin/blastit-dbproxy`: measured under `MB.49`, that
-# file is not on this boot's exec path, so replacing it changed nothing and the
-# boot simply served.
+# than by replacing the wheel's own `_bin/blastit`, the file this whole boot runs
+# from.
 stub=$work/dbproxy-stub
 printf '#!/bin/sh\necho "stub dbproxy says no"\nexit 3\n' | sudo tee "$stub" >/dev/null
 sudo chmod 0755 "$stub"

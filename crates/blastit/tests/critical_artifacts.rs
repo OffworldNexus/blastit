@@ -7,8 +7,10 @@
 //! * **R12 — the shipped wheel's payload links no interpreter and no SAPI.**
 //!   `ADR-0017` retired the per-minor `blastit/_blastit*.so` extension: the
 //!   wheel is one `py3-none-*` artifact whose `blastit/_bin/` carries the
-//!   universal binary, `blastit-lsp`, the `blastit-dbproxy` stage 0 `execve`s
-//!   and the per-minor shims stage 1 `dlopen`s. `scripts/build-wheel.sh`
+//!   universal binary, `blastit-lsp` and the per-minor shims stage 1 `dlopen`s.
+//!   The universal binary plays every role — the credentials-holding one is that
+//!   same file re-executed as `--role=dbproxy` — so a bundle ships **one**
+//!   program. `scripts/build-wheel.sh`
 //!   measures each of those ELFs with
 //!   `scripts/check-portable-elf.sh --allow-origin-rpath` — once, during the
 //!   build. A wheel is a *published* file: it can be rebuilt long after that
@@ -84,10 +86,11 @@
 //! * `the_universal_wheel_shape_is_refused` builds the fixture wheels the
 //!   universal shape has to refuse — a `cp314-cp314` tag, a `cp314` `Tag:` under
 //!   a `py3-none` name, a stray `_blastit*.so`, a missing `blastit/_bin/`
-//!   binary, a shim built for another `(arch, libc)`, a `_bin` member that is
-//!   not an ELF, and an ELF that links `libpython`, links `libphp` or carries a
-//!   build-host `RUNPATH` — with a well-formed `py3-none` wheel as the allowed
-//!   twin, so the leg is never unconditionally red.
+//!   binary, a second program beside `blastit`, a shim built for another
+//!   `(arch, libc)`, a `_bin` member that is not an ELF, and an ELF that links
+//!   `libpython`, links `libphp` or carries a build-host `RUNPATH` — with a
+//!   well-formed `py3-none` wheel as the allowed twin, so the leg is never
+//!   unconditionally red.
 //! * `the_trait_scan_catches_a_planted_name` proves the source scan against a
 //!   fixture tree: clean, planted, planted in a path other than the exemption's,
 //!   and clean again for the exempted path itself.
@@ -155,7 +158,7 @@ fn the_universal_wheel_ships_no_interpreter_and_no_php() -> Result<(), String> {
 fn the_universal_wheel_shape_is_refused() -> Result<(), String> {
     /// Write a wheel shaped like `scripts/build-wheel.sh`'s repack output.
     ///
-    /// It carries the three `_bin` binaries, the pure-stdlib package and a
+    /// It carries the two `_bin` programs, the pure-stdlib package and a
     /// `*.dist-info/WHEEL` that declares the `py3-none` tag, so a refusal is
     /// never the fixture's own malformedness; `binaries` replaces every ELF and
     /// `extra` adds the member under test.
@@ -172,7 +175,6 @@ fn the_universal_wheel_shape_is_refused() -> Result<(), String> {
                   Tag: py3-none-manylinux_2_28_x86_64\n",
             ),
             ("blastit/_bin/blastit", binaries),
-            ("blastit/_bin/blastit-dbproxy", binaries),
             ("blastit/_bin/blastit-lsp", binaries),
             ("blastit/__init__.py", b"# the pure-stdlib package\n"),
         ];
@@ -212,7 +214,6 @@ fn the_universal_wheel_shape_is_refused() -> Result<(), String> {
         names,
         [
             "blastit/_bin/blastit",
-            "blastit/_bin/blastit-dbproxy",
             "blastit/_bin/blastit-lsp",
             "blastit/_bin/libblastit_py314-x86_64-gnu.so",
         ],
@@ -254,7 +255,6 @@ fn the_universal_wheel_shape_is_refused() -> Result<(), String> {
                 b"Wheel-Version: 1.0\nTag: cp314-cp314-manylinux_2_28_x86_64\n",
             ),
             ("blastit/_bin/blastit", binary.as_slice()),
-            ("blastit/_bin/blastit-dbproxy", binary.as_slice()),
             ("blastit/_bin/blastit-lsp", binary.as_slice()),
         ],
     )?;
@@ -270,7 +270,6 @@ fn the_universal_wheel_shape_is_refused() -> Result<(), String> {
                 "blastit-0.2.0.dist-info/WHEEL",
                 b"Wheel-Version: 1.0\nTag: py3-none-manylinux_2_28_x86_64\n",
             ),
-            ("blastit/_bin/blastit-dbproxy", binary.as_slice()),
             ("blastit/_bin/blastit-lsp", binary.as_slice()),
         ],
     )?;
@@ -335,6 +334,16 @@ fn the_universal_wheel_shape_is_refused() -> Result<(), String> {
         &[],
     )?;
     expect_shape_refusal(&host_path, "library search path")?;
+
+    // (11) One ELF per install: a second program in `_bin/` is an image nothing
+    //      builds and nothing proves, refused by name.
+    let second_program = fixture(
+        &scratch,
+        "second/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &binary,
+        &[("blastit/_bin/blastit-extra", binary.as_slice())],
+    )?;
+    expect_shape_refusal(&second_program, "blastit/_bin/blastit-extra")?;
     Ok(())
 }
 
@@ -1138,15 +1147,13 @@ fn select_wheel(root: &Path, version: &str) -> Result<Option<PathBuf>, String> {
     }
 }
 
-/// The three binaries `scripts/build-wheel.sh` promises every wheel carries.
+/// The two programs `scripts/build-wheel.sh` promises every wheel carries.
 ///
-/// The build script greps the repacked archive for all three, and the console
-/// scripts `exec` them: a wheel that lost one installs and cannot run.
-const WHEEL_BINARIES: &[&str] = &[
-    "blastit/_bin/blastit",
-    "blastit/_bin/blastit-dbproxy",
-    "blastit/_bin/blastit-lsp",
-];
+/// The build script greps the repacked archive for both, and the console
+/// scripts `exec` them: a wheel that lost one installs and cannot run. Every
+/// other `blastit/_bin/` member is a shim (`libblastit_*.so`), so a third
+/// program is a second image nobody builds.
+const WHEEL_BINARIES: &[&str] = &["blastit/_bin/blastit", "blastit/_bin/blastit-lsp"];
 
 /// One `blastit/_bin/` member `assert_portable` certified.
 struct PortableMember {
@@ -1164,15 +1171,17 @@ struct UniversalWheel {
     members: Vec<PortableMember>,
 }
 
-/// Read a published wheel: `py3-none`, no extension, every `_bin/` ELF portable.
+/// Read a published wheel: `py3-none`, no extension, one program, every `_bin/`
+/// ELF portable.
 ///
 /// This is R12 on the artifact a user installs. `ADR-0017` retired the per-minor
 /// `blastit/_blastit*.so`, so the subject is the universal `blastit/_bin/`
-/// payload: the `blastit` binary, the shims stage 1 `dlopen`s and the
-/// `blastit-dbproxy` stage 0 `execve`s. Each member is an ELF this check reads,
-/// never a script it trusts, and the wheel's *shape* is read from the same file:
-/// the tag in the name and in `*.dist-info/WHEEL`, the absence of the deleted
-/// extension, and the target every shim was built for.
+/// payload: the `blastit` binary every role is (the credentials-holding one is
+/// that file re-executed as `--role=dbproxy`), `blastit-lsp`, and the shims
+/// stage 1 `dlopen`s. Each member is an ELF this check reads, never a script it
+/// trusts, and the wheel's *shape* is read from the same file: the tag in the
+/// name and in `*.dist-info/WHEEL`, the absence of the deleted extension, and
+/// the target every shim was built for.
 fn certify_universal_wheel(wheel: &Path) -> Result<UniversalWheel, String> {
     let label = wheel.display().to_string();
     let name = wheel
@@ -1216,8 +1225,8 @@ fn certify_universal_wheel(wheel: &Path) -> Result<UniversalWheel, String> {
         if !payload.iter().any(|member| member.name == *required) {
             return Err(format!(
                 "{label} carries no {required}: every wheel `scripts/build-wheel.sh` builds \
-                 carries the universal binary, `blastit-lsp` and the `blastit-dbproxy` stage 0 \
-                 `execve`s — a wheel without them installs and cannot run"
+                 carries the universal binary and `blastit-lsp` — a wheel without them installs \
+                 and cannot run"
             ));
         }
     }
@@ -1240,6 +1249,23 @@ fn certify_universal_wheel(wheel: &Path) -> Result<UniversalWheel, String> {
             name: member.name.clone(),
             needed: facts.needed,
         });
+    }
+    // (4) One ELF per install, after every member has been read: a second
+    //     program beside `blastit` and `blastit-lsp` is an image nobody builds
+    //     and nobody proves — every role is the one binary, the
+    //     credentials-holding one included (`--role=dbproxy`).
+    for member in &certified {
+        let name = member.name.strip_prefix("blastit/_bin/").unwrap_or("");
+        if name.starts_with("libblastit_") || WHEEL_BINARIES.contains(&member.name.as_str()) {
+            continue;
+        }
+        return Err(format!(
+            "{label} carries {}: `blastit/_bin/` holds one program per role — `blastit`, which \
+             runs the credentials-holding role as `--role=dbproxy`, and `blastit-lsp` — plus the \
+             shims (`libblastit_*.so`); a second program is a bundle that ships an image nothing \
+             builds",
+            member.name
+        ));
     }
     Ok(UniversalWheel {
         tag,

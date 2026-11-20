@@ -99,7 +99,7 @@ runs:
             --platform "${{ inputs.platform }}" \
             dist/*-py3-none-*.whl
 
-    - name: The wheel carries dbproxy, executable
+    - name: The wheel carries one program, executable
       shell: bash
       run: |
         set -euo pipefail
@@ -108,13 +108,16 @@ runs:
             # finding it needs no tool; the mode lives in the zip's attributes,
             # which is what `zipinfo -l` prints in its first column. The repack
             # writes `0100755`, so the file type is `-` and the bits are `rwxr-xr-x`.
-            if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
-                echo "::error::$wheel has no dbproxy binary in it: blastit refuses to start without it"
+            if ! zipinfo -l "$wheel" | awk '{ print $1, $NF }' | grep -qx -- "-rwxr-xr-x blastit/_bin/blastit"; then
+                echo "::error::the universal blastit binary is not executable in $wheel"
+                zipinfo -l "$wheel" | grep 'blastit/_bin/blastit' || true
                 exit 1
             fi
-            if ! zipinfo -l "$wheel" | awk '{ print $1, $NF }' | grep -qx -- "-rwxr-xr-x blastit/_bin/blastit-dbproxy"; then
-                echo "::error::dbproxy is not executable in $wheel"
-                zipinfo -l "$wheel" | grep dbproxy || true
+            # One ELF runs every role: the credentials-holding one is that same
+            # program as --role=dbproxy, so a second program in _bin/ is a bundle
+            # that ships an image nobody builds.
+            if grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
+                echo "::error::$wheel ships a second program: one ELF runs every role"
                 exit 1
             fi
             echo "$wheel ok"

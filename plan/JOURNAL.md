@@ -4160,3 +4160,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T16:36 [MB.56.1.2.1] (lead) REVIEW FIX: delete dead check::evaluate::check_audit (+ its check/mod.rs arm); single --learn --json renderer via LearnPlan::json in report::learn; demote over-
 - 2026-11-20T16:36 [MB.56.1.3] (lead) ALSO: stale blastit-audit/--internal-json prose in ARCHITECTURE.md:564,575 and Makefile:267 comment (left behind by MB.56.1.2.1)
 - 2026-11-20T16:40 [MB.56.1.2.1] (lead) status active -> done
+- 2026-11-20T16:40 [MB.56.1.2.1] (lead) commit cdbb89d
+- 2026-11-20T16:40 [MB.56.1.2.2] (lead) status ready -> active
+- 2026-11-20T16:40 [MB.56.1.2.2] (lead) attempt 1/3 started
+- 2026-11-20T16:40 [MB.56.1.2.2] (lead) base cdbb89dc7ba93927afacadd895c5b46543570cea
+- 2026-11-20T16:50 [MB.56.1.3] (lead) ALSO: ARCHITECTURE.md:1449-1450 says the wheel file to chmod o+rx is _bin/blastit-dbproxy (now _bin/blastit); publish-pypi.yml:50 pull_request.paths still lists
+- 2026-11-20T16:50 [MB.56.1.2.2] (lead) rootless/venv-smoke/Dockerfile/dx_replay prose + docs/,CHANGELOG,AGENTS stale dbproxy prose pending (see RESULT.md follow-ups)
+- 2026-11-20T16:54 [MB.56.1.3] (lead) ALSO: ARCHITECTURE.md:183 still mentions blastit_build.py; docs/knowledge/LESSONS.md:7 too
+- 2026-11-20T16:54 [MB.56.1.2.2] (lead) status active -> done
+- 2026-11-20T16:54 [MB.56.1.2.2] (lead) edited fields

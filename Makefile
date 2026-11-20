@@ -379,7 +379,6 @@ test-critical: critical-skip-check ## Run critical skip check + staged Python cr
 	echo "cargo build --locked -p blastit"; \
 	$(RUST_ENV) CARGO_NET_OFFLINE=true $(CARGO) build --locked -p blastit; \
 	cp target/debug/blastit "$$stage/blastit/_bin/blastit"; \
-	ln -sfn blastit "$$stage/blastit/_bin/blastit-dbproxy"; \
 	echo "python -m unittest discover -s python/tests/critical"; \
 	CARGO_NET_OFFLINE=true UV_OFFLINE=1 PYTHONPATH="$${stage}:$(CURDIR)/python" \
 		$(RUST_ENV) $(UV) run --no-project python -m unittest discover \

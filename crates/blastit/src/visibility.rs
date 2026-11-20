@@ -1370,7 +1370,7 @@ mod tests {
         // nothing a deployment installed: the file itself has to be executable
         // by others, and so does every directory on the way to it.
         let tree = TempTree::new("program");
-        let program = tree.path.join("blastit-dbproxy");
+        let program = tree.path.join("blastit");
         std::fs::write(&program, b"#!/bin/sh\n").unwrap();
 
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1401,7 +1401,7 @@ mod tests {
         // A program behind a directory nobody may pass: the *directory* is what
         // an operator has to change, so that is what is named.
         let private = tree.dir("private", 0o700);
-        let inside = private.join("blastit-dbproxy");
+        let inside = private.join("blastit");
         std::fs::write(&inside, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o755)).unwrap();
         let blocker = unexecutable(&[inside], DBPROXY_UID, false).expect("a blocker");

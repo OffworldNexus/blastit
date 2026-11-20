@@ -7,7 +7,8 @@
 //!    and every `[proxy.*]` input are validated. Any problem exits **`2`** with
 //!    **nothing on stdout** — under `--json` stdout is reserved for exactly one
 //!    document.
-//! 2. **`blastit-dbproxy`** is started in [`blastit_dbproxy::ListenerMode::DynamicCheck`] on one
+//! 2. **The credentials-holding role** is started in
+//!    [`blastit_dbproxy::ListenerMode::DynamicCheck`] on one
 //!    wildcard socket per proxy under `<runtime_dir>/pg`, so it never refuses a
 //!    statement a missing grant would have refused (`R26`), and it writes every
 //!    statement to an observation pipe.

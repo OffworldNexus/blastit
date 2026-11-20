@@ -7,7 +7,7 @@
 # `<PREFIX>/share/blastit/lib/{blastit,blastit-lsp}`; the lib directory holds the
 # per-minor shims; `share/blastit/LICENSE` and `share/blastit/python/blastit/*.py`
 # are the licence and the pure-Python package. Nothing else may appear under
-# `share/blastit` — not a retired wheel layout (a `_bin/blastit-dbproxy`), not a
+# `share/blastit` — not a retired wheel layout (a `_bin/`), not a
 # second binary, not an eighth module — because a bundle is what the operator
 # runs, and an extra path is a claim nobody checked.
 #

@@ -47,8 +47,8 @@ use blastit_sys::exe_path;
 /// The environment variable that names a standalone install's capability-free
 /// binary (D6/B2).
 ///
-/// Read by the standalone binary only; a wheel always `execve`s the
-/// `blastit-dbproxy` it ships.
+/// Read by the standalone binary only; a wheel `execve`s the same
+/// `blastit/_bin/blastit` image it was started from.
 pub const EXEC: &str = "BLASTIT_EXEC";
 
 /// `R7`/`B2-R5`: the **deployment** half of the `[route.php]` gate, for the

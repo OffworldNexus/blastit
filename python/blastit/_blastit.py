@@ -25,9 +25,10 @@ __all__ = ["EXEC_GUARD", "bin_path", "lsp_bin_path", "main"]
 #: ``PATH`` fallbacks would find the script that is running — an `exec` loop.
 EXEC_GUARD = "BLASTIT_WHEEL_EXEC"
 
-#: The programs a wheel keeps in ``blastit/_bin/`` (§6.1). ``blastit-dbproxy`` is
-#: listed because stage 0 runs it directly; no caller asks :func:`_program` for it.
-_PROGRAMS = ("blastit", "blastit-lsp", "blastit-dbproxy")
+#: The programs a wheel keeps in ``blastit/_bin/`` (§6.1). One program plays
+#: every role — stage 0 reaches the credentials-holding one as
+#: ``blastit --role=dbproxy`` — so there is nothing else here to repair.
+_PROGRAMS = ("blastit", "blastit-lsp")
 
 
 def _executable(path: str, *, repair: bool = False) -> bool:

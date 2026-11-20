@@ -463,9 +463,8 @@ pub(super) fn fork_dbproxy(
                 format!("--ready-fd={}", ready_write.as_raw_fd()),
             ));
             // dbproxy is exec'd with an empty environment (§4), so §7.3's
-            // `BLASTIT_SECCOMP` reaches it as an argument instead. A wheel
-            // install hands the same argument to the Python-free
-            // `blastit-dbproxy` binary it ships, which takes the same flags.
+            // `BLASTIT_SECCOMP` reaches it as an argument instead. Every install
+            // runs the same image, so the flags do not change with it.
             argv.push(cstring(
                 emitter,
                 format!("--seccomp={}", u8::from(config.seccomp)),

@@ -11,9 +11,10 @@ Design §6.1, stage two of `scripts/build-wheel.sh`:
     repack_universal_wheel.py     ->  blastit-<ver>-py3-none-<platform>.whl
 
 One wheel serves CPython 3.12, 3.13 and 3.14, because it carries no extension:
-it carries the universal `blastit` binary, `blastit-lsp`, `blastit-dbproxy` and
-every shim the build staged, all under `blastit/_bin/` (mode 0755), where
-`blastit._blastit` looks first. What this script does, and why each step is
+it carries the universal `blastit` binary, `blastit-lsp` and every shim the build
+staged, all under `blastit/_bin/` (mode 0755), where `blastit._blastit` looks
+first. The binary plays every role — the credentials-holding one is that same
+file as `--role=dbproxy` — so the package ships one program, not two. What this script does, and why each step is
 required:
 
 1. **Relocates the binary.** A `bindings = "bin"` wheel puts `blastit` in
@@ -215,8 +216,7 @@ def staged_blobs(directory: Path, *, arch: str, libc: str) -> dict[str, bytes]:
     another tuple is **refused**, never skipped: silently dropping it produces a
     wheel that ships fewer shims than the leg promised while every count still
     says six, and the review of `MB.42.3.3` found exactly that hole. A name that
-    does not parse as a shim is copied as is (`blastit-lsp`, a `blastit-dbproxy`
-    a caller staged by hand).
+    does not parse as a shim is copied as is (`blastit-lsp`).
     """
     blobs: dict[str, bytes] = {}
     if not directory.is_dir():

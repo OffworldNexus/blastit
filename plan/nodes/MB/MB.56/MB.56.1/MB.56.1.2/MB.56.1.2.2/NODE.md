@@ -2,7 +2,7 @@
 id: MB.56.1.2.2
 title: "Drop the duplicate blastit-dbproxy binary: one ELF, _bin/blastit --role=dbproxy, maturin backend"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.1.2.1]
@@ -12,7 +12,6 @@ paths:
   - Cargo.lock
   - blastit_build.py
   - "crates/blastit-dbproxy/**"
-  - crates/blastit/src/check.rs
   - "crates/blastit/src/check/**"
   - crates/blastit/src/host.rs
   - crates/blastit/src/roles.rs
@@ -21,14 +20,14 @@ paths:
   - crates/blastit/tests/critical_artifacts.rs
   - "scripts/**"
   - ".github/**"
-  - "\"e2e/rootless/run.py\""
-  - "\"e2e/venv-smoke/run.sh\""
+  - "e2e/**"
   - Makefile
-attempts: 0
+  - "python/**"
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:25"
-updated: "2026-11-20T16:25"
+updated: "2026-11-20T16:54"
 ---
 
 # Goal

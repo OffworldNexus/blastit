@@ -12,16 +12,17 @@
 # false` and retags the file `py3-none-<platform>`. Four wheels, one per
 # `{arch} x {libc}`, serve CPython 3.12, 3.13 and 3.14 alike.
 #
-# The backend is `blastit_build`, which is maturin's with one thing in front of
-# it: a PEP 517 build also builds `blastit-dbproxy` and puts it in the package.
-# `maturin build` itself — what `scripts/build-wheel.sh` and CI run — never loads
-# this file.
+# The backend is maturin's own: `maturin build` is what `scripts/build-wheel.sh`
+# and CI run, and a PEP 517 build (`pip install .`, `uv sync`, and every
+# `pip install blastit` that falls back to the sdist) does exactly the same thing.
+# One program makes that enough — the universal binary plays every role, the
+# credentials-holding one included (`--role=dbproxy`), so no second artifact has
+# to be built in front of maturin.
 [build-system]
 # 1.9.3 is the first release that carries `license-files` into the sdist, which
 # is where a source install reads them from (§ E4).
 requires = ["maturin>=1.9.3,<2.0"]
-build-backend = "blastit_build"
-backend-path = ["."]
+build-backend = "maturin"
 
 [project]
 name = "blastit"
@@ -93,27 +94,20 @@ Changelog = "https://github.com/OffworldNexus/blastit/blob/develop/CHANGELOG.md"
 manifest-path = "crates/blastit/Cargo.toml"
 bindings = "bin"
 python-source = "python"
-# The wheel carries `blastit/_bin/blastit-dbproxy`, the capability-free copy
-# stage 0 `execve`s for the credentials-holding role (`--role=dbproxy`).
-# `scripts/build-wheel.sh` builds it and puts it in the package before maturin
-# runs, and it is gitignored there — which maturin's walk of `python-source`
-# *does* respect, so the path is named explicitly.
+# The wheel carries one program under `blastit/_bin/` — `blastit`, which runs the
+# credentials-holding role as `--role=dbproxy` — and nothing has to be staged
+# into the package before maturin runs. The `include` list below is the sdist's
+# cargo tree and nothing else.
 include = [
-    { path = "python/blastit/_bin/blastit-dbproxy", format = "wheel" },
-    # The build backend isn't part of the cargo workspace or of `python-source`,
-    # so the sdist has to be told about it: without this file, `pip install` of
-    # that sdist has no `blastit_build` module to import.
-    { path = "blastit_build.py", format = "sdist" },
     # **Every** workspace member, not just the graph `crates/blastit` reaches.
-    # The workspace is `members = ["crates/*"]`, and a source install runs
-    # `cargo build --release --locked -p blastit-dbproxy` inside the unpacked
-    # sdist (`blastit_build.py`), which resolves the whole workspace first. Two
-    # members no shipped binary depends on — `blastit-py-shim` (the per-minor
-    # cdylib `make py-sapi` builds) and `blastit-view-python` (which only that
-    # shim links) — are not on that graph, so maturin's walk drops them and
-    # `cargo metadata --locked` dies before the build starts with "cannot update
-    # the lock file because --locked was passed". The glob keeps a future member
-    # in the sdist without a second edit here.
+    # The workspace is `members = ["crates/*"]`, and a source install builds the
+    # sdist's `crates/blastit` with cargo, which resolves the whole workspace
+    # first. Two members no shipped binary depends on — `blastit-py-shim` (the
+    # per-minor cdylib `make py-sapi` builds) and `blastit-view-python` (which
+    # only that shim links) — are not on that graph, so maturin's walk drops them
+    # and `cargo metadata --locked` dies before the build starts with "cannot
+    # update the lock file because --locked was passed". The glob keeps a future
+    # member in the sdist without a second edit here.
     #
     # An `include` glob is **not** `.gitignore`-filtered (unlike maturin's walk
     # of `python-source`): from a dirty checkout the same glob would carry

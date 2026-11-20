@@ -21,8 +21,10 @@
 #      gets, so the file `pip` installed is measured for
 #      `BLASTIT_TEST_SWAP_POINT` exactly as `scripts/build-standalone.sh`
 #      measures the archive's binary;
-#   2. `blastit-dbproxy` is present and executable, because stage 0 `execve`s it
-#      and a wheel without it refuses to boot (§2.2);
+#   2. `blastit/_bin/` holds exactly one program: `_bin/blastit` is it, it is
+#      executable, and no second one travels beside it — the credentials-holding
+#      role is that same file as `--role=dbproxy`, so a wheel that also ships a
+#      second binary is an image nobody builds (§2.2, §4);
 #   3. one static route is served (`200` with `Cache-Control: no-cache`) and an
 #      unmatched path is Blastit's own `404` — with no WSGI route and no
 #      interpreter in the manifest, so nothing here depends on Python *inside*
@@ -137,19 +139,41 @@ fi
 bash "$script_dir/check-no-test-seam.sh" "$binary"
 echo "wheel-smoke: $binary carries no test seam"
 
-# 2. dbproxy travels in the wheel and is executable.
-dbproxy=$("$python" - <<'PY'
+# 2. `_bin/` holds exactly the wheel's payload: the one program `blastit` (every
+# role, the credentials-holding one as `--role=dbproxy`), `blastit-lsp` and the
+# shims. An exact allow-list, not "no `blastit-dbproxy`": a third program a
+# staged `_bin/` carried would otherwise install unnoticed.
+bin_dir=$("$python" - <<'PY'
 import pathlib
 import blastit
 
-print(pathlib.Path(blastit.__file__).parent / "_bin" / "blastit-dbproxy")
+print(pathlib.Path(blastit.__file__).parent / "_bin")
 PY
 )
-if [ ! -x "$dbproxy" ]; then
-    echo "error: $dbproxy is missing or not executable: the wheel refuses to boot without it" >&2
+strays=$("$python" - "$bin_dir" <<'PY'
+import pathlib
+import sys
+
+allowed = {"blastit", "blastit-lsp"}
+strays = [
+    path.name
+    for path in sorted(pathlib.Path(sys.argv[1]).iterdir())
+    if path.name not in allowed
+    and not (
+        path.name.startswith(("libblastit_py", "libblastit_php"))
+        and path.name.endswith(".so")
+    )
+]
+print(", ".join(strays))
+PY
+)
+if [ -n "$strays" ]; then
+    echo "error: $bin_dir holds $strays: one ELF runs every role, so \`_bin/\` is" >&2
+    echo "  \`blastit\` (--role=dbproxy included), \`blastit-lsp\` and the shims" >&2
+    echo "  (\`libblastit_py*.so\`, \`libblastit_php*.so\`) and nothing else" >&2
     exit 1
 fi
-echo "wheel-smoke: dbproxy executable at $dbproxy"
+echo "wheel-smoke: $binary is the wheel's only program"
 
 # 3. One static route, and a 404 that is Blastit's own.
 work=$(mktemp -d "${TMPDIR:-/tmp}/blastit-wheel-smoke.XXXXXX")

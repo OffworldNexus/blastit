@@ -47,7 +47,6 @@ on:
       - "pyproject.toml"
       - "Cargo.toml"
       - "CHANGELOG.md"
-      - "blastit_build.py"
       - "scripts/**"
       - "README.md"
       - ".github/actions/**"
@@ -624,8 +623,8 @@ jobs:
           LINK_REF: ${{ needs.guard.outputs.ref_for_links }}
         run: uv run --no-project scripts/readme-absolute-links.py --ref "$LINK_REF"
       # The sdist is what a platform without a wheel installs, so it has to build
-      # a working wheel on its own — including the dbproxy binary, which the
-      # build backend builds from the workspace in it (`blastit_build.py`).
+      # a working wheel on its own. The backend is maturin's own: one program
+      # runs every role, so nothing has to be built in front of it.
       - name: Build the sdist
         run: uvx maturin sdist --out dist
       - name: Install from the sdist, in a fresh environment
@@ -635,17 +634,19 @@ jobs:
           # `--no-cache`: this must build the sdist here and now, not reuse a
           # wheel some earlier run put in the cache.
           VIRTUAL_ENV=/tmp/from-sdist uv pip install --no-cache dist/blastit-*.tar.gz
-      - name: The installed blastit runs, with dbproxy in it
+      - name: The installed blastit runs, as one program
         run: |
           set -euo pipefail
           # `--help` prints the usage and exits 0 (`cli::SUCCESS`); the words come
-          # from `blastit._blastit`, so a wheel built from this sdist that doesn't
-          # load fails here.
+          # from the binary the sdist built, so a wheel built from this sdist that
+          # doesn't run fails here.
           usage=$(/tmp/from-sdist/bin/blastit --help)
           printf '%s\n' "$usage" | grep -q "stage 0"
-          dbproxy=$(ls /tmp/from-sdist/lib/python3*/site-packages/blastit/_bin/blastit-dbproxy)
-          test -x "$dbproxy"
-          ls -l "$dbproxy"
+          # One ELF per install: the credentials-holding role is that same program
+          # as `--role=dbproxy`, so a source install ships no second binary.
+          retired=$(find /tmp/from-sdist -name 'blastit-dbproxy' -print -quit)
+          test -z "$retired"
+          ls -l /tmp/from-sdist/bin/blastit
       - uses: actions/upload-artifact@v4
         with:
           name: sdist

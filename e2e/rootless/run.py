@@ -82,24 +82,27 @@ CAPABILITIES = [
 ]
 #: Shell that names the installed `_bin` from the package itself. Never a
 #: site-packages literal: the interpreter's version moves with the image, and the
-#: wheel keeps `blastit`, `blastit-dbproxy` and the shims in this one directory.
-BIN_DIR = ('lib="$(python3 -c \'import blastit, pathlib; '
-           'print(pathlib.Path(blastit.__file__).parent / "_bin")\')"')
+#: wheel keeps `blastit`, `blastit-lsp` and the shims in this one directory.
+BIN_DIR = (
+    "lib=\"$(python3 -c 'import blastit, pathlib; "
+    'print(pathlib.Path(blastit.__file__).parent / "_bin")\')"'
+)
 #: The files whose file capabilities are the whole of B1: the dedicated copy init
 #: is started from must carry them, and every shared file the service uid can run
 #: must carry none. `getcap` prints nothing for a symlink (it is not a regular
 #: file) and still exits 0, so each path is resolved first and its line carries
 #: the inode: an empty line, an unresolved path or a missing file is a FAIL, never
 #: a pass.
-CAPABILITIES_PROBE = (f'{BIN_DIR}; '
-                      'probe() { p=$(readlink -f "$1"); '
-                      'echo "$2: $(stat -c %i "$p" 2>/dev/null || echo MISSING) '
-                      '$p $(getcap "$p" 2>/dev/null)"; }; '
-                      'getcap "$lib/blastit-init"; '
-                      'probe "$lib/blastit" shared; '
-                      'probe "$lib/blastit-dbproxy" dbproxy; '
-                      'for shim in "$lib"/libblastit_*.so; do probe "$shim" shim; done; '
-                      'probe "$(command -v python3)" python')
+CAPABILITIES_PROBE = (
+    f"{BIN_DIR}; "
+    'probe() { p=$(readlink -f "$1"); '
+    'echo "$2: $(stat -c %i "$p" 2>/dev/null || echo MISSING) '
+    '$p $(getcap "$p" 2>/dev/null)"; }; '
+    'getcap "$lib/blastit-init"; '
+    'probe "$lib/blastit" shared; '
+    'for shim in "$lib"/libblastit_*.so; do probe "$shim" shim; done; '
+    'probe "$(command -v python3)" python'
+)
 # E1: the preset the compose file gives the app, and the settings it supplies —
 # the whole trust decision for this deployment. The driver asserts that the boot
 # event reports exactly these, and that no `BLASTIT_*` variable overrode one.
@@ -134,7 +137,10 @@ def run(cmd, *, check_rc=True, cwd=None, capture=True, **kw):
 
 
 def doctl(*args, parse=True, check_rc=True):
-    p = run(["doctl", *CONTEXT, *args] + (["-o", "json"] if parse else []), check_rc=check_rc)
+    p = run(
+        ["doctl", *CONTEXT, *args] + (["-o", "json"] if parse else []),
+        check_rc=check_rc,
+    )
     if not parse:
         return p.stdout
     try:
@@ -166,12 +172,15 @@ def compose_env(project, port, tls_port, image, password, dockerfile="Dockerfile
     }
 
 
-
 def compose_local(env, *args):
     # `logs` is captured for the checks; everything else streams to the
     # terminal, so a build failure is visible while it happens.
-    return subprocess.run(["docker", "compose", "-f", COMPOSE, *args], env=env, text=True,
-                          capture_output=("logs" in args))
+    return subprocess.run(
+        ["docker", "compose", "-f", COMPOSE, *args],
+        env=env,
+        text=True,
+        capture_output=("logs" in args),
+    )
 
 
 def compose_remote(ssh, env, *args, check_rc=True):
@@ -181,18 +190,31 @@ def compose_remote(ssh, env, *args, check_rc=True):
     file the droplet received over stdin, never in a command line that `ps` on
     the droplet could read.
     """
-    command = (f"cd /root/blastit && docker compose --env-file {ENV_FILE} "
-               f"-f e2e/rootless/compose.yml {' '.join(args)}")
+    command = (
+        f"cd /root/blastit && docker compose --env-file {ENV_FILE} "
+        f"-f e2e/rootless/compose.yml {' '.join(args)}"
+    )
     return ssh_run(ssh, command, check_rc=check_rc)
 
 
 def write_env_file(ssh, env):
     """Writes the compose variables to the droplet, from stdin (never argv)."""
-    variables = ("E2E_PROJECT", "E2E_IMAGE", "E2E_PORT", "E2E_TLS_PORT", "E2E_DB_PASSWORD",
-                 "E2E_ROOTLESS_DOCKERFILE")
+    variables = (
+        "E2E_PROJECT",
+        "E2E_IMAGE",
+        "E2E_PORT",
+        "E2E_TLS_PORT",
+        "E2E_DB_PASSWORD",
+        "E2E_ROOTLESS_DOCKERFILE",
+    )
     text = "".join(f"{name}={env[name]}\n" for name in variables if name in env)
-    written = subprocess.run([*ssh, f"cat > /root/blastit/{ENV_FILE}"], input=text, text=True,
-                             capture_output=True, check=False)
+    written = subprocess.run(
+        [*ssh, f"cat > /root/blastit/{ENV_FILE}"],
+        input=text,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
     if written.returncode != 0:
         raise RuntimeError(f"writing the env file failed: {written.stderr.strip()}")
 
@@ -205,11 +227,14 @@ def remove_env_file(ssh):
 def scenario_self_test():
     """`scenario.py --self-test`: the helpers' own assertions (E1)."""
     return subprocess.run(
-        [sys.executable, os.path.join(ROOT, "e2e", "scenario.py"), "--self-test"], text=True
+        [sys.executable, os.path.join(ROOT, "e2e", "scenario.py"), "--self-test"],
+        text=True,
     ).returncode
 
 
-def scenario(port, timeout=180, remote_addr=None, expect_scheme=None, forged_proto_ignored=False):
+def scenario(
+    port, timeout=180, remote_addr=None, expect_scheme=None, forged_proto_ignored=False
+):
     """The shared e2e scenario, against the app on `port`.
 
     `remote_addr` is what the client address must be — the docker network's
@@ -219,8 +244,15 @@ def scenario(port, timeout=180, remote_addr=None, expect_scheme=None, forged_pro
     ingress sets `X-Forwarded-Proto` itself, which this stack's Traefik does
     (measured; see ARCHITECTURE §10's Traefik subsection).
     """
-    command = [sys.executable, os.path.join(ROOT, "e2e", "scenario.py"),
-               f"http://127.0.0.1:{port}", "--expect", "blastit", "--wait", str(timeout)]
+    command = [
+        sys.executable,
+        os.path.join(ROOT, "e2e", "scenario.py"),
+        f"http://127.0.0.1:{port}",
+        "--expect",
+        "blastit",
+        "--wait",
+        str(timeout),
+    ]
     if remote_addr:
         command += ["--remote-addr", remote_addr]
     if expect_scheme:
@@ -234,7 +266,11 @@ def check_rootless_logs(path, password):
     """D6's own log checks, on top of the shared ones."""
     rc = subprocess.run(
         [sys.executable, os.path.join(ROOT, "e2e", "check_logs.py"), path],
-        env={**os.environ, "E2E_SECRET_VAR": "E2E_DB_PASSWORD", "E2E_DB_PASSWORD": password},
+        env={
+            **os.environ,
+            "E2E_SECRET_VAR": "E2E_DB_PASSWORD",
+            "E2E_DB_PASSWORD": password,
+        },
         text=True,
     ).returncode
     events = []
@@ -249,32 +285,51 @@ def check_rootless_logs(path, password):
 
     print("D6: the boot event says which mode init runs in")
     ok = True
-    stage0 = [e for e in events if e.get("event") == "boot" and e.get("stage") == "stage0"]
-    preload = [e for e in events if e.get("event") == "boot" and e.get("stage") == "preload"]
+    stage0 = [
+        e for e in events if e.get("event") == "boot" and e.get("stage") == "stage0"
+    ]
+    preload = [
+        e for e in events if e.get("event") == "boot" and e.get("stage") == "preload"
+    ]
     ok &= check(len(stage0) == 1, f"one stage 0 boot event ({len(stage0)})")
-    for event, where in ((stage0[0] if stage0 else {}), "stage 0"), \
-                        ((preload[0] if preload else {}), "preload"):
-        ok &= check(event.get("privilege") == "capabilities",
-                    f"the {where} boot event says `privilege: capabilities` ({event.get('privilege')})")
+    for event, where in (
+        ((stage0[0] if stage0 else {}), "stage 0"),
+        ((preload[0] if preload else {}), "preload"),
+    ):
+        ok &= check(
+            event.get("privilege") == "capabilities",
+            f"the {where} boot event says `privilege: capabilities` ({event.get('privilege')})",
+        )
     reported = (stage0[0].get("capabilities") if stage0 else None) or []
-    ok &= check(reported == CAPABILITIES,
-                f"and names exactly the capabilities it holds ({reported})")
+    ok &= check(
+        reported == CAPABILITIES,
+        f"and names exactly the capabilities it holds ({reported})",
+    )
 
     print("D6: the sandboxes are unchanged")
     spawned = [e for e in events if e.get("event") == "process.spawned"]
     ok &= check(bool(spawned), f"view processes were forked ({len(spawned)})")
-    ok &= check(all(e.get("uid", 0) >= 20_000 for e in spawned),
-                f"every view runs under a uid of its own, above the layout base "
-                f"({sorted({e.get('uid') for e in spawned})})")
-    ok &= check(any(e.get("seccomp") is True for e in events),
-                "the seccomp filters are on in the boot event")
+    ok &= check(
+        all(e.get("uid", 0) >= 20_000 for e in spawned),
+        f"every view runs under a uid of its own, above the layout base "
+        f"({sorted({e.get('uid') for e in spawned})})",
+    )
+    ok &= check(
+        any(e.get("seccomp") is True for e in events),
+        "the seccomp filters are on in the boot event",
+    )
     # D6: init's uid is dedicated, and here nothing else runs as it — the compose
     # gives the worker and the migrations a uid of their own. The warning is for
     # the deployments that forgot, and it must not be a false positive here.
-    siblings = [e for e in events
-                if e.get("event") == "app.output" and "run as uid" in e.get("line", "")]
-    ok &= check(not siblings,
-                f"nothing else runs as init's uid at boot ({[e.get('line') for e in siblings]})")
+    siblings = [
+        e
+        for e in events
+        if e.get("event") == "app.output" and "run as uid" in e.get("line", "")
+    ]
+    ok &= check(
+        not siblings,
+        f"nothing else runs as init's uid at boot ({[e.get('line') for e in siblings]})",
+    )
     return rc | (0 if ok else 1)
 
 
@@ -285,16 +340,24 @@ def check_preset_logs(path):
     ok = True
     boots = [e for e in events if e.get("event") == "boot"]
     named = [e for e in boots if e.get("preset") == PRESET]
-    ok &= check(bool(named), f"a boot event says `preset: {PRESET}` "
-                             f"({[e.get('stage') for e in boots]})")
+    ok &= check(
+        bool(named),
+        f"a boot event says `preset: {PRESET}` ({[e.get('stage') for e in boots]})",
+    )
     for stage in ("config", "preload"):
         event = next((e for e in boots if e.get("stage") == stage), {})
-        ok &= check(event.get("preset") == PRESET,
-                    f"the {stage} boot event names it ({event.get('preset')})")
-        ok &= check(event.get("preset_settings") == PRESET_SETTINGS,
-                    f"and the settings it supplied ({event.get('preset_settings')})")
-        ok &= check(not event.get("preset_overridden"),
-                    f"with nothing overriding them ({event.get('preset_overridden')})")
+        ok &= check(
+            event.get("preset") == PRESET,
+            f"the {stage} boot event names it ({event.get('preset')})",
+        )
+        ok &= check(
+            event.get("preset_settings") == PRESET_SETTINGS,
+            f"and the settings it supplied ({event.get('preset_settings')})",
+        )
+        ok &= check(
+            not event.get("preset_overridden"),
+            f"with nothing overriding them ({event.get('preset_overridden')})",
+        )
     return 0 if ok else 1
 
 
@@ -333,13 +396,19 @@ def check_proxy_headers(tls_port, gateway):
         facts = tls_request_probe(tls_port)
     except Exception as e:  # noqa: BLE001
         return 0 if check(False, f"Traefik's TLS entry point answers ({e!r})") else 1
-    ok &= check(facts.get("scheme") == "https",
-                f"a request Traefik TLS-terminated is `https` to the app "
-                f"({facts.get('scheme')})")
-    ok &= check(facts.get("remote_addr") == gateway,
-                f"and the client address is the one Traefik saw "
-                f"({facts.get('remote_addr')}, expected {gateway})")
-    ok &= check(facts.get("route") == "debug", f"the probe ran on the debug route ({facts})")
+    ok &= check(
+        facts.get("scheme") == "https",
+        f"a request Traefik TLS-terminated is `https` to the app "
+        f"({facts.get('scheme')})",
+    )
+    ok &= check(
+        facts.get("remote_addr") == gateway,
+        f"and the client address is the one Traefik saw "
+        f"({facts.get('remote_addr')}, expected {gateway})",
+    )
+    ok &= check(
+        facts.get("route") == "debug", f"the probe ran on the debug route ({facts})"
+    )
     return 0 if ok else 1
 
 
@@ -352,13 +421,21 @@ def network_gateway(env, project, ssh=None):
     """
     name = f"{project}_default"
     if ssh is None:
-        p = subprocess.run(["docker", "network", "inspect", name, "-f", GATEWAY_FORMAT],
-                           env=env, text=True, capture_output=True)
+        p = subprocess.run(
+            ["docker", "network", "inspect", name, "-f", GATEWAY_FORMAT],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
     else:
-        p = ssh_run(ssh, f"docker network inspect {name} -f {shlex.quote(GATEWAY_FORMAT)}")
+        p = ssh_run(
+            ssh, f"docker network inspect {name} -f {shlex.quote(GATEWAY_FORMAT)}"
+        )
     gateway = p.stdout.strip()
     if not gateway:
-        raise RuntimeError(f"no gateway for the network {name}: {p.stderr.strip()[-400:]}")
+        raise RuntimeError(
+            f"no gateway for the network {name}: {p.stderr.strip()[-400:]}"
+        )
     return gateway
 
 
@@ -460,26 +537,71 @@ def check_container(env, project, ssh=None):
 
     def in_container(script):
         if ssh is None:
-            return subprocess.run(["docker", "compose", "-f", COMPOSE, "exec", "-T", "app",
-                                   "sh", "-c", script], env=env, text=True,
-                                  capture_output=True).stdout
-        return compose_remote(ssh, env, "exec", "-T", "app", "sh", "-c",
-                              shlex.quote(script)).stdout
+            return subprocess.run(
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    COMPOSE,
+                    "exec",
+                    "-T",
+                    "app",
+                    "sh",
+                    "-c",
+                    script,
+                ],
+                env=env,
+                text=True,
+                capture_output=True,
+            ).stdout
+        return compose_remote(
+            ssh, env, "exec", "-T", "app", "sh", "-c", shlex.quote(script)
+        ).stdout
 
     def as_uid(uid, script):
         """The same, as another uid: what the container lets a foreign process do."""
         if ssh is None:
-            return subprocess.run(["docker", "compose", "-f", COMPOSE, "exec", "-T", "-u",
-                                   str(uid), "app", "sh", "-c", script], env=env, text=True,
-                                  capture_output=True).stdout
-        return compose_remote(ssh, env, "exec", "-T", "-u", str(uid), "app", "sh", "-c",
-                              shlex.quote(script)).stdout
+            return subprocess.run(
+                [
+                    "docker",
+                    "compose",
+                    "-f",
+                    COMPOSE,
+                    "exec",
+                    "-T",
+                    "-u",
+                    str(uid),
+                    "app",
+                    "sh",
+                    "-c",
+                    script,
+                ],
+                env=env,
+                text=True,
+                capture_output=True,
+            ).stdout
+        return compose_remote(
+            ssh,
+            env,
+            "exec",
+            "-T",
+            "-u",
+            str(uid),
+            "app",
+            "sh",
+            "-c",
+            shlex.quote(script),
+        ).stdout
 
     def run_probe(what, command, uid):
         """Writes the probe into the container, runs it as `uid`, reads the line."""
-        script = (f"cat > /tmp/blastit-probe.py <<'PROBE'\n{SELF_PROBE}PROBE\n{command}\n")
+        script = (
+            f"cat > /tmp/blastit-probe.py <<'PROBE'\n{SELF_PROBE}PROBE\n{command}\n"
+        )
         out = as_uid(uid, script)
-        line = next((text for text in out.splitlines() if text.startswith("probe ")), "")
+        line = next(
+            (text for text in out.splitlines() if text.startswith("probe ")), ""
+        )
         fields = line.split()
         if len(fields) != 9:
             return check(False, f"{what} did not report: {out.strip()[:200]}")
@@ -503,45 +625,66 @@ def check_container(env, project, ssh=None):
         pid, uid, inh, prm, eff, bnd, amb, nnp = fields
         seen[int(uid)] = (pid, inh, prm, eff, bnd, amb, nnp)
     layout = {uid: state for uid, state in seen.items() if uid >= UID_BASE}
-    ok &= check(len(layout) >= 4, f"the layout runs more than one process ({len(layout)})")
+    ok &= check(
+        len(layout) >= 4, f"the layout runs more than one process ({len(layout)})"
+    )
     for uid, (pid, inh, prm, eff, bnd, amb, nnp) in sorted(layout.items()):
         ok &= check(
             (inh, prm, eff, bnd, amb) == (ZERO,) * 5 and nnp == "1",
             f"uid {uid} (pid {pid}) holds nothing and has no_new_privs "
             f"(inh={inh} prm={prm} eff={eff} bnd={bnd} amb={amb} nnp={nnp})",
         )
-    for uid, what in ((UID_BASE + 1, "http"), (UID_BASE + 2, "scheduler"),
-                      (UID_BASE + 3, "dbproxy")):
+    for uid, what in (
+        (UID_BASE + 1, "http"),
+        (UID_BASE + 2, "scheduler"),
+        (UID_BASE + 3, "dbproxy"),
+    ):
         ok &= check(uid in layout, f"{what} runs under uid {uid} (D6 keeps the layout)")
 
     # A worker, a migration and a shell all run as their own uid (the compose has
     # the `migrate` service on it), and that uid is the one the checks below use:
     # what protects the capable copy is that *they* cannot run it, not that they
     # are somehow capability-free.
-    ok &= run_probe(f"a plain python3, as the worker's uid ({WORKER_UID})",
-                    "python3 /tmp/blastit-probe.py", WORKER_UID)
-    ok &= run_probe(f"a manage.py, as the worker's uid ({WORKER_UID})",
-                    'python3 manage.py shell -c "$(cat /tmp/blastit-probe.py)"', WORKER_UID)
+    ok &= run_probe(
+        f"a plain python3, as the worker's uid ({WORKER_UID})",
+        "python3 /tmp/blastit-probe.py",
+        WORKER_UID,
+    )
+    ok &= run_probe(
+        f"a manage.py, as the worker's uid ({WORKER_UID})",
+        'python3 manage.py shell -c "$(cat /tmp/blastit-probe.py)"',
+        WORKER_UID,
+    )
 
     # The capable copy is init's alone: mode `0500`, owned by the uid init runs
     # as, runnable by that uid, refused to every other one (B1, D6 — the uid is
     # dedicated precisely because it *can* run it).
     facts = in_container(f'{BIN_DIR}; stat -c "mode=%a uid=%u" "$lib/blastit-init"')
-    ok &= check(f"mode=500 uid={APP_UID}" in facts,
-                f"the capable copy is mode 0500 and owned by init's uid ({facts.strip()})")
+    ok &= check(
+        f"mode=500 uid={APP_UID}" in facts,
+        f"the capable copy is mode 0500 and owned by init's uid ({facts.strip()})",
+    )
     # The positive signal as well as the absence of a denial: `rc=0` and the
     # copy's own version line. `as_uid` keeps stdout only and the status used to
     # be swallowed, so `not found`, a traceback or an empty `$lib` could pass.
-    runnable = as_uid(APP_UID,
-                      f'{BIN_DIR}; "$lib/blastit-init" --version 2>&1; echo "rc=$?"')
-    started = next((line for line in runnable.splitlines() if line.startswith("blastit")), "")
-    ok &= check("rc=0" in runnable and "Permission denied" not in runnable and bool(started),
-                f"init's own uid can run it — which is why nothing else may use that uid "
-                f"({runnable.strip()})")
-    refused = as_uid(WORKER_UID,
-                     f'{BIN_DIR}; "$lib/blastit-init" --version 2>&1; echo "rc=$?"')
-    ok &= check("Permission denied" in refused and "rc=0" not in refused,
-                f"the worker's uid cannot run it ({refused.strip()})")
+    runnable = as_uid(
+        APP_UID, f'{BIN_DIR}; "$lib/blastit-init" --version 2>&1; echo "rc=$?"'
+    )
+    started = next(
+        (line for line in runnable.splitlines() if line.startswith("blastit")), ""
+    )
+    ok &= check(
+        "rc=0" in runnable and "Permission denied" not in runnable and bool(started),
+        f"init's own uid can run it — which is why nothing else may use that uid "
+        f"({runnable.strip()})",
+    )
+    refused = as_uid(
+        WORKER_UID, f'{BIN_DIR}; "$lib/blastit-init" --version 2>&1; echo "rc=$?"'
+    )
+    ok &= check(
+        "Permission denied" in refused and "rc=0" not in refused,
+        f"the worker's uid cannot run it ({refused.strip()})",
+    )
     return 0 if ok else 1
 
 
@@ -555,54 +698,92 @@ def caps_and_limits(env, ssh=None):
     what the container was allowed to give it (D6/B1)."""
     if ssh is None:
         caps = subprocess.run(
-            ["docker", "compose", "-f", COMPOSE, "exec", "-T", "app", "sh", "-c",
-             CAPABILITIES_PROBE],
-            env=env, text=True, capture_output=True)
+            [
+                "docker",
+                "compose",
+                "-f",
+                COMPOSE,
+                "exec",
+                "-T",
+                "app",
+                "sh",
+                "-c",
+                CAPABILITIES_PROBE,
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
         limits = subprocess.run(
-            ["docker", "inspect", "-f", "User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
-             "CapAdd={{.HostConfig.CapAdd}}",
-             subprocess.run(["docker", "compose", "-f", COMPOSE, "ps", "-q", "app"], env=env,
-                            text=True, capture_output=True).stdout.strip()],
-            text=True, capture_output=True)
+            [
+                "docker",
+                "inspect",
+                "-f",
+                "User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
+                "CapAdd={{.HostConfig.CapAdd}}",
+                subprocess.run(
+                    ["docker", "compose", "-f", COMPOSE, "ps", "-q", "app"],
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip(),
+            ],
+            text=True,
+            capture_output=True,
+        )
     else:
         caps = compose_remote(
-            ssh, env, "exec", "-T", "app", "sh", "-c",
-            shlex.quote(CAPABILITIES_PROBE))
-        limits = ssh_run(ssh, f"cd /root/blastit && docker compose --env-file {ENV_FILE} "
-                              "-f e2e/rootless/compose.yml ps -q app | "
-                              "xargs docker inspect -f 'User={{.Config.User}} "
-                              "CapDrop={{.HostConfig.CapDrop}} CapAdd={{.HostConfig.CapAdd}}'")
-    init = next((line for line in caps.stdout.splitlines() if "_bin/blastit-init" in line), "")
+            ssh, env, "exec", "-T", "app", "sh", "-c", shlex.quote(CAPABILITIES_PROBE)
+        )
+        limits = ssh_run(
+            ssh,
+            f"cd /root/blastit && docker compose --env-file {ENV_FILE} "
+            "-f e2e/rootless/compose.yml ps -q app | "
+            "xargs docker inspect -f 'User={{.Config.User}} "
+            "CapDrop={{.HostConfig.CapDrop}} CapAdd={{.HostConfig.CapAdd}}'",
+        )
+    init = next(
+        (line for line in caps.stdout.splitlines() if "_bin/blastit-init" in line), ""
+    )
     log(f"the dedicated init binary's file capabilities: {init or '(none)'}")
     ok = "cap_setuid" in init and "cap_setpcap" in init
+
     # B1: every shared file the service uid can run must carry none — the
     # capabilities would turn any of them into init. Each is resolved first:
     # `getcap` on a symlink prints nothing and still exits 0, so a clean line has
     # to *name* the resolved path and its inode as well as carry no `cap_`.
     def clean(label):
-        found = [text for text in caps.stdout.splitlines() if text.startswith(f"{label}: ")]
+        found = [
+            text for text in caps.stdout.splitlines() if text.startswith(f"{label}: ")
+        ]
         good = []
         for text in found:
             fields = text.split()
-            good.append(len(fields) >= 3 and fields[1].isdigit()
-                        and fields[2].startswith("/") and "cap_" not in text)
+            good.append(
+                len(fields) >= 3
+                and fields[1].isdigit()
+                and fields[2].startswith("/")
+                and "cap_" not in text
+            )
         return bool(found) and all(good)
 
-    ok &= clean("shared") and clean("dbproxy") and clean("shim") and clean("python")
+    ok &= clean("shared") and clean("shim") and clean("python")
     for text in caps.stdout.splitlines():
-        if text.startswith(("shared: ", "dbproxy: ", "shim: ", "python: ")):
+        if text.startswith(("shared: ", "shim: ", "python: ")):
             log(f"  {text}")
     if not ok:
-        print("  FAIL the capabilities are on the wrong file: expected\n"
-              "         $lib/blastit-init: cap_chown,cap_dac_override,cap_fowner,"
-              "cap_kill,cap_setgid,cap_setuid,cap_setpcap\n"
-              "         none on $lib/blastit, $lib/blastit-dbproxy, "
-              "$lib/libblastit_*.so or python3\n"
-              "       fix: sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,"
-              "cap_setgid,cap_setuid,cap_setpcap+ep' \"$lib/blastit-init\"\n"
-              "            sudo setcap -r \"$lib/blastit\" \"$lib/blastit-dbproxy\" "
-              "\"$(readlink -f \"$(command -v python3)\")\"\n"
-              f"       saw:\n{caps.stdout}{caps.stderr}")
+        print(
+            "  FAIL the capabilities are on the wrong file: expected\n"
+            "         $lib/blastit-init: cap_chown,cap_dac_override,cap_fowner,"
+            "cap_kill,cap_setgid,cap_setuid,cap_setpcap\n"
+            "         none on $lib/blastit, "
+            "$lib/libblastit_*.so or python3\n"
+            "       fix: sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,"
+            'cap_setgid,cap_setuid,cap_setpcap+ep\' "$lib/blastit-init"\n'
+            '            sudo setcap -r "$lib/blastit" '
+            '"$(readlink -f "$(command -v python3)")"\n'
+            f"       saw:\n{caps.stdout}{caps.stderr}"
+        )
     log(f"the app container's limits: {limits.stdout.strip()}")
     return 0 if ok else 1
 
@@ -640,16 +821,31 @@ def check_negative_boot(image, uid=APP_UID):
     print("D6: an unprivileged boot with no capabilities is refused")
     ok = True
     completed = subprocess.run(
-        ["docker", "run", "--rm", "--cap-drop", "ALL", "--user", f"{uid}:{uid}",
-         image, "python3", "-m", "blastit"],
-        text=True, capture_output=True, timeout=180,
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--cap-drop",
+            "ALL",
+            "--user",
+            f"{uid}:{uid}",
+            image,
+            "python3",
+            "-m",
+            "blastit",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=180,
     )
     output = completed.stdout + completed.stderr
     ok &= check(completed.returncode == 1, f"the boot exits 1 ({completed.returncode})")
     expected = MISSING_CAPABILITIES.format(uid=uid)
     named = expected in output
-    ok &= check(named, f"and the message names the uid and every capability it lacks "
-                       f"({expected})")
+    ok &= check(
+        named,
+        f"and the message names the uid and every capability it lacks ({expected})",
+    )
     if not named:
         print(f"  info the boot said: {output.strip()[-1200:]}")
     return 0 if ok else 1
@@ -711,10 +907,26 @@ def rooted_boot(image, workdir, name):
     subprocess.run(["docker", "rm", "-f", name], text=True, capture_output=True)
     try:
         return subprocess.run(
-            ["docker", "run", "--rm", "--name", name, "--user", "0:0",
-             "--workdir", "/work", "-v", f"{workdir}:/work", image,
-             "sh", "-c", "unset BLASTIT_APP BLASTIT_MANIFEST; exec python3 -m blastit"],
-            text=True, capture_output=True, timeout=180,
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--name",
+                name,
+                "--user",
+                "0:0",
+                "--workdir",
+                "/work",
+                "-v",
+                f"{workdir}:/work",
+                image,
+                "sh",
+                "-c",
+                "unset BLASTIT_APP BLASTIT_MANIFEST; exec python3 -m blastit",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=180,
         )
     except subprocess.TimeoutExpired:
         return None
@@ -738,39 +950,57 @@ def check_rooted_startup(image):
         print("D6: the rooted production boot names the missing manifest first")
         completed = rooted_boot(image, workdir, f"{ROOTED_BOOT}-missing")
         if completed is None:
-            return 0 if check(False, "the rooted boot names the missing manifest") else 1
+            return (
+                0 if check(False, "the rooted boot names the missing manifest") else 1
+            )
         output = completed.stdout + completed.stderr
         lines = app_output_lines(completed.stdout)
-        ok &= check(completed.returncode == 1, f"the rooted boot exits 1 ({completed.returncode})")
+        ok &= check(
+            completed.returncode == 1,
+            f"the rooted boot exits 1 ({completed.returncode})",
+        )
         named = [line for line in lines if MISSING_MANIFEST in line]
-        ok &= check(bool(named),
-                    f"and stdout's `app.output` names the file and the reason "
-                    f"({MISSING_MANIFEST}); stderr carries {len(completed.stderr)} bytes")
+        ok &= check(
+            bool(named),
+            f"and stdout's `app.output` names the file and the reason "
+            f"({MISSING_MANIFEST}); stderr carries {len(completed.stderr)} bytes",
+        )
         if not named:
             print(f"  info the boot said: {output.strip()[-1200:]}")
         blamed = [line for line in lines if "BLASTIT_APP" in line]
-        ok &= check(not blamed and "BLASTIT_APP" not in output,
-                    f"and `BLASTIT_APP` is not blamed for the missing file ({blamed})")
+        ok &= check(
+            not blamed and "BLASTIT_APP" not in output,
+            f"and `BLASTIT_APP` is not blamed for the missing file ({blamed})",
+        )
 
         # The other order: the file exists and names no app.
         with open(os.path.join(workdir, "Blastfile"), "w", encoding="utf-8") as f:
             f.write(MANIFEST_WITHOUT_APP)
-        print("D6: the rooted production boot with a manifest names BLASTIT_APP, not the file")
+        print(
+            "D6: the rooted production boot with a manifest names BLASTIT_APP, not the file"
+        )
         completed = rooted_boot(image, workdir, f"{ROOTED_BOOT}-no-app")
         if completed is None:
             return 0 if check(False, "the rooted boot names `BLASTIT_APP`") else 1
         output = completed.stdout + completed.stderr
         lines = app_output_lines(completed.stdout)
-        ok &= check(completed.returncode == 1, f"the rooted boot exits 1 ({completed.returncode})")
+        ok &= check(
+            completed.returncode == 1,
+            f"the rooted boot exits 1 ({completed.returncode})",
+        )
         named = [line for line in lines if "BLASTIT_APP" in line]
-        ok &= check(bool(named),
-                    f"and stdout's `app.output` names `BLASTIT_APP` ({named[:1]}); "
-                    f"stderr carries {len(completed.stderr)} bytes")
+        ok &= check(
+            bool(named),
+            f"and stdout's `app.output` names `BLASTIT_APP` ({named[:1]}); "
+            f"stderr carries {len(completed.stderr)} bytes",
+        )
         if not named:
             print(f"  info the boot said: {output.strip()[-1200:]}")
         missing = [line for line in lines if "No such file" in line]
-        ok &= check(not missing and "No such file" not in output,
-                    f"and nothing claims the manifest is missing ({missing})")
+        ok &= check(
+            not missing and "No such file" not in output,
+            f"and nothing claims the manifest is missing ({missing})",
+        )
     finally:
         # The workdir is the bind mount of the container above, which `--rm` has
         # taken away; the directory itself is this check's to remove.
@@ -815,7 +1045,9 @@ def local(args):
         except ValueError as error:
             print(error, file=sys.stderr)
             return 1
-    env = compose_env(project, args.port, args.tls_port, image, password, args.dockerfile)
+    env = compose_env(
+        project, args.port, args.tls_port, image, password, args.dockerfile
+    )
     if version:
         env["E2E_PYTHON_VERSION"] = version
     rc = 1
@@ -832,11 +1064,27 @@ def local(args):
             return 1
         gateway = network_gateway(env, project)
         log(f"the compose network's gateway: {gateway}")
-        rc |= scenario(args.port, remote_addr=gateway, expect_scheme="http",
-                       forged_proto_ignored=True)
-        logs = subprocess.run(["docker", "compose", "-f", COMPOSE, "logs", "--no-color",
-                               "--no-log-prefix", "app"], env=env, text=True,
-                              capture_output=True).stdout
+        rc |= scenario(
+            args.port,
+            remote_addr=gateway,
+            expect_scheme="http",
+            forged_proto_ignored=True,
+        )
+        logs = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                COMPOSE,
+                "logs",
+                "--no-color",
+                "--no-log-prefix",
+                "app",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+        ).stdout
         path = dump_logs(logs, args.out)
         rc |= check_rootless_logs(path, password)
         rc |= check_preset_logs(path)
@@ -851,8 +1099,20 @@ def local(args):
     finally:
         if rc:
             compose_local(env, "logs", "--no-color", "--tail", "200", "app")
-        subprocess.run(["docker", "compose", "-f", COMPOSE, "down", "--volumes",
-                        "--remove-orphans"], env=env, text=True, capture_output=True)
+        subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                COMPOSE,
+                "down",
+                "--volumes",
+                "--remove-orphans",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+        )
     return rc
 
 
@@ -884,15 +1144,35 @@ def generate_key(key_name):
 
 
 def ssh_argv(key, ip):
-    return ["ssh", "-i", key, "-o", "StrictHostKeyChecking=no", "-o",
-            "UserKnownHostsFile=/dev/null", "-o", "IdentitiesOnly=yes", "-o",
-            "ConnectTimeout=15", "-o", "ServerAliveInterval=30", "-o", "LogLevel=ERROR",
-            f"root@{ip}"]
+    return [
+        "ssh",
+        "-i",
+        key,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "LogLevel=ERROR",
+        f"root@{ip}",
+    ]
 
 
 def ssh_run(ssh, command, *, check_rc=False, timeout=None, stdin=None):
-    return subprocess.run([*ssh, command], text=True, capture_output=True, timeout=timeout,
-                          stdin=stdin, check=False)
+    return subprocess.run(
+        [*ssh, command],
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        stdin=stdin,
+        check=False,
+    )
 
 
 def wait_for_ssh(ssh, timeout=300):
@@ -929,7 +1209,10 @@ def droplet_image(args):
         str(image.get("slug", ""))
         for image in images
         if str(image.get("slug", "")).startswith("docker-")
-        and ("24.04" in str(image.get("name", "")) or "26.04" in str(image.get("name", "")))
+        and (
+            "24.04" in str(image.get("name", ""))
+            or "26.04" in str(image.get("name", ""))
+        )
     )
     if modern:
         log(f"droplet image: {modern[-1]} (Docker and Compose are already there)")
@@ -954,12 +1237,21 @@ def ship_checkout(ssh):
     with tempfile.TemporaryDirectory() as tmp:
         archive = os.path.join(tmp, "blastit.tar")
         with open(archive, "wb") as out:
-            subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT, stdout=out,
-                           check=True)
+            subprocess.run(
+                ["git", "archive", "--format=tar", "HEAD"],
+                cwd=ROOT,
+                stdout=out,
+                check=True,
+            )
         with open(archive, "rb") as source:
             remote = subprocess.run(
-                [*ssh, "rm -rf /root/blastit && mkdir -p /root/blastit && tar -x -C /root/blastit"],
-                stdin=source, check=False)
+                [
+                    *ssh,
+                    "rm -rf /root/blastit && mkdir -p /root/blastit && tar -x -C /root/blastit",
+                ],
+                stdin=source,
+                check=False,
+            )
         if remote.returncode != 0:
             raise RuntimeError("shipping the checkout failed")
     commit = run(["git", "rev-parse", "HEAD"], cwd=ROOT).stdout.strip()
@@ -981,7 +1273,9 @@ def droplet(args):
         # the `finally`'s to remove too (M2).
         key = generate_key(key_name)
         log(f"importing the SSH key {key_name}")
-        imported = doctl("compute", "ssh-key", "import", key_name, "--public-key-file", key + ".pub")
+        imported = doctl(
+            "compute", "ssh-key", "import", key_name, "--public-key-file", key + ".pub"
+        )
         imported = imported[0] if isinstance(imported, list) else imported
         fingerprint = imported["fingerprint"]
 
@@ -991,17 +1285,40 @@ def droplet(args):
         image = droplet_image(args)
         log(f"creating the droplet {name} in {REGION} ({image}, {args.droplet_size})")
         try:
-            created = doctl("compute", "droplet", "create", name, "--region", REGION,
-                            "--size", args.droplet_size, "--image", image,
-                            "--ssh-keys", fingerprint, "--tag-name", TAG,
-                            "--user-data-file", user_data, "--wait")
+            created = doctl(
+                "compute",
+                "droplet",
+                "create",
+                name,
+                "--region",
+                REGION,
+                "--size",
+                args.droplet_size,
+                "--image",
+                image,
+                "--ssh-keys",
+                fingerprint,
+                "--tag-name",
+                TAG,
+                "--user-data-file",
+                user_data,
+                "--wait",
+            )
         finally:
             os.unlink(user_data)
         created = created[0] if isinstance(created, list) else created
-        ip = next((n.get("ip_address") for n in created.get("networks", {}).get("v4", [])
-                   if n.get("type") == "public"), None)
+        ip = next(
+            (
+                n.get("ip_address")
+                for n in created.get("networks", {}).get("v4", [])
+                if n.get("type") == "public"
+            ),
+            None,
+        )
         if not ip:
-            raise RuntimeError(f"the droplet has no public IPv4: {created.get('networks')}")
+            raise RuntimeError(
+                f"the droplet has no public IPv4: {created.get('networks')}"
+            )
         log(f"droplet {created['id']} is up at {ip}")
 
         ssh = ssh_argv(key, ip)
@@ -1010,17 +1327,28 @@ def droplet(args):
         log("waiting for cloud-init (Docker)")
         ssh_run(ssh, "cloud-init status --wait || true", timeout=1800)
         version = ssh_run(ssh, "docker version --format '{{.Server.Version}}'")
-        log(f"docker on the droplet: {version.stdout.strip() or version.stderr.strip()}")
+        log(
+            f"docker on the droplet: {version.stdout.strip() or version.stderr.strip()}"
+        )
 
         ship_checkout(ssh)
 
-        env = compose_env(args.project or "blastit-d6-rootless", args.port, args.tls_port,
-                          args.image or "blastit-d6-rootless:droplet", password)
+        env = compose_env(
+            args.project or "blastit-d6-rootless",
+            args.port,
+            args.tls_port,
+            args.image or "blastit-d6-rootless:droplet",
+            password,
+        )
         write_env_file(ssh, env)
-        log("docker compose up --build (a full Rust build on the droplet, this takes a while)")
+        log(
+            "docker compose up --build (a full Rust build on the droplet, this takes a while)"
+        )
         started = time.monotonic()
         up = compose_remote(ssh, env, "up", "--build", "--detach")
-        log(f"compose up returned {up.returncode} after {time.monotonic() - started:.0f}s")
+        log(
+            f"compose up returned {up.returncode} after {time.monotonic() - started:.0f}s"
+        )
         if up.returncode != 0:
             print(up.stdout[-4000:], up.stderr[-4000:])
             compose_remote(ssh, env, "logs", "--no-color", "--tail", "200", "app")
@@ -1030,17 +1358,30 @@ def droplet(args):
         # through a tunnel, so nothing is exposed to the internet.
         log(f"tunnelling 127.0.0.1:{args.port} and {args.tls_port} from the droplet")
         tunnel = subprocess.Popen(
-            [*ssh_argv(key, ip), "-N",
-             "-L", f"127.0.0.1:{args.port}:127.0.0.1:{args.port}",
-             "-L", f"127.0.0.1:{args.tls_port}:127.0.0.1:{args.tls_port}",
-             "-o", "ExitOnForwardFailure=yes"])
+            [
+                *ssh_argv(key, ip),
+                "-N",
+                "-L",
+                f"127.0.0.1:{args.port}:127.0.0.1:{args.port}",
+                "-L",
+                f"127.0.0.1:{args.tls_port}:127.0.0.1:{args.tls_port}",
+                "-o",
+                "ExitOnForwardFailure=yes",
+            ]
+        )
         try:
             wait_http(args.port)
             gateway = network_gateway(env, env["E2E_PROJECT"], ssh)
             log(f"the compose network's gateway on the droplet: {gateway}")
-            rc = scenario(args.port, remote_addr=gateway, expect_scheme="http",
-                          forged_proto_ignored=True)
-            logs = compose_remote(ssh, env, "logs", "--no-color", "--no-log-prefix", "app").stdout
+            rc = scenario(
+                args.port,
+                remote_addr=gateway,
+                expect_scheme="http",
+                forged_proto_ignored=True,
+            )
+            logs = compose_remote(
+                ssh, env, "logs", "--no-color", "--no-log-prefix", "app"
+            ).stdout
             path = dump_logs(logs, args.out)
             rc |= check_rootless_logs(path, password)
             rc |= check_preset_logs(path)
@@ -1062,9 +1403,11 @@ def droplet(args):
         rc = 1
     finally:
         if args.keep:
-            log(f"--keep: leaving {name}, the key {key_name} and the key file "
+            log(
+                f"--keep: leaving {name}, the key {key_name} and the key file "
                 f"({os.path.dirname(key) if key else 'none was generated'}); delete with "
-                f"`run.py --cleanup --name {name}`")
+                f"`run.py --cleanup --name {name}`"
+            )
         else:
             # M2: the droplet, the key and the private key file all go together
             # (`destroy` removes the file), and the env file — which holds the
@@ -1073,6 +1416,7 @@ def droplet(args):
                 remove_env_file(ssh)
             destroy(name, key_name)
     return rc
+
 
 def wait_http(port, timeout=900):
     """The app answers its health path through the tunnel."""
@@ -1116,19 +1460,37 @@ def destroy(name, key_name):
         log(f"no droplet named {name}")
     else:
         log(f"deleting droplet {droplet['id']} ({name})")
-        doctl("compute", "droplet", "delete", str(droplet["id"]), "--force", parse=False, check_rc=False)
+        doctl(
+            "compute",
+            "droplet",
+            "delete",
+            str(droplet["id"]),
+            "--force",
+            parse=False,
+            check_rc=False,
+        )
     key = find_key(key_name)
     if key is None:
         log(f"no SSH key named {key_name}")
     else:
         log(f"deleting SSH key {key['id']} ({key_name})")
-        doctl("compute", "ssh-key", "delete", str(key["id"]), "--force", parse=False, check_rc=False)
+        doctl(
+            "compute",
+            "ssh-key",
+            "delete",
+            str(key["id"]),
+            "--force",
+            parse=False,
+            check_rc=False,
+        )
     # M2: the private key of a droplet that no longer exists has no reason to
     # outlive it (`--keep` is the caller's business, and it does not call this).
     for directory in glob.glob(os.path.join(tempfile.gettempdir(), f"{key_name}-*")):
         shutil.rmtree(directory, ignore_errors=True)
         if os.path.exists(directory):
-            log(f"could not remove the private key file ({directory}): it is still there")
+            log(
+                f"could not remove the private key file ({directory}): it is still there"
+            )
         else:
             log(f"removed the private key file ({directory})")
     verify_gone(name, key_name)
@@ -1141,10 +1503,16 @@ def verify_gone(name, key_name):
     confirmed over a few seconds rather than once.
     """
     for attempt in range(10):
-        left = [d["name"] for d in doctl("compute", "droplet", "list", "--tag-name", TAG) or []
-                if d.get("name") == name]
-        keys = [k["name"] for k in doctl("compute", "ssh-key", "list") or []
-                if k.get("name") == key_name]
+        left = [
+            d["name"]
+            for d in doctl("compute", "droplet", "list", "--tag-name", TAG) or []
+            if d.get("name") == name
+        ]
+        keys = [
+            k["name"]
+            for k in doctl("compute", "ssh-key", "list") or []
+            if k.get("name") == key_name
+        ]
         if not left and not keys:
             log(f"verified: neither the droplet nor the key named {name} exists")
             return
@@ -1173,7 +1541,9 @@ def janitor(minutes):
     def old(created):
         """Whether `created` is *known* to be older than the cutoff."""
         try:
-            stamp = dt.datetime.fromisoformat(str(created).replace("Z", "+00:00").rstrip(" "))
+            stamp = dt.datetime.fromisoformat(
+                str(created).replace("Z", "+00:00").rstrip(" ")
+            )
         except (AttributeError, ValueError):
             return False
         if stamp.tzinfo is None:
@@ -1185,9 +1555,18 @@ def janitor(minutes):
     for droplet in droplets:
         name = droplet.get("name", "")
         if old(droplet.get("created_at", "")):
-            log(f"stale droplet {name} ({droplet['id']}, created {droplet.get('created_at')})")
-            doctl("compute", "droplet", "delete", str(droplet["id"]), "--force", parse=False,
-                  check_rc=False)
+            log(
+                f"stale droplet {name} ({droplet['id']}, created {droplet.get('created_at')})"
+            )
+            doctl(
+                "compute",
+                "droplet",
+                "delete",
+                str(droplet["id"]),
+                "--force",
+                parse=False,
+                check_rc=False,
+            )
             deleted.add(name)
     if not deleted:
         log("no droplet is known to be older than the cutoff")
@@ -1195,36 +1574,67 @@ def janitor(minutes):
         key_name = key.get("name", "")
         if key_name in deleted:
             log(f"the SSH key of the droplet that went: {key_name} ({key['id']})")
-            doctl("compute", "ssh-key", "delete", str(key["id"]), "--force", parse=False,
-                  check_rc=False)
+            doctl(
+                "compute",
+                "ssh-key",
+                "delete",
+                str(key["id"]),
+                "--force",
+                parse=False,
+                check_rc=False,
+            )
     return 0
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--local", action="store_true", help="run on this machine with Docker Compose")
-    ap.add_argument("--droplet", action="store_true", help="create a droplet, test it, destroy it")
-    ap.add_argument("--cleanup", action="store_true", help="delete --name's droplet and key")
-    ap.add_argument("--janitor", action="store_true", help="delete stale blastit-d6 resources")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "--local", action="store_true", help="run on this machine with Docker Compose"
+    )
+    ap.add_argument(
+        "--droplet", action="store_true", help="create a droplet, test it, destroy it"
+    )
+    ap.add_argument(
+        "--cleanup", action="store_true", help="delete --name's droplet and key"
+    )
+    ap.add_argument(
+        "--janitor", action="store_true", help="delete stale blastit-d6 resources"
+    )
     ap.add_argument("--older-than-minutes", type=int, default=120)
     ap.add_argument("--name", help=f"droplet name (default {PREFIX}<pid>)")
     ap.add_argument("--project", help="compose project name")
     ap.add_argument("--image", help="image tag for the app service")
-    ap.add_argument("--dockerfile", default="Dockerfile", help="Dockerfile under e2e/rootless/")
-    ap.add_argument("--php-image",
-                    help="image for the PHP entry-swap check (default "
-                         "E2E_PHP_IMAGE or blastit-e2e-php, which the e2e "
-                         "`php` leg builds)")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("E2E_PORT", "18080")),
-                    help="host port Traefik publishes its entry point on")
-    ap.add_argument("--tls-port", type=int,
-                    default=int(os.environ.get("E2E_TLS_PORT", "18443")),
-                    help="host port Traefik publishes its TLS entry point on (E1)")
+    ap.add_argument(
+        "--dockerfile", default="Dockerfile", help="Dockerfile under e2e/rootless/"
+    )
+    ap.add_argument(
+        "--php-image",
+        help="image for the PHP entry-swap check (default "
+        "E2E_PHP_IMAGE or blastit-e2e-php, which the e2e "
+        "`php` leg builds)",
+    )
+    ap.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("E2E_PORT", "18080")),
+        help="host port Traefik publishes its entry point on",
+    )
+    ap.add_argument(
+        "--tls-port",
+        type=int,
+        default=int(os.environ.get("E2E_TLS_PORT", "18443")),
+        help="host port Traefik publishes its TLS entry point on (E1)",
+    )
     ap.add_argument("--droplet-size", default=SIZE)
-    ap.add_argument("--droplet-image", help="droplet image slug (default: the newest docker-* one)")
+    ap.add_argument(
+        "--droplet-image", help="droplet image slug (default: the newest docker-* one)"
+    )
     ap.add_argument("--context", help="doctl auth context (local runs)")
-    ap.add_argument("--keep", action="store_true", help="do not delete the droplet (debugging)")
+    ap.add_argument(
+        "--keep", action="store_true", help="do not delete the droplet (debugging)"
+    )
     ap.add_argument("--out", default=os.path.join(HERE, "out"))
     args = ap.parse_args()
     if args.context:

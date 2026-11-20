@@ -1,5 +1,4 @@
-//! The dbproxy *process*: the role both `blastit --role=dbproxy` and the
-//! Python-free `blastit-dbproxy` binary run (§2.2, §4).
+//! The dbproxy *process*: the role `blastit --role=dbproxy` runs (§2.2, §4).
 //!
 //! The protocol work lives in the rest of this crate; this module is the part
 //! that only makes sense for a process init has just `execve`'d: take the pipes
@@ -8,11 +7,10 @@
 //!
 //! It is in this crate, and not in `blastit`, because of the one thing a wheel
 //! changes about dbproxy: it must **not** run an interpreter. dbproxy holds the
-//! real credentials (§2.2), so the `blastit` crate — which links CPython for
-//! every other role — cannot be where its entry point lives. Both binaries call
-//! this function: the standalone one through the `--role=dbproxy` argument it
-//! has always taken, and the wheel through the `blastit-dbproxy` binary it
-//! ships at `blastit/_bin/blastit-dbproxy` (D2).
+//! real credentials (§2.2), so the role lives beside the protocol code and is
+//! entered by the universal binary itself — stage 0 `execve`s the same image
+//! with `--role=dbproxy`, after `hold_none`, and this function is what it runs
+//! (D2).
 
 use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
