@@ -19,3 +19,7 @@ OUT OF SCOPE for every MB.47 slice (docs/** not in paths) — needs a docs node 
 ## 2026-11-20T08:02 [lead]
 
 TWO OUT-OF-SCOPE FOLLOW-UPS for a crates/blastit node (host.rs not in any MB.47 slice's paths): (1) Host::binary() should name <dir of /proc/self/exe>/blastit when it exists beside a *-init, which would delete BLASTIT_EXEC from all three e2e start commands and remove the python3 -c resolution (and its cwd input) entirely; (2) refuse a stale capable init fail-closed: after 'pip install --force-reinstall blastit' the old _bin/blastit-init stays behind, silently pinning a pre-upgrade binary as init (check by device+inode against _bin/blastit).
+
+## 2026-11-20T08:40 [lead]
+
+status ready -> done

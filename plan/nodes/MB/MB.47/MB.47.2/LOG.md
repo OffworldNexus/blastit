@@ -31,3 +31,7 @@ REVIEW FIX (both lenses, lead-verified): [arch-MAJOR] live.yml:53-57 builds the 
 ## 2026-11-20T08:34 [lead]
 
 status review -> done
+
+## 2026-11-20T08:34 [lead]
+
+commit 0d3f434

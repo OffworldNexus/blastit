@@ -2,7 +2,7 @@
 id: MB.47
 title: "Align rootless e2e, ci.yml py-sapi/wheel shims, venv-smoke py3-none glob, root-safe critical tests & standalone archive Python shims"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths:
@@ -16,7 +16,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T07:49"
-updated: "2026-11-20T07:50"
+updated: "2026-11-20T08:40"
 ---
 
 # Goal

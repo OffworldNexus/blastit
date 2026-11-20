@@ -4053,3 +4053,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T08:24 [MB.47.2] (lead) status active -> review
 - 2026-11-20T08:27 [MB.47.2] (lead) REVIEW FIX (both lenses, lead-verified): [arch-MAJOR] live.yml:53-57 builds the wheel with no --require-shims and feeds e2e/Dockerfile.prebuilt the WSGI demo ->
 - 2026-11-20T08:34 [MB.47.2] (lead) status review -> done
+- 2026-11-20T08:34 [MB.47.2] (lead) commit 0d3f434
+- 2026-11-20T08:40 [MB.47] (lead) status ready -> done
