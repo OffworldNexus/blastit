@@ -61,9 +61,17 @@ if [ "$libc" = musl ] && [ -z "$inside" ] && [ ! -e "/lib/ld-musl-$(uname -m).so
         exit 1
     }
     echo "py-sapi-leg: $soname in $image (a musl binary cannot be linked from a glibc host)"
-    docker run --rm -v "$root:/src" -w /src "$image" \
-        bash /src/scripts/py_sapi_leg.sh --inside \
-        --minor "$minor" --arch "$arch" --libc "$libc" --out "/src/target/py-sapi"
+    # `alpine:3.21` ships `/bin/sh` and no `bash` before `apk add`, so the leg
+    # starts under `sh`: it installs bash and runs the same script again with
+    # `--inside`. The arguments arrive as `sh` positionals, so no leg value is
+    # ever re-parsed as shell. `bash` is *not* `exec`ed: that would replace the
+    # shell and drop the EXIT trap that hands `target/` back to the host uid.
+    docker run --rm -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -v "$root:/src" -w /src "$image" \
+        sh -eu -c 'trap "chown -R $HOST_UID:$HOST_GID /src/target 2>/dev/null || true" EXIT; apk add --no-cache bash >/dev/null; bash /src/scripts/py_sapi_leg.sh --inside --minor "$1" --arch "$2" --libc "$3" --out /src/target/py-sapi' \
+        sh "$minor" "$arch" "$libc" || {
+        echo "error: py-sapi-leg: $soname could not run in $image (bash bootstrap failed)" >&2
+        exit 1
+    }
     exit 0
 fi
 
@@ -91,6 +99,19 @@ if [ "$libc" = musl ]; then
     export "PY_SAPI_PYTHON_$digits=$(uv python find "$minor")"
 fi
 
+# The gnu legs run on a runner whose oldest CPython may be 3.12: fetch the minor
+# the leg names when nothing names an interpreter for it yet.
+# `PY_SAPI_PYTHON_<digits>` is the Makefile's first stop, and the `dlopen` probe
+# proves the shim against *that* interpreter's shared `libpython`.
+py_var="PY_SAPI_PYTHON_$digits"
+if [ "$libc" = gnu ] && [ -z "${!py_var:-}" ] && command -v uv >/dev/null 2>&1; then
+    if ! interpreter=$(uv python find --no-project "$minor" 2>/dev/null); then
+        uv python install "$minor" >/dev/null
+        interpreter=$(uv python find --no-project "$minor")
+    fi
+    export "$py_var=$interpreter"
+fi
+
 # `PY_SAPI_OUT` must be absolute: the `dlopen` probe hands the path to a test
 # binary whose working directory is the crate's, so a relative path there reads as
 # "not a file" (found while proving this script).
@@ -110,18 +131,20 @@ shim="$out/$soname"
 [ -f "$shim" ] || { echo "error: py-sapi-leg: $shim was not built" >&2; exit 1; }
 echo "--- $soname"
 readelf -d "$shim" | sed -n 's/.*(SONAME).*/&/p'
-readelf -d "$shim" | grep -q "SONAME).*\[$soname\]" ||
+# No `grep -q` on a pipeline under `set -o pipefail`: `-q` closes the pipe on the
+# first match, so the producer's stdout must be consumed instead (`> /dev/null`).
+readelf -d "$shim" | grep -E "SONAME).*\[$soname\]" >/dev/null ||
     { echo "error: $shim does not carry DT_SONAME $soname" >&2; exit 1; }
 exports=$(nm -D --defined-only "$shim" | awk '{ print $2" "$3 }')
 for symbol in blastit_py_abi_version blastit_py_minor blastit_py_abi_v1; do
-    printf '%s\n' "$exports" | grep -qx "T $symbol" ||
+    printf '%s\n' "$exports" | grep -x "T $symbol" >/dev/null ||
         { echo "error: $shim does not export $symbol" >&2; exit 1; }
     echo "exported: T $symbol"
 done
-nm -uD "$shim" | grep -qE ' Py_Initialize(Ex|FromConfig)$' ||
+nm -uD "$shim" | grep -E ' Py_Initialize(Ex|FromConfig)$' >/dev/null ||
     { echo "error: $shim carries no undefined Py_Initialize entry point" >&2; exit 1; }
 echo "undefined: Py_Initialize* (resolved by the host interpreter)"
-if readelf -d "$shim" | grep -q 'NEEDED.*libpython'; then
+if readelf -d "$shim" | grep -E 'NEEDED.*libpython' >/dev/null; then
     echo "error: $shim links a libpython: the shim must use the host interpreter's" >&2
     readelf -d "$shim" | grep NEEDED >&2
     exit 1
@@ -129,13 +152,13 @@ fi
 needed=$(readelf -d "$shim" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' | tr '\n' ' ')
 case "$libc" in
     musl)
-        printf '%s\n' "$needed" | grep -q "libc\.musl-${arch}\.so\.1" ||
+        printf '%s\n' "$needed" | grep -F "libc.musl-${arch}.so.1" >/dev/null ||
             { echo "error: $shim claims musl but needs: $needed" >&2
               echo "  a glibc artifact wearing a musl name is what the review found" >&2
               exit 1; }
         ;;
     gnu)
-        printf '%s\n' "$needed" | grep -q 'libc\.so\.6' ||
+        printf '%s\n' "$needed" | grep -F 'libc.so.6' >/dev/null ||
             { echo "error: $shim claims gnu but needs: $needed" >&2; exit 1; }
         ;;
 esac

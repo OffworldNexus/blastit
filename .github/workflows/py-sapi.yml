@@ -97,6 +97,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
+      # The leg is `bash scripts/py_sapi_leg.sh`, which runs `make py-sapi`:
+      # it needs cargo and a warm `target/` on the runner.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       # **The leg's own builder image.** `matrix.builder_image` comes from
       # `scripts/platform_matrix.py`: a musl shim is compiled inside
       # `alpine:3.21`, because no `--target` makes a glibc linker emit a musl

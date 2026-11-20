@@ -165,12 +165,16 @@ jobs:
       # red step rather than a job that idles to its timeout (MA.9).
       # `~/.local` (where `uv` keeps its CPython) gets the same treatment right
       # after `uv python install` below, once that tree exists (`MB.47.2`).
+      # `actions/setup-python` extracts the tool cache as runner uid 1001, so
+      # root's provenance check would refuse its `libpython`; `chown` makes the
+      # tree root's before that check runs (`MB.50`).
       - name: Make /opt and the tool cache non-world-writable (as root)
         timeout-minutes: 1
         run: |
           set -euo pipefail
           sudo --non-interactive chmod go-w /opt
           sudo --non-interactive chmod -R go-w /opt/hostedtoolcache
+          sudo --non-interactive chown -R root:root /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The per-minor CPython shims are a **build artifact** (`target/py-sapi`),
@@ -191,6 +195,12 @@ jobs:
           interpreters="${UV_PYTHON_INSTALL_DIR:-$HOME/.local}"
           if [ -d "$interpreters" ]; then
             sudo --non-interactive chmod -R go-w "$interpreters"
+          fi
+          # Only the interpreter tree becomes root's: `~/.local` also holds the
+          # runner's `uv` and pipx, which this job still runs as the runner uid.
+          python_root="${UV_PYTHON_INSTALL_DIR:-$HOME/.local/share/uv/python}"
+          if [ -d "$python_root" ]; then
+            sudo --non-interactive chown -R root:root "$python_root"
           fi
           # `uv python install` puts CPython under that tree, not on `PATH`, so a
           # consumer asking for `/usr/local/bin/python3.13` finds nothing
@@ -745,7 +755,7 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       # The runner image ships /opt and its tool cache world-writable; blastit refuses an
       # interpreter a view uid could plant a module in, as it should.
-      - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache
+      - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache && sudo --non-interactive chown -R root:root /opt/hostedtoolcache
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The plugin's tests boot a WSGI view through the wheel (`MB.47.2`), so the
@@ -761,6 +771,12 @@ jobs:
           interpreters="${UV_PYTHON_INSTALL_DIR:-$HOME/.local}"
           if [ -d "$interpreters" ]; then
             sudo --non-interactive chmod -R go-w "$interpreters"
+          fi
+          # Only the interpreter tree becomes root's: `~/.local` also holds the
+          # runner's `uv` and pipx, which this job still runs as the runner uid.
+          python_root="${UV_PYTHON_INSTALL_DIR:-$HOME/.local/share/uv/python}"
+          if [ -d "$python_root" ]; then
+            sudo --non-interactive chown -R root:root "$python_root"
           fi
       - name: Build the per-minor CPython shims (fails closed)
         run: make python-runtime

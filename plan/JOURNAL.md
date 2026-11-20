@@ -4073,3 +4073,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T10:09 [MB.49] (lead) status active -> done
 - 2026-11-20T10:09 [MB.49] (lead) commit 4d3f4c5
 - 2026-11-20T10:09 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
+- 2026-11-20T10:28 [MB.50] (conductor) created (task) Fix final 5 PR #64 CI items (wheel-smoke entry_points spacing, host.rs symlink-independent test, empty-PATH POSIX fallback, hostedtoolcache chown
+- 2026-11-20T10:28 AUTOPILOT on by conductor closing final 5 PR #64 CI items in MB.50
+- 2026-11-20T10:28 [MB.50] (lead) status ready -> active
+- 2026-11-20T10:28 [MB.50] (lead) attempt 1/3 started
+- 2026-11-20T10:28 [MB.50] (lead) base 3f0325bd2adaec97d0fc97d419337a65939e5a3e
+- 2026-11-20T10:38 [MB.50] (lead) REVIEW FIX (review-ux): py_sapi_leg.sh libpython guard still uses 'readelf | grep -q' under pipefail (SIGPIPE 141 -> guard silently skipped, message lies); same
+- 2026-11-20T10:42 [MB.50] (lead) REVIEW FIX (review-arch): (1) BLOCKER search() POSIX fallback finds /usr/bin/python3=3.12 -> UnsupportedMinor; prefer python3.<minor> from SUPPORTED_MINORS per 
+- 2026-11-20T10:50 [MB.50] (lead) status active -> done

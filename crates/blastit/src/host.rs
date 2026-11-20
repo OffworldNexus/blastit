@@ -1046,10 +1046,13 @@ mod tests {
     /// named by `BLASTIT_EXEC`.
     #[test]
     fn every_named_program_that_carries_capabilities_is_refused() {
+        // Synthetic paths: the refusal's sentences are what this proves, and
+        // `placement()` follows the names with a real `fs::read_link` — a host
+        // `/usr/local/bin/python3.13 -> ...` symlink would decide the outcome.
         let names = [
-            "/usr/local/bin/python",
-            "/usr/local/bin/python3",
-            "/usr/local/bin/python3.13",
+            "/nonexistent/blastit-test/python",
+            "/nonexistent/blastit-test/python3",
+            "/nonexistent/blastit-test/python3.13",
         ];
         for capable in names {
             // init runs from a *copy*, so the refusal can only come from the

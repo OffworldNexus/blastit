@@ -235,11 +235,7 @@ fn dev_interpreter(
     {
         return Ok(path.to_path_buf());
     }
-    let directories: Vec<PathBuf> = dev
-        .path
-        .as_deref()
-        .map(|value| std::env::split_paths(value).collect())
-        .unwrap_or_default();
+    let directories = dev_search_directories(dev);
     search(&directories).ok_or_else(|| DiscoveryError::NoInterpreter {
         command: command.to_owned(),
         searched: directories,
@@ -279,21 +275,45 @@ fn production_interpreter(
     {
         return Ok(path.to_path_buf());
     }
-    let directories: Vec<PathBuf> = ["/usr/local/bin", "/usr/bin", "/bin"]
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
+    let directories = posix_search_path();
     search(&directories).ok_or_else(|| DiscoveryError::NoInterpreter {
         command: command.to_owned(),
         searched: directories,
     })
 }
 
-/// The first `{python3,python}` of `directories` that is executable.
+/// `_CS_PATH`'s default directories: what `libc::execvp` searches when `PATH`
+/// is unset. An empty environment must not collapse the search to zero
+/// directories (`env -i blastit dev`, `MB.50`).
+const POSIX_SEARCH_PATH: [&str; 3] = ["/usr/local/bin", "/usr/bin", "/bin"];
+
+/// Those defaults, as paths.
+fn posix_search_path() -> Vec<PathBuf> {
+    POSIX_SEARCH_PATH.into_iter().map(PathBuf::from).collect()
+}
+
+/// The `PATH` directories a development boot searches: `PATH` when it is set,
+/// `_CS_PATH`'s default when it is not.
+fn dev_search_directories(dev: &DevEnv) -> Vec<PathBuf> {
+    dev.path.as_deref().map_or_else(posix_search_path, |value| {
+        std::env::split_paths(value).collect()
+    })
+}
+
+/// The first supported interpreter of `directories`, in the directories' order.
 fn search(directories: &[PathBuf]) -> Option<PathBuf> {
+    // Per directory, the supported minors come first: `/usr/local/bin/python3.13`
+    // exists on the runner while `/usr/bin/python3` is 3.12, and a 3.12 pick would
+    // only be refused one step later. The generic names stay last, so an
+    // old-only host still gets `UnsupportedMinor`, not `NoInterpreter`.
+    let names: Vec<String> = SUPPORTED_MINORS
+        .into_iter()
+        .map(|minor| format!("python3.{minor}"))
+        .chain(["python3".to_owned(), "python".to_owned()])
+        .collect();
     directories.iter().find_map(|directory| {
-        ["python3", "python"]
-            .into_iter()
+        names
+            .iter()
             .map(|name| directory.join(name))
             .find(|candidate| is_executable(candidate))
     })
@@ -720,6 +740,111 @@ mod tests {
         );
         assert!(activates(true, true), "an app beside them: search");
         assert!(activates(false, true), "an app: search");
+    }
+
+    #[test]
+    fn an_unset_path_searches_the_posix_defaults() {
+        // `env_clear()` leaves `PATH` unset (`critical_dev_reload`), and an empty
+        // environment used to mean zero directories searched. `execvp` searches
+        // `_CS_PATH`'s defaults instead, and so does the dev boot.
+        let fixture = Fixture::new("unset-path");
+        let dev = DevEnv {
+            exe_dir: fixture.dir.join("bin"),
+            ..DevEnv::default()
+        };
+        assert_eq!(
+            dev_search_directories(&dev),
+            vec![
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ]
+        );
+        match dev_interpreter(&dev, "dev", &fixture.dir.join("project")) {
+            Ok(found) => assert!(
+                POSIX_SEARCH_PATH
+                    .iter()
+                    .any(|directory| { found.parent() == Some(Path::new(directory)) }),
+                "{} is not under the POSIX defaults",
+                found.display()
+            ),
+            Err(DiscoveryError::NoInterpreter { searched, .. }) => assert_eq!(
+                searched,
+                posix_search_path(),
+                "the refusal names the defaults it searched"
+            ),
+            Err(error) => panic!("unexpected refusal: {error}"),
+        }
+        assert_eq!(
+            dev_search_directories(&DevEnv {
+                path: Some(OsString::from("/opt/one:/opt/two")),
+                ..DevEnv::default()
+            }),
+            vec![PathBuf::from("/opt/one"), PathBuf::from("/opt/two")],
+            "a set PATH is still read verbatim"
+        );
+    }
+
+    #[test]
+    fn a_supported_interpreter_beside_the_generic_one_wins() {
+        let fixture = Fixture::new("supported-beside-generic");
+        let bin = fixture.dir.join("bin");
+        fixture.executable(&bin.join("python3"));
+        let supported = fixture.executable(&bin.join("python3.13"));
+        let dev = DevEnv {
+            path: Some(bin.into_os_string()),
+            exe_dir: fixture.dir.join("exe"),
+            ..DevEnv::default()
+        };
+        assert_eq!(
+            dev_interpreter(&dev, "dev", &fixture.dir.join("project")).expect("a supported minor"),
+            supported
+        );
+    }
+
+    #[test]
+    fn an_old_python3_alone_is_still_refused_by_its_own_minor() {
+        let fixture = Fixture::new("old-python3");
+        let bin = fixture.dir.join("bin");
+        fixture.executable(&bin.join("python3"));
+        // The runner's `/usr/bin/python3` is 3.12: the generic name is still
+        // offered, so the refusal stays the honest `UnsupportedMinor`.
+        std::fs::create_dir_all(fixture.dir.join("lib/python3.12")).expect("the 3.12 tree");
+        let dev = DevEnv {
+            path: Some(bin.into_os_string()),
+            exe_dir: fixture.dir.join("exe"),
+            ..DevEnv::default()
+        };
+        let error = discover(&DiscoveryEnv::dev(dev), "dev", &fixture.dir.join("project"))
+            .expect_err("3.12");
+        assert!(
+            matches!(error, DiscoveryError::UnsupportedMinor { ref found, .. } if found == "3.12"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_set_path_is_searched_in_its_own_order() {
+        let fixture = Fixture::new("path-order");
+        let first = fixture.dir.join("first");
+        let second = fixture.dir.join("second");
+        let older = fixture.executable(&first.join("python3.13"));
+        let newer = fixture.executable(&second.join("python3.14"));
+        let dev = DevEnv {
+            path: Some(OsString::from(format!(
+                "{}:{}",
+                first.display(),
+                second.display()
+            ))),
+            exe_dir: fixture.dir.join("exe"),
+            ..DevEnv::default()
+        };
+        assert_ne!(older, newer);
+        assert_eq!(
+            dev_interpreter(&dev, "dev", &fixture.dir.join("project")).expect("3.13"),
+            older,
+            "the first directory wins, even over a newer minor later"
+        );
     }
 
     #[test]

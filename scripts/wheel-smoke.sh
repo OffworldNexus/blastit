@@ -108,6 +108,7 @@ echo "wheel-smoke: console scripts on PATH: blastit, blastit-lsp, blastit-manife
 # the installed metadata, because that is what `pytest` reads.
 "$python" - <<'PY'
 import importlib.metadata
+import re
 import sys
 
 problems = []
@@ -117,7 +118,21 @@ entry_points = importlib.metadata.distribution("blastit").read_text(
 for section in ("[console_scripts]", "[pytest11]"):
     if section not in entry_points:
         problems.append(f"entry_points.txt has no {section}")
-if "blastit = blastit.pytest_plugin" not in entry_points:
+# The plugin entry point must sit in the `[pytest11]` body (a line under
+# `[console_scripts]` is not the plugin), and `maturin` writes no spaces around
+# `=`; `splitlines()` + `strip()` also accept CRLF metadata.
+pytest11 = []
+current = None
+for line in entry_points.splitlines():
+    stripped = line.strip()
+    if stripped.startswith("[") and stripped.endswith("]"):
+        current = stripped
+    elif current == "[pytest11]" and stripped:
+        pytest11.append(stripped)
+if not any(
+    re.fullmatch(r"blastit[ \t]*=[ \t]*blastit\.pytest_plugin[ \t]*", line)
+    for line in pytest11
+):
     problems.append("entry_points.txt has no `blastit = blastit.pytest_plugin` (pytest11)")
 if problems:
     for problem in problems:

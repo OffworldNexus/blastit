@@ -383,7 +383,9 @@ if [[ -n $manylinux_ver ]]; then
         echo "build-wheel: provisioning $builder_image from $base_image (+ clang for bindgen)"
         docker build -t "$builder_image" - <<DOCKER
 FROM ${base_image}
-RUN dnf install -y --setopt=install_weak_deps=False clang && dnf clean all
+RUN for attempt in 1 2 3; do dnf install -y --setopt=install_weak_deps=False clang && break; dnf clean all; sleep 2; done \
+ && command -v clang || exit 1
+RUN dnf clean all || true
 DOCKER
     fi
 
