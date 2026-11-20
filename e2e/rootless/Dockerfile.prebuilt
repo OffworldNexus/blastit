@@ -2,16 +2,16 @@
 # without the Rust build, for a job that has already run
 # `scripts/build-wheel.sh` (the same split as `e2e/Dockerfile.prebuilt`).
 #
-# The wheel decides the interpreter: `blastit._blastit` is not abi3, so a cp314
-# wheel only installs into CPython 3.14, and `PYTHON_VERSION` — read out of the
-# wheel's file name by the driver (`e2e/prebuilt_wheel.py`) — is the base image.
-# Nothing below names a Python version: the copy init is started from is found
-# from the image's own `python3`.
+# The wheel is universal (`py3-none`), so `PYTHON_VERSION` is a *choice*, read out
+# of the environment by the driver (`e2e/prebuilt_wheel.py`) unless a developer
+# wheel (`cp3NN`) names the interpreter it needs. Nothing below writes a Python
+# version down: `_bin` — and the init copy that holds the capabilities — is
+# resolved from the installed package's own path.
 #
 # Exactly one blastit wheel must be in `dist/`. The capability block is the same
 # as in the other rootless Dockerfile; see that file for why the capability goes
-# to a *dedicated copy* of the interpreter (never to the shared one, which every
-# process of the service uid can run).
+# to a *dedicated copy* of the init binary `_bin/blastit` (never to the shared
+# one, which every process of the service uid can run).
 ARG PYTHON_VERSION=3.13
 FROM python:${PYTHON_VERSION}-slim-trixie
 COPY e2e/demo/requirements.txt /app/requirements.txt
@@ -31,15 +31,21 @@ RUN set -e; \
     fi; \
     pip install --no-cache-dir "$wheels"; \
     rm -rf /tmp/dist
+# The dedicated copy of the init binary, with the capabilities (B1). `_bin` is
+# resolved from the installed package — never a site-packages literal, because the
+# interpreter's version moves — and the console script is run once so `_bin/`'s
+# execute bits are restored after `pip` normalised the wheel's modes. `chown`
+# clears a file capability, so nothing re-owns the file after the `setcap`.
 ARG BLASTIT_UID=10000
-RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit
-RUN interpreter="$(readlink -f "$(command -v python3)")" \
-    && cp "$interpreter" "$interpreter-init" \
-    && chown "$BLASTIT_UID:$BLASTIT_UID" "$interpreter-init" \
-    && chmod 0500 "$interpreter-init" \
+RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
+    && blastit --version >/dev/null \
+    && lib="$(python3 -I -c 'import blastit, pathlib; print(pathlib.Path(blastit.__file__).parent / "_bin")')" \
+    && cp "$lib/blastit" "$lib/blastit-init" \
+    && chown "$BLASTIT_UID:$BLASTIT_UID" "$lib/blastit-init" \
+    && chmod 0500 "$lib/blastit-init" \
     && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-         "$interpreter-init" \
-    && getcap "$interpreter-init" && getcap "$interpreter" || true
+         "$lib/blastit-init" \
+    && getcap "$lib/blastit-init" && getcap "$lib/blastit"
 COPY e2e/demo /app
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
@@ -50,8 +56,8 @@ ENV PYTHONUNBUFFERED=1 \
     BLASTIT_MANIFEST=/app/Blastfile \
     PORT=8080
 EXPOSE 8080
-# The *copy* holds the capabilities; the shared interpreter stays
-# capability-free (B1). Its name carries the image's Python version, so it is
-# resolved here rather than written down (the compose service, which overrides
-# this, resolves it the same way).
-CMD exec "$(readlink -f "$(command -v python3)")-init" -m blastit
+# The *copy* holds the capabilities; the shared `_bin/blastit` stays
+# capability-free (B1). Both are resolved from the installed package here rather
+# than written down (the compose service, which overrides this, resolves them the
+# same way).
+CMD ["sh", "-c", "lib=$(python3 -I -c 'import blastit, pathlib; print(pathlib.Path(blastit.__file__).parent / \"_bin\")'); export BLASTIT_EXEC=\"$lib/blastit\"; exec \"$lib/blastit-init\""]

@@ -513,6 +513,48 @@ fn php_shim() -> Option<PathBuf> {
         })
 }
 
+/// The boot's own PHP search, under exactly the environment the boot sees.
+///
+/// `dev_command()` clears the environment and forwards only `LD_LIBRARY_PATH`,
+/// `HOME` and `TMPDIR` — never `BLASTIT_LIBPHP` — so this helper passes no
+/// `libphp` either. Forwarding one would let the leg report a runtime the cleared
+/// child never finds: a spurious panic, or a `runtime.libphp` that is not the
+/// library serving. What the boot then walks are `PhpSearch`'s own defaults.
+#[cfg(feature = "php")]
+fn php_search()
+-> Result<blastit_view_php::discovery::PhpRuntime, blastit_view_php::discovery::PhpRefusal> {
+    use blastit_view_php::discovery::{PhpSearch, PhpShimScope, discover_php};
+
+    let search = PhpSearch::new(None, Some(php_shim_dir()), PhpShimScope::Development);
+    discover_php(&search)
+}
+
+/// The `libphp` + shim pair this host can serve PHP with, or `None`.
+///
+/// The boot's own gate (`discover_php`), not a `target/php-sapi` directory
+/// probe: a runner can mount or cache the shim while the host has no NTS
+/// `libphp` the shim matches, and the boot then refuses in PHP's terms.
+#[cfg(feature = "php")]
+fn usable_php_runtime() -> Option<blastit_view_php::discovery::PhpRuntime> {
+    php_search().ok()
+}
+
+/// The sentence the boot prints when its PHP search finds nothing (`ADR-0010`
+/// §4.1), derived from the refusal the boot itself would get.
+///
+/// The fixture is `view app regex '.*'` with `entrypoint php
+/// "public/index.php"`, which is what `first_php_route` hands
+/// `php_refusal_message`; the assertion is on the whole sentence, so an
+/// unrelated failure (a manifest error, another refusal's sentence) cannot pass
+/// as "refused in PHP's terms".
+#[cfg(feature = "php")]
+fn php_refusal_sentence() -> String {
+    use blastit_view_php::discovery::php_refusal_message;
+
+    let refusal = php_search().expect_err("a PHP refusal to name");
+    php_refusal_message("app", "public/index.php", &refusal)
+}
+
 #[cfg(feature = "php")]
 #[test]
 fn a_php_only_boot_never_opens_libpython() {
@@ -544,29 +586,50 @@ fn a_php_only_boot_never_opens_libpython() {
             "a PHP-only boot named {banned}: {log}"
         );
     }
-    match (php_shim(), answer) {
-        (Some(shim), Ok(answer)) => {
+    let shim = php_shim();
+    let runtime = usable_php_runtime();
+    match answer {
+        Ok(answer) => {
+            // A boot that *answered* is serving: a 500 or a 404 from a boot that
+            // did come up is a failure, not a quiet pass on `log.contains("php")`
+            // (every PHP boot log names PHP).
             assert!(
                 answer.starts_with("HTTP/1.1 200") || answer.starts_with("HTTP/1.0 200"),
-                "the PHP worker must serve 200:\n{answer}"
+                "the PHP worker must serve 200:\n{answer}\n{log}"
             );
             assert!(answer.contains("php served this"), "{answer}");
             println!(
-                "php: 200 via {} without opening {}",
-                shim.display(),
-                prefix.display()
+                "php: 200 without opening {} (shim {}, libphp {})",
+                prefix.display(),
+                shim.as_ref()
+                    .map_or_else(|| "none".to_owned(), |path| path.display().to_string()),
+                runtime
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), |rt| rt.libphp.display().to_string()),
             );
         }
-        (None, _) => {
-            // No PHP runtime on this host: the documented refusal is this leg's
-            // outcome, and it must still be about PHP only.
-            assert!(
-                log.contains("php") || log.contains("PHP"),
-                "a PHP-only boot must refuse in PHP's terms: {log}"
-            );
-            println!("php: no `make php-sapi` artifact here; refused in PHP's terms");
-        }
-        (Some(_), Err(_)) => panic!("a PHP boot with a shim must serve: {log}"),
+        Err(_) => match (shim, runtime) {
+            // Both halves are here and the boot still failed: a real failure,
+            // never a quiet pass.
+            (Some(_), Some(_)) => {
+                panic!("a PHP boot with a shim and a usable libphp must serve: {log}")
+            }
+            (shim, _) => {
+                let expected = php_refusal_sentence();
+                assert!(
+                    log.contains(&expected),
+                    "a PHP-only boot must print the PHP refusal ({expected}): {log}"
+                );
+                println!(
+                    "php: {}; refused in PHP's terms",
+                    if shim.is_some() {
+                        "no usable host libphp beside the shim"
+                    } else {
+                        "no `make php-sapi` artifact here"
+                    }
+                );
+            }
+        },
     }
 }
 

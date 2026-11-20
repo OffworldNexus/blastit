@@ -107,7 +107,22 @@ impl Drop for Project {
 /// fixture scripts need `/bin/sh`, which their `#!` line names) and a token the
 /// scripts echo to prove the environment crosses the `execve`.
 fn run_in(dir: &Path, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_blastit"));
+    run_with(
+        Path::new(env!("CARGO_BIN_EXE_blastit")),
+        dir,
+        arguments,
+        environment,
+    )
+}
+
+/// The same, from `binary`.
+///
+/// A fixture that hard-links the running image has to `execve` the file it
+/// linked, not the one cargo built elsewhere: `handoff` compares the candidate's
+/// device and inode with `/proc/self/exe`'s, so the copy the fixture links is the
+/// one that must run.
+fn run_with(binary: &Path, dir: &Path, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(binary);
     command
         .args(arguments)
         .current_dir(dir)
@@ -256,12 +271,38 @@ fn an_activated_venv_replaces_the_project_venv() {
 #[test]
 fn a_candidate_that_is_this_image_does_not_hand_off() {
     let project = Project::new("self");
+    // The candidate has to be a hard link to the image this test runs: `handoff`
+    // compares the candidate's device and inode with `/proc/self/exe`'s, so only
+    // the same inode makes the promise honest.
+    //
+    // The direct link is tried first, because a fresh copy must never be
+    // `execve`d under the parallel harness: `Command::output()` forks the whole
+    // process, and a fork taken while a write descriptor on that copy is open (or
+    // a descendant that forks without `exec`, as `blastit` itself does) leaves the
+    // inode busy — `execve` then returns `ETXTBSY`. A hard link cannot cross
+    // filesystems, which is the `sudo`/container case (fixture under `$HOME`,
+    // `target/` elsewhere); that suite runs with `--test-threads=1`, so the copy
+    // is the `EXDEV` fallback only.
+    let real = Path::new(env!("CARGO_BIN_EXE_blastit"));
+    let image = project.path("global/blastit");
     let link = project.path(".venv/bin/blastit");
     fs::create_dir_all(link.parent().expect("the shim's directory")).expect("create .venv/bin");
-    if let Err(err) = fs::hard_link(env!("CARGO_BIN_EXE_blastit"), &link) {
-        panic!("cannot hard-link the binary for the self-handoff fixture: {err}");
-    }
-    let output = project.run(&["dev"], &[]);
+    let runnable = match fs::hard_link(real, &link) {
+        Ok(()) => real.to_path_buf(),
+        Err(err) if err.kind() == std::io::ErrorKind::CrossesDevices => {
+            fs::create_dir_all(image.parent().expect("the image's directory"))
+                .expect("create global");
+            fs::copy(real, &image).expect("copy the running image");
+            fs::hard_link(&image, &link).unwrap_or_else(|err| {
+                panic!("cannot hard-link the copied image for the self-handoff fixture: {err}")
+            });
+            image
+        }
+        Err(err) => {
+            panic!("cannot hard-link the running image for the self-handoff fixture: {err}")
+        }
+    };
+    let output = run_with(&runnable, &project.dir, &["dev"], &[]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("local handoff") && !stderr.contains("skipping"),

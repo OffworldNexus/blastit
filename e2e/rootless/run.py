@@ -68,8 +68,9 @@ UID_BASE = 20_000
 APP_UID = 10_000
 WORKER_UID = 10_001
 # The capabilities D6 asks for, in the order the kernel numbers them. The
-# image's `setcap` line, the compose `cap_add` list and this list are one set,
-# and the log check fails when blastit reports anything else.
+# image's `setcap` line (on `_bin/blastit-init`), the compose `cap_add` list and
+# this list are one set, and the log check fails when blastit reports anything
+# else.
 CAPABILITIES = [
     "cap_chown",
     "cap_dac_override",
@@ -79,6 +80,26 @@ CAPABILITIES = [
     "cap_setuid",
     "cap_setpcap",
 ]
+#: Shell that names the installed `_bin` from the package itself. Never a
+#: site-packages literal: the interpreter's version moves with the image, and the
+#: wheel keeps `blastit`, `blastit-dbproxy` and the shims in this one directory.
+BIN_DIR = ('lib="$(python3 -c \'import blastit, pathlib; '
+           'print(pathlib.Path(blastit.__file__).parent / "_bin")\')"')
+#: The files whose file capabilities are the whole of B1: the dedicated copy init
+#: is started from must carry them, and every shared file the service uid can run
+#: must carry none. `getcap` prints nothing for a symlink (it is not a regular
+#: file) and still exits 0, so each path is resolved first and its line carries
+#: the inode: an empty line, an unresolved path or a missing file is a FAIL, never
+#: a pass.
+CAPABILITIES_PROBE = (f'{BIN_DIR}; '
+                      'probe() { p=$(readlink -f "$1"); '
+                      'echo "$2: $(stat -c %i "$p" 2>/dev/null || echo MISSING) '
+                      '$p $(getcap "$p" 2>/dev/null)"; }; '
+                      'getcap "$lib/blastit-init"; '
+                      'probe "$lib/blastit" shared; '
+                      'probe "$lib/blastit-dbproxy" dbproxy; '
+                      'for shim in "$lib"/libblastit_*.so; do probe "$shim" shim; done; '
+                      'probe "$(command -v python3)" python')
 # E1: the preset the compose file gives the app, and the settings it supplies —
 # the whole trust decision for this deployment. The driver asserts that the boot
 # event reports exactly these, and that no `BLASTIT_*` variable overrode one.
@@ -424,8 +445,9 @@ def check_container(env, project, ssh=None):
       even in its bounding set, and has `no_new_privs` set;
     * the three component uids are among them;
     * a plain `python3`, and a second `manage.py`, run as the service uid hold
-      nothing and cannot become root: the *shared* interpreter has no file
-      capabilities, only the dedicated copy init starts from does (B1).
+      nothing and cannot become root: the *shared* binary (`_bin/blastit`) has
+      no file capabilities, only the dedicated copy init starts from
+      (`_bin/blastit-init`) does (B1).
 
     Processes outside the layout — root, the service uid, and this check's own
     shell — are not asserted on: the service uid's own processes are what the two
@@ -504,18 +526,21 @@ def check_container(env, project, ssh=None):
     # The capable copy is init's alone: mode `0500`, owned by the uid init runs
     # as, runnable by that uid, refused to every other one (B1, D6 — the uid is
     # dedicated precisely because it *can* run it).
-    facts = in_container(
-        'stat -c "mode=%a uid=%u" "$(readlink -f "$(command -v python3)")-init"')
+    facts = in_container(f'{BIN_DIR}; stat -c "mode=%a uid=%u" "$lib/blastit-init"')
     ok &= check(f"mode=500 uid={APP_UID}" in facts,
                 f"the capable copy is mode 0500 and owned by init's uid ({facts.strip()})")
+    # The positive signal as well as the absence of a denial: `rc=0` and the
+    # copy's own version line. `as_uid` keeps stdout only and the status used to
+    # be swallowed, so `not found`, a traceback or an empty `$lib` could pass.
     runnable = as_uid(APP_UID,
-                      'copy="$(readlink -f "$(command -v python3)")-init"; "$copy" -V 2>&1 || true')
-    ok &= check("Permission denied" not in runnable,
+                      f'{BIN_DIR}; "$lib/blastit-init" --version 2>&1; echo "rc=$?"')
+    started = next((line for line in runnable.splitlines() if line.startswith("blastit")), "")
+    ok &= check("rc=0" in runnable and "Permission denied" not in runnable and bool(started),
                 f"init's own uid can run it — which is why nothing else may use that uid "
                 f"({runnable.strip()})")
     refused = as_uid(WORKER_UID,
-                     'copy="$(readlink -f "$(command -v python3)")-init"; "$copy" -V 2>&1 || true')
-    ok &= check("Permission denied" in refused,
+                     f'{BIN_DIR}; "$lib/blastit-init" --version 2>&1; echo "rc=$?"')
+    ok &= check("Permission denied" in refused and "rc=0" not in refused,
                 f"the worker's uid cannot run it ({refused.strip()})")
     return 0 if ok else 1
 
@@ -531,8 +556,7 @@ def caps_and_limits(env, ssh=None):
     if ssh is None:
         caps = subprocess.run(
             ["docker", "compose", "-f", COMPOSE, "exec", "-T", "app", "sh", "-c",
-             'getcap "$(readlink -f "$(command -v python3)")-init"; '
-             'echo "shared: $(getcap "$(readlink -f "$(command -v python3)")")"'],
+             CAPABILITIES_PROBE],
             env=env, text=True, capture_output=True)
         limits = subprocess.run(
             ["docker", "inspect", "-f", "User={{.Config.User}} CapDrop={{.HostConfig.CapDrop}} "
@@ -543,21 +567,42 @@ def caps_and_limits(env, ssh=None):
     else:
         caps = compose_remote(
             ssh, env, "exec", "-T", "app", "sh", "-c",
-            shlex.quote('getcap "$(readlink -f "$(command -v python3)")-init"; '
-                        'echo "shared: $(getcap "$(readlink -f "$(command -v python3)")")"'))
+            shlex.quote(CAPABILITIES_PROBE))
         limits = ssh_run(ssh, f"cd /root/blastit && docker compose --env-file {ENV_FILE} "
                               "-f e2e/rootless/compose.yml ps -q app | "
                               "xargs docker inspect -f 'User={{.Config.User}} "
                               "CapDrop={{.HostConfig.CapDrop}} CapAdd={{.HostConfig.CapAdd}}'")
-    capabilities = caps.stdout.strip()
-    log(f"the dedicated interpreter's file capabilities: {capabilities}")
-    ok = "cap_setuid" in capabilities and "cap_setpcap" in capabilities
-    # B1: the *shared* interpreter must have none — every process of that uid can
-    # run it, and the capabilities would turn any of them into init.
-    shared = next((line for line in caps.stdout.splitlines() if line.startswith("shared:")), "")
-    ok &= "cap_" not in shared
+    init = next((line for line in caps.stdout.splitlines() if "_bin/blastit-init" in line), "")
+    log(f"the dedicated init binary's file capabilities: {init or '(none)'}")
+    ok = "cap_setuid" in init and "cap_setpcap" in init
+    # B1: every shared file the service uid can run must carry none — the
+    # capabilities would turn any of them into init. Each is resolved first:
+    # `getcap` on a symlink prints nothing and still exits 0, so a clean line has
+    # to *name* the resolved path and its inode as well as carry no `cap_`.
+    def clean(label):
+        found = [text for text in caps.stdout.splitlines() if text.startswith(f"{label}: ")]
+        good = []
+        for text in found:
+            fields = text.split()
+            good.append(len(fields) >= 3 and fields[1].isdigit()
+                        and fields[2].startswith("/") and "cap_" not in text)
+        return bool(found) and all(good)
+
+    ok &= clean("shared") and clean("dbproxy") and clean("shim") and clean("python")
+    for text in caps.stdout.splitlines():
+        if text.startswith(("shared: ", "dbproxy: ", "shim: ", "python: ")):
+            log(f"  {text}")
     if not ok:
-        print(f"  FAIL the capabilities are on the wrong file:\n{caps.stdout}{caps.stderr}")
+        print("  FAIL the capabilities are on the wrong file: expected\n"
+              "         $lib/blastit-init: cap_chown,cap_dac_override,cap_fowner,"
+              "cap_kill,cap_setgid,cap_setuid,cap_setpcap\n"
+              "         none on $lib/blastit, $lib/blastit-dbproxy, "
+              "$lib/libblastit_*.so or python3\n"
+              "       fix: sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,"
+              "cap_setgid,cap_setuid,cap_setpcap+ep' \"$lib/blastit-init\"\n"
+              "            sudo setcap -r \"$lib/blastit\" \"$lib/blastit-dbproxy\" "
+              "\"$(readlink -f \"$(command -v python3)\")\"\n"
+              f"       saw:\n{caps.stdout}{caps.stderr}")
     log(f"the app container's limits: {limits.stdout.strip()}")
     return 0 if ok else 1
 
@@ -577,13 +622,14 @@ def check_negative_boot(image, uid=APP_UID):
 
     The positive path is the whole run above; this is the refusal the same image
     must give when the deployment drops everything (`--cap-drop ALL`, as a
-    platform with a stricter policy would). It starts the *shared* interpreter,
-    which is the capability-free one: the image's default command is the
-    dedicated copy, and with an empty bounding set the kernel refuses to
-    `execve` a file whose capabilities it cannot grant at all ("Operation not
-    permitted") — a deployment error, but not the sentence an operator has to be
-    told. The shared interpreter is what a container that gave blastit nothing
-    can start, so that is the boot that must speak.
+    platform with a stricter policy would). It starts the *shared* binary
+    (`python3 -m blastit` execs `_bin/blastit`), which is the capability-free
+    one: the image's default command is the dedicated copy, and with an empty
+    bounding set the kernel refuses to `execve` a file whose capabilities it
+    cannot grant at all ("Operation not permitted") — a deployment error, but not
+    the sentence an operator has to be told. The shared binary is what a
+    container that gave blastit nothing can start, so that is the boot that must
+    speak.
 
     The message is asserted as well as the exit code: an exit `1` alone could be
     a traceback, and the point is that the boot *names* the uid and the
@@ -757,9 +803,11 @@ def local(args):
     password = "e2e-" + secrets.token_hex(16)
     project = args.project or "blastit-d6-rootless"
     image = args.image or "blastit-d6-rootless:local"
-    # A prebuilt image installs the wheel this host built, so its base image has
-    # to be the interpreter that wheel targets (the extension is not abi3). The
-    # in-image Dockerfile builds its own wheel on its own interpreter.
+    # A prebuilt image installs the wheel this host built. The release wheel is
+    # universal (`py3-none`), so its base image is a *choice* the driver makes
+    # (`prebuilt_wheel.version()`, `E2E_PYTHON_VERSION`, default 3.14); only a
+    # developer `cp3NN` wheel pins the interpreter. The in-image Dockerfile
+    # builds its own wheel on its own interpreter.
     version = None
     if "prebuilt" in args.dockerfile:
         try:

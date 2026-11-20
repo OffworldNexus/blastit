@@ -8,12 +8,13 @@
 # the application's dependencies are importable, and the credentials-holding role
 # runs from the Python-free binary the wheel ships.
 #
-#   WHEEL=dist/blastit-0.1.0-cp314-cp314-manylinux_2_34_x86_64.whl e2e/venv-smoke.sh
+#   WHEEL=dist/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl e2e/venv-smoke.sh
 #
-# `scripts/build-wheel.sh` (against CPython 3.14) builds that wheel. The check is
-# Docker-only because the layout it has to prove — a venv created by uv from a
-# python-build-standalone interpreter, with the server started as root through
-# `sudo` — is exactly the one the platform runs.
+# `scripts/build-wheel.sh` builds that wheel (universal `py3-none`, with one
+# CPython shim per supported minor inside it). The check is Docker-only because
+# the layout it has to prove — a venv created by uv from a python-build-standalone
+# interpreter, with the server started as root through `sudo` — is exactly the one
+# the platform runs.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -24,12 +25,15 @@ python=${PYTHON:-/opt/python/cpython-3.14-linux-x86_64-gnu/bin/python3.14}
 
 wheel=${WHEEL:-}
 if [[ -z $wheel ]]; then
-    # Default to the wheel this repository just built, whichever patch version
-    # of CPython 3.14 it was built for.
-    wheel=$(ls "$root"/dist/blastit-*cp314*.whl 2>/dev/null | tail -1 || true)
+    # Default to the universal wheel this repository just built, whatever
+    # platform tag it carries; a developer wheel (`cp3NN`) is the fallback.
+    wheel=$(ls "$root"/dist/blastit-*-py3-none-*.whl 2>/dev/null | tail -1 || true)
+    if [[ -z $wheel ]]; then
+        wheel=$(ls "$root"/dist/blastit-*.whl 2>/dev/null | tail -1 || true)
+    fi
 fi
 if [[ -z $wheel || ! -f $wheel ]]; then
-    echo "no wheel: build one with scripts/build-wheel.sh (CPython 3.14), or set WHEEL=" >&2
+    echo "no wheel in $root/dist matching blastit-*-py3-none-*.whl (or blastit-*.whl): build one with scripts/build-wheel.sh, or set WHEEL=<path>" >&2
     exit 1
 fi
 wheel=$(cd "$(dirname "$wheel")" && pwd)/$(basename "$wheel")

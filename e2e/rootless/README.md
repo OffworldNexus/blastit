@@ -29,9 +29,9 @@ $ uv run e2e/rootless/run.py --droplet     # a DigitalOcean Droplet in ams3
 ```
 
 Both modes build `e2e/rootless/Dockerfile` (the wheel install, plus `setcap` on
-a dedicated copy of the interpreter), run `e2e/rootless/compose.yml`, drive
-`e2e/scenario.py` over HTTP and check `e2e/check_logs.py` plus D6's own
-assertions:
+a dedicated copy of the init binary the wheel ships — `_bin/blastit` →
+`_bin/blastit-init`), run `e2e/rootless/compose.yml`, drive `e2e/scenario.py`
+over HTTP and check `e2e/check_logs.py` plus D6's own assertions:
 
 * on the event stream: the `boot` event of stage 0 **and** of the preload phase
   say `"privilege": "capabilities"`, list the capabilities init holds, and say
@@ -42,13 +42,15 @@ assertions:
 * in `/proc` of the container: **every** process running under a layout uid —
   http (20001), the scheduler (20002), dbproxy (20003) and every view — holds
   nothing, bounding set included, and has `no_new_privs` set;
-* on the capable file itself: it is mode `0500`, owned by the uid init runs as,
-  that uid can run it, and **every other uid is refused by the kernel**
-  (`EACCES`) — the worker and the migrations run as a uid of their own in the
-  compose file, and that is the uid the check uses;
+* on the capable file itself: `_bin/blastit-init` is mode `0500`, owned by the
+  uid init runs as, that uid can run it, and **every other uid is refused by the
+  kernel** (`EACCES`) — the worker and the migrations run as a uid of their own
+  in the compose file, and that is the uid the check uses;
+* nothing else carries a capability: `getcap` finds none on the shared
+  `_bin/blastit` and none on the `python3` a project runs;
 * as a worker's uid: a plain `python3`, and a `manage.py`, hold nothing and
-  cannot `setuid(0)`: the *shared* interpreter grants nothing, and the uid that
-  can run the copy is a dedicated one (B1);
+  cannot `setuid(0)`: the *shared* binary grants nothing, and the uid that can
+  run the copy is a dedicated one (B1);
 * **the refusal**: the same image started with `--cap-drop ALL` as the service
   uid — neither root nor a single capability — exits `1` and prints the
   sentence `docs/troubleshooting.md` sends that deployment to: `init runs as
@@ -56,8 +58,8 @@ assertions:
   cap_setgid, cap_setuid`. A deployment that asked for nothing gets a refusal
   that names what it did not give, not a traceback. (The image's default
   command is the capable copy, which the kernel will not even `execve` with an
-  empty bounding set; the check starts the shared interpreter, the one a
-  container that granted nothing can run.)
+  empty bounding set; the check starts the shared binary `_bin/blastit`, the
+  one a container that granted nothing can run.)
 * **the ordering**: the *same* image started as **root** in an empty directory
   exits `1`, and its stdout's `app.output` names `./Blastfile: no such file or
   directory` — and never `BLASTIT_APP`. With the file present but naming no
@@ -131,10 +133,11 @@ the names and the recipe.
 Two mechanisms exist; this test uses the first, and the second is the spelling
 for a platform that sets `no_new_privs`:
 
-* **File capabilities on a dedicated copy of the file init starts from**
-  (`setcap`). In a wheel install that file is the **interpreter**: `blastit` is a
-  console script whose shebang names the image's Python. The *shared* interpreter
-  never carries them — see below.
+* **File capabilities on a dedicated copy of the init binary** (`setcap`). In a
+  wheel install `blastit` is the binary the package keeps at
+  `blastit/_bin/blastit`; the copy init is started from is
+  `blastit/_bin/blastit-init`, beside the shims and `blastit-dbproxy`. The
+  *shared* `_bin/blastit` never carries them — see below.
 * **Ambient capabilities from a launcher** — `setpriv --reuid … --inh-caps +…
   --ambient-caps +…` from an entrypoint that starts as root. This is the way to
   do it on a platform that sets `no_new_privs` on the container (App Platform,
@@ -156,24 +159,30 @@ run it into init: `CAP_SETUID`, `CAP_SETPCAP`, `setuid(0)`. So the capability
 never goes on a file anybody else runs:
 
 ```
-/usr/local/bin/python3.13        root:root  0755   the interpreter a project's `python` is
-/usr/local/bin/python3.13-init   10000:10000 0500  the copy init is started from, with
-                                                  cap_chown,cap_dac_override,cap_fowner,
-                                                  cap_kill,cap_setgid,cap_setuid,cap_setpcap
+…/site-packages/blastit/_bin/blastit        root:root    0755  the shared binary: a console
+                                                               script execs it, and
+                                                               `BLASTIT_EXEC` names it
+…/site-packages/blastit/_bin/blastit-init   10000:10000  0500  the copy init is started from,
+                                                               with cap_chown, cap_dac_override,
+                                                               cap_fowner, cap_kill, cap_setgid,
+                                                               cap_setuid, cap_setpcap
 ```
 
-* the copy sits **next to** the original, because CPython finds its stdlib
-  (`sys.prefix`) and the venv's `site-packages` from the executable's own path;
+* the copy sits **beside** the shims and `blastit-dbproxy` in `_bin/` — the
+  directory the installed package resolves to — so `entrypoint php` still finds
+  its shims, and the copy is the only capable file;
 * `0500`, owned by the uid init runs as — and **that uid is dedicated**: it is
   the uid that can run the copy, so a worker, a migration or an operator's shell
   must use another one. The compose file gives them `E2E_WORKER_UID` (10001 by
   default), and the e2e checks that uid is refused the copy (`EACCES`) and that
-  it holds nothing when it runs the *shared* interpreter;
-* the boot refuses, with the recipe, a deployment where **any name** of the
-  shared interpreter carries the capabilities (`python`, `python3`, `python3.13`
-  and `sys._base_executable` are all checked, and compared with init's copy by
-  device and inode rather than by name), and refuses a wheel that cannot name the
-  capability-free interpreter at all;
+  it holds nothing when it runs the *shared* binary;
+* the boot refuses, with the recipe, a deployment where `_bin/blastit` — or any
+  name that resolves to init's own file — carries the capabilities (compared with
+  init's copy by device and inode rather than by name), and refuses a wheel that
+  cannot name the capability-free binary at all;
+* `BLASTIT_EXEC` names that shared binary: a child that has emptied its bounding
+  set cannot `execve` a file with file capabilities at all, and it is what
+  `--role=dbproxy` runs;
 * a child cannot use the copy even if it could run it: its bounding set is empty
   and it sets `no_new_privs`, and the kernel refuses such an `execve` outright
   (`EPERM`, "insufficient to execute correctly");
@@ -181,6 +190,10 @@ never goes on a file anybody else runs:
   neither group nor others, in a directory that is not either: a uid that could
   replace that binary would decide what dbproxy — the process holding the real
   credentials — runs next. The boot refuses anything else, `/tmp` included.
+* a reinstall replaces the shared binary and **leaves the capable copy behind**:
+  `pip install --force-reinstall blastit` writes a new `_bin/blastit` while the
+  old `_bin/blastit-init` keeps its mode, owner and `setcap`, so the copy (and
+  its `setcap`) has to be recreated.
 
 **Standalone install.** The same principle one level up: `setcap` on the binary
 itself breaks `--role=dbproxy`, which re-executes `/proc/self/exe` from a child
@@ -188,19 +201,25 @@ whose bounding set is empty. A rootless standalone deployment therefore keeps tw
 copies and names the capability-free one:
 
 ```console
-$ cp /usr/local/bin/blastit /usr/local/bin/blastit-init
-$ chown 10000:10000 /usr/local/bin/blastit-init && chmod 0500 /usr/local/bin/blastit-init
+$ lib=/usr/local/share/blastit/lib
+$ cp "$lib/blastit" "$lib/blastit-init"
+$ chown 10000:10000 "$lib/blastit-init" && chmod 0500 "$lib/blastit-init"
 $ sudo setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-      /usr/local/bin/blastit-init
-$ BLASTIT_EXEC=/usr/local/bin/blastit /usr/local/bin/blastit-init
+      "$lib/blastit-init"
+$ BLASTIT_EXEC="$lib/blastit" "$lib/blastit-init"
 ```
+
+The copy has to sit *beside* the package, not in `bin/`: the boot finds the
+package as `<exe_dir>/../python`, and `docs/install.sh` (default prefix
+`/usr/local`) puts the binary in `share/blastit/lib` with the package in
+`share/blastit/python`, so a copy in `bin/` resolves `<prefix>/python` and finds
+nothing (`bundled_python()` fails the boot).
 
 Two more consequences worth knowing when deploying this:
 
 * a child that has cleared its **bounding** set cannot `execve` a file with file
-  capabilities at all, which is why the wheel's separate `blastit-dbproxy`
-  binary — no file capabilities — is what the capability-holding wheel install
-  `execve`s for that role;
+  capabilities at all, which is why `BLASTIT_EXEC` names the capability-free
+  `_bin/blastit` for the role it re-execs;
 * `/run/blastit` must be writable by the uid init runs as. `/run` belongs to
   root, so the compose file mounts a `tmpfs` there owned by that uid:
   `tmpfs: ["/run/blastit:mode=0700,uid=10000,gid=10000"]`.
@@ -247,11 +266,13 @@ Two conservative rules, both about what the API does not say:
 ## In CI
 
 `e2e/rootless/Dockerfile.prebuilt` installs a wheel CI has already built, so a
-job needs no Rust toolchain. Its base image is the interpreter that wheel
-targets — the driver reads the tag out of the file name — so a job that pins
-3.13 for the wheel builds on `python:3.13`. The proposed job (for the
-orchestrator, since `.github/` is out of scope for this step) is the D6 analogue
-of `e2e`:
+job needs no Rust toolchain. The release wheel is universal (`py3-none`): it runs
+on any supported CPython, so the base image is a **choice**, not something read
+out of the file name — `E2E_PYTHON_VERSION` (`PYTHON_VERSION` for the compose
+build) sets it, defaulting to `3.14` per `e2e/prebuilt_wheel.py`. Only a developer
+wheel (`cp3NN`) pins the interpreter, and only then does the tag decide the
+image. The proposed job (for the orchestrator, since `.github/` is out of scope
+for this step) is the D6 analogue of `e2e`:
 
 ```yaml
   rootless:

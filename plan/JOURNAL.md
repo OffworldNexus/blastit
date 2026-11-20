@@ -4031,3 +4031,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T07:23 [MB.46] (lead) status active -> done
 - 2026-11-20T07:23 [MB.46] (lead) REVIEW FIX (review-arch+review-ux, both changes-requested): (1) BLOCKER archive README advertised non-existent 'blastit serve' -> 'blastit [--preset NAME]'; (2)
 - 2026-11-20T07:23 [MB.46] (lead) commit c25e751
+- 2026-11-20T07:49 [MB.47] (conductor) created (task) Align rootless e2e, ci.yml py-sapi/wheel shims, venv-smoke py3-none glob, root-safe critical tests & standalone archive Python shims
+- 2026-11-20T07:50 [MB.47] (planner) edited fields
+- 2026-11-20T07:50 [MB.47.1] (planner) created (task) Rootless Docker e2e blastit-init alignment, venv-smoke py3-none glob & root-safe critical tests
+- 2026-11-20T07:50 [MB.47.2] (planner) created (task) CI py-sapi shims & root provenance, wheel --require-shims, standalone .tar.gz CPython shims
+- 2026-11-20T07:50 [MB.47] (planner) edited fields
+- 2026-11-20T07:50 [MB.47.1] (lead) status ready -> active
+- 2026-11-20T07:50 [MB.47.1] (lead) attempt 1/3 started
+- 2026-11-20T07:50 [MB.47.1] (lead) base 9066d280ecb80f98b14c898895dffb66d1273bcd
+- 2026-11-20T07:59 [MB.47.1] (lead) status active -> review
+- 2026-11-20T08:01 [MB.47.1] (lead) REVIEW FIX (in scope, e2e/**): (a) rootless/README.md standalone example copies blastit-init into /usr/local/bin, but check.rs resolves the package as <exe_dir>
+- 2026-11-20T08:01 [MB.47] (lead) OUT OF SCOPE for every MB.47 slice (docs/** not in paths) — needs a docs node before the 0.2.0 deploy guide ships: docs/deploy/compose-traefik.md §4 uses lib=/u
+- 2026-11-20T08:02 [MB.47.1] (lead) REVIEW ROUND 2 (review-arch, all verified by lead): [BLOCKER] getcap on symlink command -v python3 prints nothing/rc=0 so 'cap_ not in python' can never fail (r
+- 2026-11-20T08:02 [MB.47] (lead) TWO OUT-OF-SCOPE FOLLOW-UPS for a crates/blastit node (host.rs not in any MB.47 slice's paths): (1) Host::binary() should name <dir of /proc/self/exe>/blastit w
+- 2026-11-20T08:15 [MB.47.1] (lead) status review -> done
