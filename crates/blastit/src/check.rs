@@ -1108,19 +1108,24 @@ fn path_python() -> Option<PathBuf> {
     None
 }
 
-/// `<exe_dir>/../python`, or the package root three levels up, when it holds the
-/// staged `blastit` gate (`MB.40.8`, `MB.42.2.2.2`, `MB.42.11`).
+/// `<exe_dir>/../python`, or the wheel root two levels up, when it holds the
+/// staged `blastit` gate (`MB.40.8`, `MB.42.2.2.2`, `MB.42.11`, `MB.42.3.3`).
 ///
 /// Two layouts, one marker pair. `make install` puts the binary at
 /// `<prefix>/share/blastit/lib/blastit` and the package at
 /// `<prefix>/share/blastit/python/blastit`, so `<exe_dir>/../python` is the
-/// package root. A wheel or the critical tier stages `<dir>/blastit/_bin/blastit`,
-/// whose `<exe_dir>/../../..` is that root instead. Both markers have to be
-/// there — `_check_pytest.py` is the gate `-p` imports and `__main__.py` is the
-/// package's entry point, and every bundle ships both — so a `cargo` build tree
-/// whose `target/<profile>` sits beside the repository's own `python/` can never
-/// be mistaken for one. `_bin` is deliberately not a marker: it is the retired
-/// wheel layout `scripts/check-bundle-layout.sh` refuses, so no bundle has it.
+/// package root. The published `py3-none-*` wheel (`MB.42.3.3`) puts the binary
+/// at `<site-packages>/blastit/_bin/blastit` with the package's own modules
+/// beside it, so `<exe_dir>/../..` is `<site-packages>` — the root that holds
+/// `blastit/`. (`MB.42.11`'s `../../..` resolved one level *above*
+/// `site-packages`, which can never hold the gate: it was a dead fallback, and
+/// `MB.42.3.3` replaced it with the root the repacked wheel actually has.)
+///
+/// Both markers have to be there — `_check_pytest.py` is the gate `-p` imports
+/// and `__main__.py` is the package's entry point, and every bundle ships both —
+/// so a `cargo` build tree whose `target/<profile>` sits beside the repository's
+/// own `python/` can never be mistaken for one. `_bin` is deliberately not a
+/// marker: it is a *directory name*, and the wheel's root is two levels above it.
 fn bundled_python() -> Option<String> {
     let exe = std::env::current_exe().ok()?;
     bundle_root(exe.parent()?)
@@ -1128,7 +1133,7 @@ fn bundled_python() -> Option<String> {
 
 /// The `blastit` package root beside `exe_dir` that carries the staged gate.
 fn bundle_root(exe_dir: &Path) -> Option<String> {
-    let roots = [exe_dir.join("../python"), exe_dir.join("../../..")];
+    let roots = [exe_dir.join("../python"), exe_dir.join("../..")];
     roots
         .into_iter()
         .find(|root| {
@@ -1932,6 +1937,58 @@ view upload regex '/upload/.*' {}
             std::fs::write(repo_package.join(format!("{module}.py")), b"").expect("module");
         }
         assert_eq!(bundle_root(&deps), None);
+    }
+
+    /// The published `py3-none-*` wheel (`MB.42.3.3`): `<site-packages>/blastit/_bin/blastit`
+    /// beside the package's own modules, so `<exe_dir>/../..` is the root the gate
+    /// lives under. This is the layout the dead `../../..` could never match, and the
+    /// one `blastit check` runs in when the CLI was `pip install`ed.
+    #[test]
+    fn a_repacked_wheel_layout_finds_its_gate() {
+        let root = CheckRoot::create().expect("a runtime root");
+        let site = root.path().join("lib/python3.13/site-packages");
+        let package = site.join("blastit");
+        std::fs::create_dir_all(&package).expect("package");
+        for module in [
+            "__init__",
+            "__main__",
+            "_blastit",
+            "_check_pytest",
+            "fold",
+            "logs",
+            "pytest_plugin",
+        ] {
+            std::fs::write(package.join(format!("{module}.py")), b"").expect("module");
+        }
+        let bin = package.join("_bin");
+        std::fs::create_dir_all(&bin).expect("_bin");
+        std::fs::write(bin.join("blastit"), b"#!/bin/sh\n").expect("binary");
+
+        let found = bundle_root(&bin).expect("the wheel root");
+        assert_eq!(
+            std::fs::canonicalize(&found).expect("canonical"),
+            std::fs::canonicalize(&site).expect("canonical site-packages"),
+            "the repacked wheel's gate root is `<site-packages>`, two levels above `_bin`"
+        );
+
+        // Denied twin: a `blastit` package one level **above** `site-packages`
+        // (`lib/python3.13/blastit`) must not shadow the wheel's own — that is the
+        // exact place `MB.42.11`'s third root looked, and it is why that root was
+        // dead rather than merely redundant.
+        let decoy = site.join("../../blastit");
+        std::fs::create_dir_all(&decoy).expect("decoy");
+        for module in ["__main__", "_check_pytest"] {
+            std::fs::write(decoy.join(format!("{module}.py")), b"").expect("module");
+        }
+        assert_eq!(
+            std::fs::canonicalize(bundle_root(&bin).expect("the wheel root")).expect("canonical"),
+            std::fs::canonicalize(&site).expect("canonical site-packages"),
+            "a package above site-packages must not shadow the wheel's own"
+        );
+
+        // Denied twin: a wheel whose gate module is missing is not a gate root.
+        std::fs::remove_file(package.join("_check_pytest.py")).expect("remove");
+        assert_eq!(bundle_root(&bin), None, "a wheel with no staged gate");
     }
 
     #[test]
