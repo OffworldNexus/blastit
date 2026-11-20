@@ -4313,3 +4313,17 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T20:40 [MB.56.3.3] (lead) edited fields
 - 2026-11-20T20:40 [MB.56.3.3] (lead) REVIEW FIX 2 (ux): raw_ingress+ingress_mismatch kinds + ', N proxies' header; docs contradict --learn widening (blastfile.md:566-567 roadmap apology, cli.md:69,
 - 2026-11-20T20:48 [MB.56.3.3] (lead) status active -> done
+- 2026-11-20T20:48 [MB.56.3.4] (lead) status ready -> active
+- 2026-11-20T20:48 [MB.56.3.4] (lead) attempt 1/3 started
+- 2026-11-20T20:48 [MB.56.3.4] (lead) base 026024a59603d0595407c7019233ba888f567e1d
+- 2026-11-20T20:48 [MB.56.3.3] (lead) commit 026024a
+- 2026-11-20T20:56 [MB.56.3.4] (lead) edited fields
+- 2026-11-20T20:56 [MB.56.3.5] (lead) FROM MB.56.3.4: Makefile:203 still runs --test no_python_build -> e2e_prod_refusals; ci.yml root-test exclusion list names critical_dev_and_fail_closed (EXCLUDE
+- 2026-11-20T20:56 [MB.56.3.4] (lead) RESUME: finish run_spawned zombie fix, make fast-check green, RESULT.md. ALSO: a symlinked Blastfile is NOT refused today (metadata() follows links) but the MB.
+- 2026-11-20T21:00 [MB.56.3.4] (lead) edited fields
+- 2026-11-20T21:00 [MB.56.3.4] (lead) REVIEW FIX (ux): document the symlinked-Blastfile production refusal + the dev/check/fmt accept split (blastfile.md, troubleshooting row); document the FIFO 'no
+- 2026-11-20T21:00 [MB.56.3.4] (lead) REVIEW FIX (ux): document the symlinked-Blastfile production refusal and the dev/check/fmt accept split (docs/reference/blastfile.md, docs/troubleshooting.md); 
+- 2026-11-20T21:01 [MB.56.3.4] (lead) edited fields
+- 2026-11-20T21:01 [MB.56.3.4] (lead) REVIEW FIX 2 (arch): REVERT the symlink refusal - a regular file can be swapped too (stage-1 re-read + TOCTOU test is the real barrier) and it rejects the canon
+- 2026-11-20T21:05 [MB.56.3.5] (lead) FROM MB.56.3.4: Makefile:203 + ci.yml root-test exclusion list now point at the consolidated suites - verify; e2e_prod_refusals is 2,2xx LOC (PHP stub/helper ha
+- 2026-11-20T21:07 [MB.56.3.4] (lead) status active -> done

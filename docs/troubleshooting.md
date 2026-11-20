@@ -10,6 +10,7 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `init runs as uid … and is missing cap_…` | production, unprivileged: run `blastit dev` locally, or give the deployment the [capabilities](deploy/anything-else.md#root-or-rootless) |
 | `BLASTIT_SECCOMP=0` | it removes the syscall and egress wall: the boot warns, and both presets abort the boot on it. Keep it at `1` |
 | `./Blastfile: no such file or directory` | there is no `Blastfile` in this directory: `cd` to the project, or set `BLASTIT_MANIFEST` |
+| `the file is not a regular file; Blastfile must be a plain file` | a FIFO, socket or device sits at that path: the boot stats before it opens, so it refuses instead of hanging. Replace it with a regular file, or point `BLASTIT_MANIFEST` at one |
 | `BLASTIT_APP: the WSGI callable … is required` | the file exists but names no callable: write `entrypoint python "module:attribute"`, or set `BLASTIT_APP` |
 | the boot names no usable `libphp` | install the distro's NTS package for 8.3, 8.4, 8.5 or 8.6 (`apt install libphp-embed`, `apk add php84-embed`, `dnf install php-embedded`), or set `BLASTIT_LIBPHP` to the library's absolute path ([PHP install](frameworks/php/index.md#install)) |
 | `libphp` is a ZTS build | the embedded SAPI must be **NTS**: install the distro's `…-embed` package rather than a thread-safe build, which exports no `php_version` for the shim to check |

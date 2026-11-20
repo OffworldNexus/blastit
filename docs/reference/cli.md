@@ -192,7 +192,10 @@ $ blastit --help
 
 There is no `--port` here: the listener is a [setting](settings.md) (`PORT` or
 `BLASTIT_*`), and `blastit --port 8080` exits `2`, naming `--port` and pointing at
-`PORT=<n>`; the `-p` spelling is refused the same way.
+`PORT=<n>`; the `-p` spelling is refused the same way. An unknown `--preset` is
+the same usage error: it exits `2` **before stage 0** and names both presets
+(`digitalocean-paas`, `compose-traefik`), so a typo never becomes an unprivileged
+boot.
 
 Production **fails closed**: without root or the capability set in
 [the settings](settings.md#privileges-and-the-uid-layout), and without seccomp,

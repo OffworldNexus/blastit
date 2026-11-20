@@ -264,19 +264,15 @@ jobs:
       # a deadlock). `--message-format=json` names every test binary; the human
       # build progress still streams on stderr.
       #
-      # Two suites are deliberately not handed to root, both because their
-      # assertion is about an UNPRIVILEGED caller and running them as uid 0 feeds
-      # the test an input it was never written for:
-      # 1. `critical_dev_and_fail_closed::unprivileged_production_has_no_single_uid_fallback`
-      #    spawns the production binary and waits for it to exit 1. Production fails
-      #    closed *because capability detection refuses*, which is only true for an
-      #    unprivileged caller: as uid 0 production legitimately boots and serves, so
-      #    the spawned child never exits, `Command::output()` waits forever, and the
-      #    per-binary timeout below names a "blocked" test that is in fact correct.
-      # 2. `critical_static_cli::a_root_the_caller_cannot_list_is_refused` asserts a
-      #    static `root` the caller cannot list is refused. As uid 0 every directory
-      #    is listable, so the precondition cannot exist and the test fails on a
-      #    correct implementation (`MB.7`, the red `smoke (root)` job on PR #64).
+      # One suite is deliberately not handed to root, because its assertion is
+      # about an UNPRIVILEGED caller and running it as uid 0 feeds the test an
+      # input it was never written for: `critical_static_cli` asserts a static
+      # `root` the caller cannot list is refused, and as uid 0 every directory is
+      # listable, so the precondition cannot exist and the test fails on a correct
+      # implementation (`MB.7`, the red `smoke (root)` job on PR #64). The
+      # production-refusal legs in `e2e_prod_refusals` are written for both callers
+      # (the unprivileged half skips with a printed reason, which `--nocapture`
+      # makes visible), so they run here too.
       # The tests are right and running them as root is an invalid input to them, so
       # this job runs every other binary and the filter below *fails the step* if a
       # listed suite ever disappears (the exclusion would be dead and its coverage
@@ -301,22 +297,11 @@ jobs:
           # above this step). A name here without a reason, or a reason without a
           # name, fails below: an exclusion is a claim that root cannot exercise
           # this assertion, and every claim needs its proof in writing.
-          EXCLUDED = {
-              "critical_dev_and_fail_closed": (
-                  "its assertion is only valid unprivileged: production refuses "
-                  "because capability detection fails, and as root it serves, so "
-                  "the spawned child never exits and the suite blocks"
-              ),
-              "critical_static_cli": (
-                  "its assertion is about an unprivileged caller: it refuses a "
-                  "static root the caller cannot list, and as root every directory "
-                  "is listable, so the precondition cannot exist"
-              ),
-          }
-          # The tripwire that keeps this list from growing silently: adding a
-          # third exclusion must bump this constant in the same commit, which is
-          # what forces the proof, the reason and the comment above the step.
-          EXCLUDED_COUNT = 2
+          EXCLUDED = {}
+          # The tripwire that keeps this list from growing silently: adding an
+          # exclusion must bump this constant in the same commit, which is what
+          # forces the proof, the reason and the comment above the step.
+          EXCLUDED_COUNT = 0
           # cargo names a test binary `<target>-<16 hex metadata hash>`; the stem is
           # the target name. Two targets can share a stem (this crate's lib and bin
           # are both `blastit`), so the stem is not a unique key and the kept list
@@ -449,13 +434,13 @@ jobs:
           ls -l target/debug/libblastit_py3*.so
       # The job's purpose, unchanged: init has to be PID-1's uid (root) to bind
       # the view sockets and drop privileges, so every test binary the build step
-      # kept is run here as uid 0, one target at a time. Two suites are not among
-      # them (see the build step, which fails if either disappears or the list is
-      # widened): `critical_dev_and_fail_closed` waits on a production child that
-      # as root legitimately serves, and `critical_static_cli` refuses a root the
-      # caller cannot list, which as uid 0 cannot exist. Both assert something
-      # about an *unprivileged* caller, so root is an invalid input to them and the
-      # `test` job runs them as the runner.
+      # kept is run here as uid 0, one target at a time. One suite is not among
+      # them (see the build step, which fails if it disappears or the list is
+      # widened): `critical_static_cli` refuses a root the caller cannot list,
+      # which as uid 0 cannot exist, so root is an invalid input to it and the
+      # `test` job runs it as the runner. `e2e_prod_refusals`' unprivileged
+      # capability leg skips with a printed reason here, which `--nocapture` makes
+      # visible in this log.
       # `--nocapture` plus `tee` make the log carry the in-flight
       # `test <name> ...` line as it happens, so a test that blocks is named in
       # the log while it blocks, not inferred afterwards (MA.9 candidate 3), and

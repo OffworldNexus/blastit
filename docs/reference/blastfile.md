@@ -4,6 +4,12 @@
 `./Blastfile`; `BLASTIT_MANIFEST` names another path, and there is no upward
 search. No header, no version, no `=`.
 
+Stage 0 reads and approves the file before it starts anything, and stage 1
+re-reads it from the same path and re-applies every gate before it binds
+(`body raw unvalidated`, the PHP entry pin). A file swapped in between is
+refused, whether the path is a regular file or a symbolic link — a
+Kubernetes ConfigMap mount (`Blastfile -> ..data/Blastfile`) is fine.
+
 ## The whole file
 
 `postgres` is the store keyword, and a `Blastfile` declares one application backend: a Python WSGI

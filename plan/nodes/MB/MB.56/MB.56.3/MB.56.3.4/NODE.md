@@ -2,16 +2,23 @@
 id: MB.56.3.4
 title: "Create e2e_prod_refusals.rs (§6 fail-closed startup, env/WSGI refusals)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.3.3]
-paths: ["crates/blastit/tests/**", "crates/blastit/src/**"]
-attempts: 0
+paths:
+  - "crates/blastit/tests/**"
+  - "crates/blastit/src/**"
+  - Makefile
+  - .github/workflows/ci.yml
+  - docs/reference/blastfile.md
+  - docs/reference/cli.md
+  - docs/troubleshooting.md
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:45"
-updated: "2026-11-20T18:45"
+updated: "2026-11-20T21:07"
 ---
 
 # Goal

@@ -200,7 +200,7 @@ rs-no-python: ## Build + inspect the universal binary: zero libpython, zero libp
 	echo "blastit-view: 0 pyo3 / blastit-php-sapi lines"
 	$(CARGO) test -p blastit-view --locked
 	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --lib
-	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --test no_python_build
+	$(STANDALONE_ENV) $(CARGO) test -p blastit --locked --test e2e_prod_refusals -- --nocapture
 	$(STANDALONE_ENV) $(CARGO) clippy -p blastit --all-targets --locked -- -D warnings
 	$(CARGO) clippy -p blastit-view --lib --locked -- -D warnings
 	@set -e; tree=$$($(CARGO) tree -p blastit --locked -e normal --prefix none); \

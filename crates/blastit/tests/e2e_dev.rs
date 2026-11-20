@@ -2632,6 +2632,263 @@ fn learn_refuses_a_literal_and_never_writes_it() {
     );
 }
 
+/// The app the two `--learn` attribution legs serve: each path runs one fixed
+/// statement over the route's own socket, and the unrouted paths run none (or
+/// the fallback view's `SELECT 1`), so attribution can be read back per route.
+#[cfg(feature = "python")]
+const LEARN_ATTRIBUTION_APP: &str = r#"
+import json
+import os
+import socket
+import struct
+
+
+def _read_exact(sock, count):
+    body = b""
+    while len(body) < count:
+        chunk = sock.recv(count - len(body))
+        if not chunk:
+            raise OSError(0, "the server closed the session")
+        body += chunk
+    return body
+
+
+def _until_ready(sock):
+    while True:
+        tag = _read_exact(sock, 1)
+        length = struct.unpack("!I", _read_exact(sock, 4))[0]
+        body = _read_exact(sock, length - 4)
+        if tag == b"E":
+            raise RuntimeError("pg: " + body.decode("utf-8", "replace"))
+        if tag == b"Z":
+            return
+
+
+def _session():
+    url = os.environ["DATABASE_URL"]
+    query = url.split("?", 1)[1] if "?" in url else ""
+    params = dict(part.split("=", 1) for part in query.split("&") if "=" in part)
+    path = os.path.join(params.get("host", "/proc/self/cwd"),
+                        ".s.PGSQL." + params.get("port", "5432"))
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(10)
+    sock.connect(path)
+    startup = struct.pack("!I", 196608)
+    for name, value in (("user", "blastit"), ("database", "app")):
+        startup += name.encode() + b"\0" + value.encode() + b"\0"
+    startup += b"\0"
+    sock.sendall(struct.pack("!I", len(startup) + 4) + startup)
+    _until_ready(sock)
+    return sock
+
+
+def pg(sql):
+    sock = _session()
+    try:
+        body = sql.encode() + b"\0"
+        sock.sendall(b"Q" + struct.pack("!I", len(body) + 4) + body)
+        _until_ready(sock)
+    finally:
+        sock.close()
+
+
+def application(environ, start_response):
+    path = environ.get("PATH_INFO", "/")
+    try:
+        if path == "/a/1":
+            pg("SELECT 111")
+        elif path == "/b":
+            pg("SELECT 222")
+        elif path == "/a/2":
+            pg("SELECT 333")
+        elif path.startswith("/extra/"):
+            pg("SELECT 1")
+        payload = {"ok": True, "pid": os.getpid()}
+        status = "200 OK"
+    except Exception as err:  # noqa: BLE001 - the body is the diagnosis
+        payload = {"error": str(err)}
+        status = "500 Internal Server Error"
+    body = json.dumps(payload).encode()
+    start_response(status, [("Content-Type", "application/json"),
+                            ("Content-Length", str(len(body)))])
+    return [body]
+"#;
+
+/// The two routes both attribution legs declare, and nothing else.
+#[cfg(feature = "python")]
+const LEARN_ATTRIBUTION_MANIFEST: &str = "\
+app \"app\"
+entrypoint python \"app:application\"
+
+postgres $DATABASE_URL
+
+view a regex '/a/.*' {}
+
+view b \"/b\" {}
+";
+
+/// §4/§5: two declared routes run under one `--learn` pass, and every statement
+/// is attributed to the route whose own view executed it — route `a` keeps both
+/// of its statements after route `b`'s view has spawned, and never receives
+/// `b`'s.
+#[cfg(feature = "python")]
+#[test]
+fn learn_attributes_queries_per_route_across_concurrent_live_views() {
+    use blastit_manifest::{Grant, Manifest, ProxyName};
+    use pg_upstream::PgUpstream;
+
+    let server = PgUpstream::start();
+    let url = format!(
+        "postgresql://real-user:s3cr3t@127.0.0.1:{}/shop?sslmode=disable",
+        server.port()
+    );
+    let project = Project::new("learn-multi-view");
+    let manifest = project.write("Blastfile", LEARN_ATTRIBUTION_MANIFEST);
+    project.write("app.py", LEARN_ATTRIBUTION_APP);
+    let mut dev = learn_dev(&project, &url);
+    let dev = StopOnDrop(&mut dev);
+    dev.0.wait_ready("/a/1");
+
+    // Route `a` spawns its view and runs `SELECT 111`.
+    let a1 = dev.0.json_request("GET", "/a/1");
+    assert_eq!(a1["ok"], true, "{a1}\n{}", dev.0.text());
+    let pid_a = a1["pid"].as_i64().expect("route a view pid");
+    // Route `b` spawns a second view while `a`'s stays live.
+    let b = dev.0.json_request("GET", "/b");
+    assert_eq!(b["ok"], true, "{b}\n{}", dev.0.text());
+    let pid_b = b["pid"].as_i64().expect("route b view pid");
+    assert_ne!(pid_a, pid_b, "each route runs in its own view process");
+    for (name, pid) in [("a", pid_a), ("b", pid_b)] {
+        assert!(
+            std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "route {name}'s view ({pid}) must still be live"
+        );
+    }
+    // Route `a` runs `SELECT 333` on its still-live view: attribution comes from
+    // `a`'s per-route listener and never drifts onto `b`.
+    let a2 = dev.0.json_request("GET", "/a/2");
+    assert_eq!(a2["ok"], true, "{a2}\n{}", dev.0.text());
+    assert_eq!(
+        a2["pid"].as_i64(),
+        Some(pid_a),
+        "the warm view of route a served /a/2 while route b was live"
+    );
+    dev.0.wait_event_mentioning("request", "/a/2");
+
+    let status = dev.0.terminate().expect("the learn run exits");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        dev.0.text(),
+        dev.0.stderr.lock().expect("the stderr buffer").join("\n")
+    );
+
+    let learned = std::fs::read_to_string(&manifest).expect("the manifest is readable");
+    let (parsed, _) =
+        Manifest::parse_blastfile(&learned, 20_000).expect("the learned manifest parses");
+    let proxy = ProxyName::new("db");
+    let queries = |index: usize| -> Vec<String> {
+        parsed
+            .effective_grants(index)
+            .get(&proxy)
+            .and_then(Grant::as_postgresql)
+            .unwrap_or_else(|| panic!("route {index} received no postgresql grant:\n{learned}"))
+            .queries()
+            .to_vec()
+    };
+    assert_eq!(
+        queries(0),
+        vec!["SELECT 111", "SELECT 333"],
+        "route a keeps both of its statements after route b spawned:\n{learned}"
+    );
+    assert_eq!(
+        queries(1),
+        vec!["SELECT 222"],
+        "route b never receives route a's statements:\n{learned}"
+    );
+    assert!(
+        dev.0.text().contains("learn: 0 routes, 3 queries added"),
+        "the summary counted all three queries:\n{}",
+        dev.0.text()
+    );
+}
+
+/// §4/§5: the first declared route keeps **all** its statements when unrouted
+/// requests exist; the fallback view's `SELECT 1` belongs to the inferred view,
+/// never to a declared one.
+#[cfg(feature = "python")]
+#[test]
+fn first_declared_route_keeps_all_queries_when_unrouted_requests_exist() {
+    use blastit_manifest::{Grant, Manifest, ProxyName};
+    use pg_upstream::PgUpstream;
+
+    let server = PgUpstream::start();
+    let url = format!(
+        "postgresql://real-user:s3cr3t@127.0.0.1:{}/shop?sslmode=disable",
+        server.port()
+    );
+    let project = Project::new("learn-first-route");
+    let manifest = project.write("Blastfile", LEARN_ATTRIBUTION_MANIFEST);
+    project.write("app.py", LEARN_ATTRIBUTION_APP);
+    let mut dev = learn_dev(&project, &url);
+    let dev = StopOnDrop(&mut dev);
+    dev.0.wait_ready("/a/1");
+
+    // a → 111, unrouted → no SQL, b → 222, a again → 333, unrouted fallback → 1.
+    for path in ["/a/1", "/zzz/9", "/b", "/a/2", "/extra/7"] {
+        let answer = dev.0.json_request("GET", path);
+        assert_eq!(answer["ok"], true, "{path}: {answer}\n{}", dev.0.text());
+    }
+    for path in ["/zzz/9", "/extra/7", "/a/2"] {
+        dev.0.wait_event_mentioning("request", path);
+    }
+
+    let status = dev.0.terminate().expect("the learn run exits");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        dev.0.text(),
+        dev.0.stderr.lock().expect("the stderr buffer").join("\n")
+    );
+
+    let learned = std::fs::read_to_string(&manifest).expect("the manifest is readable");
+    let (parsed, _) =
+        Manifest::parse_blastfile(&learned, 20_000).expect("the learned manifest parses");
+    let route_names: Vec<&str> = parsed.routes().iter().map(|route| route.name()).collect();
+    assert_eq!(
+        route_names,
+        vec!["a", "b", "extra", "zzz"],
+        "only the truly-unrouted requests contribute inferred routes:\n{learned}"
+    );
+    let proxy = ProxyName::new("db");
+    let queries = |index: usize| -> Vec<String> {
+        parsed
+            .effective_grants(index)
+            .get(&proxy)
+            .and_then(Grant::as_postgresql)
+            .unwrap_or_else(|| panic!("route {index} received no postgresql grant:\n{learned}"))
+            .queries()
+            .to_vec()
+    };
+    assert_eq!(
+        queries(0),
+        vec!["SELECT 111", "SELECT 333"],
+        "the first declared route keeps all of its statements, and none of the fallback's:\n{learned}"
+    );
+    assert_eq!(
+        queries(1),
+        vec!["SELECT 222"],
+        "route b keeps its exact statement:\n{learned}"
+    );
+    assert!(
+        dev.0.text().contains("learn: 2 routes, 3 queries added"),
+        "the summary reports two inferred routes and all three routed queries:\n{}",
+        dev.0.text()
+    );
+}
+
 /// §4: loopback by default — a non-loopback `--host` is refused with the variable
 /// to set, and with it the boot serves and says it is exposed.
 #[cfg(feature = "static")]

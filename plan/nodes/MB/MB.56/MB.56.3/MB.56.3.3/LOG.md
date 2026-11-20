@@ -43,3 +43,7 @@ REVIEW FIX 2 (ux): raw_ingress+ingress_mismatch kinds + ', N proxies' header; do
 ## 2026-11-20T20:48 [lead]
 
 status active -> done
+
+## 2026-11-20T20:48 [lead]
+
+commit 026024a
