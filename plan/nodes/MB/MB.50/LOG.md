@@ -27,3 +27,7 @@ REVIEW FIX (review-arch): (1) BLOCKER search() POSIX fallback finds /usr/bin/pyt
 ## 2026-11-20T10:50 [lead]
 
 status active -> done
+
+## 2026-11-20T10:50 [lead]
+
+commit a60d6c4
