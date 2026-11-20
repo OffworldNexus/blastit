@@ -30,6 +30,7 @@ CHECK_WHEEL_TAG = REPO / "scripts" / "check_wheel_tag.py"
 CHECK_EXEC_ENV = REPO / "scripts" / "check-exec-env.sh"
 CHECK_NO_TEST_SEAM = REPO / "scripts" / "check-no-test-seam.sh"
 CHECK_PORTABLE_ELF = REPO / "scripts" / "check-portable-elf.sh"
+BUILD_WHEEL = REPO / "scripts" / "build-wheel.sh"
 
 # Recorded verbatim from the shipped `aarch64-unknown-linux-musl` artifact of
 # `0.2.0` (`readelf --version-info blastit/_blastit.cpython-314-aarch64-linux-musl.so`):
@@ -2313,6 +2314,104 @@ def test_package_workflow_cases() -> int:
     return cases_run
 
 
+def _derived_floor(*args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+    """`build-wheel.sh --print-glibc-floor` with no ambient floor override.
+
+    The two variables an ambient shell could set are dropped, so a case measures
+    the parser and not this machine's environment.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("BLASTIT_MANYLINUX", "BLASTIT_WHEEL_MAX_GLIBC")
+    }
+    env.update(overrides)
+    return subprocess.run(
+        ["bash", str(BUILD_WHEEL), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+
+
+def test_wheel_floor_cases() -> int:
+    """`MB.42.13`: the glibc floor is parsed out of the platform, never stripped.
+
+    maturin 1.16 tags a `bindings = "bin"` wheel `manylinux_2_39_x86_64`, so
+    `${tag#manylinux_}` was `2_39_x86_64` and the floor parser refused the whole
+    build — with the message blaming the shim it had just measured. Every case
+    here runs the **shipped** `manylinux_floor` through
+    `build-wheel.sh --print-glibc-floor`, so the parse under test is the one a
+    release uses:
+
+    * `manylinux_2_39_x86_64` → `2_39`, `manylinux_2_28_aarch64` → `2_28`: the
+      architecture suffix is not part of a floor;
+    * a newer pip's `manylinux_2_39_x86_64_glibc_2_39` → `2_39`: neither is the
+      libc suffix;
+    * `musllinux_1_2_x86_64` and an unparseable string fail loudly, naming the
+      platform, instead of handing a malformed floor to `--max-glibc` (whose
+      refusal then read as a shim that outgrew the floor);
+    * `--manylinux` and `BLASTIT_WHEEL_MAX_GLIBC` still win when given, so the
+      floor is not weakened by the derivation.
+    """
+    cases_run = 0
+    for platform, expected in (
+        ("manylinux_2_39_x86_64", "2_39"),
+        ("manylinux_2_28_aarch64", "2_28"),
+        ("manylinux_2_39_x86_64_glibc_2_39", "2_39"),
+        ("manylinux_2_17_aarch64_gnu", "2_17"),
+    ):
+        res = _derived_floor("--print-glibc-floor", platform)
+        _expect(
+            res.returncode == 0 and res.stdout.strip() == expected,
+            f"{platform} must derive the floor {expected!r}, not its arch suffix",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+    for platform, needle in (
+        ("musllinux_1_2_x86_64", "names a musl version, not a glibc floor"),
+        ("manylinux_x86_64", "cannot derive a glibc floor"),
+        ("not-a-platform", "cannot derive a glibc floor"),
+    ):
+        res = _derived_floor("--print-glibc-floor", platform)
+        _expect(
+            res.returncode == 1
+            and platform in res.stderr
+            and needle in res.stderr
+            and "outgrew" not in res.stderr,
+            f"{platform} must fail loudly, naming the platform and not a shim: "
+            f"{needle!r}",
+            res.stdout + res.stderr,
+        )
+        cases_run += 1
+
+    res = _derived_floor(
+        "--manylinux", "2_28", "--print-glibc-floor", "manylinux_2_39_x86_64"
+    )
+    _expect(
+        res.returncode == 0 and res.stdout.strip() == "2_28",
+        "--manylinux must still win over the platform it chose the tag for",
+        res.stdout + res.stderr,
+    )
+    cases_run += 1
+
+    res = _derived_floor(
+        "--print-glibc-floor",
+        "manylinux_2_39_x86_64",
+        BLASTIT_WHEEL_MAX_GLIBC="2_17",
+    )
+    _expect(
+        res.returncode == 0 and res.stdout.strip() == "2_17",
+        "BLASTIT_WHEEL_MAX_GLIBC must still win over the parsed platform",
+        res.stdout + res.stderr,
+    )
+    cases_run += 1
+
+    return cases_run
+
+
 def main() -> int:
     wf = test_workflow_auditor_cases()
     pm = test_platform_matrix_cases()
@@ -2324,6 +2423,7 @@ def main() -> int:
     rp = test_repack_cases()
     mp = test_matrix_producer_cases()
     pk = test_package_workflow_cases()
+    wfl = test_wheel_floor_cases()
     # The publishing suite lives in its own module (a 2 700-line gate is where a
     # case hides); this file stays its entry point, so one command still runs all.
     sys.path.insert(0, str(REPO / "scripts"))
@@ -2332,12 +2432,12 @@ def main() -> int:
     finally:
         sys.path.remove(str(REPO / "scripts"))
     pub = test_publish_gates.cases()
-    total = wf + pm + wt + ee + ts + pe + pg + rp + mp + pk + pub
+    total = wf + pm + wt + ee + ts + pe + pg + rp + mp + pk + wfl + pub
     print(
         f"packaging-gates-test: ok — {total} cases passed "
         f"(workflow={wf}, matrix={pm}, wheel-tag={wt}, exec-env={ee}, test-seam={ts}, "
         f"portable-elf={pe}, max-glibc={pg}, repack={rp}, matrix-producer={mp}, "
-        f"package-workflow={pk}, publish={pub})"
+        f"package-workflow={pk}, wheel-floor={wfl}, publish={pub})"
     )
     return 0
 

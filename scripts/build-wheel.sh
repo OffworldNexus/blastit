@@ -48,8 +48,19 @@
 #   * Without `--manylinux` (used by `make docs-test` inside `make check`, which
 #     runs offline and without Docker, and inside container builds), both binaries
 #     link against the ambient libc; `scripts/check_wheel_tag.py` still inspects
-#     `*.dist-info/WHEEL`, prints the actual `Tag:`, refuses unversioned `linux_*`,
-#     and enforces `--max-glibc ${BLASTIT_WHEEL_MAX_GLIBC:-2_41}`.
+#     `*.dist-info/WHEEL` and prints the actual `Tag:`, and the unversioned
+#     `linux_<arch>` developer wheel is the one it accepts with `--allow-host-tag`.
+#   * The glibc floor is **parsed** from the tag, never prefix-stripped
+#     (`MB.42.13`). maturin 1.16 tags a `bindings = "bin"` wheel
+#     `manylinux_2_39_x86_64`, so `${tag#manylinux_}` is `2_39_x86_64` — not a
+#     `<major>_<minor>` — and the floor parser refused the build, blaming the
+#     shim it had just measured. `manylinux_floor` keeps the first two numeric
+#     components and ignores a trailing `_<arch>` / `_<arch>_<libc>` suffix;
+#     `--manylinux` and `BLASTIT_WHEEL_MAX_GLIBC` win over it, and a platform it
+#     cannot read stops the build naming that platform. `--print-glibc-floor
+#     <platform>` prints the derived floor and exits: the hook
+#     `scripts/test_packaging_gates.py` runs, so the self-test exercises this
+#     parse and not a paraphrase of it.
 #
 # **One platform tag, from one place (`MB.3.58`).** A tag reaches maturin through
 # exactly one route: `--compatibility` here (this script enters
@@ -77,8 +88,53 @@ requested_interp=""
 blob_dir="${BLASTIT_WHEEL_BLOBS:-}"
 require_shims="${BLASTIT_WHEEL_REQUIRE_SHIMS:-}"
 shims_from="${BLASTIT_WHEEL_SHIMS_FROM:-}"
+print_floor=""
+# The glibc floor a wheel claims, derived from its platform (`MB.42.13`).
+#
+# A maturin `bindings = "bin"` wheel is tagged `manylinux_2_39_x86_64`, so the
+# floor is the tag's first two numeric components; a trailing `_<arch>` (or a
+# newer pip's `_<arch>_<libc>`) is not part of it. Stripping the `manylinux_`
+# prefix instead handed `2_39_x86_64` to `--max-glibc`, which refused it and made
+# the message blame the shim that had just been measured.
+#
+# `--manylinux` wins (it chose the tag), then `BLASTIT_WHEEL_MAX_GLIBC`. A
+# platform this cannot read is an error naming that platform: a wheel whose glibc
+# floor nothing can state must not be built.
+manylinux_floor() {
+    local platform=$1
+    if [[ -n $manylinux_ver ]]; then
+        printf '%s\n' "$manylinux_ver"
+        return 0
+    fi
+    if [[ -n ${BLASTIT_WHEEL_MAX_GLIBC:-} ]]; then
+        printf '%s\n' "$BLASTIT_WHEEL_MAX_GLIBC"
+        return 0
+    fi
+    if [[ $platform =~ ^manylinux_([0-9]+)_([0-9]+)(_[A-Za-z0-9_]+)?$ ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}_${BASH_REMATCH[2]}"
+        return 0
+    fi
+    case "$platform" in
+        musllinux_*)
+            echo "error: platform '$platform' is musllinux: it names a musl version, not a glibc floor" >&2
+            ;;
+        *)
+            echo "error: cannot derive a glibc floor from platform '$platform' (want manylinux_<major>_<minor>_<arch>); pass --manylinux 2_28" >&2
+            ;;
+    esac
+    return 1
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --print-glibc-floor)
+            print_floor=${2:?--print-glibc-floor requires a platform such as manylinux_2_28_x86_64}
+            shift 2
+            ;;
+        --print-glibc-floor=*)
+            print_floor=${1#--print-glibc-floor=}
+            shift
+            ;;
         --manylinux)
             manylinux_ver=${2:?--manylinux requires a version such as 2_28}
             shift 2
@@ -135,6 +191,14 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+# `--print-glibc-floor` is the self-test hook (`scripts/test_packaging_gates.py`):
+# it runs the shipped parser, prints the floor and touches nothing — no blob
+# directory, no README rewrite, no build.
+if [[ -n $print_floor ]]; then
+    manylinux_floor "$print_floor"
+    exit 0
+fi
 
 # The staged `blastit/_bin/` payload for the repack: `blastit-lsp` and the shims.
 blob_dir=${blob_dir:-target/wheel-blobs}
@@ -482,9 +546,13 @@ if [[ -n ${wheel_platform:-} && $wheel_platform != "$tag_platform" ]]; then
 fi
 wheel_platform=$tag_platform
 if [[ $wheel_platform == manylinux_* ]]; then
+    # The floor this tag claims, parsed once (`manylinux_floor`, `MB.42.13`): the
+    # tag carries the architecture too, and passing `2_39_x86_64` to the floor
+    # parser made the build refuse with a message about the shim, not the parse.
+    wheel_floor=$(manylinux_floor "$wheel_platform") || exit 1
     # Before the repack: an embedded ELF that outgrew the floor must never reach
     # a wheel whose tag claims that floor.
-    check_blob_floors "${manylinux_ver:-${wheel_platform#manylinux_}}"
+    check_blob_floors "$wheel_floor"
 fi
 read_shims "$shims_from"
 assert_shims
@@ -565,8 +633,8 @@ if [ -s "$scratch/members" ]; then
     # distinguishable from a shippable one.
     if [[ $wheel_platform == manylinux_* ]]; then
         "${link_python[@]}" scripts/check_wheel_tag.py \
-            --max-glibc "${manylinux_ver:-${wheel_platform#manylinux_}}" \
-            --platform "manylinux_${manylinux_ver:-${wheel_platform#manylinux_}}" \
+            --max-glibc "$wheel_floor" \
+            --platform "manylinux_${wheel_floor}" \
             "$wheel"
     elif [[ $wheel_platform == musllinux_* ]]; then
         # `${wheel_platform%_*}` strips the arch: `musllinux_1_2_x86_64` becomes
@@ -588,7 +656,7 @@ if [ -s "$scratch/members" ]; then
         # and an embedded shim that outgrew it would make the tag a lie.
         if [[ $wheel_platform == manylinux_* ]]; then
             scripts/check-portable-elf.sh --allow-origin-rpath \
-                --max-glibc "${manylinux_ver:-${wheel_platform#manylinux_}}" "$extracted"
+                --max-glibc "$wheel_floor" "$extracted"
         fi
         # `MB.3.67`: the seam measurement, on the same file the portable-ELF
         # assertion just read. A release binary that an environment variable can
