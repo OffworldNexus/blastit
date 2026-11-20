@@ -2,16 +2,16 @@
 id: MB.56.3.5
 title: "Finish consolidation: four suites + minimal common/, <=5,500 LOC, fix dead test legs"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.3.4]
 paths: ["crates/blastit/tests/**", "e2e/**", "docs/design/**", Makefile, ".github/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T18:45"
-updated: "2026-11-20T18:50"
+updated: "2026-11-20T21:22"
 ---
 
 # Goal

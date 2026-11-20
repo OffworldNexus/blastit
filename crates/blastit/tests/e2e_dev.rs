@@ -10,8 +10,10 @@
 //! `EPERM`), skips its legs **loudly** with one `SKIP …` line.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-// A build with neither runtime feature has no test that reaches this harness.
-#![cfg_attr(not(any(feature = "python", feature = "php")), allow(dead_code))]
+// Every leg below needs at least one view runtime; a build with none has no
+// test that reaches this harness, so the file is an empty suite there instead
+// of a dead-code shell that `--no-default-features --all-targets` refuses.
+#![cfg(any(feature = "python", feature = "php", feature = "static"))]
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

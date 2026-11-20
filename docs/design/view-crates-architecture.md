@@ -135,7 +135,13 @@ Each requirement names an oracle that can fail; §7 repeats them as a table.
   `default = ["php", "static"]`; `blastit-view` is `default = []`; `blastit-py` enables
   `python`; `cargo build -p blastit --locked --no-default-features` compiles; no build or ship
   command uses `--workspace`.
-- **R14 — Zero behaviour change.** §1's seven captures diff empty against `develop`.
+- **R14 — Zero behaviour change.** The four consolidated E2E suites
+  (`crates/blastit/tests/e2e_cli.rs`, `e2e_dev.rs`, `e2e_check_fmt.rs`,
+  `e2e_prod_refusals.rs`) carry §1's seven rows as `TESTING_PLAN.md` stories —
+  the per-command handoff, the `dev` boot banner and denial lines, `check`'s
+  human and `--json` reports, the static `ETag`/`Range` answers and the packaged
+  binary's argv — so a behaviour change fails a story instead of hiding behind a
+  mask.
 - **R15 — No protected case lost.** Every moved `critical_*.rs` keeps its case count (a
   `cargo test … -- --list` count, not a `grep`), and the two trait-machinery unit cases that are
   deleted with their subject are listed in §4.2.1.
@@ -789,7 +795,7 @@ role child and out of scope. The `Shared`/`Off` census therefore stays "two `Sha
 | R11 | `make rs-no-python` → `scripts/check-portable-elf.sh target/debug/blastit` (`NEEDED`, no `RUNPATH`) |
 | R12 | `scripts/build-wheel.sh`; `scripts/check-portable-elf.sh --allow-origin-rpath target/wheels/blastit-*/blastit/_blastit*.so`; `scripts/check_wheel_tag.py` |
 | R13 | `make rs-no-default` (`cargo build -p blastit --locked --no-default-features` + no `blastit-view-php` in `cargo tree`); `grep '^default' crates/blastit/Cargo.toml crates/blastit-view/Cargo.toml` |
-| R14 | §1's seven captures diff empty after the documented mask (below); `crates/blastit/tests/dx_invariance.rs` covers rows 1 and 3 in process, row 4 is the boot-line capture and row 7 a build-level capture; `crates/blastit/tests/dx_capture.rs` carries the normaliser **and two self-tests**: a varying `ts` is masked while a stable `status` is kept, and a line the normaliser cannot parse is a **failure, never dropped** — so neither an over-broad mask nor a lossy parse can make the diff compare nothing; `critical_check_schema` owns row 5's JSON shape; row 1's `ETag` is compared **unmasked by shape**, and the shape is hex because `static_response.rs:203` formats `"{:x}-{:x}"`: `^"[0-9a-f]+-[0-9a-f]+"$` |
+| R14 | the four consolidated suites hold §1's seven rows as `TESTING_PLAN.md` stories: `e2e_cli` the command line and the per-command handoff (rows 1 and 3), `e2e_dev` the boot banner, route table and denial lines (row 4), `e2e_check_fmt` the human ⇄ `--json` reports and the static `ETag`/`Range` answers (rows 1, 5 and 6), and `e2e_prod_refusals` the packaged binary's argv and every fail-closed exit — the `dx_*` capture/normaliser pair, its mask files and their parity self-test are retired with the rest of the fixture tree, so a behaviour change is a failing story, never a masked diff |
 | R15 | the per-row `cargo test … -- --list` counts; `make critical-guard NODE=MB.36.<leaf>`; the release-wide `--node` list in §4.5 |
 | R16 | every leaf's `make check` tail in its `RESULT.md`, and `git show --stat <leaf commit>` names `Cargo.lock` for that leaf and no other leaf's commit in its range does |
 | R17 | `git diff develop -- 'Cargo.toml' '*/Cargo.toml'` shows only members/feature lines/dev-dep flags; `grep -c libc crates/blastit-view-{python,php}/Cargo.toml` is 0; the `unsafe` guard is computable: `grep -rn 'unsafe {' crates/blastit-view/src crates/blastit-view-*/src` (through `cut -d: -f1 | sort -u`) must list **only** `blastit-view-python/src/immortal.rs`, and `MB.36.6` wires that into `rs-lint` (`Makefile` is in its `paths`) |

@@ -2,7 +2,7 @@
 id: MB.56.3
 title: "Consolidate crates/blastit/tests/ (30+ files -> 4 crisp user-story E2E suites)"
 kind: epic
-status: active
+status: done
 priority: 1
 depends_on: [MB.56.2]
 paths: ["crates/blastit/tests/**", Makefile]
@@ -10,7 +10,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:02"
-updated: "2026-11-20T18:45"
+updated: "2026-11-20T21:22"
 ---
 
 # Goal

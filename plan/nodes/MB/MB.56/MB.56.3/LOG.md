@@ -39,3 +39,7 @@ base d313856b4918afad5267c015b2ad87ed561b578a
 ## 2026-11-20T18:45 [lead]
 
 edited fields
+
+## 2026-11-20T21:22 [lead]
+
+status active -> done: four BDD suites + common/; 26,643 -> 11,513 LOC

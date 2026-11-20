@@ -31,3 +31,7 @@ From MB.56.3.2.3: PHP concurrency (the critical_parallel_views PHP half) is hand
 ## 2026-11-20T20:18 [lead]
 
 From MB.56.3.2.3: the SPLIT store form (postgres { host $DB_HOST port $DB_PORT user $DB_USER password $DB_PASSWORD database $DB_NAME }) has no runtime leg now - blastit-manifest §7 pins its lowering, but not the env rewrite + real connection. Prove it once end-to-end in the prod E2E (compose presets already use split stores).
+
+## 2026-11-20T21:07 [lead]
+
+edited fields

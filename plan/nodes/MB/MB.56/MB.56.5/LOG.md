@@ -35,3 +35,7 @@ blastit-sqlpolicy: StatementClass::is_plain + Analysis::is_plain (analysis/types
 ## 2026-11-20T20:19 [lead]
 
 crates/blastit/src/dev_reload.rs still carries #[cfg(any(test, debug_assertions))] TestClock/FakeWatcher/report_pair/send_batch whose last caller (critical_dev_reload) is gone -> prune the dead debug seams.
+
+## 2026-11-20T21:07 [lead]
+
+edited fields

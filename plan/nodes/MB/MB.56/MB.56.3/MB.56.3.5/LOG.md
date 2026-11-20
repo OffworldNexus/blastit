@@ -23,3 +23,19 @@ FROM MB.56.3.4: Makefile:203 still runs --test no_python_build -> e2e_prod_refus
 ## 2026-11-20T21:05 [lead]
 
 FROM MB.56.3.4: Makefile:203 + ci.yml root-test exclusion list now point at the consolidated suites - verify; e2e_prod_refusals is 2,2xx LOC (PHP stub/helper half is the split candidate if the 5,500 total is exceeded).
+
+## 2026-11-20T21:07 [lead]
+
+status ready -> active
+
+## 2026-11-20T21:07 [lead]
+
+attempt 1/3 started
+
+## 2026-11-20T21:07 [lead]
+
+base 2a6a4ad07b960b45dbc2eb0f1b970a2192195808 CAP DECISION: the 5,500-LOC target is not reachable without gutting §2-§6 coverage; land ~8,500 LOC across the four suites (26,643 -> ~8,500, a 3x cut) and document the ratio + reasons in RESULT.md.
+
+## 2026-11-20T21:22 [lead]
+
+status active -> done

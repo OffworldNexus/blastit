@@ -238,11 +238,11 @@ jobs:
           echo "runner: uid=$(id -u) user=$(id -un) cwd=$PWD"
           echo "runner cargo: $(command -v cargo) ($(cargo --version))"
           if [ -z "${PYO3_PYTHON:-}" ]; then
-            echo "::error::PYO3_PYTHON is empty: the setup-python step did not reach GITHUB_ENV, and every test binary would lose libpython (tests/smoke.rs derives LD_LIBRARY_PATH from it)."
+            echo "::error::PYO3_PYTHON is empty: the setup-python step did not reach GITHUB_ENV, and every test binary would lose libpython (common/deployment.rs derives LD_LIBRARY_PATH from it)."
             exit 1
           fi
           if [ -z "${BLASTIT_TEST_PG_URL:-}" ]; then
-            echo "::error::BLASTIT_TEST_PG_URL is empty: the service's URL did not reach the environment, and the smoke tests would silently skip every PostgreSQL check."
+            echo "::error::BLASTIT_TEST_PG_URL is empty: the service's URL did not reach the environment, and the PostgreSQL legs would skip instead of proving the dbproxy's grants."
             exit 1
           fi
           echo "runner python: PYO3_PYTHON=$PYO3_PYTHON"

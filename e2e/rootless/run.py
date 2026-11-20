@@ -853,9 +853,10 @@ def check_negative_boot(image, uid=APP_UID):
 
 #: The sentence production (`stage0::run`) prints in a directory with no
 #: `./Blastfile` (`docs/troubleshooting.md`): the file, then the reason. The
-#: `dev` entry point is pinned in the protected suite
-#: (`critical_config_and_presets.rs`); this is the same ordering at the identity
-#: that can reach the configuration in production (`MB.1.16`, AUDIT-MB1 `G5`).
+#: `dev` half is pinned by
+#: `e2e_prod_refusals::an_empty_directory_names_the_missing_manifest_before_the_app`;
+#: this is the same ordering at the identity that can reach the configuration in
+#: production (`MB.1.16`, AUDIT-MB1 `G5`).
 MISSING_MANIFEST = "./Blastfile: no such file or directory"
 #: A `Blastfile` that exists and names no app: then the *setting* is what is
 #: missing, and the file is not named as absent. One view with no `entrypoint`
@@ -895,7 +896,7 @@ def rooted_boot(image, workdir, name):
     named, the directory below is never consulted, and with `app` set the setting
     is never what is missing. They are `unset` in the shell rather than passed as
     `-e NAME=`: an empty `BLASTIT_APP` is still a *set* variable (it wins over the
-    manifest, as `critical_config_and_presets.rs` pins), and an empty
+    manifest, as `e2e_prod_refusals`'s empty-setting legs pin), and an empty
     `BLASTIT_MANIFEST` is refused as a mistake of its own — neither is the boot
     this check is about.
 

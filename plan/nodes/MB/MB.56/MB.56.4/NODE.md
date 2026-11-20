@@ -1,17 +1,16 @@
 ---
 id: MB.56.4
 title: "Consolidate container & multi-platform GHA E2E suites (Laravel/Symfony PHP + Postgres + static, Django/Flask, Static, root/rootless prod & packaging)"
-kind: task
+kind: epic
 status: ready
-owner: implementer
 priority: 1
 depends_on: [MB.56.3]
-paths: ["e2e/**", "scripts/**", Makefile, ".github/workflows/**"]
+paths: ["e2e/**", "scripts/**", ".github/**", Makefile, "docs/**"]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-20T16:02"
-updated: "2026-11-20T16:02"
+updated: "2026-11-20T21:07"
 ---
 
 # Goal

@@ -32,13 +32,29 @@ mod php_host;
 #[path = "common/pg_upstream.rs"]
 mod pg_upstream;
 
+/// A **deployment** boot (root, real uid isolation) for the §6 serving legs.
+#[cfg(feature = "python")]
+#[path = "common/deployment.rs"]
+mod deployment;
+
 use std::fs;
-use std::io::{BufRead, Read, Write};
+#[cfg(feature = "python")]
+use std::io::BufRead;
+use std::io::Read;
+#[cfg(feature = "python")]
+use std::io::Write;
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(feature = "python")]
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "python")]
+use std::process::Child;
+use std::process::{Command, Stdio};
+#[cfg(feature = "python")]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "python")]
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -48,17 +64,21 @@ const BOOT: Duration = Duration::from_secs(20);
 /// blocks would otherwise hang the suite instead of failing it.
 const NO_HANG: Duration = Duration::from_secs(15);
 /// How long a killed probe may linger in `/proc` before the reap is the failure.
+#[cfg(feature = "php")]
 const REAPED: Duration = Duration::from_secs(2);
 /// One request's whole exchange.
+#[cfg(feature = "python")]
 const REQUEST: Duration = Duration::from_secs(20);
 
 /// A counter for unique fixture directories.
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// The route every fixture declares.
+#[cfg(feature = "php")]
 const ROUTE: &str = "app";
 
 /// `ADR-0010` §4.1's package half: the sentence every PHP refusal carries.
+#[cfg(feature = "php")]
 const PACKAGES: &str = "install the PHP embed package";
 
 /// §10.2's production refusal for an unacknowledged `body raw` route.
@@ -234,8 +254,12 @@ fn announced_ready(stdout: &str) -> bool {
 }
 
 // ------------------------------------------------------------- dev harness
+// The `blastit dev` collector below is only reachable from the WSGI legs: a
+// zero-feature build has no view to boot, so the whole harness is gated with
+// them instead of failing closed on dead code.
 
 /// A `libphp` and shim to move under a boot paused at the test rendezvous.
+#[cfg(feature = "python")]
 struct Swap {
     point: PathBuf,
     from: PathBuf,
@@ -243,6 +267,7 @@ struct Swap {
 }
 
 /// A running `blastit dev`, with both streams collected as they arrive.
+#[cfg(feature = "python")]
 struct Boot {
     child: Child,
     port: u16,
@@ -252,6 +277,7 @@ struct Boot {
     swapped: Option<Arc<AtomicBool>>,
 }
 
+#[cfg(feature = "python")]
 impl Boot {
     fn start(dir: &Path, env: &[(&str, &str)]) -> Self {
         Self::launch(dir, env, None)
@@ -437,6 +463,7 @@ impl Boot {
     }
 }
 
+#[cfg(feature = "python")]
 impl Drop for Boot {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -450,6 +477,7 @@ impl Drop for Boot {
 }
 
 /// Reads a child's pipe into `sink`, line by line.
+#[cfg(feature = "python")]
 fn spawn_reader(
     pipe: impl Read + Send + 'static,
     sink: Arc<Mutex<Vec<String>>>,
@@ -463,6 +491,7 @@ fn spawn_reader(
 }
 
 /// `<point>.<suffix>`, the two halves of the swap rendezvous.
+#[cfg(feature = "python")]
 fn sidecar(point: &Path, suffix: &str) -> PathBuf {
     let mut name = point.as_os_str().to_owned();
     name.push(".");
@@ -471,6 +500,7 @@ fn sidecar(point: &Path, suffix: &str) -> PathBuf {
 }
 
 /// A boot that must never have served: no `ready`, nothing on the port.
+#[cfg(feature = "python")]
 fn assert_never_served(boot: &mut Boot, what: &str) {
     let events = boot.events();
     for name in ["ready", "process.spawned", "request", "runtime"] {
@@ -929,6 +959,135 @@ view home regex '.*' {}
         "the real credential reached a worker: {env:?}"
     );
     boot.stop();
+}
+
+/// §4/§6: a `PORT` that is not a port is the shell's exit `1` — the real
+/// process, stdout empty, and the value named on stderr — not a serve that
+/// silently picks another one.
+#[test]
+fn a_port_that_is_not_a_port_is_a_refusal_that_names_the_value() {
+    let dir = Scratch::new("bad-port", "");
+    let (code, stdout, stderr) = run_bounded(dir.path(), &["dev"], &[("PORT", "70000")], BOOT);
+    assert_eq!(code, Some(1), "stdout={stdout:?} stderr={stderr:?}");
+    assert!(
+        stdout.is_empty(),
+        "a CLI failure writes nothing: {stdout:?}"
+    );
+    assert!(stderr.contains("PORT"), "{stderr}");
+    assert!(
+        stderr.contains("70000"),
+        "the refusal names the value: {stderr}"
+    );
+}
+
+/// §4/§5: `blastit dev` and `blastit check` never read an exported
+/// `BLASTIT_PRESET`, while the production path does — so a shell that happens to
+/// export a deployment's preset cannot change what a developer sees, and cannot
+/// quietly disarm the seccomp gate either.
+///
+/// The production half of this leg is `an_environment_driven_abort_is_a_real_exit_code`
+/// below; here the promise is that `dev` *starts*.
+#[cfg(feature = "python")]
+#[test]
+fn dev_ignores_an_exported_preset_and_an_unknown_one() {
+    const APP: &str = "
+def application(environ, start_response):
+    start_response(\"200 OK\", [(\"Content-Length\", \"0\")])
+    return [b\"\"]
+";
+    let dir = Scratch::new("dev-preset", WSGI_MANIFEST);
+    dir.write("app.py", APP);
+
+    for (label, preset) in [
+        ("a known preset with the gate off", "compose-traefik"),
+        ("an unknown preset", "compose-trafik"),
+    ] {
+        let mut boot = Boot::start(
+            dir.path(),
+            &[("BLASTIT_PRESET", preset), ("BLASTIT_SECCOMP", "0")],
+        );
+        assert!(
+            boot.await_boot().is_none(),
+            "{label}: `blastit dev` must serve, not read the variable: {}",
+            boot.all_text()
+        );
+        assert!(
+            boot.get("/").contains("200 OK"),
+            "{label}: it answers: {}",
+            boot.stdout_text()
+        );
+        boot.stop();
+    }
+}
+
+/// §4: an empty directory names the **missing manifest** before it blames the
+/// app setting; a manifest that exists but declares no `app` is the setting's
+/// own refusal.
+#[cfg(feature = "python")]
+#[test]
+fn an_empty_directory_names_the_missing_manifest_before_the_app() {
+    let dir = Scratch::new("no-manifest", "");
+    fs::remove_file(dir.path().join("Blastfile")).expect("the empty fixture has no manifest");
+
+    let (code, stdout, stderr) = run_bounded(dir.path(), &["dev"], &[], BOOT);
+    assert_eq!(code, Some(1), "{stdout:?} {stderr:?}");
+    assert!(
+        stdout.is_empty(),
+        "a startup error writes nothing: {stdout:?}"
+    );
+    assert!(stderr.contains("./Blastfile"), "{stderr}");
+    assert!(
+        !stderr.contains("BLASTIT_APP"),
+        "the file is missing, not the app: {stderr}"
+    );
+
+    fs::write(dir.path().join("Blastfile"), "view home GET \"/\" {}\n")
+        .expect("a manifest with no app");
+    let (code, _, stderr) = run_bounded(dir.path(), &["dev"], &[], BOOT);
+    assert_eq!(code, Some(1), "{stderr:?}");
+    assert!(stderr.contains("BLASTIT_APP"), "{stderr}");
+    assert!(
+        !stderr.contains("No such file"),
+        "the manifest exists, so nothing is missing: {stderr}"
+    );
+}
+
+/// §6: a `BLASTIT_SECCOMP=0` next to a preset never reaches a running server —
+/// and where the boot gets far enough to read the configuration, it says which
+/// variable it refused rather than dying on an `EPERM` nobody can place.
+#[cfg(feature = "python")]
+#[test]
+fn an_environment_driven_abort_is_a_real_exit_code_and_names_its_cause() {
+    let dir = Scratch::new("seccomp", WSGI_MANIFEST);
+    dir.write(
+        "app.py",
+        "
+def application(environ, start_response):
+    start_response(\"200 OK\", [(\"Content-Length\", \"0\")])
+    return [b\"\"]
+",
+    );
+    let (code, stdout, stderr) = run_bounded(
+        dir.path(),
+        &[],
+        &[
+            ("BLASTIT_PRESET", "compose-traefik"),
+            ("BLASTIT_SECCOMP", "0"),
+        ],
+        BOOT,
+    );
+    assert_eq!(code, Some(1), "{stdout:?} {stderr:?}");
+    let combined = format!("{stdout}{stderr}");
+    assert!(
+        !combined.contains(r#""event":"ready""#),
+        "the boot aborts before serving: {combined}"
+    );
+    if combined.contains(r#""stage":"config""#) {
+        assert!(
+            combined.contains("BLASTIT_SECCOMP"),
+            "the abort names the gate: {combined}"
+        );
+    }
 }
 
 // ------------------------------------------------------------ WSGI host
@@ -1445,6 +1604,255 @@ fn a_dev_boot_on_an_occupied_port_names_the_bind_failure() {
         "the refusal names the port and the reason: {all}"
     );
     assert!(!announced_ready(&stdout), "nothing is served: {stdout}");
+}
+
+// -------------------------------------------- §6 deployment: per-view identity
+
+/// The app every deployment leg serves: it reports the identity and the
+/// environment a **view worker** really got.
+#[cfg(feature = "python")]
+const DEPLOYED_APP: &str = r#"
+import json
+import os
+
+
+def application(environ, start_response):
+    body = json.dumps({
+        "uid": os.getuid(),
+        "pid": os.getpid(),
+        "gid": os.getgid(),
+        "route": environ.get("blastit.route"),
+        "home": os.environ.get("HOME"),
+        "tmpdir": os.environ.get("TMPDIR"),
+        "cwd": os.getcwd(),
+        "blastit": sorted(k for k in os.environ if k.startswith("BLASTIT_")),
+        "remote_addr": environ.get("REMOTE_ADDR"),
+        "remote_port": environ.get("REMOTE_PORT"),
+    }).encode()
+    start_response("200 OK", [("Content-Type", "application/json"),
+                              ("Content-Length", str(len(body)))])
+    return [body]
+"#;
+
+/// Two views, so "one route, one identity" can be observed at all.
+#[cfg(feature = "python")]
+const TWO_VIEWS: &str = "\
+view one \"/\", \"/one\" {}
+
+view two regex '/two/.*' {}
+";
+
+/// The uid base every deployment leg uses; the views are `base + 1000`, `+1001`.
+#[cfg(feature = "python")]
+const DEPLOY_UID_BASE: u32 = 52_000;
+
+/// Starts a deployment boot, or returns `None` when this host cannot host one.
+#[cfg(feature = "python")]
+fn deployed(tag: &str, args: &[&str], env: &[(&str, &str)]) -> Option<deployment::Deployment> {
+    deployment::Deployment::start(
+        tag,
+        DEPLOY_UID_BASE,
+        TWO_VIEWS,
+        &[("app.py", DEPLOYED_APP)],
+        env,
+        args,
+    )
+}
+
+/// The JSON body a deployment view answered with.
+#[cfg(feature = "python")]
+fn deployed_body(response: &deployment::Response) -> serde_json::Value {
+    assert_eq!(response.status, 200, "{}", response.body);
+    serde_json::from_str(&response.body).expect("the view's JSON body")
+}
+
+/// §6: every view runs under its **own** OS user identity, in its own scratch
+/// directory, with no `BLASTIT_*` variable and the client's address and port as
+/// two CGI keys — the deployment path, as root, on the real binary.
+#[cfg(feature = "python")]
+#[test]
+fn a_deployment_runs_each_route_in_its_own_process_and_uid() {
+    let Some(deployment) = deployed("uids", &[], &[]) else {
+        return;
+    };
+    let one = DEPLOY_UID_BASE + 1000;
+    let two = DEPLOY_UID_BASE + 1001;
+
+    let first = deployed_body(&deployment.get("/one"));
+    assert_eq!(first["uid"], one, "{first}");
+    assert_eq!(first["gid"], one, "gid == uid, no groups: {first}");
+    assert_eq!(first["route"], "one", "{first}");
+    assert_eq!(
+        first["home"].as_str().map(|path| path.to_owned()),
+        Some(format!("/run/blastit/views/{one}")),
+        "{first}"
+    );
+    assert_eq!(first["tmpdir"], first["home"], "{first}");
+    assert_eq!(
+        first["cwd"], first["home"],
+        "its own socket directory: {first}"
+    );
+    assert_eq!(
+        first["blastit"].as_array().map(Vec::len),
+        Some(0),
+        "no BLASTIT_* survives the rewrite: {first}"
+    );
+    assert_eq!(first["remote_addr"], "127.0.0.1", "{first}");
+    assert!(
+        first["remote_port"]
+            .as_str()
+            .is_some_and(|port| port.parse::<u16>().is_ok_and(|port| port > 0)),
+        "the connection's port, as a string: {first}"
+    );
+
+    let second = deployed_body(&deployment.get("/two/anything"));
+    assert_eq!(second["uid"], two, "{second}");
+    assert_eq!(second["route"], "two", "{second}");
+    assert_ne!(
+        first["pid"], second["pid"],
+        "one route, one process: {first} {second}"
+    );
+    let again = deployed_body(&deployment.get("/one"));
+    assert_eq!(
+        again["pid"], first["pid"],
+        "the same route keeps its process"
+    );
+
+    // Both view identities are live processes of init, and both are in the
+    // uid's own table — not the harness's.
+    for uid in [one, two] {
+        assert!(
+            deployment.component_uid(uid).is_some(),
+            "no live process runs as uid {uid}: {}",
+            deployment.stdout_text()
+        );
+    }
+
+    // §6: the boot says which mode it ran in and, with no preset, that there is
+    // none in force — a rootless boot and a root one look identical otherwise.
+    let boots = deployment.events("boot");
+    assert!(boots.len() >= 2, "stage 0 and config: {boots:?}");
+    for boot in &boots {
+        assert_eq!(boot["privilege"], "root", "{boot}");
+        assert!(boot["preset"].is_null(), "{boot}");
+        assert!(
+            boot.get("port").is_none(),
+            "a boot never carries a port: {boot}"
+        );
+    }
+}
+
+/// §6: a preset is reported by the boot (what it supplied, what the environment
+/// overrode) and it decides **which** forwarded client header is believed — the
+/// other one is ignored, even when the request sends it.
+#[cfg(feature = "python")]
+#[test]
+fn a_deployment_preset_is_reported_and_decides_which_forwarded_header_is_trusted() {
+    for (preset, believed, ignored) in [
+        ("digitalocean-paas", "DO-Connecting-IP", "X-Forwarded-For"),
+        ("compose-traefik", "X-Forwarded-For", "DO-Connecting-IP"),
+    ] {
+        let Some(deployment) = deployed(
+            "preset",
+            &["--preset", preset],
+            &[("BLASTIT_LOG_FORMAT", "json")],
+        ) else {
+            return;
+        };
+        let boots = deployment.events("boot");
+        let boot = boots.first().expect("a boot event");
+        assert_eq!(boot["privilege"], "root", "{boot}");
+        assert_eq!(boot["preset"], preset, "{boot}");
+        let settings = boot["preset_settings"]
+            .as_object()
+            .expect("what the preset supplied");
+        assert_eq!(settings.len(), 4, "{preset}: {settings:?}");
+        let overridden = boot["preset_overridden"].as_array().expect("the overrides");
+        assert!(
+            overridden.iter().any(|name| name == "BLASTIT_LOG_FORMAT"),
+            "the harness's own format won over the preset's: {preset}: {overridden:?}"
+        );
+
+        let trusted = deployed_body(&deployment.request_with(
+            "/one",
+            &[(believed, "198.51.100.7"), (ignored, "203.0.113.9")],
+        ));
+        assert_eq!(
+            trusted["remote_addr"], "198.51.100.7",
+            "{preset} believes {believed} and not {ignored}: {trusted}"
+        );
+
+        // The untrusted header alone is ignored: the peer's own address wins.
+        let untrusted =
+            deployed_body(&deployment.request_with("/one", &[(ignored, "203.0.113.9")]));
+        assert_eq!(
+            untrusted["remote_addr"], "127.0.0.1",
+            "{preset} must ignore {ignored}: {untrusted}"
+        );
+    }
+}
+
+/// §6: `serve` writes JSON events by default — one line per event, each with
+/// `ts`/`level`/`component` — and `BLASTIT_LOG_FORMAT=pretty` renders a
+/// forwarded event as the human line instead.
+#[cfg(feature = "python")]
+#[test]
+fn a_deployment_writes_json_events_unless_the_format_says_pretty() {
+    let Some(json) = deployed("format-json", &[], &[]) else {
+        return;
+    };
+    let value = deployed_body(&json.get("/one"));
+    assert_eq!(value["uid"], DEPLOY_UID_BASE + 1000, "{value}");
+    for line in json.stdout_lines() {
+        let event: serde_json::Value = serde_json::from_str(&line)
+            .unwrap_or_else(|err| panic!("a serve boot writes JSON: {err}: {line}"));
+        assert_eq!(
+            event["ts"].as_str().map(str::len),
+            Some(24),
+            "one timestamp shape: {line}"
+        );
+        assert!(event["level"].is_string(), "{line}");
+        assert!(event["component"].is_string(), "{line}");
+        assert!(line.len() <= 2048, "{} bytes: {line}", line.len());
+    }
+    let names: Vec<String> = json
+        .events("boot")
+        .iter()
+        .filter_map(|event| event["stage"].as_str().map(str::to_owned))
+        .collect();
+    assert!(names.iter().any(|stage| stage == "preload"), "{names:?}");
+    assert!(
+        !json.events("ready").is_empty(),
+        "the lifecycle reaches `ready`:\n{}",
+        json.stdout_text()
+    );
+
+    let Some(pretty) = deployed("format-pretty", &[], &[("BLASTIT_LOG_FORMAT", "pretty")]) else {
+        return;
+    };
+    deployed_body(&pretty.get("/one"));
+    assert!(
+        pretty.wait_for_event(" request "),
+        "no request line:\n{}",
+        pretty.stdout_text()
+    );
+    let log = pretty.stdout_text();
+    let request = log
+        .lines()
+        .find(|line| line.contains(" request "))
+        .expect("the request line");
+    assert!(
+        !request.starts_with('{') && !request.contains("\"event\":"),
+        "one human line, not a JSON object: {request}"
+    );
+    assert!(
+        request.contains("→ "),
+        "the route reaches the line: {request}"
+    );
+    assert!(
+        log.lines().filter(|line| line.starts_with('{')).count() <= 2,
+        "only stage 0's first lines may be JSON:\n{log}"
+    );
 }
 
 // ------------------------------------------------------------------- PHP

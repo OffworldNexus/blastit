@@ -4327,3 +4327,15 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T21:01 [MB.56.3.4] (lead) REVIEW FIX 2 (arch): REVERT the symlink refusal - a regular file can be swapped too (stage-1 re-read + TOCTOU test is the real barrier) and it rejects the canon
 - 2026-11-20T21:05 [MB.56.3.5] (lead) FROM MB.56.3.4: Makefile:203 + ci.yml root-test exclusion list now point at the consolidated suites - verify; e2e_prod_refusals is 2,2xx LOC (PHP stub/helper ha
 - 2026-11-20T21:07 [MB.56.3.4] (lead) status active -> done
+- 2026-11-20T21:07 [MB.56.3.4] (lead) commit 2a6a4ad
+- 2026-11-20T21:07 [MB.56.3.5] (lead) status ready -> active
+- 2026-11-20T21:07 [MB.56.3.5] (lead) attempt 1/3 started
+- 2026-11-20T21:07 [MB.56.3.5] (lead) base 2a6a4ad07b960b45dbc2eb0f1b970a2192195808 CAP DECISION: the 5,500-LOC target is not reachable without gutting §2-§6 coverage; land ~8,500 LOC across the fou
+- 2026-11-20T21:07 [MB.56.4] (lead) edited fields
+- 2026-11-20T21:07 [MB.56.4.1] (lead) created (task) e2e/apps + run_apps.py: PHP/PostgreSQL/static, Django & Flask, interpreter-free Static
+- 2026-11-20T21:07 [MB.56.4.2] (lead) created (task) e2e/run_prod.py: root + rootless presets, isolation, fair queueing, drain
+- 2026-11-20T21:07 [MB.56.4.3] (lead) created (task) e2e/run_packaging.py: deb/rpm/install.sh/wheel/composer
+- 2026-11-20T21:07 [MB.56.4.4] (lead) created (task) Wire workflows: drop the host-tree smoke (root), run every §2/§3/§6 story on the matrix
+- 2026-11-20T21:07 [MB.56.5] (lead) edited fields
+- 2026-11-20T21:22 [MB.56.3.5] (lead) status active -> done
+- 2026-11-20T21:22 [MB.56.3] (lead) status active -> done: four BDD suites + common/; 26,643 -> 11,513 LOC

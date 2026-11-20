@@ -59,3 +59,7 @@ REVIEW FIX 2 (arch): REVERT the symlink refusal - a regular file can be swapped 
 ## 2026-11-20T21:07 [lead]
 
 status active -> done
+
+## 2026-11-20T21:07 [lead]
+
+commit 2a6a4ad

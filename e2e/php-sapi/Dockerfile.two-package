@@ -18,8 +18,8 @@
 #
 # `--cap-add SYS_PTRACE` is load-bearing, exactly as in `make rs-test-php-image`:
 # Docker's default root set cannot read the maps of a `PR_SET_DUMPABLE(0)` role,
-# and `critical_php_embed`'s maps leg asserts every role above the view is
-# content-checked when it runs as root.
+# and `e2e_prod_refusals`'s `no_libphp_is_mapped_above_the_view_worker` asserts
+# every role above the view is content-checked when it runs as root.
 #
 # `run-two-package.sh` is the witness: it refuses to pass unless the suites ran
 # their **served** branch, and unless the library their own probe resolved on
