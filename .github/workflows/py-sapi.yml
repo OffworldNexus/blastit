@@ -1,4 +1,5 @@
-# The real proof for the per-minor CPython shims (`MB.42.2`, `MB.42.3.3`).
+# The real proof for the per-minor CPython shims (`MB.42.2`, `MB.42.3.3`) and for
+# the WSGI story they carry (`TESTING_PLAN.md` §2).
 #
 # `make check` builds the shims this host can build and asserts their ELF
 # contract, but it cannot prove every leg: it has one interpreter per minor and
@@ -29,6 +30,12 @@
 # *proof line per leg* rather than "the target exited 0", and it is what fails
 # when `make py-sapi` is refactored into something weaker.
 #
+# The `wsgi` job is the boot-level half: Django and Flask on **CPython 3.13 and
+# 3.14**, serving their views through these shims, with per-view SQL grants and
+# the five refusals (`e2e/run_apps.py --legs wsgi`). The minors it installs and
+# the runner it uses come from the matrix, so a newly declared minor is a leg
+# here before it is a promise in the docs.
+#
 # Kept out of `make check` (Docker-free but needs several interpreters), exactly
 # like `php-sapi.yml`, so the shim cannot rot unnoticed between gates.
 name: Python SAPI
@@ -53,10 +60,12 @@ env:
 
 jobs:
   matrix:
-    name: the legs (scripts/platform_matrix.py)
+    name: the leg list (scripts/platform_matrix.py)
     runs-on: ubuntu-latest
     outputs:
       py_shims: ${{ steps.legs.outputs.py_shims }}
+      wsgi_host: ${{ steps.legs.outputs.wsgi_host }}
+      minors: ${{ steps.legs.outputs.minors }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
@@ -67,9 +76,17 @@ jobs:
         run: |
           set -euo pipefail
           echo "py_shims=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims)" >> "$GITHUB_OUTPUT"
+          # The WSGI story runs on a host, not in a container: the architecture
+          # whose native runner carries it and the minors a shim exists for are
+          # both the matrix's.
+          echo "wsgi_host=$(uv run --no-project scripts/platform_matrix.py --matrix hosts --arch x86_64 |
+              uv run --no-project python -c 'import json, sys; print(json.load(sys.stdin)["include"][0]["runs_on"])')" >> "$GITHUB_OUTPUT"
+          minors=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims |
+              uv run --no-project python -c 'import json, sys; print(" ".join(sorted({item["python"] for item in json.load(sys.stdin)["include"]})))')
+          echo "minors=$minors" >> "$GITHUB_OUTPUT"
 
   lint:
-    name: fmt + clippy (the shim crates)
+    name: 'lint: the shim crates, fmt + clippy -D warnings'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,7 +103,7 @@ jobs:
           cargo clippy -p blastit-py-shim --features extension-module --all-targets --locked -- -D warnings
 
   legs:
-    name: shim + contract (${{ matrix.shim }})
+    name: '§2 CPython ${{ matrix.minor }} shim (${{ matrix.arch }}-${{ matrix.libc }})'
     needs: [lint, matrix]
     strategy:
       fail-fast: false
@@ -132,3 +149,54 @@ jobs:
           name: py-shim-${{ matrix.name }}
           path: target/py-sapi/${{ matrix.shim }}
           if-no-files-found: error
+
+  # `TESTING_PLAN.md` §2's WSGI story: Django and Flask on CPython 3.13 **and**
+  # 3.14, each view executing only its declared statements, the same five
+  # refusals answering `403`/`42501`, and no database password in any worker
+  # environment or response. The PHP and static legs of the same driver belong
+  # to `ci.yml`; this job runs one family so its log is the WSGI proof.
+  wsgi:
+    name: '§2 WSGI views: Django & Flask on CPython ${{ needs.matrix.outputs.minors }}'
+    needs: [matrix, legs]
+    runs-on: ${{ needs.matrix.outputs.wsgi_host }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the CPython minors the matrix names
+        run: uv python install ${{ needs.matrix.outputs.minors }}
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
+      - name: Build the binary under test
+        run: cargo build -p blastit --release --locked
+      - name: Run the WSGI family (e2e/run_apps.py --legs wsgi)
+        run: |
+          set -o pipefail
+          uv run --no-project e2e/run_apps.py --legs wsgi 2>&1 | tee "$RUNNER_TEMP/wsgi.log"
+      # A missing interpreter or shim prints a `SKIP` and exits 0, so a green job
+      # would prove nothing. The printout is the verdict: every minor's two
+      # frameworks PASS, and nothing in this family skipped.
+      - name: 'guard: both WSGI frameworks serve on every minor, none skipped'
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/wsgi.log"
+          status=0
+          if skipped=$(grep -nE '^SKIP ' "$log"); then
+            echo "::error::the WSGI legs skipped instead of serving: this runner has no interpreter or shim for a minor the matrix declares"
+            echo "$skipped"
+            status=1
+          fi
+          for evidence in 'PASS  django 3\.13 ' 'PASS  flask 3\.13 ' 'PASS  django 3\.14 ' 'PASS  flask 3\.14 '; do
+            if ! grep -qE "$evidence" "$log"; then
+              echo "::error::the WSGI proof line is missing from the run: $evidence"
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "--- $log (tail) ---"
+            tail -n 60 "$log"
+            exit 1
+          fi
+          echo "the WSGI legs served: $(grep -cE '^PASS  (django|flask) ' "$log") framework leg(s)"

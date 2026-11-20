@@ -106,13 +106,14 @@ jobs:
           echo "packages: tag $tag, event $EVENT_NAME/$REF_TYPE, publishes: $publish"
 
   matrix:
-    name: the legs (scripts/platform_matrix.py)
+    name: the leg list (scripts/platform_matrix.py)
     runs-on: ubuntu-24.04
     outputs:
       install: ${{ steps.legs.outputs.install }}
       packages: ${{ steps.legs.outputs.packages }}
       shims_gnu: ${{ steps.legs.outputs.shims_gnu }}
       py_shims_gnu: ${{ steps.legs.outputs.py_shims_gnu }}
+      hosts: ${{ steps.legs.outputs.hosts }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
@@ -127,9 +128,12 @@ jobs:
           echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages)" >> "$GITHUB_OUTPUT"
           echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu)" >> "$GITHUB_OUTPUT"
           echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu)" >> "$GITHUB_OUTPUT"
+          # The host stories (install.sh --user, the Composer wrapper) run on a
+          # native runner per architecture, from the same matrix.
+          echo "hosts=$(uv run --no-project scripts/platform_matrix.py --matrix hosts)" >> "$GITHUB_OUTPUT"
 
   shims:
-    name: shim (${{ matrix.shim }})
+    name: '§2 PHP ${{ matrix.minor }} shim, built and probed (${{ matrix.arch }}-${{ matrix.libc }})'
     needs: [matrix]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
@@ -158,7 +162,7 @@ jobs:
           if-no-files-found: error
 
   py_shims:
-    name: python shim (${{ matrix.shim }})
+    name: '§2 CPython ${{ matrix.minor }} shim, ELF contract (${{ matrix.arch }}-${{ matrix.libc }})'
     needs: [matrix]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 30
@@ -181,7 +185,7 @@ jobs:
           if-no-files-found: error
 
   packages:
-    name: package (${{ matrix.name }})
+    name: '§3 build the ${{ matrix.format }} package for ${{ matrix.arch }}'
     needs: [plan, matrix, shims, py_shims]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
@@ -248,7 +252,7 @@ jobs:
           if-no-files-found: error
 
   install:
-    name: install (${{ matrix.name }})
+    name: '§3 ${{ matrix.image }} installs the ${{ matrix.format }} package and runs it (${{ matrix.arch }})'
     needs: [matrix, packages]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 25
@@ -270,9 +274,41 @@ jobs:
       - name: install in ${{ matrix.image }} and drive it
         run: scripts/install_matrix.sh --leg "${{ matrix.name }}" --dir dist
 
+  # `TESTING_PLAN.md` §3's user-space stories, on the host rather than in a
+  # distribution image: `docs/install.sh --user` (zero `sudo`, from a release
+  # archive served over `file://`, with a tampered archive refused) and the
+  # Composer wrapper (`vendor/bin/blastit`, digests verified). Both legs are
+  # `e2e/run_packaging.py`'s, so no step here repeats an install command, and both
+  # architectures' native runners are the matrix's `hosts` list.
+  user-space:
+    name: '§3 install.sh --user + composer wrapper in user space (${{ matrix.arch }})'
+    needs: [matrix]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the release binary
+        run: cargo build --release --locked -p blastit
+      # A host release build, not the release archive: this workflow runs from a
+      # tag and has no `standalone-*` artifact of its own. The archive-fed twin of
+      # this story is `publish-pypi.yml`'s `§3 install.sh --user (gnu) + Alpine
+      # musl install` job, which downloads the archives it just built.
+      - name: install.sh --user on a host release build (e2e/run_packaging.py --leg install)
+        run: >-
+          uv run --no-project e2e/run_packaging.py --require-legs --leg install
+          --binary target/release/blastit
+      - name: Composer wrapper, vendor/bin/blastit (e2e/run_packaging.py --leg composer)
+        run: uv run --no-project e2e/run_packaging.py --require-legs --leg composer
+
   publish:
     name: signed repositories
-    needs: [plan, packages, install]
+    needs: [plan, packages, install, user-space]
     # The repositories belong to offworld-nexus: a fork that pushes a tag has no
     # secret and must not be asked for one.
     if: >-
@@ -280,7 +316,8 @@ jobs:
       github.repository == 'offworld-nexus/blastit' &&
       needs.plan.result == 'success' &&
       needs.packages.result == 'success' &&
-      needs.install.result == 'success'
+      needs.install.result == 'success' &&
+      needs.user-space.result == 'success'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4

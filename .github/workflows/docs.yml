@@ -5,6 +5,11 @@ name: Docs
 # deploys it on every push to `develop`, on `workflow_dispatch`, and on a pushed
 # `v*` tag.
 #
+# This workflow owns the pages: the nav/orphan check, the `--strict` build, the
+# package's offline suites, and the installer the README's hero advertises as a
+# served asset. `ci.yml` runs no docs job — one workflow, one owner (`MB.56.4.4`
+# removed the duplicate `docs-gate`).
+#
 # The site is the only thing GitHub Pages serves here now: the PEP 503 wheel
 # index that `release.yml` used to publish was retired in E4, and releases go to
 # PyPI instead. Deploying from `develop` is also what makes the README's links
@@ -16,9 +21,7 @@ name: Docs
 # every Markdown page under `docs/` that `exclude_docs` does not keep out of the
 # build must be named by the nav, so a page/nav drift is a red Docs check instead
 # of an orphan page on the site. It needs no wheel and no cargo, only the
-# repository. `ci.yml`'s `docs-gate` job runs `make docs-check` + `make docs-unit`
-# on a pull request (a job cannot `needs` another workflow's job, so the strict
-# build is repeated there).
+# repository.
 #
 # The installer the README's hero advertises is a *served asset*, not a page:
 # https://offworldnexus.github.io/blastit/install.sh must be the exact bytes this
@@ -27,13 +30,9 @@ name: Docs
 # built `site/`, compares the two with `cmp`, fetches the file back over HTTP and
 # compares that too, then pipes the served URL into `sh -s -- --help`. The pipe
 # is how a new user runs it, and it is a help-only smoke: no repository is
-# touched, nothing is installed.
-#
-# Two release guards live in that step as well. The embedded digest table must be
-# keyed by `BLASTIT_DEFAULT_VERSION` (one version to bump, checked against
-# `Cargo.toml`), and a `v*` tag whose table still holds `-` rows fails: `-` means
-# an archive install would verify against the origin's own `SHA256SUMS`, which is
-# the same trust root as the download and therefore no independent check.
+# touched, nothing is installed. (The installer's own install stories are
+# `e2e/run_packaging.py --leg install|alpine`, run by `packages.yml` and
+# `publish-pypi.yml`.)
 
 on:
   push:
@@ -59,8 +58,9 @@ env:
 
 jobs:
   build:
-    name: build (--strict)
+    name: 'pages: nav/orphan check, strict build, served install.sh + offline suites'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,7 +72,7 @@ jobs:
       # out has to appear in the nav, exactly as `--strict` would publish it. An
       # orphan page ships a URL nothing links to, which is a page the review
       # never read.
-      - name: Check the page list
+      - name: Check the page list (no orphan page reaches the site)
         env:
           UV_PYTHON_DOWNLOADS: never
         run: |
@@ -148,8 +148,14 @@ jobs:
       # `--strict` aborts on a warning, and link validation is on by default:
       # every internal link and every link anchor is resolved, so a renamed
       # heading or a moved page fails this job.
-      - name: Build
+      - name: Build the site with --strict
         run: zensical build --strict
+      # The package's offline suites (`python/tests/test_check_pytest_gate.py`,
+      # `test_launcher.py`) plus the `install.sh` POSIX-sh parse: no wheel, no
+      # network, no root. This is the job that keeps them on a pull request now
+      # that `ci.yml` runs no docs job.
+      - name: The package's offline suites and install.sh's syntax
+        run: make docs-unit
       # The hero's one command is served from the site root, so the served bytes
       # must be the reviewed bytes. The build happens to copy `docs/install.sh`
       # in this pinned Zensical, which is not a guarantee the gate can lean on:
@@ -157,13 +163,13 @@ jobs:
       # hand a user, and the pipe proves a real `curl … | sh` still reaches
       # usage.
       #
-      # The three version guards: `BLASTIT_DEFAULT_VERSION` must equal
+      # Three version guards live beside it: `BLASTIT_DEFAULT_VERSION` must equal
       # `Cargo.toml`'s version, the embedded digest table must be keyed by that
       # same constant (so a release has one version to bump), and a `v*` tag may
       # not publish a table whose rows are still `-` — an archive install would
       # then verify against the origin's own SHA256SUMS, which shares the
       # download's trust root and adds no assurance.
-      - name: Publish and prove install.sh
+      - name: Publish and prove install.sh (the README's one command)
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
@@ -209,7 +215,7 @@ jobs:
           path: site
 
   deploy:
-    name: deploy (GitHub Pages)
+    name: deploy the site to GitHub Pages
     needs: build
     # A pull request builds the site and stops there: the `github-pages`
     # environment allows `develop` and `v*` only, so a deployment from a

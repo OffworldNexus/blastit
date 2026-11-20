@@ -15,8 +15,23 @@ epic and milestone gates (skill `testing`).
 | `make fast-check` | `guard`, `rs-fmt`, `rs-lint`, `rs-doc`, `rs-test`, `py-lint`, `plan-validate`, `universal-smoke` | Formatting, `clippy -D warnings`, rustdoc, every Rust unit/integration/doc test (including `crates/*/tests/critical_*.rs`), Python lint, plan consistency, and the debug binary's portable-ELF shape |
 | `make check` | `fast-check` + `test-critical`, `docs-unit`, `docs-check`, `rs-no-python`, `rs-no-default`, `e2e-universal`, `zed-check` | The epic/release gate: staged Python critical suites, the offline package suites, the strict docs build, the standalone artifact's ELF and dependency graph, one bundle across four runtimes, and the Zed extension |
 | `make docs-check` | `uvx --offline zensical build --strict` | Zero broken links/anchors, and every Markdown page `exclude_docs` does not keep out is named by the nav (an unpublished orphan is a page no review read) |
-| `make docs-unit` | `python/tests/test_check_pytest_gate.py`, `python/tests/test_launcher.py` | The package's offline suites: the `check` exit-code contract and the project-binary handoff. No wheel build, no network, no root |
-| `make e2e`, `make php-sapi-e2e` | Docker images and the real-load PHP probe | Multi-UID/rootless isolation and real PHP/PostgreSQL/static stacks. Gates only — never inside `fast-check` |
+| `make docs-unit` | `python/tests/test_check_pytest_gate.py`, `python/tests/test_launcher.py`, plus its `install-sh-syntax` prerequisite (`sh -n`/`dash -n` on `docs/install.sh`) | The package's offline suites: the `check` exit-code contract and the project-binary handoff, and that the installer still parses as POSIX `sh`. No wheel build, no network, no root |
+| `make e2e` (`e2e/run_apps.py`, `--legs wsgi`/`php`/`static`) | `§2`: real PHP 8.4 + `libphp`, Django and Flask on CPython 3.13/3.14, a static site in a container with neither interpreter | Per-view SQL grants, the five refusals, `exit()`/fatal recovery, `php2shell` neutrality and the static mount's boundary. **PR** (`ci.yml`), and the WSGI family in `py-sapi.yml` |
+| `make e2e-prod` (`e2e/run_prod.py`) | `§6`: both deployment presets as container root and as a capable service user beside `postgres:18`/Traefik/PgBouncer | Per-view uids ≥ 20000, zero capabilities, the `/proc` credential scan, one grant per view, fair queuing and `SIGTERM` drain. **Nightly** (`nightly.yml`) — an image build per leg, never on a PR |
+| `make e2e-packaging` (`e2e/run_packaging.py`) | `§3`: `.deb`/`.rpm` installs, `install.sh --user`, the Alpine musl install, the `py3-none` wheel and the Composer wrapper | Each artifact installs where the story says and answers `--version`/`fmt`/`check` (plus a served WSGI view through the shipped shim). **Tags**: `packages.yml`, `wheels.yml`, `publish-pypi.yml`; the wheel also in `ci.yml` |
+| `make php-sapi-e2e`, `make rs-test-php-image` | The real-load PHP probe and the boot-level `e2e_dev` view legs, in the leg's own distro image | `§2`'s PHP 8.3–8.6 × `x86_64`/`aarch64` × `gnu`/`musl` matrix. **PR** (`php-sapi.yml`), a hard failure when a leg skips |
+
+## Where the story suites run
+
+| Workflow | What it proves | When |
+|---|---|---|
+| `ci.yml` | `§2` applications (PHP 8.4, Django/Flask on 3.13/3.14, static), plus lint, the Rust suites, the R42 guard, one root-only assertion, `blastit-lsp` and the wheel | every PR; `develop` |
+| `php-sapi.yml` | `§2` PHP 8.3, 8.4, 8.5 and 8.6 on `x86_64`+`aarch64`, `gnu`+`musl`, with the boot-level view legs | every PR; `develop` |
+| `py-sapi.yml` | `§2` the per-minor CPython shims and the Django/Flask WSGI legs they serve | every PR; `develop` |
+| `wheels.yml`, `packages.yml` | `§3` the wheel legs, the `.deb`/`.rpm` installs, `install.sh --user` and the Composer wrapper | `wheels.yml`: `develop`; `packages.yml`: tags + dispatch |
+| `publish-pypi.yml` | `§3` the user-space install stories against the release archives; PyPI + the release assets | release PR + release |
+| `nightly.yml` | `§3` the nightly packages and `§6` both production presets | nightly + dispatch |
+| `docs.yml` | the published pages, the nav/orphan check and the served `install.sh` | every PR; `develop`; tags |
 
 ## Writing a test
 

@@ -33,6 +33,12 @@
 # checklist (M-1 worker environment, M-2/M-3 per-route uid and `SeccompRole::View`,
 # M-6 INI values) is evinced by the same boots.
 #
+# `TESTING_PLAN.md` §2's PHP compatibility story is the whole `--matrix shims`
+# list: **PHP 8.3, 8.4, 8.5 and 8.6** on `x86_64` **and** `aarch64`, both `gnu`
+# and `musl` (16 legs), each on the native runner for its architecture and in the
+# image that ships its minor. No leg is filtered in this file: the list, the
+# runner and the `suites` fact all come from the matrix.
+#
 # Kept out of `make check` (Docker + a PHP image + a Rust toolchain in the
 # image), exactly like `e2e/`, so the shim cannot rot unnoticed between gates.
 name: PHP SAPI
@@ -57,7 +63,7 @@ env:
 
 jobs:
   matrix:
-    name: the legs (scripts/platform_matrix.py)
+    name: the leg list (scripts/platform_matrix.py)
     runs-on: ubuntu-latest
     outputs:
       legs: ${{ steps.legs.outputs.legs }}
@@ -75,7 +81,7 @@ jobs:
   # The probe binary lives behind `--features probe`, so plain `make check` never
   # lints it; this job is the one that does. It runs once, not per leg.
   lint:
-    name: fmt + clippy (the probe and the e2e seccomp harness)
+    name: 'lint: the real-load probe and the e2e seccomp harness'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +106,7 @@ jobs:
           cargo clippy --manifest-path e2e/php-sapi/seccomp-exec/Cargo.toml -- -D warnings
 
   legs:
-    name: shim + probe (${{ matrix.shim }} on ${{ matrix.base }})
+    name: '§2 PHP ${{ matrix.minor }} (${{ matrix.arch }}-${{ matrix.libc }}): shim probe + boot-level view legs'
     needs: [lint, matrix]
     strategy:
       fail-fast: false
@@ -176,7 +182,7 @@ jobs:
       # stage-0 text that a *healthy* leg cannot contain now (no leg boots a
       # missing pair), but anchoring on the sentinel keeps the guard reading the
       # run's own verdict rather than prose.
-      - name: 'guard: the PHP legs must serve, not skip'
+      - name: 'guard: the view legs must serve, not skip'
         if: matrix.suites == 'true'
         run: |
           log="$RUNNER_TEMP/php-pair.log"

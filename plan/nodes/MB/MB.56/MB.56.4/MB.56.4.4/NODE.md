@@ -2,16 +2,16 @@
 id: MB.56.4.4
 title: "Wire workflows: drop the host-tree smoke (root), run every §2/§3/§6 story on the matrix"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.56.4.3]
 paths: [".github/**", "e2e/**", "scripts/**", Makefile, "docs/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T21:07"
-updated: "2026-11-20T21:07"
+updated: "2026-11-20T22:55"
 ---
 
 # Goal

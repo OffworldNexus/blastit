@@ -11,7 +11,7 @@
 #   make test-critical    # run critical skip check + staged Python critical tests (offline)
 #   make rs-test-critical # run every crates/*/tests/critical_*.rs suite standalone
 #   make coverage         # instrumented line/region % + uncovered lines (TESTS="…" FILES="…")
-#   make e2e              # build manylinux_2_28 wheel and run Docker + rootless capability e2e tests
+#   make e2e              # application suite (§2): PHP, Django/Flask, static in Docker
 #   make e2e-prod         # both deployment presets in real containers: uids, caps, /proc, fair queue, drain
 #   make e2e-packaging    # install stories (§3): deb/rpm, install.sh --user + Alpine musl, wheel, composer
 #   make e2e-universal    # one staged bundle, four runtimes: CPython 3.13/3.14, PHP 8.4, static, handoff (slow)
@@ -63,15 +63,17 @@ STANDALONE_ENV = env -u PYO3_PYTHON -u PYTHONHOME
 # PHP, `manylinux_2_28` for the rest) — never accommodated by dropping a
 # distribution.
 #
-# Staging, the built files and the container proof all live under `/tmp/opencode`;
-# nothing is installed on the host. Both targets are slow (a container build,
-# Docker, dnf) and stay out of `check`. `MB.42.3.4` wires `packages.yml`/`nightly.yml`;
-# until then they run by hand (and are the commands that gate will call).
+# Staging and the container proof live under `/tmp/opencode`; the built packages
+# land in `target/packages`, which is the directory `e2e/run_packaging.py`'s
+# `discover()` and `e2e/README.md` already name (so `make packages` is the
+# recovery path a SKIP prints). Nothing is installed on the host. Both targets
+# are slow (a container build, Docker, dnf) and stay out of `check`.
+# `packages.yml`/`nightly.yml` run the same legs on their matrix.
 # The `.deb` keeps `blastit_<ver>_<arch>.deb` (no Debian revision by default);
 # the `.rpm` needs a release, which is what a nightly stamps.
 PACKAGES_SCRATCH ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/opencode/blastit-packages
 PACKAGES_PREFIX  ?= $(PACKAGES_SCRATCH)/prefix
-PACKAGES_OUT     ?= $(PACKAGES_SCRATCH)
+PACKAGES_OUT     ?= $(CURDIR)/target/packages
 # The declared ceiling for a package bundle, `<major>_<minor>`, from the matrix
 # that states it — never a literal here.
 PACKAGES_SHIM_FLOOR ?= $(shell $(UV) run --no-project scripts/platform_matrix.py --shim-floor)
@@ -293,8 +295,10 @@ packages-test: ## The deb/rpm legs of `make e2e-packaging` for the packages unde
 		exit 1; \
 	fi; \
 	echo "packages-test: deb=$${deb:-none} rpm=$${rpm:-none}"; \
-	$(UV) run --no-project e2e/run_packaging.py \
-		$(if $(deb),--leg deb --deb "$(deb)") $(if $(rpm),--leg rpm --rpm "$(rpm)")
+	set --; \
+	if [ -n "$$deb" ]; then set -- "$$@" --leg deb --deb "$$deb"; fi; \
+	if [ -n "$$rpm" ]; then set -- "$$@" --leg rpm --rpm "$$rpm"; fi; \
+	$(UV) run --no-project e2e/run_packaging.py --require-legs "$$@"
 
 rs-test-critical: ## Run every crates/*/tests/critical_*.rs suite standalone
 	@set -e; found=0; for file in crates/*/tests/critical_*.rs; do \

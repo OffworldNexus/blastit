@@ -33,10 +33,11 @@ and then runs the story's own commands *where the artifact was installed*:
   refused with a sentence.
 
 An artifact that has not been built yet is a loud SKIP naming the command that
-builds it — never a silent pass. Every container is `blastit-pkg-*`, every port
-comes from `28080`, every scratch tree lives under
-`${TMPDIR:-/tmp/opencode}/blastit-pkg`, and one `finally` removes what this run
-created. Stdlib only, no `sudo` on the host.
+builds it — never a silent pass. `--require-legs` turns any SKIP into a failure,
+which is what every CI call site passes: a green gate cannot be one that skipped.
+Every container is `blastit-pkg-*`, every port comes from `28080`, every scratch
+tree lives under `${TMPDIR:-/tmp/opencode}/blastit-pkg`, and one `finally`
+removes what this run created. Stdlib only, no `sudo` on the host.
 """
 
 from __future__ import annotations
@@ -61,8 +62,10 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 FIXTURES = HERE / "packaging"
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(ROOT / "scripts"))
 from typing import Self
 
+from platform_matrix import wheel_legs
 from universal_binary import LegFailure, Skip, http
 
 PORT_BASE = 28080
@@ -177,7 +180,7 @@ class Summary:
         self.rows.append((leg, state, detail))
         print(f"{state:4}  {leg:20}  {detail}", flush=True)
 
-    def report(self) -> int:
+    def report(self, require: bool = False) -> int:
         passed = sum(1 for _, state, _ in self.rows if state == "PASS")
         skipped = sum(1 for _, state, _ in self.rows if state == "SKIP")
         failed = sum(1 for _, state, _ in self.rows if state == "FAIL")
@@ -186,6 +189,13 @@ class Summary:
             "(a SKIP names the artifact it needs)",
             flush=True,
         )
+        if require and skipped:
+            print(
+                f"{skipped} leg(s) skipped but this run requires them: a gate that "
+                "skipped proves nothing",
+                flush=True,
+            )
+            return 1
         return 1 if failed else 0
 
 
@@ -923,12 +933,43 @@ def leg_package(
     return checks.done(f"{kind} ({image})")
 
 
+def wheel_images(wheel: Path) -> list[tuple[str, str]]:
+    """The matrix's `runtime_images` for this wheel's own (arch, libc).
+
+    One `py3-none` wheel serves every CPython `>=3.12`, so the interpreters it is
+    installed into are a fact of the leg that built it: `python:3.12/3.13/3.14-slim`
+    for a `manylinux` wheel and the `-alpine` images for a `musllinux` one. They
+    are read from `scripts/platform_matrix.py --matrix wheels`, never spelled here,
+    so a wheel and the images it is smoked in cannot disagree (`MB.42.3.3`).
+    """
+    tag = wheel.name.rsplit("-", 1)[-1].removesuffix(".whl")
+    arch = "aarch64" if tag.endswith("aarch64") else "x86_64"
+    libc = "musl" if tag.startswith("musllinux") else "gnu"
+    leg = next(
+        (
+            item
+            for item in wheel_legs()
+            if item["arch"] == arch and item["libc"] == libc
+        ),
+        None,
+    )
+    if leg is None:
+        raise LegFailure(
+            f"{wheel.name} is not a platform this matrix declares "
+            "(`scripts/platform_matrix.py --matrix wheels`)"
+        )
+    return [
+        (image.rsplit(":", 1)[-1].split("-")[0], image)
+        for image in leg["runtime_images"].split(",")
+    ]
+
+
 def leg_wheel(scratch: Path, wheel: Path, version: str) -> str:
-    """The universal wheel: `pip install` in `python:3.12/3.13/3.14-slim`."""
+    """The universal wheel: `pip install` in the images its leg's matrix names."""
     require_docker()
     checks = Checks()
-    for minor in ("3.12", "3.13", "3.14"):
-        image = f"python:{minor}-slim"
+    images = wheel_images(wheel)
+    for minor, image in images:
         name = f"blastit-pkg-wheel-{minor.replace('.', '')}-{os.getpid()}"
         port = PORTS.take()
         dev_env = {
@@ -948,6 +989,15 @@ def leg_wheel(scratch: Path, wheel: Path, version: str) -> str:
             publish=[port],
             environment={"PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_CACHE_DIR": "1"},
         ) as box:
+            if "alpine" in image:
+                # A dynamically linked musl Rust binary needs `libgcc_s.so.1`,
+                # and a bare interpreter image does not carry it (the matrix's
+                # musl leg says so). Installed here so the wheel's own binary —
+                # not the image — is what answers.
+                box.exec(
+                    ["sh", "-c", "apk add --no-cache libgcc >/dev/null"],
+                    timeout=300,
+                )
             installed = box.exec(
                 [
                     "python",
@@ -1035,7 +1085,7 @@ def leg_wheel(scratch: Path, wheel: Path, version: str) -> str:
                     )
             if checks.failures:
                 print(tail(box.logs(80), 50), flush=True)
-    return checks.done("wheel py3-none (3.12, 3.13, 3.14)")
+    return checks.done(f"wheel py3-none ({', '.join(minor for minor, _ in images)})")
 
 
 def leg_composer(scratch: Path, version: str) -> str:
@@ -1249,6 +1299,14 @@ def main() -> int:
         "--musl-archive", type=Path, help="an existing musl release tarball"
     )
     parser.add_argument("--keep", action="store_true", help="keep the work directory")
+    parser.add_argument(
+        "--require-legs",
+        action="store_true",
+        help=(
+            "fail when a leg skips: CI passes this, because a runner without "
+            "Docker or the artifact would otherwise exit 0 having proved nothing"
+        ),
+    )
     arguments = parser.parse_args()
 
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1341,7 +1399,7 @@ def main() -> int:
     finally:
         if not arguments.keep:
             shutil.rmtree(workspace, ignore_errors=True)
-    return summary.report()
+    return summary.report(arguments.require_legs)
 
 
 if __name__ == "__main__":

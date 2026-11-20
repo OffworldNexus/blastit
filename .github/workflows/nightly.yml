@@ -8,6 +8,12 @@ name: Nightly
 # the newest seven. `packages.yml` is this file's sibling: same graph, release
 # versions, the `main` component and no retention.
 #
+# The long legs live here, not on a pull request: this run also carries
+# `TESTING_PLAN.md` §6 (`e2e/run_prod.py`) — both deployment presets, their OS
+# uids, capability sets, `/proc` scans, fair queuing and `SIGTERM` drain, in real
+# containers — because that suite is a Docker image build per leg and does not
+# belong in front of a review.
+#
 # The two stamps are `scripts/publish_packages.py stamp`'s, and they are the two
 # the package formats need:
 #
@@ -70,13 +76,14 @@ jobs:
           echo "should_publish=true" >> "$GITHUB_OUTPUT"
 
   matrix:
-    name: the legs (scripts/platform_matrix.py)
+    name: the leg list (scripts/platform_matrix.py)
     runs-on: ubuntu-24.04
     outputs:
       install: ${{ steps.legs.outputs.install }}
       packages: ${{ steps.legs.outputs.packages }}
       shims_gnu: ${{ steps.legs.outputs.shims_gnu }}
       py_shims_gnu: ${{ steps.legs.outputs.py_shims_gnu }}
+      prod_host: ${{ steps.legs.outputs.prod_host }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
@@ -91,9 +98,56 @@ jobs:
           echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages)" >> "$GITHUB_OUTPUT"
           echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu)" >> "$GITHUB_OUTPUT"
           echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu)" >> "$GITHUB_OUTPUT"
+          # `§6` runs on a host, not in a container: the runner is the
+          # architecture's native one, from the matrix like every other leg.
+          echo "prod_host=$(uv run --no-project scripts/platform_matrix.py --matrix hosts --arch x86_64 |
+              uv run --no-project python -c 'import json, sys; print(json.load(sys.stdin)["include"][0]["runs_on"])')" >> "$GITHUB_OUTPUT"
+
+  prod:
+    name: '§6 production presets: root + rootless in real containers (Docker)'
+    needs: [matrix]
+    runs-on: ${{ needs.matrix.outputs.prod_host }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the binary under test
+        run: cargo build -p blastit --release --locked
+      - name: Run both deployment presets (e2e/run_prod.py)
+        run: |
+          set -o pipefail
+          uv run --no-project e2e/run_prod.py 2>&1 | tee "$RUNNER_TEMP/prod.log"
+      # A preset that skipped (no Docker, no PgBouncer image, no capability
+      # support) exits 0 and proves nothing; a rootless image the daemon cannot
+      # store file capabilities in is a FAIL in the harness itself. The printout
+      # is the verdict.
+      - name: 'guard: both presets ran, none skipped'
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/prod.log"
+          status=0
+          if skipped=$(grep -nE '^SKIP ' "$log"); then
+            echo "::error::a production preset skipped instead of running: this runner cannot prove §6"
+            echo "$skipped"
+            status=1
+          fi
+          for evidence in 'PASS  root preset ' 'PASS  rootless preset '; do
+            if ! grep -qE "$evidence" "$log"; then
+              echo "::error::the preset's proof line is missing from the run: $evidence"
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "--- $log (tail) ---"
+            tail -n 80 "$log"
+            exit 1
+          fi
+          echo "the production presets served: $(grep -cE '^PASS  (root|rootless) preset ' "$log") preset(s)"
 
   shims:
-    name: shim (${{ matrix.shim }})
+    name: '§2 PHP ${{ matrix.minor }} shim, built and probed (${{ matrix.arch }}-${{ matrix.libc }})'
     needs: [matrix]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 45
@@ -119,7 +173,7 @@ jobs:
           if-no-files-found: error
 
   py_shims:
-    name: python shim (${{ matrix.shim }})
+    name: '§2 CPython ${{ matrix.minor }} shim, ELF contract (${{ matrix.arch }}-${{ matrix.libc }})'
     needs: [matrix]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 30
@@ -140,7 +194,7 @@ jobs:
           if-no-files-found: error
 
   packages:
-    name: package (${{ matrix.name }})
+    name: '§3 build the nightly ${{ matrix.format }} package for ${{ matrix.arch }}'
     needs: [stamp, matrix, shims, py_shims]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
@@ -203,7 +257,7 @@ jobs:
           if-no-files-found: error
 
   install:
-    name: install (${{ matrix.name }})
+    name: '§3 ${{ matrix.image }} installs the nightly ${{ matrix.format }} package (${{ matrix.arch }})'
     needs: [matrix, packages]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 25

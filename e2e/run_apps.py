@@ -1,6 +1,7 @@
 """The application and runtime end-to-end suite.
 
     uv run --no-project e2e/run_apps.py            # every leg, free ports 28080+
+    uv run --no-project e2e/run_apps.py --legs wsgi  # only the WSGI family
 
 Real frameworks, a real PostgreSQL 18, a real PHP front controller, and a bare
 Debian container that has neither Python nor PHP. Every leg asserts the user
@@ -1044,8 +1045,20 @@ def fmt_check(binary: Path, manifest: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--binary", type=Path, help="the blastit artifact under test")
+    parser.add_argument(
+        "--legs",
+        default="",
+        help=(
+            "comma-separated families to run: wsgi (Django & Flask on 3.13 and "
+            "3.14), php, static (default: every family)"
+        ),
+    )
     parser.add_argument("--keep", action="store_true", help="keep the work directory")
     arguments = parser.parse_args()
+    families = [name.strip() for name in arguments.legs.split(",") if name.strip()]
+    unknown = sorted(set(families) - {"wsgi", "php", "static"})
+    if unknown:
+        parser.error(f"--legs names {unknown}; the families are wsgi, php, static")
 
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix="run-", dir=WORK_ROOT))
@@ -1098,25 +1111,31 @@ def main() -> int:
 
         legs = [
             (
+                "wsgi",
                 "django 3.13",
                 lambda: leg_django(binary, workspace, venv_for("3.13"), "3.13", pg),
             ),
             (
+                "wsgi",
                 "flask 3.13",
                 lambda: leg_flask(binary, workspace, venv_for("3.13"), "3.13", pg),
             ),
             (
+                "wsgi",
                 "django 3.14",
                 lambda: leg_django(binary, workspace, venv_for("3.14"), "3.14", pg),
             ),
             (
+                "wsgi",
                 "flask 3.14",
                 lambda: leg_flask(binary, workspace, venv_for("3.14"), "3.14", pg),
             ),
-            ("php 8.4", lambda: leg_php(binary, network, pg)),
-            ("static", lambda: leg_static(binary, workspace, network)),
+            ("php", "php 8.4", lambda: leg_php(binary, network, pg)),
+            ("static", "static", lambda: leg_static(binary, workspace, network)),
         ]
-        for name, leg in legs:
+        for family, name, leg in legs:
+            if families and family not in families:
+                continue
             try:
                 summary.add(name, "PASS", leg())
             except Skip as skipped:

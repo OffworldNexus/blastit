@@ -92,13 +92,20 @@ runs:
     # The wheel's tag, its payload modes and the shims it promised are asserted
     # inside `scripts/build-wheel.sh` (it reads the finished archive back), so a
     # leg's wheel is proved once, by the script that built it.
-    # One wheel, three interpreters — the promise a `py3-none` tag makes. Every
-    # leg runs the same three images, so a wheel that loads on 3.13 and not on
-    # 3.12 fails on the commit that built it (`scripts/wheel_container_smoke.sh`
-    # takes the images from `scripts/platform_matrix.py`'s leg).
-    - name: Install the wheel in python:3.12/3.13/3.14 and drive it
+    # One wheel, three interpreters — the promise a `py3-none` tag makes — is
+    # `e2e/run_packaging.py --leg wheel`'s: it installs the wheel with `pip` into
+    # the images `scripts/platform_matrix.py --matrix wheels` names for this
+    # leg (`python:3.12/3.13/3.14-slim`, the `-alpine` images for a musllinux
+    # wheel), drives `--version`, `blastit fmt` and `blastit check`, and serves a
+    # WSGI view through the shipped shim. One harness, no second copy of the
+    # install commands.
+    - uses: astral-sh/setup-uv@v10.3.2
+    - name: Install the wheel in the matrix's images and drive it (e2e/run_packaging.py)
       shell: bash
-      run: bash scripts/wheel_container_smoke.sh dist
+      run: |
+        set -euo pipefail
+        uv run --no-project e2e/run_packaging.py --require-legs --leg wheel \
+            --wheel "$(ls dist/blastit-*-py3-none-*.whl | head -n 1)"
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact }}

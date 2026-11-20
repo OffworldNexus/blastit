@@ -35,3 +35,7 @@ From MB.56.3.2.3: the SPLIT store form (postgres { host $DB_HOST port $DB_PORT u
 ## 2026-11-20T21:07 [lead]
 
 edited fields
+
+## 2026-11-20T22:55 [lead]
+
+status ready -> done

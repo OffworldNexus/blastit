@@ -15,8 +15,7 @@ name: Publish
 #      `develop` whose version is already tagged exits cleanly in seconds);
 #   2. `wheels`, `sdist`, and `verify` build and verify the exact release artifacts
 #      with README links pinned to `v<version>`, while `validate` waits in parallel
-#      for `CI`, `Docs`, and `Live (DigitalOcean)` on that merged `develop` commit
-#      to pass green;
+#      for `CI` and `Docs` on that merged `develop` commit to pass green;
 #   3. `pypi` publishes the wheels and sdist to PyPI via OIDC trusted publishing
 #      from the `pypi` GitHub environment;
 #   4. `release` creates and pushes the annotated `v<version>` git tag on the
@@ -170,6 +169,7 @@ jobs:
       binaries_gnu: ${{ steps.legs.outputs.binaries_gnu }}
       binaries_musl: ${{ steps.legs.outputs.binaries_musl }}
       lsp: ${{ steps.legs.outputs.lsp }}
+      hosts: ${{ steps.legs.outputs.hosts }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
@@ -191,6 +191,9 @@ jobs:
               key=$family${libc:+_$libc}
               echo "$key=$(uv run --no-project scripts/platform_matrix.py --matrix "$family" ${libc:+--libc "$libc"})" >> "$GITHUB_OUTPUT"
           done
+          # The host stories (`§3`: install.sh --user, the Alpine musl install)
+          # run on each architecture's native runner, from the same matrix.
+          echo "hosts=$(uv run --no-project scripts/platform_matrix.py --matrix hosts)" >> "$GITHUB_OUTPUT"
 
   shims:
     name: shim (${{ matrix.shim }})
@@ -597,16 +600,60 @@ jobs:
                   apk add --no-cache bash >/dev/null
                   bash scripts/build-musl-wheel.sh "$PY_VER" \
                       --require-shims all --shims-from dist/shims
-                  export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
-                  interpreter=$(uv python find "$PY_VER")
-                  bash scripts/wheel-smoke.sh --python "$interpreter" \
-                      dist/blastit-*-py3-none-musllinux_*.whl
               '
+      - name: Install it in every image its leg names and drive it (e2e/run_packaging.py)
+        run: uv run --no-project e2e/run_packaging.py --leg wheel --wheel "$(ls dist/blastit-*-py3-none-musllinux_*.whl | head -n 1)"
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.name }}
           path: dist/*.whl
           if-no-files-found: error
+
+  # `TESTING_PLAN.md` §3's two user-space stories at release time, against the
+  # archives this run just built: `docs/install.sh --user` (glibc, zero `sudo`,
+  # tampered archive refused) and the same installer in `alpine:3.21` as a
+  # non-root uid against the musl archive. Both are `e2e/run_packaging.py` legs,
+  # and the two archive names are the matrix's, so no target is spelled here.
+  install-stories:
+    name: '§3 install.sh --user (gnu) + Alpine musl install (${{ matrix.arch }})'
+    needs: [guard, matrix, binaries_gnu, binaries_musl]
+    if: needs.guard.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: standalone-*
+      - name: The two archive names this architecture ships
+        id: archives
+        run: |
+          set -euo pipefail
+          for libc in gnu musl; do
+            name=$(uv run --no-project scripts/platform_matrix.py --matrix binaries \
+                --arch "${{ matrix.arch }}" --libc "$libc" |
+                uv run --no-project python -c 'import json, sys; print(json.load(sys.stdin)["include"][0]["archive"])')
+            echo "$libc=$name" >> "$GITHUB_OUTPUT"
+          done
+      - name: Unpack the gnu archive
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/release-gnu
+          tar -C /tmp/release-gnu -xzf "dist/${{ steps.archives.outputs.gnu }}"
+      - name: install.sh --user, zero sudo (e2e/run_packaging.py --leg install)
+        run: >-
+          uv run --no-project e2e/run_packaging.py --require-legs --leg install
+          --binary "/tmp/release-gnu/blastit-${{ matrix.arch }}-unknown-linux-gnu/blastit"
+      - name: the same installer in alpine:3.21 (e2e/run_packaging.py --leg alpine)
+        run: >-
+          uv run --no-project e2e/run_packaging.py --require-legs --leg alpine
+          --musl-archive "dist/${{ steps.archives.outputs.musl }}"
 
   sdist:
     name: sdist
@@ -699,7 +746,7 @@ jobs:
           uv run --no-project scripts/check-long-description.py dist/*
 
   validate:
-    name: CI, Docs & Live green on develop
+    name: CI & Docs green on develop
     needs: guard
     if: needs.guard.outputs.release == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
@@ -708,7 +755,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - name: Wait for CI, Docs, and Live (DigitalOcean) on ${{ github.sha }}
+      - name: Wait for CI and Docs on ${{ github.sha }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -726,7 +773,6 @@ jobs:
           required = {
               ".github/workflows/ci.yml": "CI",
               ".github/workflows/docs.yml": "Docs",
-              ".github/workflows/live.yml": "Live (DigitalOcean)",
           }
 
           # Give GitHub Actions a moment to register all sibling `push` workflows.

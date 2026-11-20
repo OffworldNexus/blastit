@@ -5,9 +5,32 @@ PHP front controller, Django and Flask on CPython 3.13 and 3.14, and a static
 site in a container with **neither Python nor PHP installed**.
 
 ```console
-$ uv run --no-project e2e/run_apps.py        # every leg; free ports 28080+
-$ uv run --no-project e2e/run_apps.py --keep # keep the work directory
+$ uv run --no-project e2e/run_apps.py                    # every leg; free ports 28080+
+$ uv run --no-project e2e/run_apps.py --legs wsgi        # one family (wsgi, php, static)
+$ uv run --no-project e2e/run_apps.py --keep             # keep the work directory
 ```
+
+## Where each story runs
+
+Every `TESTING_PLAN.md` story has one workflow that proves it, and each of those
+steps calls one of the three drivers in this directory — never a copy of an
+install or boot command:
+
+| Story | Workflow job | Driver |
+|---|---|---|
+| §2 PHP 8.3/8.4/8.5/8.6, per-view grants, faults, `php2shell` | `php-sapi.yml` `§2 PHP … (arch-libc)` (16 matrix legs) | `make php-sapi-e2e` + `make rs-test-php-image` (`e2e_dev`) |
+| §2 Django & Flask on CPython 3.13/3.14 | `py-sapi.yml` `§2 WSGI views…` and `ci.yml` `§2 apps…` | `run_apps.py --legs wsgi` (and the whole suite in `ci.yml`) |
+| §2 static site with no interpreter | `ci.yml` `§2 apps…` | `run_apps.py` (`static`) |
+| §3 `.deb`/`.rpm` in every distribution | `packages.yml` / `nightly.yml` `§3 … installs the … package` | `scripts/install_matrix.sh` → `run_packaging.py --leg deb` / `--leg rpm` |
+| §3 `py3-none` wheel in every CPython | `wheels.yml`, `publish-pypi.yml`, `ci.yml` | `run_packaging.py --leg wheel` (via `.github/actions/build-wheel`) |
+| §3 `install.sh --user` and Alpine musl | `packages.yml` `§3 install.sh --user …`; `publish-pypi.yml` `§3 install.sh --user (gnu) + Alpine musl install` | `run_packaging.py --leg install` / `--leg alpine` |
+| §3 Composer wrapper | `packages.yml` `§3 … composer wrapper …` | `run_packaging.py --leg composer` |
+| §6 both deployment presets | `nightly.yml` `§6 production presets…` | `run_prod.py` |
+
+`ci.yml` runs the application suite on a pull request; the production suite and
+the release install stories are nightly/tag work, because each leg builds a real
+image. The job names carry the story (`§2`, `§3`, `§6`) so a red check says which
+promise broke.
 
 It checks the deploy pages' pooler promises first (`docs_deploy.py`), builds the
 fixtures it needs (`e2e/apps/`), starts one `postgres:18`, and prints one
@@ -66,7 +89,8 @@ images, network and volumes it created — it never touches a foreign container.
 ## The production suite
 
 `run_prod.py` is `TESTING_PLAN.md` §6: both deployment presets, in real
-containers, against the same binary.
+containers, against the same binary. `nightly.yml` runs it (`§6 production
+presets…`), and that job's guard fails the run when a preset prints `SKIP`.
 
 ```console
 $ make e2e-prod                                # the target below
@@ -132,6 +156,12 @@ leg installs the artifact the story names and then runs the story's own commands
 *inside the target* (`blastit --version`, `blastit fmt`, `blastit check`, and
 `blastit-lsp --version` where the artifact ships it).
 
+Every packaging workflow calls this driver rather than repeating an install
+command: `packages.yml` (`--leg deb` / `--leg rpm` through
+`scripts/install_matrix.sh`, plus `--leg install` and `--leg composer`),
+`publish-pypi.yml` (`--leg install` and `--leg alpine` against the release
+archives), and `wheels.yml` / `.github/actions/build-wheel` (`--leg wheel`).
+
 ```console
 $ make e2e-packaging                                 # every leg
 $ uv run --no-project e2e/run_packaging.py --leg composer
@@ -145,16 +175,19 @@ $ uv run --no-project e2e/run_packaging.py \
 | `install` | `docs/install.sh --user` on this host (zero `sudo`) from a release archive served over `file://` | `$prefix/bin` symlinks into `share/blastit/lib`; `blastit --version`, `fmt`, `fmt --check`, `check` and `blastit-lsp --version`; a tampered archive (`sha256 mismatch … refusing to install it`) and an overridden origin with no digest install nothing and answer with a sentence |
 | `alpine` | the same installer in `alpine:3.21` as a non-root uid, fetching the musl archive over HTTP | the musl target is selected, the prefix layout holds, and the tampered archive is refused. A host with no musl build runs a stand-in archive and says so (`--musl-binary`/`--musl-archive` serve the real one) |
 | `deb` / `rpm` | `docs/install.sh` with `BLASTIT_DEB`/`BLASTIT_RPM` in `debian:trixie` / `rockylinux:9` | §6.1's payload (two entry points, 13 paths under `/usr/share/blastit`, `root:root`), the four CLI commands, a served page — and with `--modes "install static wsgi"` the WSGI fixture imported and served through the package's own `python/blastit` |
-| `wheel` | the universal `py3-none` wheel with `pip` into `python:3.12-slim`, `3.13-slim` and `3.14-slim` | `--version`, `fmt` and `check` in all three, plus a WSGI view served through the shipped shim on 3.13 and 3.14 |
+| `wheel` | the universal `py3-none` wheel with `pip` into the images its leg's matrix names — `python:3.12-slim`, `3.13-slim` and `3.14-slim` for a `manylinux` wheel, the `-alpine` images for a `musllinux` one | `--version`, `fmt` and `check` in all three, plus a WSGI view served through the shipped shim on 3.13 and 3.14 |
 | `composer` | `packages/composer-blastit` in `composer:2` | `composer install` puts `vendor/bin/blastit` on the project's PATH; the embedded digest table verifies the default origin (a warm run is silent); a tampered archive, an origin with no digest and an unstamped `pending` table are all refused |
 
 A leg whose artifact has not been built is a loud `SKIP` naming the command that
-builds it — `make packages` for the `.deb`/`.rpm`, `make wheel-manylinux` for the
-wheel — never a silent pass. Artifacts are discovered under `target/packages/`
-and `dist/`, or named with `--deb`/`--rpm`/`--wheel`. The fixtures are
-`e2e/packaging/fixture` (a static site) and `e2e/packaging/fixture-wsgi` (one
-WSGI view and the packaged-gate test). Every container is `blastit-pkg-*`, every
-port comes from `28080`, the scratch tree is
+builds it — `make packages` for the `.deb`/`.rpm` (they land in `target/packages`,
+which is one of the directories searched here), `make wheel-manylinux` for the
+wheel — never a silent pass. Every CI call site passes `--require-legs`, which
+turns any `SKIP` into a failure, so a runner without Docker or without the
+artifact cannot report a green gate. Artifacts are discovered under
+`target/packages/` and `dist/`, or named with `--deb`/`--rpm`/`--wheel`. The
+fixtures are `e2e/packaging/fixture` (a static site) and
+`e2e/packaging/fixture-wsgi` (one WSGI view and the packaged-gate test). Every
+container is `blastit-pkg-*`, every port comes from `28080`, the scratch tree is
 `${TMPDIR:-/tmp/opencode}/blastit-pkg`, and one `finally` removes it.
 
 ## Other harnesses

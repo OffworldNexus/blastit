@@ -4359,3 +4359,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T22:27 [MB.56.4.3] (lead) attempt 1/3 started
 - 2026-11-20T22:27 [MB.56.4.3] (lead) base 8384cfd36e5a9b1ad600cb2edfcf3c98b6df1a65
 - 2026-11-20T22:45 [MB.56.4.3] (lead) status active -> done
+- 2026-11-20T22:45 [MB.56.4.3] (lead) commit c90b03d
+- 2026-11-20T22:45 [MB.56.4.4] (lead) status ready -> active
+- 2026-11-20T22:45 [MB.56.4.4] (lead) attempt 1/3 started
+- 2026-11-20T22:45 [MB.56.4.4] (lead) base c90b03deb0721e5f2aba7486f91973e477e2f968
+- 2026-11-20T22:53 [MB.56.4.4] (lead) REVIEW FIX: (B) restore the R42 critical-skip-check job (nothing in CI runs it now); (M) restore one bounded ROOT job with BLASTIT_REQUIRE_ROOT_TESTS=1 running 
+- 2026-11-20T22:53 [MB.56.4.4] (lead) edited fields
+- 2026-11-20T22:53 [MB.56.4.4] (lead) REVIEW FIX 2 (ux): (B) make packages-test expands $(deb)/$(rpm) at make level -> runs all six legs and passes no artifact (fix with set --); (M) e2e/README + 'm
+- 2026-11-20T22:55 [MB.56.4.4] (lead) status active -> done
+- 2026-11-20T22:55 [MB.56.4] (lead) status ready -> done

@@ -33,6 +33,7 @@ Usage (stdlib only):
     scripts/platform_matrix.py --matrix lsp         # editor binaries (five targets)
     scripts/platform_matrix.py --matrix packages    # the 4 .deb/.rpm legs
     scripts/platform_matrix.py --matrix install     # the 6 container install legs
+    scripts/platform_matrix.py --matrix hosts       # the native runner per arch
     scripts/platform_matrix.py --summary            # Markdown, for a RESULT
     scripts/platform_matrix.py --count shims --libc gnu --arch x86_64
     scripts/platform_matrix.py --count lsp
@@ -656,6 +657,21 @@ def install_legs() -> list[dict]:
         }
         for leg in INSTALL_LEGS
         for arch in ARCHES
+    ]
+
+
+def host_legs() -> list[dict]:
+    """One host runner per architecture, for the stories that run on the runner.
+
+    The `install.sh --user` and WSGI stories install no container artifact, so
+    they have no row in `LEGS`: their leg is the architecture's **native**
+    runner, taken from `ARCHES` so `packages.yml` and `py-sapi.yml` spell
+    `ubuntu-24.04`/`ubuntu-24.04-arm` nowhere and an emulated host can never
+    claim a story (`MB.35.1`'s rule applied to the host).
+    """
+    return [
+        {"name": arch, "arch": arch, "runs_on": spec["runs_on"]}
+        for arch, spec in ARCHES.items()
     ]
 
 
@@ -1372,6 +1388,7 @@ def _filtered_legs(
         "lsp": lsp_legs,
         "packages": package_legs,
         "install": install_legs,
+        "hosts": host_legs,
     }[family]()
     if name:
         legs = [leg for leg in legs if leg.get("name") == name]
@@ -1406,6 +1423,7 @@ def main(argv: list[str] | None = None) -> int:
             "lsp",
             "packages",
             "install",
+            "hosts",
         ),
     )
     parser.add_argument(
@@ -1419,6 +1437,7 @@ def main(argv: list[str] | None = None) -> int:
             "lsp",
             "packages",
             "install",
+            "hosts",
         ),
         help="print how many enabled legs match the filters (exits 0 even when 0)",
     )
