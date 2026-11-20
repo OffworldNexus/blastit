@@ -141,7 +141,7 @@ impl Scheduler {
             }
             self.mark_finished(stream_id);
             // The timeout answer is final now, so its charge must precede its
-            // event (`MB.3.45`): `emit_request` reports `charged_ns`, and the
+            // event: `emit_request` reports `charged_ns`, and the
             // request never pays the queue wait it spent before dispatch.
             self.charge(stream_id);
             self.emit_request(stream_id);
@@ -614,7 +614,7 @@ impl Scheduler {
                     && view.inflight == 0
                     // A worker on its way out frees itself; killing it would
                     // only report an eviction for a process that had already
-                    // answered its last request (`MB.26.8`).
+                    // answered its last request.
                     && view.leaving_at().is_none()
                     && !self.route_waiting(view.key.route)
             })

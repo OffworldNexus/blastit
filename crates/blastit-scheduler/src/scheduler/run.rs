@@ -84,7 +84,7 @@ pub async fn run<C: CtlChannel + Send + 'static>(
 ) -> Result<(), SchedulerError> {
     // A manifest that declares a static mount needs the responder this binary
     // was built without: refuse at boot, before a single channel is served
-    // (`MB.36.2`, ADR-0016 decision 6).
+    // (`ADR-0016` decision 6).
     #[cfg(not(feature = "static"))]
     if !cfg.mounts.is_empty() {
         return Err(SchedulerError::StaticNotCompiled);

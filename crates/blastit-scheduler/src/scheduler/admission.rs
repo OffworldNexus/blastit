@@ -29,7 +29,7 @@ pub(super) struct View {
     /// Frames towards this view, with its own writer task behind them.
     pub(super) out: Option<Outbound>,
     /// When init reported the process gone and the ordered `view.chan` has not
-    /// reached [`ViewIn::Closed`] yet (`MB.3.45`).
+    /// reached [`ViewIn::Closed`] yet.
     ///
     /// The scheduler learns a process exited on `ctl.chan`, a different input
     /// from the frames the process itself wrote, so the two can arrive in

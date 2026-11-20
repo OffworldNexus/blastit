@@ -21,11 +21,11 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
 
 use blastit_php_sapi::SharedObject;
-use blastit_sys::child::{ChildIo, ChildPlan, child_exit, wait_readable};
+use blastit_sys::child::{child_exit, wait_readable, ChildIo, ChildPlan};
 use blastit_sys::{ExitStatus, Fork, Pid, Rlimits, Signal};
 use blastit_view::spawn::{ForkProtocol, Forker};
 
-use crate::discovery::{PhpRuntime, php_probe_refusal};
+use crate::discovery::{php_probe_refusal, PhpRuntime};
 use crate::pinning::{PhpBinding, PhpSlot};
 use crate::spawn::set_view_environment;
 
@@ -274,7 +274,7 @@ fn probe_child(
 ///
 /// The `php.ini` is read between `worker_init` and `worker_shutdown`, which is
 /// the only window in which PHP's own global is meaningful: it is the file
-/// `php_init_config()` opened, and `None` when it opened none (`MB.25.2`). The
+/// `php_init_config()` opened, and `None` when it opened none. The
 /// version is the loaded library's own `php_version()`, the full `"8.4.27"` the
 /// line reports.
 fn load_and_shut_down(binding: &PhpBinding) -> Result<(String, Option<String>), String> {

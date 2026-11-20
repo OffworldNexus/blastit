@@ -4382,3 +4382,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T22:58 [MB.56.5.1] (lead) base 7b0b4671a2febca4862e2a96fd366fbcb6d7026f
 - 2026-11-20T23:02 [MB.56.5.1] (lead) status active -> done: dead symbols pruned; god-file splits deferred as pre-existing debt (recorded L1-L6 in RESULT.md)
 - 2026-11-20T23:02 HUMAN H-018 opened by lead (node MB.56.5.1)
+- 2026-11-20T23:02 [MB.56.5.2] (lead) status ready -> active
+- 2026-11-20T23:02 [MB.56.5.2] (lead) attempt 1/3 started
+- 2026-11-20T23:02 [MB.56.5.2] (lead) base 8f1ca23dc947df4171239a03b127f0ca5643a863
+- 2026-11-20T23:06 [MB.56.5.2.1] (lead) created (task) Diary-comment strip: all crates except crates/blastit
+- 2026-11-20T23:06 [MB.56.5.2.2] (lead) created (task) Diary-comment strip: crates/blastit + stale refs + final gates
+- 2026-11-20T23:06 [MB.56.5.2] (lead) edited fields

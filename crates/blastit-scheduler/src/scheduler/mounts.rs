@@ -339,7 +339,7 @@ impl Scheduler {
     /// Pushes a static head and starts its body pump (design §4.6).
     ///
     /// Only the status and the header **names** are ever recorded anywhere:
-    /// `StaticResponse` has no `Debug` on purpose (`MB.2.4.2`), and a header
+    /// `StaticResponse` has no `Debug` on purpose, and a header
     /// value may be content-derived, so the response is never formatted.
     #[cfg(feature = "static")]
     pub(super) fn serve_static(
@@ -670,7 +670,7 @@ impl Scheduler {
     }
 
     /// The three calls the view path makes into the responder, in a build
-    /// without `static` (`MB.36.2`).
+    /// without `static`.
     ///
     /// [`run`] refuses a manifest that declares a mount in that build
     /// ([`SchedulerError::StaticNotCompiled`]), so no request ever matches a

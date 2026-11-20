@@ -1,9 +1,8 @@
 ---
 id: MB.56.5.2
 title: Strip diary comments and stale tool references; land the final gates
-kind: task
-status: ready
-owner: implementer
+kind: epic
+status: active
 priority: 1
 depends_on: [MB.56.5.1]
 paths:
@@ -14,11 +13,11 @@ paths:
   - ARCHITECTURE.md
   - docs/knowledge/LESSONS.md
   - Makefile
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T22:57"
-updated: "2026-11-20T22:57"
+updated: "2026-11-20T23:06"
 ---
 
 # Goal

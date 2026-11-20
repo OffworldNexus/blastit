@@ -43,14 +43,14 @@ use std::path::Path;
 use std::time::Instant;
 
 use blastit_php_sapi::SharedObject;
-use blastit_sys::child::{ChildIo, ChildPlan, child_exit, panic_message, set_env};
+use blastit_sys::child::{child_exit, panic_message, set_env, ChildIo, ChildPlan};
 use blastit_sys::{Fork, Pid};
 use blastit_view::spawn::{ForkProtocol, Forker, SpawnContext};
 
 use crate::pinning::PhpBinding;
 use blastit_view::loaded::LoadedReport;
 
-use crate::worker::{PhpEmbedRuntime, PhpRuntimeConfig, serve_forever};
+use crate::worker::{serve_forever, PhpEmbedRuntime, PhpRuntimeConfig};
 
 /// How many extra processes a view's uid may have beyond its workers (§7.2:
 /// gVisor leaves out the main thread, so one unit of margin).
@@ -74,14 +74,13 @@ pub struct PhpViewSpawn<'a> {
     pub binding: &'a PhpBinding,
     /// The fork protocol this image needs; the forker refuses a disagreement.
     pub protocol: ForkProtocol,
-    /// The dev-only loaded-file report (`MB.23.4.2`, `MB.23.5.3`): the write end
+    /// The dev-only loaded-file report: the write end
     /// of this view's own report socketpair, created by the supervisor before the
     /// fork and moved into `ChildIo.keep` here. `None` is production,
     /// `--no-reload` and every host without a usable shim sink.
     ///
     /// It is the transport's [`LoadedReport`], the same value the WSGI fork
-    /// takes: `MB.36.5` deleted this crate's copy of the type, so there is one
-    /// report wire for every backend (design §4.2.1).
+    /// takes, so there is one report wire for every backend (design §4.2.1).
     pub loaded: Option<LoadedReport>,
 }
 
@@ -129,7 +128,7 @@ pub fn fork_php_view(
     // them would make the load fail with `ENOENT` in production.
     let mut keep = vec![view_end.as_raw_fd()];
     keep.extend(spawn.binding.pinned_fds());
-    // The dev-only loaded-file report's write end (`MB.23.5.3`): an inherited
+    // The dev-only loaded-file report's write end: an inherited
     // descriptor the worker's shim sink sends on, exactly like `view.chan` — no
     // environment variable, so nothing for the app to see or for stage 0 to
     // strip.
@@ -228,7 +227,7 @@ fn serve(
         SharedObject::Fd(spawn.binding.libphp.as_raw_fd()),
         SharedObject::Fd(spawn.binding.shim.as_raw_fd()),
         config,
-        // `MB.23.4.2`'s dev-only loaded-file report, wired by `MB.23.5.3`:
+        // The dev-only loaded-file report:
         // `None` is production and `--no-reload` (no socket, no reader, and not
         // one byte of extra work per request). A shim without the optional sink
         // symbol keeps that `None` behaviour inside `load_reporting`.
@@ -236,7 +235,7 @@ fn serve(
     )
     .map_err(|err| format!("{err}"))?;
     // [`blastit_sys::child::enter`] has already run, and the runtime was built
-    // with the entry's record (`ADR-0010` §3 / `MB.3.56`): every request
+    // with the entry's record (`ADR-0010` §3): every request
     // re-checks the resolved entry against it before `libphp` opens
     // `SCRIPT_FILENAME`.
     //

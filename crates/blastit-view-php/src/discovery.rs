@@ -38,9 +38,8 @@
 //! bounds-checked ELF reader: header, section header table, section bytes) plus
 //! the manifest data model. `cargo tree -p blastit-view-php` still carries
 //! `blastit-php-sapi`, because the crate's worker half needs it — the
-//! enforceable invariant is "no `dlopen` before the fork", proved by the
-//! `critical_php_embed` canary legs and by the source-level test that this
-//! module's text names no loader.
+//! enforceable invariant is "no `dlopen` before the fork", held by this crate's
+//! `#![forbid(unsafe_code)]` and by `discovery` naming no SAPI type.
 
 use std::ffi::OsStr;
 use std::io::{Read, Seek};
@@ -59,13 +58,13 @@ use blastit_sys::elf::{Elf, MAX_SECTION_BYTES, SHF_ALLOC, SHF_WRITE, STT_FUNC};
 /// library an 8.5 host embeds. Both spellings the distros install are here: the
 /// dotted Debian/Ubuntu name and the **packed** Alpine name (`libphp83.so`,
 /// `libphp86.so`); Alpine's 8.4, 8.5 and 8.6 state their minor in
-/// `/usr/lib/php84`, `/usr/lib/php85` and `/usr/lib/php86` instead (`MB.3.59`,
-/// `MB.42.5`), so a host with `BLASTIT_LIBPHP` unset reaches Alpine's package
+/// `/usr/lib/php84`, `/usr/lib/php85` and `/usr/lib/php86` instead, so a host
+/// with `BLASTIT_LIBPHP` unset reaches Alpine's package
 /// without a copy.
 ///
 /// The unversioned `libphp.so` is last here because on its own it states no
 /// minor; the per-minor directory it sits in states one, which is why
-/// `LIBPHP_PROBES` also tries it there, under that minor (`MB.3.61`).
+/// `LIBPHP_PROBES` also tries it there, under that minor.
 pub const LIBPHP_CANDIDATES: [&str; 13] = [
     "libphp8.6.so",
     "libphp-8.6.so",
@@ -83,7 +82,7 @@ pub const LIBPHP_CANDIDATES: [&str; 13] = [
 ];
 
 /// One step of the discovery order: a file name, and which of
-/// [`PhpSearch::lib_dirs`] it is looked for in (`MB.3.61`).
+/// [`PhpSearch::lib_dirs`] it is looked for in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LibphpProbe {
     /// The file name, as [`LIBPHP_CANDIDATES`] spells it.
@@ -94,8 +93,7 @@ pub struct LibphpProbe {
     per_minor_dir: Option<&'static str>,
 }
 
-/// The order the search walks: **version-major**, then spelling
-/// (`MB.3.61`).
+/// The order the search walks: **version-major**, then spelling.
 ///
 /// Each minor's own spellings — dotted, hyphenated, packed, and the per-minor
 /// `libphp.so` — are all tried before the next minor's, so the newest *library*
@@ -186,7 +184,7 @@ const NEWEST_PHP: PhpVersion = PhpVersion::new(8, 6);
 /// The distributions' PHP embed packages, named once so every refusal says the
 /// same thing (`ADR-0010` §4.1).
 ///
-/// Minor-aware (`MB.42.5`): the version the object or its path states names
+/// Minor-aware : the version the object or its path states names
 /// *its* package, and `None` names [`NEWEST_PHP`]'s. The stock Debian spelling
 /// stays beside the per-minor one because Debian 13 and Ubuntu 24.04 install
 /// exactly `libphp-embed`.
@@ -305,12 +303,12 @@ pub fn shim_name(version: PhpVersion) -> String {
 /// `/usr/local` half: Alpine installs 8.4 as `/usr/lib/php84/libphp.so`, 8.5 as
 /// `/usr/lib/php85/libphp.so` and 8.6 as `/usr/lib/php86/libphp.so`, and with
 /// `BLASTIT_LIBPHP` unset a fixed name alone cannot reach them — the directory
-/// is half of the package's spelling (`MB.3.59`, `MB.42.5`). `/usr/local/lib/php8x`
+/// is half of the package's spelling. `/usr/local/lib/php8x`
 /// is the twin of a copy an operator put there.
 ///
 /// The directory order is *within* one minor: [`LIBPHP_PROBES`] picks the minor
 /// first, so `/usr/lib/php86` outranks `/usr/lib/libphp85.so` even though it is
-/// listed later (`MB.3.61`).
+/// listed later.
 pub fn library_dirs() -> Vec<PathBuf> {
     let triplet = multiarch_triplet();
     [
@@ -450,9 +448,9 @@ pub enum PhpRefusal {
         version: Option<PhpVersion>,
     },
     /// The object's `.dynsym` has no `php_version` **name**, so the worker
-    /// cannot resolve the symbol it reads its minor from at load time
-    /// (`MB.3.59`). An object that exports the name but whose body this walk
-    /// cannot read is [`Self::NoVersion`], not this (`MB.3.61`).
+    /// cannot resolve the symbol it reads its minor from at load time. An
+    /// object that exports the name but whose body this walk cannot read is
+    /// [`Self::NoVersion`], not this.
     NoPhpVersion {
         /// The candidate.
         path: PathBuf,
@@ -482,7 +480,7 @@ pub enum PhpRefusal {
     /// `php_version` is exported in the `.dynsym`, but the version it returns
     /// could not be read from the object — no readable `return PHP_VERSION;`
     /// body, an `STT_NOTYPE` symbol, or `st_size == 0` — and the path states no
-    /// minor either (`MB.3.61`).
+    /// minor either.
     NoVersion {
         /// The candidate.
         path: PathBuf,
@@ -709,9 +707,9 @@ impl PhpBoot {
 /// The object callback is handed the claim's **noun** (`the NTS libphp`, `the
 /// embedded shim`) as well as its path, because only the callback can build the
 /// whole sentence's subject and path together. Formatting `{noun}: {detail}`
-/// here duplicated the noun (`the NTS libphp: the file (…) could be replaced`,
-/// the sentence `MB.36.5` recorded): the noun now reaches `Provenance` as the
-/// `Claim`'s name and [`deployment_refusal`] adds only the route prefix.
+/// here duplicated the noun (`the NTS libphp: the file (…) could be replaced`),
+/// and the noun now reaches `Provenance` as the `Claim`'s name, with
+/// [`deployment_refusal`] adding only the route prefix.
 #[derive(Clone)]
 pub struct Deployment<'a> {
     /// The uid init runs as: root, or init's own in `rootless` mode.
@@ -893,7 +891,7 @@ fn first_php_route(manifest: &Manifest) -> Option<(&str, &str, Option<u32>)> {
 /// a distro copy the operator did not name. Otherwise [`LIBPHP_PROBES`] is
 /// walked version-major — every 8.5 spelling, then every 8.4 one, then 8.3 —
 /// each in every directory of [`PhpSearch::lib_dirs`], so the *library's*
-/// version wins over both its name and its directory (`MB.3.61`).
+/// version wins over both its name and its directory.
 ///
 /// # Both records are the *resolved* path
 ///
@@ -947,7 +945,7 @@ pub fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
     // The path stage 1 will re-open. A name that cannot be resolved is a §4.1
     // refusal here, never an `ELOOP` after the banner.
     let path = resolve(&path)?;
-    // Three static statements, in the order `MB.3.59` fixes them: the file
+    // Three static statements, in the order this file fixes them: the file
     // name (the fast path), the path's per-minor directory, then the object's
     // own bytes. None of them loads anything.
     let named = version_of(&path, &file);
@@ -990,9 +988,9 @@ pub fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
     }
     // The worker resolves `php_version` before it can start anything, so an
     // object whose `.dynsym` has no such **name** is refused here — whatever
-    // its file name says (`MB.3.59`). Presence is the name alone: an odd object
+    // its file name says. Presence is the name alone: an odd object
     // that exports it as `STT_NOTYPE` or with no size is refused later, and for
-    // the reason that is actually true (`MB.3.61`).
+    // the reason that is actually true.
     if !facts.exports_php_version {
         return Err(PhpRefusal::NoPhpVersion {
             path: path.clone(),
@@ -1003,7 +1001,7 @@ pub fn discover_php(search: &PhpSearch) -> Result<PhpRuntime, PhpRefusal> {
     // One spelling, the `ADR-0010` §4.1 one: `make php-sapi` writes the same
     // `libblastit_php<minor>-<arch>-<libc>.so` that `Minor::shim_file()` names,
     // so a developer who has just built a shim is found here with no
-    // `BLASTIT_PHP_SHIM_DIR` (`MB.3.35`). This lookup never accepts two
+    // `BLASTIT_PHP_SHIM_DIR`. This lookup never accepts two
     // spellings for the same tuple.
     let shim = shim_name(version);
     let shim_path = search
@@ -1051,7 +1049,7 @@ fn resolve(path: &Path) -> Result<PathBuf, PhpRefusal> {
 
 /// The first probe of [`LIBPHP_PROBES`] that exists, in its own order.
 ///
-/// Version-major, then spelling (`MB.3.61`): the *minor* is preferred, and the
+/// Version-major, then spelling : the *minor* is preferred, and the
 /// name only breaks a tie within it, so a host carrying two embed packages
 /// serves from the newer one instead of preferring whichever name came first.
 fn first_existing(search: &PhpSearch) -> Option<PathBuf> {
@@ -1113,7 +1111,7 @@ fn installed_unsupported(search: &PhpSearch) -> Option<PhpVersion> {
 /// `libphp.so` is usually a symlink to `libphp8.4.so`, and a descriptor's link
 /// target says so even when the path does not — a `readlink`, never a load.
 /// Both spellings `PhpVersion::parse` knows are accepted, so Alpine's packed
-/// `libphp83.so` is a name that states a version (`MB.3.59`).
+/// `libphp83.so` is a name that states a version.
 fn version_of(path: &Path, file: &std::fs::File) -> Option<PhpVersion> {
     let named = path
         .file_name()
@@ -1137,7 +1135,7 @@ struct StatedVersion {
     spelling: String,
 }
 
-/// Every PHP minor the path itself states (`MB.3.59`), deduplicated.
+/// Every PHP minor the path itself states, deduplicated.
 ///
 /// Two spellings are the distro's: the file name (`libphp83.so`,
 /// `libphp8.4.so`) and a per-minor parent directory (`/usr/lib/php84`,
@@ -1171,7 +1169,7 @@ fn path_versions(path: &Path) -> Vec<StatedVersion> {
 }
 
 /// The one minor the path and the object's own bytes agree on, or the refusal
-/// that names every candidate (`MB.3.59`).
+/// that names every candidate.
 ///
 /// Two different statements are never resolved by a preference: the shim is
 /// chosen by this number, and a wrong one is a boot that loads a foreign ABI.
@@ -1219,8 +1217,7 @@ pub const EM_X86_64: u16 = 62;
 /// `EM_AARCH64`: the machine whose `adrp`/`add` body is read.
 pub const EM_AARCH64: u16 = 183;
 
-/// What the bounded, load-free walk says about one object (`ADR-0010` §3,
-/// `MB.3.59`).
+/// What the bounded, load-free walk says about one object (`ADR-0010` §3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ObjectFacts {
     /// Which Zend build the `.dynsym` names.
@@ -1231,7 +1228,7 @@ struct ObjectFacts {
     /// Presence comes from the **name** in the `.dynsym` and nothing else: an
     /// object that exports it as `STT_NOTYPE`, or with `st_size == 0`, does
     /// export it, and refusing it as "exports no `php_version`" was a false
-    /// sentence (`MB.3.61`). What the body says is [`ObjectFacts::version`].
+    /// sentence. What the body says is [`ObjectFacts::version`].
     exports_php_version: bool,
     /// The compile-time version `php_version()` returns, read from the string
     /// its body points at; `None` when the body is not the shape this walk
@@ -1240,7 +1237,7 @@ struct ObjectFacts {
 }
 
 /// Reads the `.dynsym` of `file` and — when the path stated no minor — the
-/// compile-time version the object carries (`ADR-0010` §3, `MB.3.59`).
+/// compile-time version the object carries (`ADR-0010` §3).
 ///
 /// No `dlopen`, no `mmap`: [`blastit_sys::elf`] `seek`s/`read`s the header, the
 /// section header table and one section at a time with every offset and length
@@ -1255,7 +1252,7 @@ fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
         .map_err(|err| err.to_string())?;
     // `blastit_sys::elf` owns the walk and the `st_shndx` rule; what is left here
     // is only "which Zend names matter". PHP's documented rule is presence of
-    // the name (`MB.3.61`) — a synthetic gate fixture may state it without a
+    // the name  — a synthetic gate fixture may state it without a
     // section index — so this filter deliberately does not consult `defined`;
     // the Python loader's gate does.
     let exported = |name: &str| symbols.iter().any(|symbol| symbol.name == name);
@@ -1277,8 +1274,7 @@ fn inspect_object(file: &mut std::fs::File) -> Result<ObjectFacts, String> {
 }
 
 /// `st_size`: how many bytes the symbol's body occupies.
-/// The compile-time version `php_version()` returns, read statically
-/// (`MB.3.59`).
+/// The compile-time version `php_version()` returns, read statically.
 ///
 /// The function is `return PHP_VERSION;` in every PHP 8.3+ build: one
 /// PC-relative `lea` (`x86_64`) or `adrp`/`add` pair (`aarch64`) whose target
@@ -1439,7 +1435,7 @@ impl PhpVersion {
     /// The version a `libphp` file name states, in every spelling a distro
     /// ships: `libphp8.4.so`, `libphp-8.4.so`, a soname such as
     /// `libphp8.4.so.0`, and the **packed** name Alpine's 8.3 package installs
-    /// — `libphp83.so` (`MB.3.59`; Alpine's 8.4 states the minor in its
+    /// — `libphp83.so`; Alpine's 8.4 states the minor in its
     /// `/usr/lib/php84` directory instead).
     ///
     /// The packed form needs exactly two digits before the first dot, so

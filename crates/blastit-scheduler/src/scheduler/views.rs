@@ -140,7 +140,7 @@ impl Scheduler {
     /// the reader task sends every frame it decoded and only then
     /// [`ViewIn::Closed`] ([`crate::task::read_frames`]), so failing the
     /// in-flight requests here would bill a request the view **answered** as a
-    /// dead view with no cost. That is `MB.3.48`'s 1-in-20 `php-sapi` flake: a
+    /// dead view with no cost. A rare `php-sapi` flake showed the shape: a
     /// contained bailout writes `RESP_HEAD`, `RESP_END_COST` and `DONE{Bailed}`
     /// and then retires by design (`crates/blastit-view/src/php.rs`), and
     /// `Ctl::Exited` can reach the scheduler first on the other channel.
@@ -175,7 +175,7 @@ impl Scheduler {
         }
     }
 
-    /// Marks a worker that answered `DONE { Bailed }` as retiring (`MB.26.8`).
+    /// Marks a worker that answered `DONE { Bailed }` as retiring.
     ///
     /// The handler never returned, so the runtime retires the process after
     /// this request — the view says so one `ctl.chan` report before init's
@@ -194,7 +194,7 @@ impl Scheduler {
     }
 
     /// Fails the requests of a view on its way out whose `view.chan` never
-    /// closed, `request_timeout` after the report (`MB.3.45`, `MB.26.8`).
+    /// closed, `request_timeout` after the report.
     ///
     /// The ordered close is what normally decides; this is the bound that keeps
     /// a lost descriptor from turning a dead (or a retiring) view into a request

@@ -1,8 +1,8 @@
 //! Requests: body collection, routing decisions and the request lifecycle.
 
+use super::mounts::{header_text, Resolution};
 #[cfg(feature = "static")]
 use super::mounts::{MountHead, StaticHead};
-use super::mounts::{Resolution, header_text};
 use super::response::retry_after_seconds;
 use super::*;
 
@@ -141,7 +141,7 @@ pub(super) struct Request {
     /// A `RESP_HEAD` was forwarded to http.
     pub(super) head_sent: bool,
     /// The `RESP_HEAD` http was sent came **from the view**, not from the
-    /// scheduler's own `respond` (`MB.3.45`).
+    /// scheduler's own `respond`.
     ///
     /// `head_sent` answers "is the response under way"; this answers "did the
     /// view answer this request". They are one and the same for an app's
@@ -152,7 +152,7 @@ pub(super) struct Request {
     /// not turn that answer into the `R19` crash bill.
     pub(super) view_answered: bool,
     /// The view's handler bailed out of this request rather than returning
-    /// (`DONE`'s `bailed`): a contained `exit()`/`die()`/fatal (`MB.3.41`).
+    /// (`DONE`'s `bailed`): a contained `exit()`/`die()`/fatal.
     ///
     /// This is a different fact from the status it may have answered. A `5xx`
     /// an app answers itself (a framework's `500`, a script's
@@ -814,10 +814,10 @@ impl Scheduler {
         }
         self.mark_finished(stream_id);
         // The response ends here, so its span is final: charge before the event
-        // that reports it (`MB.3.45`). The fair-queue debit lands here, while
+        // that reports it. The fair-queue debit lands here, while
         // the slot is still held to the view's `DONE`, not at the later
         // release: the span billed is the request's own and the debit belongs
-        // to the charge (`MB.3.49`, [`Scheduler::charge`]). `charge` is
+        // to the charge ([`Scheduler::charge`]). `charge` is
         // idempotent, so that `DONE` charges nothing more.
         self.charge(stream_id);
         self.emit_request(stream_id);

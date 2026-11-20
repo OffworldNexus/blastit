@@ -66,7 +66,7 @@ use crate::discovery::PhpRuntime;
 pub struct PhpBinding {
     /// The host's NTS `libphp.so`, opened and identity-checked at boot.
     pub libphp: SharedObject,
-    /// The matching `libblastit_php8X.so` shim (`MB.3.12`).
+    /// The matching `libblastit_php8X.so` shim.
     pub shim: SharedObject,
     /// Absolute `SCRIPT_FILENAME` (the `entrypoint php`), pinned at boot: the
     /// record is [`PhpBinding::entry_pin`] beside it, and every request
@@ -160,7 +160,7 @@ impl PhpBinding {
     }
 
     /// Records the `entrypoint php` again — the live-reload half of
-    /// `ADR-0010` §3 (`MB.40.9`).
+    /// `ADR-0010` §3.
     ///
     /// A `blastit dev` save replaces the file at the pinned path (in place, or
     /// by an atomic `rename`), which is exactly what `verify_entry` refuses:
@@ -187,7 +187,7 @@ impl PhpBinding {
     }
 }
 
-/// The `entrypoint php` as the boot recorded it (`MB.3.56`, `ADR-0010` §3).
+/// The `entrypoint php` as the boot recorded it (`ADR-0010` §3).
 ///
 /// `(st_dev, st_ino)` says *which* file, and the pair alone is not enough: a
 /// rewrite **in place** — what `cp`, `tar -x` and a deploy script do — keeps the
@@ -228,7 +228,7 @@ impl EntryPin {
     }
 }
 
-/// `MB.3.64`: how long the test-only rendezvous may hold a boot before the wait
+/// How long the test-only rendezvous may hold a boot before the wait
 /// becomes a refusal rather than a hang.
 ///
 /// Longer than any `cargo test` needs to rename one file (milliseconds), short
@@ -248,8 +248,9 @@ fn swap_sidecar(point: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// `MB.3.64`: the deterministic window `critical_php_embed`'s inode-pin legs
-/// need between stage 0's record and stage 1's re-open.
+/// The deterministic window the inode-pin legs in
+/// `crates/blastit/tests/e2e_prod_refusals.rs` need between stage 0's record
+/// and stage 1's re-open.
 ///
 /// Stage 0 read `BLASTIT_TEST_SWAP_POINT` before the `execve` that strips every
 /// `BLASTIT_*` variable and carried the path in the configuration document
@@ -630,7 +631,7 @@ fn pin_entry(entry: &Path, route: &str, declared: &str) -> Result<(EntryPin, Own
 /// Compares the whole record — `(st_dev, st_ino)`, `st_size` and `st_ctime` — of
 /// the path as it resolves **now** against what [`boot_bindings`] recorded, so
 /// both shapes of swap are refused instead of executed: a decoy inode *renamed*
-/// over the entry (`MB.3.7`'s inside-`manifest_dir` case) and a **rewrite in
+/// over the entry (the inside-`manifest_dir` case) and a **rewrite in
 /// place**, which keeps the inode and changes only the bytes (what `cp`, `tar -x`
 /// and a deploy script do). The comparison follows symlinks because PHP does.
 ///

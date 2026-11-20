@@ -49,7 +49,7 @@
 //!   app failed", so a response that died under the view is labelled like a
 //!   process that did. A `5xx` a view **completed** is neither: it is `ok` when
 //!   the handler returned, and `bailed` when a contained `exit()`/`die()`/fatal
-//!   answered it and never returned, retiring that worker (`MB.3.41`).
+//!   answered it and never returned, retiring that worker.
 //! * A `DRAIN` rejects new requests with `503`/`queue_full` (the closest of the
 //!   seven outcomes, which §8.1 closes).
 //! * A scheduler-written body is sent even for a `HEAD` request: deciding not
@@ -74,7 +74,7 @@
 //!   ([`View::retiring`]). Nothing new is dispatched to it: the pump between
 //!   that frame and the ordered close grows a replacement for the queue, so a
 //!   request queued behind a `DONE { Bailed }` retirement is served, never
-//!   answered `502`/`view_died` (`MB.26.8`). The promise is only that wide: the
+//!   answered `502`/`view_died`. The promise is only that wide: the
 //!   runtime also retires after answering a `DONE { Errored }` and after an
 //!   `Aborted` a client disconnect forced, and neither is marked — the
 //!   scheduler cannot tell them from a request it had already answered itself
@@ -121,8 +121,8 @@
 //! the exception: its report is not believed at all and it is charged the
 //! request's own wall time (arrival to last byte), the `R19` ceiling at the one
 //! live thread such a worker has, so a crash-loop can never cost less than the
-//! client waited. That fact is not on `RESP_HEAD`; it is `DONE`'s `bailed`
-//! (`MB.3.41`), so a `5xx` a view answered is labelled and charged at its
+//! client waited. That fact is not on `RESP_HEAD`; it is `DONE`'s `bailed`,
+//! so a `5xx` a view answered is labelled and charged at its
 //! `DONE`, one frame later. A `5xx` an app **answered itself** (a framework's
 //! `500`, a script's `http_response_code(500)`) returned from its handler, so it
 //! is `ok` with that status and keeps the clamp; a `5xx` the scheduler wrote
@@ -239,7 +239,7 @@ type StaticReadMsg = StaticRead;
 /// A build without the `static` responder opens no read task and no root, so
 /// its channel carries the unit message and its arm never completes: the
 /// sender is held for the whole run, and [`run`]'s loop is the same in both
-/// builds (`MB.36.2`).
+/// builds.
 #[cfg(not(feature = "static"))]
 type StaticReadMsg = ();
 
@@ -565,8 +565,8 @@ impl Scheduler {
                 take(deadline);
             }
         }
-        // A view on its way out — init reported it gone (`MB.3.45`) or it
-        // answered `DONE { Bailed }` (`MB.26.8`) — whose `view.chan` has not
+        // A view on its way out — init reported it gone, or it
+        // answered `DONE { Bailed }` — whose `view.chan` has not
         // closed yet is failed when this elapses.
         for pool in self.pools.values() {
             if let Some((_, deadline)) = pool.spawning {

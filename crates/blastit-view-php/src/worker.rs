@@ -15,11 +15,11 @@
 //!
 //! # The entry pin is a required value, not an adapter
 //!
-//! `ADR-0016` decision 2 supersedes `MB.36.5`'s original note: the runtime seam
-//! the pin used to wrap is gone, so [`PhpRuntimeConfig::new`] takes the
-//! [`EntryPin`] the boot recorded as a **required** argument. There is no
-//! `Option` and no `Default`: a runtime that could be built without a pin would
-//! be a fail-open seam, and a `SCRIPT_FILENAME` swapped in place must be a `500`
+//! `ADR-0016` decision 2: the runtime seam the pin used to wrap is gone, so
+//! [`PhpRuntimeConfig::new`] takes the [`EntryPin`] the boot recorded as a
+//! **required** argument. There is no `Option` and no `Default`: a runtime that
+//! could be built without a pin would be a fail-open seam, and a
+//! `SCRIPT_FILENAME` swapped in place must be a `500`
 //! (with the sentence on the worker's stderr) rather than a silent re-resolution
 //! to whatever is at the path now. The record is checked once at load and again
 //! before every request, beside the call into the shim.
@@ -104,14 +104,13 @@ pub struct PhpRuntimeConfig {
     /// allocate without bound (the scheduler's own body limit is the first
     /// line, this is the worker's).
     pub max_body_bytes: usize,
-    /// The record of the resolved `entry` the boot took (`ADR-0010` §3,
-    /// `MB.3.56`): `(st_dev, st_ino)` plus the size/ctime content half, checked
-    /// once at load and again before every request.
+    /// The record of the resolved `entry` the boot took (`ADR-0010` §3):
+    /// `(st_dev, st_ino)` plus the size/ctime content half, checked once at
+    /// load and again before every request.
     ///
-    /// Private and **required**: `ADR-0016` decision 2 deleted the adapter that
-    /// used to re-check the pin outside the runtime, so a value that could be
-    /// left unset would be a fail-open seam. Nothing reads it back out — the
-    /// check is [`PhpEmbedRuntime`]'s.
+    /// Private and **required**: the pin is re-checked inside the runtime only,
+    /// so a value that could be left unset would be a fail-open seam. Nothing
+    /// reads it back out — the check is [`PhpEmbedRuntime`]'s.
     pin: EntryPin,
 }
 
@@ -228,14 +227,13 @@ struct PhpWorker {
     bailed: bool,
 }
 
-// The dev-only loaded-file report a PHP view is handed (`MB.23.4.2`,
-// `ADR-0014`) is the transport's: one `LoadedReport` type for every backend, and
-// `MB.36.5` deleted this crate's duplicate of it (design §4.2.1). The socket is
-// the write end of this view's own `AF_UNIX SOCK_DGRAM` socketpair — created
-// before the fork, inherited in the child's keep list, never passed through the
-// environment.
+// The dev-only loaded-file report a PHP view is handed (`ADR-0014`) is the
+// transport's: one `LoadedReport` type for every backend (design §4.2.1). The
+// socket is the write end of this view's own `AF_UNIX SOCK_DGRAM` socketpair —
+// created before the fork, inherited in the child's keep list, never passed
+// through the environment.
 
-/// One PHP view's report (`MB.23.4.2`): the datagram sender and the
+/// One PHP view's report: the datagram sender and the
 /// compiled→source memo, over the sink the *loader* owns.
 ///
 /// The `FileSink` is not a field here, on purpose: `Loaded::install_file_sink`
@@ -317,7 +315,7 @@ pub struct PhpEmbedRuntime {
     worker: Mutex<PhpWorker>,
     /// What every request is built from.
     cfg: PhpRuntimeConfig,
-    /// The dev-only loaded-file report (`MB.23.4.2`). `None` in production,
+    /// The dev-only loaded-file report. `None` in production,
     /// with reload off, and for a shim whose optional file sink is absent — in
     /// which case every request path below is the one it always was.
     report: Option<PhpFileReport>,
@@ -344,10 +342,10 @@ impl PhpEmbedRuntime {
     }
 
     /// [`PhpEmbedRuntime::load`], plus the dev-only loaded-file report
-    /// (`MB.23.4.2`, `ADR-0014`).
+    /// (`ADR-0014`).
     ///
     /// `report` is the write end of this view's report socketpair — created
-    /// before the fork by whoever forks the view, `MB.23.5`'s job — and `None`
+    /// before the fork by whoever forks the view — and `None`
     /// is production and `--no-reload`: no socket, no reader, no report, and not
     /// one byte of extra work per request.
     ///
@@ -409,7 +407,7 @@ impl PhpEmbedRuntime {
     /// the channel writes `RESP_END_COST` and `DONE` from the [`RequestEnd`].
     ///
     /// The entry pin is re-checked **here**, before the body is read and before
-    /// `libphp` opens `SCRIPT_FILENAME` (`MB.3.56`, `ADR-0010` §3): a mismatch
+    /// `libphp` opens `SCRIPT_FILENAME` (`ADR-0010` §3): a mismatch
     /// answers an empty `500` with the sentence on the worker's stderr, never in
     /// the response.
     ///
@@ -498,7 +496,7 @@ impl PhpEmbedRuntime {
         } else {
             outcome
         };
-        // `MB.23.4.2`: what this request loaded, reported after the response is
+        // What this request loaded, reported after the response is
         // on the wire and before `DONE` — so it names exactly the files the
         // response depended on, and a reporting failure can only ever lose a
         // report, never change this request's outcome.
@@ -546,7 +544,7 @@ fn refuse(io: &mut ChanIo<'_>, sentence: &str) -> RequestEnd {
 /// What `serve` reports for one shim result: the `DONE` outcome, and whether
 /// the worker must retire because the handler bailed out of a request.
 ///
-/// `MB.3.41`: the return value of `php_execute_script` (and the shim's
+/// The return value of `php_execute_script` (and the shim's
 /// `contained` flag) is the only thing that separates a `500` an app answered
 /// from a `500` a dying handler left behind — both travel as a real
 /// `RESP_HEAD`. The handler that bailed never returned, so its request is
@@ -891,7 +889,7 @@ fn serve_loop(
 ///
 /// The same two facts `RESP_END`/`RESP_END_COST` and `DONE` carry: how the
 /// request ended — completed, abandoned, errored, or bailed out of a handler
-/// that never returned (`DoneOutcome::Bailed`, `MB.3.41`) — and what the request
+/// that never returned (`DoneOutcome::Bailed`) — and what the request
 /// cost in CPU time. The wall time on the wire is the transport's business, and
 /// the scheduler ignores it (`R18`), so it is not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
