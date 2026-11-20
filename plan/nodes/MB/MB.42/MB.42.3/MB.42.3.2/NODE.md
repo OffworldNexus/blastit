@@ -2,16 +2,16 @@
 id: MB.42.3.2
 title: "docs/install.sh: signed-repo first, /dev/tty interactivity, site/install.sh publication"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.42.3.1]
 paths: [docs/install.sh, .github/workflows/docs.yml, Makefile, "scripts/**"]
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-20T01:33"
-updated: "2026-11-20T01:33"
+updated: "2026-11-20T02:56"
 ---
 
 # Goal

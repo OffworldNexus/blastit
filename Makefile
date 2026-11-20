@@ -932,3 +932,19 @@ uninstall: ## Remove the bundle `make install` staged under PREFIX
 	else \
 		echo "uninstall: removed the bundle under $(PREFIX)"; \
 	fi
+
+# `docs/install.sh` (`MB.42.3.2`): parsed as POSIX `sh` in `docs-unit`, and its
+# contract suite (fixture HTTP server on loopback, scratch prefixes, no root, no
+# package install) in `fast-check`. Both rules are appended here so the wiring is
+# one block; `fast-check`/`docs-unit` get a prerequisite-only rule, no recipe.
+.PHONY: install-test install-sh-syntax
+
+fast-check: install-test
+docs-unit: install-sh-syntax
+
+install-sh-syntax: ## Parse docs/install.sh as POSIX sh (and dash when present)
+	sh -n docs/install.sh
+	if command -v dash >/dev/null 2>&1; then dash -n docs/install.sh; else echo "install-sh-syntax: dash not installed, skipped"; fi
+
+install-test: ## Prove docs/install.sh contract against a local fixture (no root, no network)
+	sh scripts/test_install.sh

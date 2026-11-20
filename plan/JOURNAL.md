@@ -3949,3 +3949,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T01:59 [MB.42.3.1] (lead) MB.42.11 landed (bundled_python marker). Now apply this node's own review fixes: payload assertion, manylinux staging + explicit ceiling, WSGI smoke leg, AutoRe
 - 2026-11-20T02:36 [MB.42.3.1] (lead) status review -> done
 - 2026-11-20T02:36 [MB.42.3.1] (lead) commit next; note: platform_matrix.py:499 doc comment still says the PHP shims come from shim_floor 2_41 - stale (measured 2.17, ceiling 2.34). Cosmetic drift t
+- 2026-11-20T02:36 [MB.42.3.2] (lead) status ready -> active
+- 2026-11-20T02:36 [MB.42.3.2] (lead) attempt 1/3 started
+- 2026-11-20T02:36 [MB.42.3.2] (lead) base 24b1a1043c0e23c904faed3715564ba336cfcb19
+- 2026-11-20T02:48 [MB.42.3.2] (lead) status active -> review
+- 2026-11-20T02:56 [MB.42.3.2] (lead) status review -> done

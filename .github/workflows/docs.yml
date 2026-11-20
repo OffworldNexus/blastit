@@ -21,6 +21,21 @@ name: Docs
 # `docs-gate` job runs the whole gate; a job cannot `needs` another workflow's
 # job, so the check is repeated (it needs no wheel and no cargo, only the
 # repository).
+#
+# The installer the README's hero advertises is a *served asset*, not a page:
+# https://offworldnexus.github.io/blastit/install.sh must be the exact bytes this
+# repository reviewed. The "Publish and prove install.sh" step makes that a fact
+# instead of a property of the site builder: it copies `docs/install.sh` into the
+# built `site/`, compares the two with `cmp`, fetches the file back over HTTP and
+# compares that too, then pipes the served URL into `sh -s -- --help`. The pipe
+# is how a new user runs it, and it is a help-only smoke: no repository is
+# touched, nothing is installed.
+#
+# Two release guards live in that step as well. The embedded digest table must be
+# keyed by `BLASTIT_DEFAULT_VERSION` (one version to bump, checked against
+# `Cargo.toml`), and a `v*` tag whose table still holds `-` rows fails: `-` means
+# an archive install would verify against the origin's own `SHA256SUMS`, which is
+# the same trust root as the download and therefore no independent check.
 
 on:
   push:
@@ -69,6 +84,7 @@ jobs:
         env:
           UV_PYTHON_DOWNLOADS: never
         run: |
+          set -euo pipefail
           uv run --no-project python - <<'PY'
           import fnmatch
           import sys
@@ -154,6 +170,58 @@ jobs:
       # heading or a moved page fails this job.
       - name: Build
         run: zensical build --strict
+      # The hero's one command is served from the site root, so the served bytes
+      # must be the reviewed bytes. The build happens to copy `docs/install.sh`
+      # in this pinned Zensical, which is not a guarantee the gate can lean on:
+      # the copy is explicit, `cmp` proves it, the HTTP GET proves what Pages will
+      # hand a user, and the pipe proves a real `curl … | sh` still reaches
+      # usage.
+      #
+      # The three version guards: `BLASTIT_DEFAULT_VERSION` must equal
+      # `Cargo.toml`'s version, the embedded digest table must be keyed by that
+      # same constant (so a release has one version to bump), and a `v*` tag may
+      # not publish a table whose rows are still `-` — an archive install would
+      # then verify against the origin's own SHA256SUMS, which shares the
+      # download's trust root and adds no assurance.
+      - name: Publish and prove install.sh
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          pinned=$(sed -n 's/^BLASTIT_DEFAULT_VERSION="\(.*\)"/\1/p' docs/install.sh)
+          if [ "$version" != "$pinned" ]; then
+            echo "::error file=docs/install.sh::BLASTIT_DEFAULT_VERSION=$pinned but Cargo.toml says $version: bump the installer's default with the release"
+            exit 1
+          fi
+          if ! grep -qF '"$BLASTIT_DEFAULT_VERSION":' docs/install.sh; then
+            echo "::error file=docs/install.sh::the embedded digest table must be keyed by BLASTIT_DEFAULT_VERSION"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && grep -qE "printf '%s.n' - ;;" docs/install.sh; then
+            echo "::error file=docs/install.sh::this is the $GITHUB_REF tag but the embedded digest table still holds '-' rows: stamp the four release digests before tagging"
+            exit 1
+          fi
+          cp docs/install.sh site/install.sh
+          chmod 0755 site/install.sh
+          cmp docs/install.sh site/install.sh
+          uv run --no-project python -m http.server 8731 --bind 127.0.0.1 --directory site &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          url=http://127.0.0.1:8731/install.sh
+          ready=0
+          for _ in $(seq 1 50); do
+            if curl -fsS -o /dev/null "$url" 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::the built site does not serve /install.sh"
+            exit 1
+          fi
+          curl -fsSL "$url" | cmp - docs/install.sh
+          curl -fsSL "$url" | sh -s -- --help >/dev/null
+          echo "install.sh: published for v$version, served byte-identical, and 'curl … | sh -s -- --help' exits 0"
       - uses: actions/configure-pages@v5
       - name: Upload the site
         uses: actions/upload-pages-artifact@v3
