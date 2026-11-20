@@ -3929,3 +3929,12 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T00:27 [MB.42.10] (lead) attempt 1/3 started
 - 2026-11-20T00:27 [MB.42.10] (lead) base 27c5af2261e5046ac78796e6c962e305dd49e45e
 - 2026-11-20T01:33 [MB.42.10] (lead) status active -> done
+- 2026-11-20T01:33 [MB.42.3] (unknown) edited fields
+- 2026-11-20T01:33 [MB.42.3] (lead) status ready -> ready
+- 2026-11-20T01:33 [MB.42.3.1] (unknown) created (task) Native packages: build-deb.sh + build-rpm.sh + BLASTIT_DEB/BLASTIT_RPM container smoke
+- 2026-11-20T01:33 [MB.42.3.2] (unknown) created (task) docs/install.sh: signed-repo first, /dev/tty interactivity, site/install.sh publication
+- 2026-11-20T01:33 [MB.42.3.3] (unknown) created (task) Ecosystem wrappers: 4 universal py3-none wheels + console scripts + py-sapi.yml + Composer package
+- 2026-11-20T01:33 [MB.42.3.4] (unknown) created (task) Signed-repo publishing: packages.yml (main) + nightly.yml (stamps, prune 7) + Forgejo mirror
+- 2026-11-20T01:33 [MB.42.3.1] (lead) status ready -> active
+- 2026-11-20T01:33 [MB.42.3.1] (lead) attempt 1/3 started
+- 2026-11-20T01:33 [MB.42.3.1] (lead) base 107ab5c9a1c59ebc73522770c5a4d54cbb81713f
