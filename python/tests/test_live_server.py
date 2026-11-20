@@ -13,6 +13,7 @@ production/production-sudo decision and its twins live in the protected
 `python/tests/critical/test_check_contract.py`).
 """
 
+import functools
 import json
 import os
 import shutil
@@ -111,24 +112,173 @@ def run(
 ) -> Outcome:
     """Runs pytest in a copy of the live project, and returns what it did."""
     target = project
+    report_path = project / report
+    staged: Path | None = None
     if tmp_path is not None:
-        target = tmp_path / "live_project"
-        shutil.copytree(project, target, ignore=shutil.ignore_patterns("__pycache__"))
+        if plugin._privileges() is None:
+            # No root and no sudo: the fixture serves the project through
+            # `blastit dev`, which never authorises the manifest directory, so a
+            # copy in the test user's own temporary directory is enough.
+            target = tmp_path / "live_project"
+            shutil.copytree(
+                project, target, ignore=shutil.ignore_patterns("__pycache__")
+            )
+            report_path = target / report
+        else:
+            target, report_path = _stage_for_production(project, tmp_path, report)
+            staged = target
     environment = {
         **os.environ,
         "DATABASE_URL": str(DATABASE_URL),
         "PYTHONDONTWRITEBYTECODE": "1",
         **(env or {}),
     }
+    try:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                *args,
+                "--blastit-report",
+                str(report_path),
+            ],
+            cwd=target,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        if staged is not None:
+            _remove_stage(staged)
+    return Outcome(completed, report_path)
+
+
+#: The roots a staged copy may live under, in the order they are tried.
+#:
+#: `blastit serve` authorises the manifest directory before it binds a listener
+#: (`host::Provenance`), and `/tmp` is `1777`: a path under it is refused, because
+#: a uid the views do not run as could replace the code they serve. Each of these
+#: sits on the root filesystem and is root-owned `0755` on an ordinary host — the
+#: layout a container image gives `/app`.
+_PROTECTED_CANDIDATES = (Path("/opt"), Path("/usr/local"), Path("/srv"))
+
+#: The write bits another uid would need (`S_IWGRP | S_IWOTH`): the test
+#: `host::Facts::directory_writable_by_others` applies to every ancestor.
+_GROUP_OR_OTHER_WRITE = 0o022
+
+
+@functools.cache
+def _protected_root() -> Path:
+    """The first candidate a production boot will authorise, or a refusal naming each.
+
+    The whole path decides, not only the leaf: `host::Provenance` refuses a
+    manifest directory below a directory another uid could write, so a `0755`
+    `/opt` under a `0777` `/` protects nothing. Resolved once — the walk is the
+    same for every test — and a host with none is reported with every rejected
+    candidate and its reason: that is an operator's `chmod`, and the live suite
+    must never fall back to `blastit dev` and claim production ran.
+    """
+    rejected: list[str] = []
+    for candidate in _PROTECTED_CANDIDATES:
+        reason = _unprotected_reason(candidate)
+        if reason is None:
+            return candidate
+        rejected.append(f"{candidate} ({reason})")
+    pytest.fail(
+        "blastit: a production live server needs a staging directory no other uid "
+        "can write, and none of "
+        + ", ".join(rejected)
+        + " qualifies — fix the first with `sudo chmod go-w <it>`, and the same on "
+        "every directory above it (a root-owned 0755 /opt is what a container "
+        "gives /app)",
+        pytrace=False,
+    )
+
+
+def _unprotected_reason(candidate: Path) -> str | None:
+    """Why `candidate` cannot hold a staged copy, or `None` when it can."""
+    if not candidate.is_dir():
+        return "does not exist"
+    directory: Path | None = candidate
+    while directory is not None:
+        try:
+            mode = os.stat(directory).st_mode
+        except OSError as error:
+            return f"{directory} cannot be inspected ({error})"
+        if mode & _GROUP_OR_OTHER_WRITE:
+            return f"{directory} is group- or other-writable (mode {mode & 0o7777:o})"
+        directory = directory.parent if directory != directory.parent else None
+    return None
+
+
+def _privileged(prefix: list[str], *args: str) -> None:
+    """Runs `args` as root, directly or through the prefix `_privileges` chose."""
     completed = subprocess.run(
-        [sys.executable, "-m", "pytest", *args, "--blastit-report", report],
-        cwd=target,
-        env=environment,
+        [*prefix, *args], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, (
+        f"{' '.join([*prefix, *args])} failed ({completed.returncode}):\n"
+        f"{completed.stdout}{completed.stderr}"
+    )
+
+
+def _stage_for_production(
+    project: Path, tmp_path: Path, report: str
+) -> tuple[Path, Path]:
+    """A copy of `project` production `blastit` will authorise, and its report path.
+
+    The copy is made under [`_protected_root`] and handed to root with no
+    group/other write bits once it is filled, so the manifest directory passes
+    `host::Provenance` the way `/app` does in a container; the report stays in
+    `tmp_path`, which the test user owns and can write (the project copy itself is
+    readable but not writable by it — that is what being root's means).
+    """
+    prefix = plugin._privileges() or []
+    directory = _protected_root() / f"blastit-live-{os.getpid()}-{tmp_path.name}"
+    target = directory / project.name
+    try:
+        _privileged(prefix, "mkdir", "-p", str(directory))
+        _privileged(prefix, "chown", f"{os.getuid()}:{os.getgid()}", str(directory))
+        shutil.copytree(project, target, ignore=shutil.ignore_patterns("__pycache__"))
+        _privileged(prefix, "chown", "-R", "root:root", str(directory))
+        _privileged(prefix, "chmod", "-R", "go-w,a+rX", str(directory))
+    except BaseException:
+        # A half-chowned copy is root's from the first `chown` on, so nothing
+        # else may clean it up; the test's own failure is the one to report.
+        _remove_stage(target)
+        raise
+    return target, tmp_path / report
+
+
+def _remove_stage(target: Path) -> None:
+    """Removes a staged copy, without ever replacing the session's own result.
+
+    Only a directory this module created — `blastit-live-*` directly under the
+    resolved protected root — is ever removed, and a failure to remove it is
+    printed rather than raised: a cleanup path must not turn a test's real
+    outcome into a fixture error.
+    """
+    directory = target.parent
+    try:
+        root = _protected_root()
+    except BaseException:  # noqa: BLE001 - cleanup never reports that refusal instead
+        return
+    if directory.parent != root or not directory.name.startswith("blastit-live-"):
+        return
+    prefix = plugin._privileges() or []
+    completed = subprocess.run(
+        [*prefix, "rm", "-rf", str(directory)],
         capture_output=True,
         text=True,
         check=False,
     )
-    return Outcome(completed, target / report)
+    if completed.returncode != 0:
+        print(
+            f"blastit: could not remove the staged copy {directory} "
+            f"({completed.returncode}): {completed.stderr.strip()}"
+        )
 
 
 @requires_database

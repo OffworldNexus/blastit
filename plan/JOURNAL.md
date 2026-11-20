@@ -4093,3 +4093,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T11:38 [MB.51] (lead) status active -> done
 - 2026-11-20T11:38 [MB.51] (lead) commit 6a94156
 - 2026-11-20T11:39 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
+- 2026-11-20T12:24 [MB.52] (conductor) created (task) Stage CPython shims beside blastit for smoke (root) and move pytest-plugin venv to root-owned /opt/blastit-tests
+- 2026-11-20T12:24 AUTOPILOT on by conductor closing final 2 CI jobs in MB.52
+- 2026-11-20T12:25 [MB.52] (lead) status ready -> active
+- 2026-11-20T12:25 [MB.52] (lead) attempt 1/3 started
+- 2026-11-20T12:25 [MB.52] (lead) base f8eb15a7ce91b8408ed55fb3cc707c1829ba9906
+- 2026-11-20T12:49 [MB.52] (lead) review-arch VERDICT CLEAN on ci.yml + smoke.rs; fix round 1 (python/tests only): PROTECTED_ROOT probe+ancestor walk, staging leak/assert, README venv recipe
+- 2026-11-20T12:49 [MB.52] (lead) OUT OF SCOPE (python/blastit/** not in paths, needs its own node): pytest_plugin._serveable_project copies a non-traversable $HOME project to /tmp/blastit-live-
+- 2026-11-20T12:55 [MB.52] (lead) status active -> done

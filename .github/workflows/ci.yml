@@ -416,6 +416,44 @@ jobs:
                   "--all-targets) in CI, and `make test-critical` locally"
               )
           PY
+      # A deployment boot discovers the per-minor CPython shim
+      # (`libblastit_py3<m>-<arch>-<libc>.so`) **beside the running binary only**
+      # (`DiscoveryEnv::Production` -> `ProductionEnv::exe_dir`); `target/py-sapi`
+      # is a `blastit dev` candidate and is never searched here. Every suite this
+      # job runs starts `target/debug/blastit` as uid 0 and loads CPython through
+      # that shim, so `make python-runtime`'s artifact is staged beside it —
+      # owned by root, no group/other write bits, no file capabilities, because
+      # `host::Provenance` refuses an object a view uid could replace (owner
+      # neither root nor init's uid, group/other-writable, or under a directory
+      # group/other-writable) and a child exec'ing one with an emptied bounding
+      # set.
+      # Only the `.so` files, `target/debug` and `target` are touched: the
+      # checkout above them belongs to the runner, and its ordinary 0755
+      # directories already satisfy the rule, while a `chown -R root:root` there
+      # would break every later step that writes as the runner. So a writable
+      # ancestor is a red step that names it, never a recursive chown.
+      - name: Stage the CPython shims beside the test binaries (as root)
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          install -m 0644 target/py-sapi/libblastit_py3*.so target/debug/
+          sudo --non-interactive chown root:root target/debug/libblastit_py3*.so
+          # A runner that checks out with `umask 002` leaves 0775 directories;
+          # these two are build output and nothing else writes them as root.
+          chmod go-w target target/debug
+          directory="$PWD/target/debug"
+          while :; do
+            mode="$(stat -c %a "$directory")"
+            if (( (8#$mode & 18) != 0 )); then
+              echo "::error::$directory is group- or other-writable (mode $mode): root's provenance check refuses a CPython shim below a directory a view uid could write, and this job never chowns the checkout itself — the checkout has to be created with 0755 directories"
+              exit 1
+            fi
+            if [ "$directory" = "/" ]; then
+              break
+            fi
+            directory="$(dirname "$directory")"
+          done
+          ls -l target/debug/libblastit_py3*.so
       # The job's purpose, unchanged: init has to be PID-1's uid (root) to bind
       # the view sockets and drop privileges, so every test binary the build step
       # kept is run here as uid 0, one target at a time. Two suites are not among
@@ -819,9 +857,22 @@ jobs:
         env:
           MATURIN: maturin
       - name: Install the wheel and the test tools
+        timeout-minutes: 10
         run: |
-          python -m venv /tmp/blastit-tests
-          /tmp/blastit-tests/bin/pip install dist/blastit-*.whl pytest pytest-django pytest-xdist django 'psycopg[binary]'
+          set -euo pipefail
+          # Not `/tmp`: it is 1777, so when `python/tests/test_live_server.py`
+          # starts the wheel's production `blastit` as root, provenance refuses
+          # the `_bin/libblastit_py3*.so` it `dlopen`s with "owned by uid 1001;
+          # /tmp is writable" — correctly, because a shim another uid could
+          # replace is code a view uid chooses. The venv therefore lives under
+          # `/opt` (already `go-w` above) and is handed to root without
+          # group/other write bits once it is filled.
+          sudo --non-interactive mkdir -p /opt/blastit-tests
+          sudo --non-interactive chown "$(id -u):$(id -g)" /opt/blastit-tests
+          python -m venv /opt/blastit-tests
+          /opt/blastit-tests/bin/pip install dist/blastit-*.whl pytest pytest-django pytest-xdist django 'psycopg[binary]'
+          sudo --non-interactive chown -R root:root /opt/blastit-tests
+          sudo --non-interactive chmod -R go-w /opt/blastit-tests
       - name: Run the plugin's tests
         # `python/tests/runnable_docs/fixtures/*` are runnable-docs fixture apps,
         # driven by the docs harness from their own directory: each fixture app
@@ -830,7 +881,7 @@ jobs:
         # they error at collection. Ignore them here rather than in a global
         # `norecursedirs`, which would also change what the harness collects
         # inside those directories.
-        run: /tmp/blastit-tests/bin/pytest python/tests -q --ignore=python/tests/runnable_docs/fixtures
+        run: /opt/blastit-tests/bin/pytest python/tests -q --ignore=python/tests/runnable_docs/fixtures
 
   # `make check` runs the docs gate and both critical-test guards; this job and
   # `guards` are what run them on a pull request. Nothing else here calls `make`

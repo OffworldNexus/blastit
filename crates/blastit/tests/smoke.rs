@@ -98,10 +98,15 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Creates `/tmp/blastit-smoke-<pid>-<tag>-<n>`, mode `0755` so the view
+    /// Creates `<root>/blastit-smoke-<pid>-<tag>-<n>`, mode `0755` so the view
     /// uids can read the code (§7.2).
+    ///
+    /// The root is [`fixture_root`]: the half of this suite that runs as root
+    /// drives a **deployment** boot, and that boot authorises the manifest
+    /// directory (`host::Provenance`), which refuses a path under `/tmp` — a
+    /// uid the views do not run as can replace the code it serves.
     fn new(tag: &str) -> Self {
-        let mut path = PathBuf::from("/tmp");
+        let mut path = fixture_root();
         path.push(format!(
             "blastit-smoke-{}-{}-{}",
             std::process::id(),
@@ -131,6 +136,32 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// The directory a fixture is created in.
+///
+/// The half of this suite that runs as root drives a **deployment** boot, and
+/// `host::Provenance` authorises the manifest directory before any listener
+/// binds: a path below a directory another uid can write is refused, and `/tmp`
+/// is `1777` on every host, so a fixture there can never be served by a
+/// production boot. `/opt`, `/usr/local` and `/srv` sit on the root filesystem,
+/// root-owned and `0755` on an ordinary host; [`blastit::host::facts_of`] is
+/// what decides, so a host whose candidate is world-writable falls through to
+/// the next one. An unprivileged run — where no deployment gate is reached at
+/// all — keeps `/tmp`, which is all it needs.
+fn fixture_root() -> PathBuf {
+    // SAFETY: `geteuid` takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        for parent in ["/opt", "/usr/local", "/srv"] {
+            let parent = Path::new(parent);
+            let protected = blastit::host::facts_of(parent)
+                .is_ok_and(|facts| blastit::host::protected(&facts, 0).is_ok());
+            if parent.is_dir() && protected {
+                return parent.to_path_buf();
+            }
+        }
+    }
+    PathBuf::from("/tmp")
 }
 
 /// A running `blastit`, with its event stream collected as it goes.
@@ -588,7 +619,9 @@ impl RunDir {
     }
 
     /// Copies this test's own binary in, `0755`, with `security.capability` set
-    /// to `mask` when one is asked for.
+    /// to `mask` when one is asked for — and the per-minor CPython shims beside
+    /// it, because the copy boots as a deployment (see
+    /// [`copy_python_shims_beside`]).
     ///
     /// Returns whether the attribute was written; it needs `CAP_SETFCAP`, which
     /// is what a deployment's `setcap` needs too.
@@ -596,6 +629,7 @@ impl RunDir {
         let path = self.path.join(name);
         std::fs::copy(env!("CARGO_BIN_EXE_blastit"), &path).unwrap();
         std::fs::set_permissions(&path, Permissions::from_mode(0o755)).unwrap();
+        copy_python_shims_beside(&self.path);
         let wrote = match mask {
             None => true,
             Some(mask) => write_file_caps(&path, mask),
@@ -613,6 +647,71 @@ impl Drop for RunDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Whether a file name is one of the per-minor CPython shims discovery knows.
+fn is_python_shim(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.starts_with("libblastit_py") && name.ends_with(".so")
+}
+
+/// Copies the per-minor CPython shims beside a copy of this test's binary (D6/B2).
+///
+/// A **deployment** boot looks for `libblastit_py3<m>-<arch>-<libc>.so` beside
+/// the running binary only (`DiscoveryEnv::Production` -> `ProductionEnv::exe_dir`;
+/// `target/py-sapi` is a `blastit dev` candidate), so a copy that boots as a
+/// deployment would otherwise refuse with `NoShim` before it forks anything.
+///
+/// The two places a `cargo` build holds one, both read from
+/// `CARGO_BIN_EXE_blastit` — the file the copy was made from, not the copy: the
+/// binary's own directory (the `smoke (root)` job stages them there, because
+/// every root-run test starts that binary) and `<target>/py-sapi`, which `make
+/// python-runtime` writes. Each copy is `0644` and carries no file capabilities,
+/// which is what `host::Provenance` requires of an object a view worker
+/// `dlopen`s.
+fn copy_python_shims_beside(destination: &Path) {
+    let source = Path::new(env!("CARGO_BIN_EXE_blastit"));
+    let exe_dir = source
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let search: Vec<PathBuf> = std::iter::once(exe_dir.clone())
+        .chain(exe_dir.parent().map(|target| target.join("py-sapi")))
+        .collect();
+    for directory in &search {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !is_python_shim(&entry.file_name()) || !entry.path().is_file() {
+                continue;
+            }
+            let path = destination.join(entry.file_name());
+            // The first directory wins; a later call has nothing left to do.
+            if path.exists() {
+                continue;
+            }
+            std::fs::copy(entry.path(), &path).unwrap();
+            std::fs::set_permissions(&path, Permissions::from_mode(0o644)).unwrap();
+        }
+    }
+    let present = std::fs::read_dir(destination).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| is_python_shim(&entry.file_name()))
+    });
+    let searched = search
+        .iter()
+        .map(|directory| directory.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" or ");
+    assert!(
+        present,
+        "no libblastit_py3*.so in {searched}: build one with `make python-runtime` — \
+         a deployment reads its CPython shim from the executable's own directory, \
+         and {} is the copy that needs one",
+        destination.display()
+    );
 }
 
 /// Runs a program to its exit and returns everything it printed (D6).
@@ -2286,8 +2385,14 @@ fn a_writable_working_directory_is_refused() {
     let fixture = Fixture::new("writable-cwd");
     let manifest = fixture.write("Blastfile", ONE_ROUTE);
     fixture.write("app.py", APP);
+    // The manifest and the app stay in the fixture's own directory, which a
+    // deployment's provenance authorises and therefore refuses once it is
+    // writable; only the *working directory* is the hole, so it is a
+    // subdirectory of its own and the boot reaches the `sys.path` check.
+    let cwd = fixture.path.join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
     for mode in [0o777, 0o1777] {
-        std::fs::set_permissions(&fixture.path, Permissions::from_mode(mode)).unwrap();
+        std::fs::set_permissions(&cwd, Permissions::from_mode(mode)).unwrap();
         // A port of its own per boot: the previous one releases its listener
         // only when its dbproxy child is gone, and the child outlives init for
         // a moment.
@@ -2303,14 +2408,14 @@ fn a_writable_working_directory_is_refused() {
                 ("BLASTIT_LOG_FORMAT", "json"),
             ],
             0,
-            Some(&fixture.path),
+            Some(&cwd),
         );
         assert!(
             refused.contains("is writable by another uid"),
             "mode {mode:o}: the boot refuses:\n{refused}"
         );
         assert!(
-            refused.contains(&fixture.path.display().to_string()),
+            refused.contains(&cwd.display().to_string()),
             "mode {mode:o}: and names the directory:\n{refused}"
         );
         assert!(

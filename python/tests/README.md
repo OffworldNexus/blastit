@@ -29,8 +29,9 @@
   the two views that open a socket say `egress any`.
 * `test_live_server.py` + `live_project/` — the live server of D3c: a second
   tiny Django project whose tests are served by the *real* `blastit` binary, so
-  what is checked is front-end traffic against the manifest. Those tests skip
-  without root (or passwordless sudo), which is what starting blastit needs.
+  what is checked is front-end traffic against the manifest. They never skip for
+  privilege: without root and passwordless sudo the fixture serves through
+  `blastit dev`, the unprivileged single-UID simulation (R39).
 * `packaged_project/` — the same thing in the layout `django-admin startproject
   myshop .` writes: the settings inside a package (`myshop/settings.py`), the
   dotted `WSGI_APPLICATION` Django declares, and a relative
@@ -44,15 +45,23 @@ a real PostgreSQL whose user may create databases.
 ```console
 $ export PYO3_PYTHON=python3.14          # the interpreter the wheel is built for
 $ scripts/build-wheel.sh                 # dist/blastit-*.whl
-$ python3.14 -m venv /tmp/blastit-tests
-$ /tmp/blastit-tests/bin/pip install dist/blastit-*.whl \
+$ python3.14 -m venv "$HOME/.venvs/blastit-tests"
+$ "$HOME/.venvs/blastit-tests/bin/pip" install dist/blastit-*.whl \
     pytest pytest-django pytest-xdist django 'psycopg[binary]'
 $ DATABASE_URL=postgresql://blastit:ci-not-secret@127.0.0.1:5432/blastit \
-    /tmp/blastit-tests/bin/pytest python/tests
+    "$HOME/.venvs/blastit-tests/bin/pytest" python/tests
 ```
 
 `DATABASE_URL` (or `BLASTIT_TEST_PG_URL`, the spelling dbproxy's tests use) is
 what the tests hand to the tiny project; without it they are skipped.
+
+With passwordless `sudo` the live tests run production `blastit`, which
+authorises the venv tree it loads the shim from — so hand it to root and drop the
+group/other write bits with `sudo --non-interactive chown -R root:root
+"$HOME/.venvs/blastit-tests"` and `sudo --non-interactive chmod -R go-w
+"$HOME/.venvs/blastit-tests"`; without root and sudo they serve through `blastit
+dev` instead (a venv under `/tmp` is refused by production's provenance either
+way).
 
 The plugin's own runs of `project/` and `live_project/` are subprocesses of this
 suite, so `-n` on the outer run also works. On a machine without `pip`,
