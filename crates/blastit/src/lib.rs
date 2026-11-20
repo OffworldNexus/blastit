@@ -46,12 +46,14 @@
 // interpreter can reach carries its own `allow(dead_code)` where it lives, so an
 // orphan caused by a missed `cfg` is still a warning instead of hiding here.
 
-// The audit and the grant diff live in `blastit-audit` (`MB.42.2.2.1`): the
-// CLI, `check`, `dev --learn` and the Python bridge read one implementation of
-// "executed but not granted / dead grant", so this crate re-exports it under the
-// path every caller and suite already names instead of carrying a second copy.
-pub use blastit_audit as audit_v1;
+// The grant diff and its report live in `check` (`MB.56.1.2.1`): the CLI,
+// `check` and `dev --learn` read one implementation of "executed but not
+// granted / dead grant".
 pub mod check;
+// The name the integration suites still call that engine by; `check` is its
+// home, and they are consolidated onto it directly (`MB.56.3`).
+#[doc(hidden)]
+pub use check as audit_v1;
 pub mod cli;
 pub mod config;
 // The `dev` live-reload policy (`MB.23.5.2`, `ADR-0014`). `pub` for now because
@@ -59,10 +61,10 @@ pub mod config;
 // caller would be a wall of `dead_code` for code that is already tested.
 pub mod dev_reload;
 pub mod host;
-// Route inference for `--learn` is `blastit-audit`'s, for the same reason as the
-// audit itself: `check --learn` and `dev --learn` must propose the same view for
-// the same path.
-pub use blastit_audit::infer_routes;
+// Route inference for `--learn` is `check`'s, for the same reason as the audit
+// itself: `check --learn` and `dev --learn` must propose the same view for the
+// same path.
+pub use check::infer_routes;
 // `blastit lsp` is one delegation: the server is `crates/blastit-lsp`, which
 // builds on macOS and Windows where this crate cannot serve (`MB.35.4`,
 // `ADR-0013`). The re-export keeps `crate::lsp::run()` — and the capability

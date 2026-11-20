@@ -8,7 +8,7 @@
 
 use blastit_manifest::{Manifest, MountTable};
 
-use crate::obs::CheckObsV1;
+use super::obs::CheckObsV1;
 /// The declared static mounts no observed request reached, in mount order, as
 /// `(prefix, root)` (`R14`).
 ///
@@ -17,7 +17,7 @@ use crate::obs::CheckObsV1;
 /// `check` prints one stderr line per pair and leaves the verdict alone: the
 /// root exists (or the boot refused it), so this is a hint that the suite never
 /// touched the mount, not a completeness error. Suppressed when the suite
-/// observed no request at all — [`crate::Finding::NoObservations`] already says that.
+/// observed no request at all — [`super::findings::Finding::NoObservations`] already says that.
 ///
 /// A mount is **requested** when an observed request's path the mount table
 /// would answer for: longest prefix, on a segment boundary, the same rule the

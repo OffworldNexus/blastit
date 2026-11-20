@@ -34,7 +34,7 @@
 //!   and never produces a route-less `missing_grant` (`R32`).
 //!
 //! [`plan_learn`] is the `--learn` side: it maps unrouted SQL through
-//! [`crate::infer_routes`] into the proposed view's `postgres { query … }`
+//! [`super::infer_routes`] into the proposed view's `postgres { query … }`
 //! block, writes only views and exact queries, and refuses to invent table
 //! grants or a `transactions` flag (`R27`).
 //!
@@ -60,13 +60,13 @@ use blastit_sqlpolicy::{
     KNOWN_STATIC_SETUP_SQL, LearnVerdict, is_introspection_setup_sql, normalize,
 };
 
-use crate::dead::{dead_group_grants, dead_route_grants, unexercised_routes};
-use crate::diff::{GrantCheck, grant_locator, trait_locator};
-use crate::error::ObsError;
-use crate::findings::{Finding, Fix, ProxyCounts, Report, RouteCounts, Severity};
-use crate::ingress::{ingress_findings, raw_ingress_findings};
-use crate::ledger::{Decision, Ledger};
-use crate::obs::{CheckObsV1, HttpObsLine, SCHEMA_VERSION};
+use super::dead::{dead_group_grants, dead_route_grants, unexercised_routes};
+use super::diff::{GrantCheck, grant_locator, trait_locator};
+use super::error::ObsError;
+use super::findings::{Finding, Fix, ProxyCounts, Report, RouteCounts, Severity};
+use super::ingress::{ingress_findings, raw_ingress_findings};
+use super::ledger::{Decision, Ledger};
+use super::obs::{CheckObsV1, HttpObsLine, SCHEMA_VERSION};
 
 /// The trait every view attaches so a connection-setup statement is granted once
 /// (`MA.8`, §13.3): `trait connection { … }` plus `use connection`.
@@ -83,22 +83,6 @@ pub fn parse_manifest(source: &str) -> Result<Manifest, ObsError> {
     Ok(manifest)
 }
 
-/// Audits one run: `check_audit` behind `_blastit.check_audit` and
-/// `blastit check --json`.
-///
-/// # Errors
-///
-/// [`ObsError`] when the manifest is invalid, the schema version is not
-/// [`SCHEMA_VERSION`], or a JSONL line does not parse.
-pub fn check_audit(
-    manifest_text: &str,
-    http_jsonl: &str,
-    sql_jsonl: &str,
-) -> Result<String, ObsError> {
-    let manifest = parse_manifest(manifest_text)?;
-    let observations = CheckObsV1::from_jsonl(http_jsonl, sql_jsonl)?;
-    evaluate(&manifest, &observations)?.to_json()
-}
 /// Evaluates the observations against the manifest (`R32..R38`).
 ///
 /// # Errors
@@ -131,7 +115,7 @@ pub fn evaluate(manifest: &Manifest, observations: &CheckObsV1) -> Result<Report
     for line in observations.http() {
         match table.route(&line.method, &line.path) {
             Some(matched) => {
-                ledger.request(matched.route, false);
+                ledger.request(matched.route);
                 if line.body_len > 0 {
                     bodies_per_route[matched.route].push(sample_of(line));
                 }
@@ -166,9 +150,7 @@ pub fn evaluate(manifest: &Manifest, observations: &CheckObsV1) -> Result<Report
             // No route owns the statement, so no grant can allow it — and it
             // produces no finding, only a denial in the proxy's counter.
             None => Decision {
-                normalized: normalize(&statement.sql),
-                granted: GrantCheck::of(None).allows(&statement.sql),
-                transaction_control: false,
+                granted: GrantCheck::of(None).allows(statement.sql.as_str()),
             },
         };
         let allowed = decision.granted;

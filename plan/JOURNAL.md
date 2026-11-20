@@ -4147,3 +4147,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T16:19 [MB.56.1.1] (lead) edited fields
 - 2026-11-20T16:19 [MB.56.1.1] (lead) edited fields
 - 2026-11-20T16:24 [MB.56.1.1] (lead) status active -> done
+- 2026-11-20T16:25 [MB.56.1.1] (lead) commit d987cd6
+- 2026-11-20T16:25 [MB.56.1.2] (lead) edited fields
+- 2026-11-20T16:25 [MB.56.1.2.1] (lead) created (task) Inline live check/dev_learn grant-diff into crates/blastit/src/check/ and delete the blastit-audit crate
+- 2026-11-20T16:25 [MB.56.1.2.2] (lead) created (task) Drop the duplicate blastit-dbproxy binary: one ELF, _bin/blastit --role=dbproxy, maturin backend
+- 2026-11-20T16:25 [MB.56.1.3] (lead) edited fields
+- 2026-11-20T16:25 [MB.56.1.2] (lead) edited fields
+- 2026-11-20T16:25 [MB.56.1.2.1] (lead) status ready -> active
+- 2026-11-20T16:25 [MB.56.1.2.1] (lead) attempt 1/3 started
+- 2026-11-20T16:25 [MB.56.1.2.1] (lead) base d987cd66b9e00de18abd13c9398c959bbfe1e3c7
+- 2026-11-20T16:33 [MB.56.3] (lead) MUST DO: delete the temporary #[doc(hidden)] pub use check as audit_v1; shim in crates/blastit/src/lib.rs + check::learn::plan_learn_json (dead prod code kept o
+- 2026-11-20T16:36 [MB.56.1.2.1] (lead) REVIEW FIX: delete dead check::evaluate::check_audit (+ its check/mod.rs arm); single --learn --json renderer via LearnPlan::json in report::learn; demote over-
+- 2026-11-20T16:36 [MB.56.1.3] (lead) ALSO: stale blastit-audit/--internal-json prose in ARCHITECTURE.md:564,575 and Makefile:267 comment (left behind by MB.56.1.2.1)
+- 2026-11-20T16:40 [MB.56.1.2.1] (lead) status active -> done

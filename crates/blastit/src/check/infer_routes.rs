@@ -19,8 +19,8 @@
 //!   ([`blastit_manifest::Route::is_unrestricted_catch_all`], which matches the lowered `/.*`
 //!   and `.*` fragments alike), or the end of the file.
 //!
-//! [`crate::infer_routes::infer`] is pure: it reads a [`blastit_manifest::Manifest`] and the paths, and returns a
-//! [`crate::infer_routes::RoutePlan`]. Writing the plan into a document belongs to
+//! [`super::infer_routes::infer`] is pure: it reads a [`blastit_manifest::Manifest`] and the paths, and returns a
+//! [`super::infer_routes::RoutePlan`]. Writing the plan into a document belongs to
 //! `blastit_manifest::edit` (`R29`), which owns the comment-preserving splice.
 
 use std::collections::{BTreeMap, BTreeSet};

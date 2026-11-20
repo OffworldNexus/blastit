@@ -97,7 +97,7 @@ pub fn banner(
     let routes = manifest.routes().len();
     out.push_str(&format!(
         "  http · scheduler · dbproxy · {routes} {}\n",
-        crate::audit_v1::plural(routes, "route")
+        crate::check::plural(routes, "route")
     ));
     out.push_str(&serving_table(manifest));
     out
@@ -595,11 +595,12 @@ impl LearnRun {
         let mut proposed: BTreeMap<String, (BTreeSet<String>, Vec<String>)> = BTreeMap::new();
         let mut used = names.clone();
         for (method, path) in &self.unrouted {
-            if !crate::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some() {
+            if !crate::check::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some()
+            {
                 continue;
             }
             let (name, pattern) = name_and_pattern(path);
-            if !crate::audit_v1::pattern_is_writable(path) {
+            if !crate::check::pattern_is_writable(path) {
                 continue;
             }
             let mut candidate = name.clone();
@@ -636,7 +637,7 @@ impl LearnRun {
         // `/../etc/passwd` request has no path on its statement, so its SQL would
         // land in the one legitimate view's `queries` (`MB.40.2`).
         let unattributable = self.unrouted.iter().any(|(_, path)| {
-            !crate::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some()
+            !crate::check::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some()
         });
         let fallback_owner = match edits.views.as_slice() {
             [only] if !unattributable => Some(only.name.clone()),
@@ -719,8 +720,8 @@ fn summary_line(manifest: &Path, routes: usize, queries: usize) -> String {
     let path = crate::config::display_path(
         &std::path::absolute(manifest).unwrap_or_else(|_| manifest.to_path_buf()),
     );
-    let route_noun = crate::audit_v1::plural(routes, "route");
-    let query_noun = crate::audit_v1::plural(queries, "query");
+    let route_noun = crate::check::plural(routes, "route");
+    let query_noun = crate::check::plural(queries, "query");
     format!("learn: {routes} {route_noun}, {queries} {query_noun} added → {path}")
 }
 
@@ -944,7 +945,7 @@ mod tests {
             "two routes are plural"
         );
         assert_eq!(
-            crate::audit_v1::plural(0, "route"),
+            crate::check::plural(0, "route"),
             "routes",
             "zero routes are plural"
         );

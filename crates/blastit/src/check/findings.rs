@@ -15,8 +15,8 @@ use blastit_ingress::BodyCodec;
 use blastit_manifest::Manifest;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ObsError;
-use crate::obs::SCHEMA_VERSION;
+use super::error::ObsError;
+use super::obs::SCHEMA_VERSION;
 /// How a finding fails the run (`R38`: every kind is `error` in `0.1.1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -292,7 +292,7 @@ impl Report {
     /// against a mount: the responder answers before anything reaches a view. So
     /// every count is zero but the one the manifest answers — `routes.total` —
     /// and `findings` is empty: a mount the run never reached is a warning on
-    /// stderr ([`crate::unrequested_static_roots`]), never a finding and never a reason
+    /// stderr ([`super::static_roots::unrequested_static_roots`]), never a finding and never a reason
     /// to fail. The shape is the same document a run with an app prints, so
     /// `--json` and the Python contract stay one schema.
     pub fn all_static(manifest: &Manifest) -> Self {

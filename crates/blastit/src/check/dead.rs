@@ -1,7 +1,7 @@
 //! `dead_grant` and `unexercised_route` (`R34`, `R35`).
 //!
 //! A grant is dead when no observed statement of an exercised route matched it.
-//! The *set* of matches is the shared diff's ([`crate::Ledger`]); this module
+//! The *set* of matches is the shared diff's ([`super::ledger::Ledger`]); this module
 //! applies `check`'s grouping: a route's own `queries` entry is reported on the
 //! route, a group's once per group, and an unexercised route is named instead of
 //! having all its grants called dead.
@@ -11,10 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use blastit_manifest::Manifest;
 use blastit_sqlpolicy::normalize;
 
-use crate::diff::{grant_locator, trait_locator};
-use crate::findings::{Finding, Fix, Severity};
-use crate::ledger::Ledger;
-use crate::obs::CheckObsV1;
+use super::diff::{grant_locator, trait_locator};
+use super::findings::{Finding, Fix, Severity};
+use super::ledger::Ledger;
+use super::obs::CheckObsV1;
 /// `dead_grant` for the routes' own `queries` entries (`R34`).
 ///
 /// `requests` and the matched set both come from the [`Ledger`], so this reads

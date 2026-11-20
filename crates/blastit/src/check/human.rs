@@ -6,10 +6,9 @@
 //! the `Blastfile` node its `fix` edits — the file's own nouns, never a retired
 //! `route`/`group` id (§13.3). Counts are singular or plural as written.
 
-use blastit_ingress::{BodyCodec, probe_sample};
+use blastit_ingress::BodyCodec;
 
-use crate::error::ObsError;
-use crate::findings::{Finding, Fix, Report};
+use super::findings::{Finding, Fix, Report};
 /// Renders the report as the human `§1.3` block.
 ///
 /// A clean report is the one-line form with `, clean`; a report with findings is
@@ -308,19 +307,4 @@ pub fn plural(count: usize, singular: &str) -> String {
     } else {
         format!("{singular}s")
     }
-}
-
-/// Renders `_blastit.probe_ingress`: the bounded body sample as JSON.
-///
-/// # Errors
-///
-/// [`ObsError::Report`] only when the sample cannot be rendered, which cannot
-/// happen in practice.
-pub fn probe_ingress_json(
-    content_type: Option<&str>,
-    prefix: &[u8],
-    total_len: u64,
-) -> Result<String, ObsError> {
-    let sample = probe_sample(content_type, prefix, total_len);
-    serde_json::to_string(&sample).map_err(|error| ObsError::Report(error.to_string()))
 }

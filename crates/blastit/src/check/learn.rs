@@ -17,12 +17,12 @@ use blastit_manifest::{Grant, Manifest, MountTable, ProxyName, RoutingTable};
 use blastit_sqlpolicy::{LearnVerdict, normalize};
 use serde_json::json;
 
-use crate::diff::{GrantCheck, grant_of};
-use crate::error::ObsError;
-use crate::evaluate::parse_manifest;
-use crate::infer_routes::{RoutePlan, infer, is_learnable_path};
-use crate::obs::{CheckObsV1, SCHEMA_VERSION};
-use crate::patterns::writable_pattern;
+use super::diff::{GrantCheck, grant_of};
+use super::error::ObsError;
+use super::evaluate::parse_manifest;
+use super::infer_routes::{RoutePlan, infer, is_learnable_path};
+use super::obs::{CheckObsV1, SCHEMA_VERSION};
+use super::patterns::writable_pattern;
 /// What one `--learn` run proposes, and what it refused (`R27`, `R29`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LearnPlan {
@@ -292,14 +292,14 @@ fn granted_already(manifest: &Manifest, route: usize, proxy: &str, sql: &str) ->
     granted || manifest.is_query_covered_by_tables_or_groups(route, &proxy, sql)
 }
 
-/// `check_audit` + `plan_learn`: the `--learn --json` document behind
-/// `_blastit.plan_learn` and `blastit check --learn --json`.
+/// `plan_learn` + [`LearnPlan::json`]: the `--learn --json` document over the
+/// two JSONL streams.
 ///
 /// Prints the transaction-control hints to stderr, then returns the document.
 ///
 /// # Errors
 ///
-/// Every [`ObsError`] of [`crate::check_audit`].
+/// Every [`ObsError`] of [`parse_manifest`] and [`plan_learn`].
 pub fn plan_learn_json(
     manifest_text: &str,
     http_jsonl: &str,

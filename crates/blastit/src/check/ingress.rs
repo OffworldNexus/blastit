@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use blastit_ingress::{BodyCodec, BodySample, IngressPolicy, suggest_fix};
 use blastit_manifest::Manifest;
 
-use crate::diff::body_locator;
-use crate::findings::{Finding, Fix, Severity};
+use super::diff::body_locator;
+use super::findings::{Finding, Fix, Severity};
 /// `missing_ingress` and `ingress_mismatch` (`R36`).
 pub(crate) fn ingress_findings(
     manifest: &Manifest,

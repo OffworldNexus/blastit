@@ -12,7 +12,7 @@ use blastit_dbproxy::WireSqlObs;
 use blastit_ingress::BodySample;
 use serde::{Deserialize, Serialize};
 
-use crate::error::ObsError;
+use super::error::ObsError;
 /// The only observations schema this build reads.
 pub const SCHEMA_VERSION: u64 = 1;
 
