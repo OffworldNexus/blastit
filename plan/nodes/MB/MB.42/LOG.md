@@ -23,3 +23,7 @@ MB.42.10 created (release-blocking): libc 0.2.190 declares execveat only in linu
 ## 2026-11-20T05:52 [lead]
 
 GATE EVIDENCE (host): make check exit 0 (incl. e2e-universal 6/6 + zed-check + plan); make rs-test-php-image pass (PR_SET_DUMPABLE witness, 2 roles denied EACCES to uid 1000); e2e/run.py exit 0 with 46/46 ok after moving E2E_PORT/SQLALCHEMY/STATIC to free ports (21080/21081/21095) - the default 18081/18443 are held by a FOREIGN container (n2f-vuln) which I did not stop; e2e/rootless/run.py --local CANNOT run in this sandbox: setcap -> 'unable to set CAP_SETFCAP effective capability: Operation not permitted'.
+
+## 2026-11-20T06:01 [lead]
+
+status ready -> active

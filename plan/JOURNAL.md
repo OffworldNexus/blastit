@@ -3996,3 +3996,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T05:52 [MB.42] (lead) GATE EVIDENCE (host): make check exit 0 (incl. e2e-universal 6/6 + zed-check + plan); make rs-test-php-image pass (PR_SET_DUMPABLE witness, 2 roles denied EACCE
 - 2026-11-20T06:01 [MB.42.4] (lead) status review -> done
 - 2026-11-20T06:01 [MB.42.4] (lead) visual-checker PASS on all 7 items (hero 3 lines above the fold, no uv run on user pages, install page + Cloudsmith attribution, Mermaid renders in dark, 298 li
+- 2026-11-20T06:01 [MB.42] (lead) status ready -> active
+- 2026-11-20T06:02 [MB.42.15] (unknown) created (task) critical_artifacts asserts the deleted wheel extension (_blastit*.so); re-target at the py3-none _bin ELFs
+- 2026-11-20T06:02 [MB.42.15] (lead) status ready -> active
+- 2026-11-20T06:02 [MB.42.15] (lead) attempt 1/3 started
+- 2026-11-20T06:02 [MB.42.15] (lead) base 4ccda5d13e926ee219f00c756cf3c13176c60ec2
+- 2026-11-20T06:17 [MB.42.15] (lead) status active -> done

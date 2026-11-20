@@ -4,17 +4,25 @@
 //! requirements with no automated oracle, and both are facts about a *file*
 //! rather than about a type, so neither has a compile-time witness:
 //!
-//! * **R12 — the shipped wheel's extension links no interpreter and no SAPI.**
-//!   `scripts/build-wheel.sh` extracts each `blastit/_blastit*.so` and runs
-//!   `scripts/check-portable-elf.sh --allow-origin-rpath` on it — once, during
-//!   the build. A wheel is a *published* file: it can be rebuilt long after that
+//! * **R12 — the shipped wheel's payload links no interpreter and no SAPI.**
+//!   `ADR-0017` retired the per-minor `blastit/_blastit*.so` extension: the
+//!   wheel is one `py3-none-*` artifact whose `blastit/_bin/` carries the
+//!   universal binary, `blastit-lsp`, the `blastit-dbproxy` stage 0 `execve`s
+//!   and the per-minor shims stage 1 `dlopen`s. `scripts/build-wheel.sh`
+//!   measures each of those ELFs with
+//!   `scripts/check-portable-elf.sh --allow-origin-rpath` — once, during the
+//!   build. A wheel is a *published* file: it can be rebuilt long after that
 //!   script ran (a new dependency, a feature re-enabled, a hand-driven
-//!   `maturin`), and `pyo3/extension-module` is the only thing keeping the
-//!   extension off `libpython` (`LESSONS.md`, `MB.17`). This suite reads the
-//!   same file a `pip install blastit` loads and applies the script's rule set:
-//!   no `DT_NEEDED` on `libpython*`, none on `libphp*`, and no
-//!   `DT_RUNPATH`/`DT_RPATH` that names a build host (a purely `$ORIGIN`-relative
-//!   one is the musllinux `blastit.libs/` repair and stays allowed).
+//!   `maturin`), and `pyo3/extension-module` is the only thing keeping a shim
+//!   off `libpython` (`LESSONS.md`, `MB.17`). This suite reads the same file a
+//!   `pip install blastit` loads and applies the script's rule set to **every**
+//!   `blastit/_bin/` member: no `DT_NEEDED` on `libpython*`, none on `libphp*`,
+//!   and no `DT_RUNPATH`/`DT_RPATH` that names a build host (a purely
+//!   `$ORIGIN`-relative one is the musllinux `blastit.libs/` repair and stays
+//!   allowed). It also pins the shape that lets one artifact serve every
+//!   CPython 3.x: a `py3-none-*` tag in the name **and** in
+//!   `*.dist-info/WHEEL` (a `cp3NN` wheel fails naming its tag), no
+//!   `_blastit*.so`, and every shim built for the wheel's own `(arch, libc)`.
 //! * **R3 — the deleted transport trait stays deleted.** `ADR-0016` decision 2
 //!   deletes `WorkerRuntime`, `RequestIo`, `RequestEnd` and
 //!   `RequestIo::flush_response`; `OutputStream`/`OUTPUT_LINE_CAP` move to
@@ -72,7 +80,14 @@
 //!   is missing, links `libpython`, links `libphp`, or carries a build-host
 //!   `RUNPATH`, and requires each to be refused — with a `$ORIGIN`-relative
 //!   wheel and a plain `libc` extension as the allowed twins, so the check is
-//!   never unconditionally red.
+//!   never unconditionally red. It is the reader's own fixture half.
+//! * `the_universal_wheel_shape_is_refused` builds the fixture wheels the
+//!   universal shape has to refuse — a `cp314-cp314` tag, a `cp314` `Tag:` under
+//!   a `py3-none` name, a stray `_blastit*.so`, a missing `blastit/_bin/`
+//!   binary, a shim built for another `(arch, libc)`, a `_bin` member that is
+//!   not an ELF, and an ELF that links `libpython`, links `libphp` or carries a
+//!   build-host `RUNPATH` — with a well-formed `py3-none` wheel as the allowed
+//!   twin, so the leg is never unconditionally red.
 //! * `the_trait_scan_catches_a_planted_name` proves the source scan against a
 //!   fixture tree: clean, planted, planted in a path other than the exemption's,
 //!   and clean again for the exempted path itself.
@@ -87,12 +102,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const REQUIRE_WHEEL: &str = "BLASTIT_REQUIRE_WHEEL";
 
 // ---------------------------------------------------------------------------
-// R12 — the wheel's extension
+// R12 — the wheel's universal payload
 // ---------------------------------------------------------------------------
 
-/// The published artifact's own ELF, against `scripts/check-portable-elf.sh`.
+/// The published artifact's own ELFs, against `scripts/check-portable-elf.sh`.
 #[test]
-fn the_wheel_extension_links_no_interpreter_and_no_php() -> Result<(), String> {
+fn the_universal_wheel_ships_no_interpreter_and_no_php() -> Result<(), String> {
     let root = workspace_root()?;
     let version = workspace_version(&root)?;
     let wheel = match select_wheel(&root, &version)? {
@@ -118,19 +133,235 @@ fn the_wheel_extension_links_no_interpreter_and_no_php() -> Result<(), String> {
             };
         }
     };
-    let extensions = extension_objects(&wheel)?;
-    let mut checked = Vec::new();
-    for (member, elf) in &extensions {
-        let facts = assert_portable(&format!("{}:{member}", wheel.display()), elf)?;
-        checked.push(format!("{member} [{}]", facts.needed.join(" ")));
-    }
+    let certified = certify_universal_wheel(&wheel)?;
     println!(
-        "ok   {}: {} extension(s) with no libpython/libphp NEEDED and no build-host search path: {}",
+        "ok   {}: {} wheel, {} ELF(s) with no libpython/libphp NEEDED and no build-host search \
+         path: {}",
         wheel.display(),
-        checked.len(),
-        checked.join(", ")
+        certified.tag,
+        certified.members.len(),
+        certified
+            .members
+            .iter()
+            .map(|member| format!("{} [{}]", member.name, member.needed.join(" ")))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(())
+}
+
+/// The universal shape: a `cp3NN` tag, a stray extension, a foreign shim.
+#[test]
+fn the_universal_wheel_shape_is_refused() -> Result<(), String> {
+    /// Write a wheel shaped like `scripts/build-wheel.sh`'s repack output.
+    ///
+    /// It carries the three `_bin` binaries, the pure-stdlib package and a
+    /// `*.dist-info/WHEEL` that declares the `py3-none` tag, so a refusal is
+    /// never the fixture's own malformedness; `binaries` replaces every ELF and
+    /// `extra` adds the member under test.
+    fn fixture(
+        scratch: &Scratch,
+        rel: &str,
+        binaries: &[u8],
+        extra: &[(&str, &[u8])],
+    ) -> Result<PathBuf, String> {
+        let mut members: Vec<(&str, &[u8])> = vec![
+            (
+                "blastit-0.2.0.dist-info/WHEEL",
+                b"Wheel-Version: 1.0\nRoot-Is-Purelib: false\n\
+                  Tag: py3-none-manylinux_2_28_x86_64\n",
+            ),
+            ("blastit/_bin/blastit", binaries),
+            ("blastit/_bin/blastit-dbproxy", binaries),
+            ("blastit/_bin/blastit-lsp", binaries),
+            ("blastit/__init__.py", b"# the pure-stdlib package\n"),
+        ];
+        members.extend_from_slice(extra);
+        let path = scratch.path(rel);
+        write_zip(&path, &members)?;
+        Ok(path)
+    }
+
+    let scratch = Scratch::new("universal")?;
+    let binary = synthetic_elf(&["libc.so.6", "libm.so.6"], None);
+    let shim = synthetic_elf(&["libc.so.6"], None);
+
+    // (1) The allowed twin: the shape every `py3-none` repack makes, with a shim
+    //     built for the wheel's own `(arch, libc)`. Without this a reader that
+    //     refused everything would look green below.
+    let good = fixture(
+        &scratch,
+        "good/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &binary,
+        &[(
+            "blastit/_bin/libblastit_py314-x86_64-gnu.so",
+            shim.as_slice(),
+        )],
+    )?;
+    let certified = certify_universal_wheel(&good)?;
+    assert_eq!(
+        certified.tag, "py3-none",
+        "the tag the artifact installs under"
+    );
+    let names: Vec<&str> = certified
+        .members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "blastit/_bin/blastit",
+            "blastit/_bin/blastit-dbproxy",
+            "blastit/_bin/blastit-lsp",
+            "blastit/_bin/libblastit_py314-x86_64-gnu.so",
+        ],
+        "every `blastit/_bin/` member is certified, the shims included"
+    );
+
+    // (2) A `cp3NN`-tagged wheel is refused naming its tag: it installs only on
+    //     the CPython minor that built it, which is the artifact `MB.42.3`
+    //     replaced with one universal wheel.
+    let cp = fixture(
+        &scratch,
+        "cp/blastit-0.2.0-cp314-cp314-manylinux_2_28_x86_64.whl",
+        &binary,
+        &[],
+    )?;
+    expect_shape_refusal(&cp, "cp314-cp314")?;
+
+    // (3) The extension `ADR-0017` deleted: a `py3-none` wheel that still
+    //     carries one is refused by name.
+    let stray = fixture(
+        &scratch,
+        "stray/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &binary,
+        &[(
+            "blastit/_blastit.cpython-314-x86_64-linux-gnu.so",
+            shim.as_slice(),
+        )],
+    )?;
+    expect_shape_refusal(&stray, "_blastit.cpython-314")?;
+
+    // (4) The name and the metadata must promise the same artifact: a `py3-none`
+    //     file name over a `cp314` `Tag:` is a retag, not a build.
+    let retagged = scratch.path("retag/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl");
+    write_zip(
+        &retagged,
+        &[
+            (
+                "blastit-0.2.0.dist-info/WHEEL",
+                b"Wheel-Version: 1.0\nTag: cp314-cp314-manylinux_2_28_x86_64\n",
+            ),
+            ("blastit/_bin/blastit", binary.as_slice()),
+            ("blastit/_bin/blastit-dbproxy", binary.as_slice()),
+            ("blastit/_bin/blastit-lsp", binary.as_slice()),
+        ],
+    )?;
+    expect_shape_refusal(&retagged, "Tag: cp314-cp314-manylinux_2_28_x86_64")?;
+
+    // (5) A wheel without the universal binary cannot be `exec`ed by the console
+    //     script that installs with it.
+    let no_binary = scratch.path("binary/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl");
+    write_zip(
+        &no_binary,
+        &[
+            (
+                "blastit-0.2.0.dist-info/WHEEL",
+                b"Wheel-Version: 1.0\nTag: py3-none-manylinux_2_28_x86_64\n",
+            ),
+            ("blastit/_bin/blastit-dbproxy", binary.as_slice()),
+            ("blastit/_bin/blastit-lsp", binary.as_slice()),
+        ],
+    )?;
+    expect_shape_refusal(&no_binary, "blastit/_bin/blastit")?;
+
+    // (6) A shim built for another target: stage 1 `dlopen`s it, so an `aarch64`
+    //     library in an `x86_64` wheel is a foreign ABI, not a spare.
+    let foreign = fixture(
+        &scratch,
+        "foreign/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &binary,
+        &[(
+            "blastit/_bin/libblastit_py314-aarch64-gnu.so",
+            shim.as_slice(),
+        )],
+    )?;
+    expect_shape_refusal(&foreign, "aarch64")?;
+
+    // (7) Every `_bin/` member is an ELF this check reads: a file there that it
+    //     cannot parse is refused, never skipped. (Sixty-four bytes, so the
+    //     refusal is the magic check and not the header-length one.)
+    let plain = [b'#'; 64];
+    let not_elf = fixture(
+        &scratch,
+        "notelf/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &binary,
+        &[("blastit/_bin/notes.txt", plain.as_slice())],
+    )?;
+    expect_shape_refusal(&not_elf, "no ELF magic")?;
+
+    // (8) The invariant the extension leg existed for, on the universal binary:
+    //     a `libpython` `NEEDED` is refused wherever it appears.
+    let python = synthetic_elf(&["libpython3.14.so.1.0", "libc.so.6"], None);
+    let links_python = fixture(
+        &scratch,
+        "python/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &python,
+        &[],
+    )?;
+    expect_shape_refusal(&links_python, "links an interpreter")?;
+
+    // (9) ... and `libphp` on a shim, the SAPI a view `dlopen`s from the host.
+    let php = synthetic_elf(&["libphp8.4.so", "libc.so.6"], None);
+    let links_php = fixture(
+        &scratch,
+        "php/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &binary,
+        &[(
+            "blastit/_bin/libblastit_php84-x86_64-gnu.so",
+            php.as_slice(),
+        )],
+    )?;
+    expect_shape_refusal(&links_php, "links libphp")?;
+
+    // (10) ... and a build-host `RUNPATH`, the uv cache a `PYO3_PYTHON` build
+    //      writes into the binary it links against.
+    let host = synthetic_elf(&["libc.so.6"], Some("/home/someone/.local/share/uv/lib"));
+    let host_path = fixture(
+        &scratch,
+        "host/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl",
+        &host,
+        &[],
+    )?;
+    expect_shape_refusal(&host_path, "library search path")?;
+    Ok(())
+}
+
+/// `certify_universal_wheel` must refuse `wheel`, with `needle` in the sentence.
+fn expect_shape_refusal(wheel: &Path, needle: &str) -> Result<(), String> {
+    match certify_universal_wheel(wheel) {
+        Ok(certified) => Err(format!(
+            "{} was certified as a universal wheel with {} ELF(s): the shape rule ({needle:?}) is \
+             not enforced",
+            wheel.display(),
+            certified.members.len()
+        )),
+        Err(error) => {
+            assert!(
+                error.contains(needle),
+                "the refusal must name {needle:?}, got: {error}"
+            );
+            println!(
+                "ok   {}: refused — {}",
+                wheel
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+                error.lines().next().unwrap_or_default()
+            );
+            Ok(())
+        }
+    }
 }
 
 /// A wheel the check must refuse, and the two shapes it must accept.
@@ -907,22 +1138,269 @@ fn select_wheel(root: &Path, version: &str) -> Result<Option<PathBuf>, String> {
     }
 }
 
-/// The wheel's `blastit/_blastit*.so` members, inflated, with their names.
+/// The three binaries `scripts/build-wheel.sh` promises every wheel carries.
 ///
-/// The member rule is `scripts/build-wheel.sh`'s: `blastit/`, an `_blastit`
-/// infix and a `.so` suffix. No such member is a failure, never an empty list:
-/// that is the wheel a `python`-off build produces, and it cannot serve a WSGI
-/// route at all.
+/// The build script greps the repacked archive for all three, and the console
+/// scripts `exec` them: a wheel that lost one installs and cannot run.
+const WHEEL_BINARIES: &[&str] = &[
+    "blastit/_bin/blastit",
+    "blastit/_bin/blastit-dbproxy",
+    "blastit/_bin/blastit-lsp",
+];
+
+/// One `blastit/_bin/` member `assert_portable` certified.
+struct PortableMember {
+    /// The wheel-relative member name.
+    name: String,
+    /// Its `DT_NEEDED` entries, printed in the pass line.
+    needed: Vec<String>,
+}
+
+/// What the published wheel promises, once its shape and every ELF are read.
+struct UniversalWheel {
+    /// The `<pytag>-<abitag>` its file name and its metadata agree on.
+    tag: String,
+    /// Every `blastit/_bin/` ELF, certified portable.
+    members: Vec<PortableMember>,
+}
+
+/// Read a published wheel: `py3-none`, no extension, every `_bin/` ELF portable.
+///
+/// This is R12 on the artifact a user installs. `ADR-0017` retired the per-minor
+/// `blastit/_blastit*.so`, so the subject is the universal `blastit/_bin/`
+/// payload: the `blastit` binary, the shims stage 1 `dlopen`s and the
+/// `blastit-dbproxy` stage 0 `execve`s. Each member is an ELF this check reads,
+/// never a script it trusts, and the wheel's *shape* is read from the same file:
+/// the tag in the name and in `*.dist-info/WHEEL`, the absence of the deleted
+/// extension, and the target every shim was built for.
+fn certify_universal_wheel(wheel: &Path) -> Result<UniversalWheel, String> {
+    let label = wheel.display().to_string();
+    let name = wheel
+        .file_name()
+        .map_or_else(|| label.clone(), |name| name.to_string_lossy().into_owned());
+    let (tag, platform) = universal_tag(&label, &name)?;
+    let archive = fs::read(wheel).map_err(|error| format!("cannot read {label}: {error}"))?;
+    let members = zip_members(&archive, &label)?;
+
+    // (1) The extension `ADR-0017` deleted stays deleted: one `py3-none` wheel
+    //     with per-minor shims replaced it, and a `_blastit*.so` here is a wheel
+    //     from a pipeline that still believes in the old layout.
+    let extensions: Vec<&str> = members
+        .iter()
+        .map(|member| member.name.as_str())
+        .filter(|name| is_extension_member(name))
+        .collect();
+    if !extensions.is_empty() {
+        return Err(format!(
+            "{label} carries {}: `ADR-0017` retired the per-minor `blastit/_blastit*.so` \
+             extension for one `py3-none` universal wheel, so an extension here is an artifact \
+             from the old layout — rebuild it with `scripts/build-wheel.sh`, whose repack deletes \
+             it",
+            extensions.join(", ")
+        ));
+    }
+
+    // (2) The file name and the metadata must promise the same `py3-none`
+    //     artifact: a retagged `cp3NN` wheel installs on one minor only.
+    assert_wheel_metadata(&archive, &members, &label, platform)?;
+
+    // (3) Every `blastit/_bin/` member is an ELF, and every shim is the wheel's
+    //     own `(arch, libc)`: stage 1 `dlopen`s them, so another target's
+    //     library would be a foreign ABI rather than a spare.
+    let (arch, libc) = platform_target(&label, platform)?;
+    let payload: Vec<&Member> = members
+        .iter()
+        .filter(|member| member.name.starts_with("blastit/_bin/") && !member.name.ends_with('/'))
+        .collect();
+    for required in WHEEL_BINARIES {
+        if !payload.iter().any(|member| member.name == *required) {
+            return Err(format!(
+                "{label} carries no {required}: every wheel `scripts/build-wheel.sh` builds \
+                 carries the universal binary, `blastit-lsp` and the `blastit-dbproxy` stage 0 \
+                 `execve`s — a wheel without them installs and cannot run"
+            ));
+        }
+    }
+    let mut certified = Vec::with_capacity(payload.len());
+    for member in payload {
+        if let Some((shim_arch, shim_libc)) = shim_target(&label, &member.name)?
+            && (shim_arch != arch || shim_libc != libc)
+        {
+            return Err(format!(
+                "{label}: {} is built for {shim_arch}-{shim_libc} and the wheel is \
+                 {arch}-{libc}: a wheel carries the shims of its own target only, because \
+                 stage 1 `dlopen`s them and another target's library is a foreign ABI, not a \
+                 spare",
+                member.name
+            ));
+        }
+        let bytes = zip_member(&archive, member, &label)?;
+        let facts = assert_portable(&format!("{label}:{}", member.name), &bytes)?;
+        certified.push(PortableMember {
+            name: member.name.clone(),
+            needed: facts.needed,
+        });
+    }
+    Ok(UniversalWheel {
+        tag,
+        members: certified,
+    })
+}
+
+/// The `py3-none` tag and the platform a wheel's file name declares.
+///
+/// A wheel name is `<name>-<version>-<pytag>-<abitag>-<platform>.whl`, and the
+/// tag is the half `MB.42.3` changed: maturin's `cp3NN-cp3NN` wheel installs
+/// only on the minor that built it, and the repack retags it `py3-none` so one
+/// artifact serves CPython 3.12, 3.13 and 3.14. A file name this cannot read is
+/// refused, never guessed at.
+fn universal_tag<'a>(label: &str, name: &'a str) -> Result<(String, &'a str), String> {
+    let stem = name.strip_suffix(".whl").ok_or_else(|| {
+        format!("{label}: the artifact's name does not end in `.whl`, so its tag cannot be read")
+    })?;
+    let fields: Vec<&str> = stem.split('-').collect();
+    let [_, _, pytag, abitag, platform] = fields.as_slice() else {
+        return Err(format!(
+            "{label}: a wheel's name is `<name>-<version>-<pytag>-<abitag>-<platform>.whl`, and \
+             `{stem}` splits into {} field(s) ({}): the artifact's tag and platform cannot be read",
+            fields.len(),
+            fields.join(", ")
+        ));
+    };
+    if *pytag != "py3" || *abitag != "none" {
+        return Err(format!(
+            "{label} is tagged `{pytag}-{abitag}`, not `py3-none`: a `cp3NN` wheel installs only \
+             on the CPython minor that built it, and this artifact is one universal binary that \
+             `exec`s its own per-minor shims (`ADR-0017`, design §6.1). Rebuild it with \
+             `scripts/build-wheel.sh`, whose repack retags it"
+        ));
+    }
+    Ok((format!("{pytag}-{abitag}"), platform))
+}
+
+/// Every `Tag:` in `*.dist-info/WHEEL` is the `py3-none` tag the name promises.
+///
+/// `scripts/check_wheel_tag.py` compares the two during the build; this reads the
+/// shipped file, because a retagged `cp3NN` wheel installs on one minor while its
+/// name claims every 3.x. Exactly one `WHEEL` member and at least one `Tag:`
+/// line: a promise nothing can read must not pass.
+fn assert_wheel_metadata(
+    archive: &[u8],
+    members: &[Member],
+    label: &str,
+    platform: &str,
+) -> Result<(), String> {
+    let wheels: Vec<&Member> = members
+        .iter()
+        .filter(|member| member.name.ends_with(".dist-info/WHEEL"))
+        .collect();
+    let [member] = wheels.as_slice() else {
+        return Err(format!(
+            "{label} carries {} `*.dist-info/WHEEL` member(s), not one: the tag it installs under \
+             cannot be read, and a wheel whose promise nothing can read must not pass the check",
+            wheels.len()
+        ));
+    };
+    let bytes = zip_member(archive, member, label)?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        format!(
+            "{label}: {} is not UTF-8, so its `Tag:` lines cannot be read",
+            member.name
+        )
+    })?;
+    let expected = format!("py3-none-{platform}");
+    let mut tags = 0;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.trim() != "Tag" {
+            continue;
+        }
+        tags += 1;
+        if value.trim() != expected {
+            return Err(format!(
+                "{label}: {} declares `Tag: {}`, not `Tag: {expected}`: the file name and the \
+                 metadata must promise the same `py3-none` artifact, and a `cp3NN` tag here means \
+                 the wheel installs on one CPython minor instead of every 3.x",
+                member.name,
+                value.trim()
+            ));
+        }
+    }
+    if tags == 0 {
+        return Err(format!(
+            "{label}: {} has no `Tag:` line, so the artifact's python-abi-platform promise cannot \
+             be read",
+            member.name
+        ));
+    }
+    Ok(())
+}
+
+/// The `(arch, libc)` a platform tag names: `manylinux_2_28_x86_64` → `x86_64`/`gnu`.
+///
+/// The shims are named after both (`libblastit_py314-x86_64-gnu.so`) because
+/// `scripts/repack_universal_wheel.py` filters them by the same pair. A platform
+/// this cannot read is an error, not a skipped comparison: a wheel whose target
+/// nothing can state has no shim set to verify.
+fn platform_target(label: &str, platform: &str) -> Result<(String, String), String> {
+    // The architecture is matched as a *suffix*, not as the last `_`-separated
+    // field: `x86_64` carries an underscore of its own, so splitting on `_`
+    // reads `64` (`scripts/check_wheel_tag.py` matches the same suffix).
+    let arch = if platform.ends_with("_x86_64") {
+        "x86_64"
+    } else if platform.ends_with("_aarch64") {
+        "aarch64"
+    } else {
+        return Err(format!(
+            "{label}: the platform tag `{platform}` names no architecture this check knows \
+             (`x86_64`, `aarch64`), so the target its shims must match cannot be read"
+        ));
+    };
+    let libc = if platform.starts_with("musllinux_") {
+        "musl"
+    } else {
+        "gnu"
+    };
+    Ok((arch.to_owned(), libc.to_owned()))
+}
+
+/// The `(arch, libc)` a `libblastit_<kind>-<arch>-<libc>.so` shim names.
+///
+/// `None` is a member that is not a shim. A member *named* like one that does
+/// not parse is an error: the target it was built for is the fact being checked,
+/// so a name rule that cannot read it must not pass for a match.
+fn shim_target(label: &str, member: &str) -> Result<Option<(String, String)>, String> {
+    let base = member.rsplit('/').next().unwrap_or(member);
+    if !(base.starts_with("libblastit_") && base.ends_with(".so")) {
+        return Ok(None);
+    }
+    let stem = base.strip_suffix(".so").unwrap_or(base);
+    let fields: Vec<&str> = stem.split('-').collect();
+    let [_, arch, libc] = fields.as_slice() else {
+        return Err(format!(
+            "{label}: `{member}` is named like a `libblastit_*` shim but is not \
+             `libblastit_<kind>-<arch>-<libc>.so`, so the target it was built for cannot be read"
+        ));
+    };
+    Ok(Some(((*arch).to_owned(), (*libc).to_owned())))
+}
+
+/// The `_blastit*.so` members of a wheel, inflated, with their names.
+///
+/// This is the **fixture half** of R12: a wheel that carries no such member is
+/// refused rather than accepted with an empty list, because the reader must be
+/// provably able to find one before its silence means anything. The published
+/// artifact takes the opposite rule (`certify_universal_wheel`): `ADR-0017`
+/// retired the per-minor extension, so a real wheel carries none.
 fn extension_objects(wheel: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let label = wheel.display().to_string();
     let archive = fs::read(wheel).map_err(|error| format!("cannot read {label}: {error}"))?;
     let members = zip_members(&archive, &label)?;
     let mut objects = Vec::new();
     for member in members {
-        let wanted = member.name.starts_with("blastit/")
-            && member.name.contains("_blastit")
-            && member.name.ends_with(".so");
-        if !wanted {
+        if !is_extension_member(&member.name) {
             continue;
         }
         let bytes = zip_member(&archive, &member, &label)?;
@@ -934,6 +1412,17 @@ fn extension_objects(wheel: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
         ));
     }
     Ok(objects)
+}
+
+/// The member rule the deleted extension had: `blastit/`, an `_blastit` infix
+/// and a `.so` suffix.
+///
+/// The `_bin/` payload does not match it — `blastit/_bin/libblastit_py314-…so`
+/// has no `_blastit` infix, because the underscore is part of `_bin/` and the
+/// shim's name starts at `lib` — so the extension rule and the payload rule
+/// cannot be confused for one another.
+fn is_extension_member(name: &str) -> bool {
+    name.starts_with("blastit/") && name.contains("_blastit") && name.ends_with(".so")
 }
 
 /// The R12 rule set, as `scripts/check-portable-elf.sh` applies it.
@@ -949,16 +1438,17 @@ fn assert_portable(label: &str, elf: &[u8]) -> Result<DynamicFacts, String> {
         if needed.contains("libpython") {
             problems.push(format!(
                 "error: {label} links an interpreter, so it only runs where CPython is installed:\n  \
-                 NEEDED [{needed}]\n  fix: build the wheel with `pyo3/extension-module` \
-                 (`scripts/build-wheel.sh` does). A Python extension is loaded by the interpreter \
-                 that imports it and must not link `libpython`."
+                 NEEDED [{needed}]\n  fix: build the wheel's shims with \
+                 `pyo3/extension-module` (`scripts/build-wheel.sh` does). A shim is loaded by the \
+                 interpreter stage 1 starts, and the universal binary `exec`s its own: neither may \
+                 link `libpython`."
             ));
         }
         if needed.contains("libphp") {
             problems.push(format!(
                 "error: {label} links libphp, so it carries its own PHP instead of loading the \
                  host's:\n  NEEDED [{needed}]\n  fix: build without a crate that links it; a view \
-                 `dlopen`s libphp (`ADR-0010` §1), so the wheel's extension reaches PHP through \
+                 `dlopen`s libphp (`ADR-0010` §1), so the wheel's views reach PHP through \
                  the verified descriptor and never through a link."
             ));
         }
@@ -980,9 +1470,9 @@ fn assert_portable(label: &str, elf: &[u8]) -> Result<DynamicFacts, String> {
         // dynamic section and must not report a pass.
         if facts.needed.is_empty() {
             return Err(format!(
-                "{label}: the dynamic section names no DT_NEEDED at all, which no extension the \
-                 wheel ships does: this reader did not read the section, so the check would pass \
-                 without looking and is refused instead"
+                "{label}: the dynamic section names no DT_NEEDED at all, which no ELF the wheel \
+                 ships does: this reader did not read the section, so the check would pass without \
+                 looking and is refused instead"
             ));
         }
         Ok(facts)
@@ -1051,8 +1541,8 @@ fn dynamic_facts(elf: &[u8], label: &str) -> Result<DynamicFacts, String> {
     }
     if &elf[..4] != b"\x7fELF" {
         return Err(format!(
-            "{label}: no ELF magic at the start of the member, so it is not the extension this \
-             check has to certify"
+            "{label}: no ELF magic at the start of the member, so it is not an ELF this check can \
+             certify"
         ));
     }
     let wide = match elf[4] {
@@ -1517,7 +2007,7 @@ fn zip_members(archive: &[u8], label: &str) -> Result<Vec<Member>, String> {
     if entries == u16::MAX {
         return Err(format!(
             "{label}: a zip64 central directory is beyond this reader; the check refuses rather \
-             than skip the extension"
+             than skip the payload"
         ));
     }
     let size = u32_at(archive, eocd + 12, label)? as usize;
@@ -1549,7 +2039,7 @@ fn zip_members(archive: &[u8], label: &str) -> Result<Vec<Member>, String> {
         if compressed == 0xffff_ffff || uncompressed == 0xffff_ffff || local == 0xffff_ffff {
             return Err(format!(
                 "{label}: a zip64 entry is beyond this reader; the check refuses rather than skip \
-                 the extension"
+                 the payload"
             ));
         }
         let name_start = at
@@ -1615,7 +2105,7 @@ fn zip_member(archive: &[u8], member: &Member, label: &str) -> Result<Vec<u8>, S
         other => {
             return Err(format!(
                 "{label}: `{}` uses compression method {other}, which this reader cannot open \
-                 (only stored and deflate); refusing rather than skipping the extension",
+                 (only stored and deflate); refusing rather than skipping the payload",
                 member.name
             ));
         }

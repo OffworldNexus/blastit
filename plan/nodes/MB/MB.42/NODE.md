@@ -2,7 +2,7 @@
 id: MB.42
 title: "Universal libpython-free blastit binary, PHP 8.3-8.6, signed Cloudsmith/Forgejo APT+RPM repos & install.sh, py3-none wheels, Composer wrapper, local CLI handoff & zero-decision hero DX"
 kind: epic
-status: ready
+status: active
 priority: 1
 depends_on: []
 paths: ["**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T14:30"
-updated: "2026-11-19T14:30"
+updated: "2026-11-20T06:01"
 ---
 
 # Goal
