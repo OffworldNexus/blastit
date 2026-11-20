@@ -1,7 +1,7 @@
 //! The `/proc` probes the shutdown leg reads: command line, `--dev-root`,
 //! descendants and start times, kept out of the suite body.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// The command line of `pid`, or a panic naming the process.
 pub fn cmdline(pid: u32) -> String {
@@ -56,16 +56,35 @@ pub fn children_of(pid: i32) -> Vec<i32> {
     children
 }
 
-/// Field 22 of `/proc/<pid>/stat` (the start time), or `None` when it is gone.
-pub fn starttime(pid: i32) -> Option<u64> {
+/// `/proc/<pid>/stat` after its parenthesised `comm` (fields 3..), or `None`
+/// when the entry is gone.
+fn stat_fields(pid: i32) -> Option<String> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // `comm` is parenthesised and may contain spaces, so fields resume after the
     // *last* `)`.
-    let rest = stat.rsplit_once(')')?.1;
-    rest.split_whitespace().nth(19)?.parse().ok()
+    Some(stat.rsplit_once(')')?.1.to_string())
 }
 
-/// Whether `pid` still has a `/proc` entry.
+/// Field 22 of `/proc/<pid>/stat` (the start time), or `None` when it is gone.
+///
+/// A `Z` entry is gone too: the process has already exited and only its exit
+/// status waits for a reaper, which a container's PID 1 — a shell or a test
+/// binary, not an init — may never collect. A descendant that survived is a
+/// *live* process, so field 3 is read before field 22; the start time of a live
+/// process is still field 22, unchanged.
+pub fn starttime(pid: i32) -> Option<u64> {
+    let rest = stat_fields(pid)?;
+    let mut fields = rest.split_whitespace();
+    if fields.next()? == "Z" {
+        return None;
+    }
+    fields.nth(18)?.parse().ok()
+}
+
+/// Whether `pid` is a live process: a `/proc` entry in any state but `Z`.
 pub fn in_proc(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    i32::try_from(pid)
+        .ok()
+        .and_then(stat_fields)
+        .is_some_and(|rest| rest.split_whitespace().next() != Some("Z"))
 }

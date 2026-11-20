@@ -14,8 +14,11 @@ and then runs the story's own commands *where the artifact was installed*:
   refused with a sentence.
 * `alpine` — the same installer in `alpine:3.21` as a non-root uid, fetching the
   musl archive over HTTP; the tampered archive is refused there too. A musl
-  build on the host makes the leg serve it; otherwise the archive is a stand-in
-  and the leg says so.
+  build on the host makes the leg serve it (otherwise the archive is a stand-in
+  and the leg says so), and only with one does the leg also prove the root path
+  (`ensure_libgcc` runs `apk add --no-cache libgcc` and the binary answers) and
+  the `--user` refusal that names `run: apk add libgcc` once the library is
+  gone.
 * `deb` / `rpm` — `docs/install.sh` with `BLASTIT_DEB`/`BLASTIT_RPM` installs the
   built package in `debian:trixie` / `rockylinux:9`; §6.1's payload (two entry
   points, 13 paths under `/usr/share/blastit`, `root:root`),
@@ -251,10 +254,13 @@ class Container:
         env: dict[str, str] | None = None,
         timeout: float = 900,
         detach: bool = False,
+        user: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         args = ["exec"]
         if detach:
             args.append("-d")
+        if user:
+            args += ["--user", user]
         if workdir:
             args += ["--workdir", workdir]
         for key, value in (env or {}).items():
@@ -643,6 +649,70 @@ def leg_alpine(
     ):
         uid = box.exec(["id", "-u"]).stdout.strip()
         checks.that(uid != "0", f"the Alpine leg ran as root (uid {uid})")
+        # A bare `alpine:3.21` carries neither `curl` nor `libgcc_s.so.1`. Only
+        # the first is provisioned here — it is what the leg's own fetch step
+        # needs — because the second is exactly what the installer's root path
+        # installs itself (`ensure_libgcc`). Installed as root (`--user 0`)
+        # because the leg's own uid may not run `apk`.
+        prepared = box.exec(
+            ["apk", "add", "--no-cache", "curl", "ca-certificates"],
+            user="0",
+            timeout=600,
+        )
+        checks.that(
+            prepared.returncode == 0,
+            f"the Alpine leg's prerequisites did not install "
+            f"(exit {prepared.returncode}): {tail(joined(prepared), 10)}",
+        )
+        if real:
+            # The root path: `main` reaches `ensure_libgcc` only as root, with no
+            # `--user`/`--prefix`, and no `libgcc_s.so.1` present — which is
+            # exactly this fresh container. It installs into `/usr/local`
+            # *inside the container*, never on the host. The stand-in archive
+            # cannot prove either half (it "runs" without the library), so these
+            # assertions need a real musl archive.
+            rooted = box.exec(
+                ["sh", "/src/docs/install.sh"],
+                user="0",
+                env={
+                    "BLASTIT_RELEASE_BASE_URL": f"http://127.0.0.1:{port}/release-musl",
+                    "BLASTIT_SHA256": digest,
+                },
+                timeout=1200,
+            )
+            checks.that(
+                rooted.returncode == 0,
+                f"the root install exits {rooted.returncode}: {tail(joined(rooted), 14)}",
+            )
+            checks.that(
+                "apk add --no-cache libgcc" in joined(rooted),
+                f"the root install printed no 'apk add --no-cache libgcc': "
+                f"{tail(joined(rooted), 12)}",
+            )
+            rooted_version = box.exec(["/usr/local/bin/blastit", "--version"])
+            checks.that(
+                rooted_version.returncode == 0,
+                f"the root install's /usr/local/bin/blastit --version exits "
+                f"{rooted_version.returncode}: {tail(joined(rooted_version), 8)}",
+            )
+        if real:
+            # The fixture is mounted read-only at `/fixture`; `fmt`/`check` run
+            # in a writable copy, the way every other leg provisions `<work>`.
+            provisioned = box.exec(
+                [
+                    "sh",
+                    "-c",
+                    (
+                        "rm -rf /work/fixture && mkdir -p /work/fixture"
+                        " && cp -a /fixture/. /work/fixture/"
+                    ),
+                ]
+            )
+            checks.that(
+                provisioned.returncode == 0,
+                f"the Alpine leg could not copy /fixture to /work/fixture "
+                f"(exit {provisioned.returncode}): {tail(joined(provisioned), 8)}",
+            )
         installed = box.exec(
             ["sh", "/src/docs/install.sh", "--user"],
             env={
@@ -691,6 +761,43 @@ def leg_alpine(
                 f"`blastit check` on Alpine exits {checked.returncode}: "
                 f"{tail(joined(checked), 12)}",
             )
+            # `--user` cannot install the library, so its refusal has to name the
+            # command that can. Removing the package puts the container back in
+            # the state a fresh Alpine host is in.
+            removed = box.exec(["apk", "del", "libgcc"], user="0", timeout=300)
+            checks.that(
+                removed.returncode == 0,
+                f"'apk del libgcc' exits {removed.returncode}: {tail(joined(removed), 8)}",
+            )
+            hinted = box.exec(
+                [
+                    "sh",
+                    "/src/docs/install.sh",
+                    "--user",
+                    "--prefix",
+                    "/work/hint-prefix",
+                ],
+                env={
+                    "BLASTIT_RELEASE_BASE_URL": f"http://127.0.0.1:{port}/release-musl",
+                    "BLASTIT_SHA256": digest,
+                },
+            )
+            checks.that(
+                hinted.returncode != 0,
+                "the --user install on a musl host with no libgcc_s.so.1 exited 0",
+            )
+            checks.that(
+                "run: apk add libgcc" in joined(hinted),
+                f"the refusal printed no 'run: apk add libgcc': {tail(joined(hinted), 10)}",
+            )
+            restored = box.exec(
+                ["apk", "add", "--no-cache", "libgcc"], user="0", timeout=300
+            )
+            checks.that(
+                restored.returncode == 0,
+                f"'apk add --no-cache libgcc' exits {restored.returncode}: "
+                f"{tail(joined(restored), 8)}",
+            )
         refused = box.exec(
             [
                 "sh",
@@ -718,7 +825,8 @@ def leg_alpine(
         print(
             "  note alpine: the archive holds a stand-in (no musl build on this host); "
             "build one with `scripts/build-standalone.sh --target "
-            f"{target}` to run the real fmt/check there",
+            f"{target}` to run the real fmt/check and the root//--user libgcc "
+            "assertions there",
             flush=True,
         )
     return checks.done(

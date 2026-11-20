@@ -326,6 +326,22 @@ detect_platform() {
 
 pick() { if [ "$nightly" -eq 1 ]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 
+# A musl `blastit` is a dynamic binary: it needs `libgcc_s.so.1`, and a bare
+# Alpine image carries none (`docs/install.md` names the package). `apk` is how
+# those hosts are told apart.
+libgcc_present() { [ -e /usr/lib/libgcc_s.so.1 ] || [ -e /lib/libgcc_s.so.1 ]; }
+
+# The root path's one prerequisite, installed before anything is placed: a
+# missing `libgcc_s.so.1` otherwise shows up as "blastit did not run" after an
+# install that did everything else right.
+ensure_libgcc() {
+    command -v apk >/dev/null 2>&1 || return 0
+    libgcc_present && return 0
+    step "installing libgcc with apk add --no-cache libgcc"
+    as_root apk add --no-cache libgcc ||
+        die 1 "blastit needs libgcc_s.so.1 here and 'apk add --no-cache libgcc' failed: check the network or the apk repository, then re-run this installer"
+}
+
 # --- repository installs -----------------------------------------------------
 
 # Switches the component of the source file this run created, never of one that
@@ -519,6 +535,12 @@ install_archive() {
     unpack_archive "$work/$asset"
     installed=$("$prefix/bin/blastit" --version 2>/dev/null </dev/null || true)
     if [ -z "$installed" ]; then
+        # `apk` decides whether `apk add` is advice this host can follow: an
+        # apk-less musl host (Void, Chimera, busybox) has nothing to install the
+        # package with, so it keeps the generic sentence below.
+        if command -v apk >/dev/null 2>&1 && [ "$libc" = musl ] && ! libgcc_present; then
+            die 1 "$prefix/bin/blastit did not run: this musl host has no libgcc_s.so.1 — run: apk add libgcc, then re-run this installer"
+        fi
         die 1 "$prefix/bin/blastit did not run: remove it and re-run this installer, or report the failure at https://github.com/OffworldNexus/blastit/issues"
     fi
     ok "installed: $installed in $prefix"
@@ -574,6 +596,12 @@ main() {
     fi
     detect_platform
     detect_privilege
+
+    # A root install on a musl host owes the one library the binary needs. The
+    # `--user` path cannot install it — that is the hint in `install_archive`.
+    if [ "$user_install" -eq 0 ] && [ -z "$prefix" ] && [ "$privilege" = root ]; then
+        ensure_libgcc
+    fi
 
     if [ -n "${BLASTIT_DEB:-}" ]; then
         install_local_file deb "$BLASTIT_DEB" ": build one with 'make packages', or point BLASTIT_DEB at the file"

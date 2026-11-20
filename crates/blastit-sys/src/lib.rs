@@ -171,7 +171,7 @@ pub use crate::privs::{
 pub use crate::proc::{Fork, chdir, fork, fork_unchecked, thread_count};
 pub use crate::seccomp::{InstallFailure, PreparedFilter, SeccompRole, install};
 pub use crate::signal::{
-    SignalFd, SignalMask, current_signal_mask, kill, reap, restore_signal_mask_in_child,
+    Reaped, SignalFd, SignalMask, current_signal_mask, kill, reap, restore_signal_mask_in_child,
 };
 pub use crate::sock::{
     UNIX_BACKLOG, bind_tcp, bind_unix_listener, make_private_dir, pipe, recv_with_fd, send_with_fd,

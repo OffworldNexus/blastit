@@ -224,33 +224,53 @@ impl SignalFd {
     }
 }
 
+/// The children one non-blocking `waitpid` sweep collected.
+#[derive(Debug)]
+pub struct Reaped {
+    /// Every child that ended, in the order the kernel reported them.
+    pub ended: Vec<(Pid, ExitStatus)>,
+    /// Whether the sweep reached `ECHILD`: this process has no child left, so a
+    /// shutdown drain is done even when its bookkeeping tables still list one.
+    pub exhausted: bool,
+}
+
 /// Collect every child that has exited, without blocking.
 ///
 /// `waitpid(-1, …, WNOHANG)` in a loop, which is what PID 1 does: it inherits
 /// orphans from the whole container, and gVisor gives it no init of its own
 /// (§2.1). Only ended children are reported; a child that was merely stopped is
-/// skipped. `ECHILD` ends the loop normally — nothing left to reap.
+/// skipped. `ECHILD` ends the loop normally and sets [`Reaped::exhausted`] —
+/// that is the only way a caller can tell "no children left" from "every child
+/// is still running", which `pid == 0` reports.
 ///
 /// An [`Err`] is returned only for a `waitpid` failure that is neither `EINTR`
 /// nor `ECHILD`; children reaped before it are lost, which is why the caller
 /// should treat it as fatal.
-pub fn reap() -> io::Result<Vec<(Pid, ExitStatus)>> {
-    let mut reaped = Vec::new();
+pub fn reap() -> io::Result<Reaped> {
+    let mut ended = Vec::new();
     loop {
         let mut status = 0;
         // SAFETY: `waitpid` writes one status word to `status`, which is valid
         // storage; `-1` means "any child".
         let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
         if pid == 0 {
-            return Ok(reaped);
+            return Ok(Reaped {
+                ended,
+                exhausted: false,
+            });
         }
         if pid < 0 {
             let err = io::Error::last_os_error();
             match err.raw_os_error() {
                 // A signal arrived while we were waiting; try again.
                 Some(libc::EINTR) => continue,
-                // No children left at all.
-                Some(libc::ECHILD) => return Ok(reaped),
+                // No children left at all: the drain is over.
+                Some(libc::ECHILD) => {
+                    return Ok(Reaped {
+                        ended,
+                        exhausted: true,
+                    });
+                }
                 _ => return Err(err),
             }
         }
@@ -258,7 +278,7 @@ pub fn reap() -> io::Result<Vec<(Pid, ExitStatus)>> {
             return Err(impossible("waitpid", i64::from(pid)));
         };
         match ExitStatus::from_raw(status) {
-            Some(status) => reaped.push((pid, status)),
+            Some(status) => ended.push((pid, status)),
             // Stopped or continued: nothing in this crate asks for those, so
             // the child is simply not reported as ended.
             None => continue,

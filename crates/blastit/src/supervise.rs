@@ -1811,11 +1811,26 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Reaps every child that has exited, and reports each one (§4, §8).
-    fn reap_children(&mut self) {
-        let reaped = match reap() {
-            Ok(reaped) => reaped,
+    ///
+    /// Returns `true` when the sweep reached `ECHILD` — no child is left — which
+    /// is what tells the shutdown drain ([`Supervisor::reap_every_child`]) that
+    /// there is nothing more to wait for.
+    fn reap_children(&mut self) -> bool {
+        match reap() {
+            Ok(reaped) => {
+                self.handle_reaped(reaped.ended);
+                reaped.exhausted
+            }
             Err(err) => self.fail(&format!("reaping: {err}")),
-        };
+        }
+    }
+
+    /// Reports the children one `waitpid` sweep collected.
+    ///
+    /// Split out of [`Supervisor::reap_children`] so the last drain of a
+    /// shutdown ([`Supervisor::reap_every_child`]) reports an exit it reaped
+    /// itself exactly the way the `SIGCHLD` wakeup would.
+    fn handle_reaped(&mut self, reaped: Vec<(Pid, ExitStatus)>) {
         for (pid, status) in reaped {
             let raw = pid.as_raw();
             if let Some(component) = self.components.get(&raw).copied() {
@@ -1930,12 +1945,15 @@ impl<'a> Supervisor<'a> {
                 }
             }
             Shutdown::Terminate(deadline) => {
-                if self.children.is_empty() && self.components.is_empty() {
-                    self.finish();
-                }
-                if deadline.expired() {
-                    self.kill_all();
-                    self.reap_until(TERMINATE_GRACE);
+                // A drained topology is owed no signal, but a child that exited
+                // between two wakes is still an unreaped zombie here; the final
+                // sweep below is what collects it before init exits.
+                let drained = self.children.is_empty() && self.components.is_empty();
+                if drained || deadline.expired() {
+                    if !drained {
+                        self.kill_all();
+                    }
+                    self.reap_every_child(TERMINATE_GRACE);
                     self.finish();
                 }
             }
@@ -1984,14 +2002,23 @@ impl<'a> Supervisor<'a> {
     }
 
     /// Reaps for at most `budget`, so a killed child is gone before init exits.
-    fn reap_until(&mut self, budget: Duration) {
+    ///
+    /// One [`blastit_sys::reap`] sweep per pass until it reports `ECHILD`, not
+    /// until the bookkeeping looks empty: a scheduler that closes `ctl.chan` on
+    /// its way out drops off `components` before its exit is reaped
+    /// ([`Supervisor::ctl_closed`]), so an init that trusted the tables would
+    /// `_exit` over a zombie. A container's PID 1 is often a shell or a test
+    /// binary that never reaps, and a zombie keeps its `/proc` entry and start
+    /// time — that is a "survivor" no liveness check can tell from a live one
+    /// (§8). The budget bounds the wait for a child that ignores every signal;
+    /// one that still runs past it is init's last resort.
+    fn reap_every_child(&mut self, budget: Duration) {
         let deadline = Deadline::after(budget);
-        while !deadline.expired() {
-            self.reap_children();
-            if self.children.is_empty() && self.components.is_empty() {
+        loop {
+            if self.reap_children() || deadline.expired() {
                 return;
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
