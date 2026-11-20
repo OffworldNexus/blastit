@@ -3,7 +3,7 @@
 - generated: 2026-11-20T06:22
 - autopilot: on
 - current milestone: MB Modern 12-Factor Backends: Static, PHP (embedded libphp), Vite/Node, Tomcat (0.2.x) [ready]
-- tasks: proposed=1, ready=1, done=289, superseded=143
+- tasks: proposed=1, ready=1, done=289, superseded=144
 - open human requests: 1 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 17; expensive spent: $367.34 of $600.00 cap (61%)
 
@@ -25,10 +25,6 @@
 
 ## Recent journal
 
-- 2026-11-20T05:37 [MB.42.14] (unknown) created (task) rs-no-python asserts the manylinux 2.28 floor on a host build (structurally red; blocks make check)
-- 2026-11-20T05:37 [MB.42.14] (lead) status ready -> active
-- 2026-11-20T05:37 [MB.42.14] (lead) attempt 1/3 started
-- 2026-11-20T05:37 [MB.42.14] (lead) base 37854ff259a5f9bd87f55a227c0b3e3d71f8c4a0
 - 2026-11-20T05:48 [MB.42.14] (lead) status active -> done
 - 2026-11-20T05:48 [MB.42.4] (lead) status active -> review
 - 2026-11-20T05:52 [MB.42] (lead) GATE EVIDENCE (host): make check exit 0 (incl. e2e-universal 6/6 + zed-check + plan); make rs-test-php-image pass (PR_SET_DUMPABLE witness, 2 roles denied EACCE
@@ -40,3 +36,7 @@
 - 2026-11-20T06:02 [MB.42.15] (lead) attempt 1/3 started
 - 2026-11-20T06:02 [MB.42.15] (lead) base 4ccda5d13e926ee219f00c756cf3c13176c60ec2
 - 2026-11-20T06:17 [MB.42.15] (lead) status active -> done
+- 2026-11-20T06:22 [MB.43] (unknown) created (task) Finish async-signal-safe fork cleanup in critical_child_sequence.rs (fork then child::enter allocates)
+- 2026-11-20T06:22 [MB.42.8] (lead) status proposed -> superseded
+- 2026-11-20T06:22 [MB.42.8] (lead) superseded -> MB.43 (proposed): deferred out of MB.42 so the release gate can close; the seccomp fork-in-libtest class is already fixed (MB.42.7), this is the l
+- 2026-11-20T06:22 [MB.42] (lead) status active -> done

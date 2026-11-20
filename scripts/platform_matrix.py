@@ -1059,24 +1059,14 @@ PROVEN_CLAIM = re.compile(
 
 # A count a page states **above** the matrix, with the node that lowers it.
 #
-# `MB.42.3.3` replaced eight `cp3NN` wheels with four `py3-none` ones, and the two
-# records that state the old number are documents: `ADR-0010` §4 and
-# `backend-runtimes.md` are the table of record a reviewer reads, and neither is
-# in this node's `paths`. Rather than pretend an eight-wheel matrix still exists,
-# the gate records the claim here, prints it as stale, and names the node that
-# rewrites the page (`MB.42.4`, the docs slice of this epic). An entry is checked
-# in **both** directions: if the page stops making the claim, `--check` refuses
-# the entry, so the list cannot outlive its reason.
-STALE_CLAIMS: dict[tuple[str, str], str] = {
-    (
-        "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "8 wheels",
-    ): "MB.42.4 rewrites §4 to the 4 `py3-none` wheels",
-    (
-        "docs/design/backend-runtimes.md",
-        "8 wheels",
-    ): "MB.42.4 rewrites the wheel row to the 4 `py3-none` wheels",
-}
+# Empty since `MB.42.4`: `MB.42.3.3` replaced eight `cp3NN` wheels with four
+# `py3-none` ones, and the two records that stated the old number (`ADR-0010` §4
+# and `backend-runtimes.md` §4.7) are now rewritten to the `4`-wheel matrix. The
+# mechanism stays because the next matrix change needs it — a page that over-claims
+# is recorded here with the node that fixes it, and an entry is checked in **both**
+# directions: if the page stops making the claim, `--check` refuses the entry, so
+# the list cannot outlive its reason.
+STALE_CLAIMS: dict[tuple[str, str], str] = {}
 
 # The lines the gate must keep matching, quoted from the two records it exists to
 # guard. If a Markdown edit (or a regex change) makes the scanner miss them,
@@ -1085,7 +1075,7 @@ STALE_CLAIMS: dict[tuple[str, str], str] = {
 PINNED: tuple[tuple[str, str, str], ...] = (
     (
         "docs/decisions/ADR-0010-php-embedded-via-libphp-embed.md",
-        "`8` wheels",
+        "`4` wheels",
         "declared wheel count",
     ),
     (
@@ -1113,12 +1103,12 @@ PINNED: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "docs/design/backend-runtimes.md",
-        "`8` wheels",
+        "`4` wheels",
         "declared wheel count",
     ),
     (
         "docs/design/backend-runtimes.md",
-        "`12` native PHP shims",
+        "`16` shims",
         "declared shim count",
     ),
     (

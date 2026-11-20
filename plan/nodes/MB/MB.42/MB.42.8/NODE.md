@@ -2,7 +2,7 @@
 id: MB.42.8
 title: "Finish async-signal-safe fork cleanup: critical_child_sequence.rs forks then child::enter (allocates)"
 kind: task
-status: proposed
+status: superseded
 owner: implementer
 priority: 3
 depends_on: [MB.42.7]
@@ -11,7 +11,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-19T23:19"
-updated: "2026-11-19T23:19"
+updated: "2026-11-20T06:22"
 ---
 
 # Goal

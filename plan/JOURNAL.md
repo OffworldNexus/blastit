@@ -4002,3 +4002,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-20T06:02 [MB.42.15] (lead) attempt 1/3 started
 - 2026-11-20T06:02 [MB.42.15] (lead) base 4ccda5d13e926ee219f00c756cf3c13176c60ec2
 - 2026-11-20T06:17 [MB.42.15] (lead) status active -> done
+- 2026-11-20T06:22 [MB.43] (unknown) created (task) Finish async-signal-safe fork cleanup in critical_child_sequence.rs (fork then child::enter allocates)
+- 2026-11-20T06:22 [MB.42.8] (lead) status proposed -> superseded
+- 2026-11-20T06:22 [MB.42.8] (lead) superseded -> MB.43 (proposed): deferred out of MB.42 so the release gate can close; the seccomp fork-in-libtest class is already fixed (MB.42.7), this is the l
+- 2026-11-20T06:22 [MB.42] (lead) status active -> done

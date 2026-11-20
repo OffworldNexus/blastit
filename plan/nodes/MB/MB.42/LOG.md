@@ -27,3 +27,7 @@ GATE EVIDENCE (host): make check exit 0 (incl. e2e-universal 6/6 + zed-check + p
 ## 2026-11-20T06:01 [lead]
 
 status ready -> active
+
+## 2026-11-20T06:22 [lead]
+
+status active -> done
