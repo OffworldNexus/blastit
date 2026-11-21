@@ -4452,3 +4452,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T14:19 [MB.61] (lead) commit c600bab
 - 2026-11-21T14:19 [MB.61] (lead) review-arch FAIL -> fixed D1 seccomp (socket creation, not data), D2 uid-split-only-production, D3 Not just packaging; make docs-check green
 - 2026-11-21T14:19 [MB.61] (lead) commit 60c0cc2
+- 2026-11-21T14:27 [MB.62] (conductor) created (task) Bounded spaced apt retries for sury's published-index race in php-sapi image
+- 2026-11-21T14:27 AUTOPILOT on by conductor second sury index race variant in MB.62
+- 2026-11-21T14:27 [MB.62] (lead) status ready -> active
+- 2026-11-21T14:27 [MB.62] (lead) attempt 1/3 started
+- 2026-11-21T14:27 [MB.62] (lead) base 612e3347028f785b745d7a7b150d087dc03c77d6
+- 2026-11-21T14:48 [MB.62] (lead) status active -> done

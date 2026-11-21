@@ -97,21 +97,33 @@ https://packages.sury.org/php/ bookworm main" \
         fi; \
         # This update re-reads the indexes after the extra repository is added, on
         # every apt leg (with or without one), and it can lose a race against the
-        # repository's own publish: the Surý `InRelease` (2026-11-21T10:18Z) named
+        # repository's own publish. Surý `InRelease` (2026-11-21T10:18Z) named
         # `main/binary-arm64/Packages.xz` as 291892 bytes / SHA256 9eda492b…d165
         # while the mirror served 290956, so apt — which prefers `.xz` — failed the
-        # arm64 leg in ~10s with `File has unexpected size (290956 != 291892)`.
-        # The same suite's `.gz` index was correct, so a retry that asks for the
-        # gz indexes turns a mirror sync race into a slower success instead of a
-        # red leg. This does not weaken the update: if the `.gz` index is also
-        # wrong the retry fails too and the leg still fails, while a missing
-        # package fails the `apt-get install` below, which resolves the very same
-        # package set either way. The fallback stays on this line only — a global
-        # `CompressionTypes::Order::=gz` would hide real index mismatches on every
-        # repository and every leg.
+        # arm64 leg with `File has unexpected size (290956 != 291892)`; the `.gz`
+        # index was current then, so preferring `.gz` recovered it.
+        # A wider case (run 44908280224, 13:22Z): the mirror served indexes newer
+        # than an `InRelease` already an hour old — `.xz` 292780 != 292160 and
+        # `.gz` 520904 != 520306 — so no compression choice could win. Hence three
+        # spaced attempts (20s of sleeps): plain, the gz indexes, then plain after
+        # a longer pause, which covers a publisher that rotates within that window.
+        # When it does not (measured >75min, then inverted: a rotated `InRelease`
+        # still paired with the older object), the third failure fails the leg
+        # closed and says so in the log, so a repeat reads as upstream rather than
+        # "rerun". A missing package still fails the `apt-get install` below, which
+        # resolves the same package set either way, and nothing sets a global
+        # `CompressionTypes::Order` (that would hide real index mismatches).
         if ! apt-get update; then \
-            echo "apt-get update failed; retrying with the .gz indexes (a second failure means the repository is broken or unreachable)" >&2; \
-            apt-get -o Acquire::CompressionTypes::Order::=gz update; \
+            echo "apt-get update failed: the mirror is probably publishing indexes; retrying with the gz variant" >&2; \
+            sleep 5; \
+            if ! apt-get -o Acquire::CompressionTypes::Order::=gz update; then \
+                echo "apt-get update failed again; retrying plainly after a 15s pause" >&2; \
+                sleep 15; \
+                if ! apt-get update; then \
+                    echo "apt-get update failed 3 times in 20s: the sury mirror is serving indexes its signed InRelease does not match, which is upstream (not a transient publish) — investigate, do not merely rerun" >&2; \
+                    exit 1; \
+                fi; \
+            fi; \
         fi; \
         apt-get install -y --no-install-recommends \
             "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
