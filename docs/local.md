@@ -21,6 +21,15 @@ $ blastit dev --learn
     published, or in a Linux VM. The editor is not — `blastit-lsp` ships native
     Linux, macOS and Windows binaries ([Editors](#editors)).
 
+    Not just packaging: serving is built on Linux kernel facilities. Production's
+    per-`view` isolation is a real uid split (`setresuid`, `CAP_SETUID`/`capset`);
+    static reads are confined by `openat2` (`RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`,
+    with an `O_NOFOLLOW` walk fallback on older kernels); a seccomp filter refuses a
+    view its own `AF_INET`/`AF_INET6` sockets unless its route declares `egress`;
+    roles identify each other with `SCM_CREDENTIALS` on Unix sockets. Porting means
+    replacing those mechanisms — a design project, not a recompile — so serving
+    stays Linux **for now**.
+
 ## Start
 
 === "Python (WSGI)"

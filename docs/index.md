@@ -34,7 +34,8 @@ system package manager it puts the release archive in `~/.local/bin` instead
     NTS `libphp` (8.3, 8.4, 8.5 and 8.6); no `entrypoint` plus a `static` mount
     serves a built front end. One `blastit` binary serves all three. `blastit-lsp`
     runs natively on Linux, macOS and Windows; on a macOS or Windows laptop, run
-    the server in Docker/Compose or a Linux VM.
+    the server in Docker/Compose or a Linux VM, because serving rests on Linux
+    kernel facilities ([why Linux](local.md)).
 
 ## One file, no code changes
 

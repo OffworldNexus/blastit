@@ -4442,3 +4442,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T12:35 HUMAN H-019 opened by conductor (node MB)
 - 2026-11-21T12:39 [MB.60] (lead) review round 2 (review-arch on a3d2f5e): PASS; applied keep=120 + singular/plural marker; rejected echo shortening (contradicts accepted UX finding)
 - 2026-11-21T12:39 [MB.60] (lead) commit 5fa972e
+- 2026-11-21T14:14 [MB.61] (conductor) created (task) Explain why serving is Linux-only (kernel facilities, not packaging)
+- 2026-11-21T14:14 AUTOPILOT on by conductor owner-requested Linux-only rationale in docs (MB.61)
+- 2026-11-21T14:15 [MB.61] (lead) status ready -> active
+- 2026-11-21T14:15 [MB.61] (lead) attempt 1/3 started
+- 2026-11-21T14:15 [MB.61] (lead) base 76b1bcba35284b869846eeadc872ab8c8fbfa6cd
+- 2026-11-21T14:16 [MB.61] (lead) status active -> review
+- 2026-11-21T14:19 [MB.61] (lead) status review -> done
+- 2026-11-21T14:19 [MB.61] (lead) commit c600bab
+- 2026-11-21T14:19 [MB.61] (lead) review-arch FAIL -> fixed D1 seccomp (socket creation, not data), D2 uid-split-only-production, D3 Not just packaging; make docs-check green
+- 2026-11-21T14:19 [MB.61] (lead) commit 60c0cc2
