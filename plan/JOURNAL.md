@@ -4470,3 +4470,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T15:44 [MB.63] (lead) lead gate: e2e green on final bytes (EXIT=0, 3 probe legs ok); independent chain replay matched '.xz' (signed 6b5a7eae), plain+gz mismatch-skipped, 7/7 : OK; ru
 - 2026-11-21T15:44 [MB.63] (lead) status active -> done
 - 2026-11-21T15:44 [MB.63] (lead) commit 2b82366a0249a0170798d73e6f38fea1342ed90f
+- 2026-11-21T15:55 [MB.64] (conductor) created (task) Pin sury PHP 8.6 payloads per arch (sury index is durably inconsistent)
+- 2026-11-21T15:55 AUTOPILOT on by conductor pinned sury payloads in MB.64
+- 2026-11-21T15:55 [MB.64] (lead) status ready -> active
+- 2026-11-21T15:55 [MB.64] (lead) attempt 1/3 started
+- 2026-11-21T15:55 [MB.64] (lead) base 6b43c548720237a81652881d7ae37580f7bb7bcd
+- 2026-11-21T16:12 [MB.64] (lead) status active -> done
