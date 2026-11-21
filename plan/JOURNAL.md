@@ -4459,3 +4459,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T14:27 [MB.62] (lead) base 612e3347028f785b745d7a7b150d087dc03c77d6
 - 2026-11-21T14:48 [MB.62] (lead) status active -> done
 - 2026-11-21T14:48 [MB.62] (lead) commit 1083bf1
+- 2026-11-21T14:57 AUTOPILOT off by conductor arm64 sury index broken upstream; awaiting human release decision
