@@ -67,10 +67,23 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # `libc6-dev`); the musl legs are Alpine (`apk`, `musl-dev`, `pkgconf`). Detected
 # rather than declared so a leg cannot name the wrong one and still build.
 #
-# The extra repository comes first, because the PHP packages do not exist in a
-# stock `debian:bookworm-slim` (8.6 is Ondřej Surý's) or a stock `alpine:edge`
-# (8.6 is in `edge/testing`). `EXTRA_REPO` is the leg's name from the matrix, so
-# the setup lives here once instead of in every workflow and driver.
+# The extra repository (Alpine) or the signing-key/`InRelease` fetch (sury) comes
+# first, because the PHP packages do not exist in a stock `debian:bookworm-slim`
+# (8.6 is Ondřej Surý's) or a stock `alpine:edge` (8.6 is in `edge/testing`).
+# `EXTRA_REPO` is that leg's name from the matrix, so the setup lives here once
+# instead of in every workflow and driver.
+#
+# `sury` is deliberately **not** an apt source. Its mirror serves
+# `main/binary-<arch>/Packages*` objects that do not match its own signed
+# `InRelease` (measured 2026-11-21 against its own `InRelease`, arm64: `.xz`
+# served 292780 vs 294336 signed, `.gz` served 520904 vs 522854 signed; amd64 is
+# the mirror image), while the `.deb` payloads are consistent and `by-hash/`
+# answers 404, so apt has no content-addressed escape. Instead this fetches the
+# signed `InRelease`, verifies it with `gpgv`, takes each index variant's SHA256
+# from that signed document, keeps the first variant whose bytes hash to it, and
+# installs the seven payloads whose hashes the verified index pins. The signature
+# and the signed index are the pin: no payload version or hash is hardcoded here,
+# and nothing is installed `--allow-unauthenticated`.
 #
 # `clang`/`libclang-dev` are on the glibc branch, and Alpine's `clang`/
 # `llvm-dev` plus whichever `clang<version>-libclang` this rolling image ships
@@ -85,33 +98,23 @@ RUN set -eux; \
         apt-get update; \
         apt-get install -y --no-install-recommends ca-certificates curl; \
         if [ "${EXTRA_REPO}" = "sury" ]; then \
-            mkdir -p /etc/apt/keyrings; \
+            mkdir -p /etc/apt/keyrings /tmp/sury-debs; \
+            apt-get install -y --no-install-recommends gpgv xz-utils; \
             curl -fsSL https://packages.sury.org/php/apt.gpg \
                 -o /etc/apt/keyrings/sury.gpg; \
-            echo "deb [signed-by=/etc/apt/keyrings/sury.gpg] \
-https://packages.sury.org/php/ bookworm main" \
-                > /etc/apt/sources.list.d/sury.list; \
         elif [ -n "${EXTRA_REPO}" ]; then \
             echo "unknown EXTRA_REPO '${EXTRA_REPO}' for this image" >&2; \
             exit 1; \
         fi; \
-        # This update re-reads the indexes after the extra repository is added, on
-        # every apt leg (with or without one), and it can lose a race against the
-        # repository's own publish. Surý `InRelease` (2026-11-21T10:18Z) named
-        # `main/binary-arm64/Packages.xz` as 291892 bytes / SHA256 9eda492b…d165
-        # while the mirror served 290956, so apt — which prefers `.xz` — failed the
-        # arm64 leg with `File has unexpected size (290956 != 291892)`; the `.gz`
-        # index was current then, so preferring `.gz` recovered it.
-        # A wider case (run 44908280224, 13:22Z): the mirror served indexes newer
-        # than an `InRelease` already an hour old — `.xz` 292780 != 292160 and
-        # `.gz` 520904 != 520306 — so no compression choice could win. Hence three
-        # spaced attempts (20s of sleeps): plain, the gz indexes, then plain after
-        # a longer pause, which covers a publisher that rotates within that window.
-        # When it does not (measured >75min, then inverted: a rotated `InRelease`
-        # still paired with the older object), the third failure fails the leg
-        # closed and says so in the log, so a repeat reads as upstream rather than
-        # "rerun". A missing package still fails the `apt-get install` below, which
-        # resolves the same package set either way, and nothing sets a global
+        # This re-reads the distro's indexes only (sury's payloads are installed
+        # from signed hashes below, never from an apt source), and a distro mirror
+        # can still serve an index object its own signed `InRelease` does not match
+        # while it publishes — Debian and Ubuntu alike — and no compression choice
+        # wins when the variants are stale. Hence three spaced attempts (20s of
+        # sleeps): plain, the gz indexes, then plain after a longer pause, which
+        # covers a publisher that rotates within that window. The third failure
+        # fails the leg closed and says so in the log, so a repeat reads as
+        # upstream rather than "rerun". Nothing sets a global
         # `CompressionTypes::Order` (that would hide real index mismatches).
         if ! apt-get update; then \
             echo "apt-get update failed: the mirror is probably publishing indexes; retrying with the gz variant" >&2; \
@@ -120,15 +123,76 @@ https://packages.sury.org/php/ bookworm main" \
                 echo "apt-get update failed again; retrying plainly after a 15s pause" >&2; \
                 sleep 15; \
                 if ! apt-get update; then \
-                    echo "apt-get update failed 3 times in 20s: the sury mirror is serving indexes its signed InRelease does not match, which is upstream (not a transient publish) — investigate, do not merely rerun" >&2; \
+                    echo "apt-get update failed 3 times in 20s: the distro mirror is serving indexes its signed InRelease does not match (sury is not an apt source here) — investigate, do not merely rerun" >&2; \
                     exit 1; \
                 fi; \
             fi; \
         fi; \
-        apt-get install -y --no-install-recommends \
-            "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
-            gcc make pkg-config libc6-dev binutils ca-certificates curl bash tar xz-utils \
-            clang libclang-dev; \
+        if [ "${EXTRA_REPO}" = "sury" ]; then \
+            arch=$(dpkg --print-architecture); \
+            prefix="main/binary-${arch}"; \
+            variant=""; \
+            attempt=0; \
+            while [ -z "${variant}" ]; do \
+                attempt=$((attempt + 1)); \
+                if [ "${attempt}" -gt 3 ]; then \
+                    echo "sury serves ${prefix} indexes its signed InRelease does not match (3 attempts, 10s apart): that is upstream, not transient" >&2; \
+                    exit 1; \
+                fi; \
+                curl -fsSL https://packages.sury.org/php/dists/bookworm/InRelease \
+                    -o /tmp/sury-InRelease; \
+                gpgv --keyring /etc/apt/keyrings/sury.gpg /tmp/sury-InRelease; \
+                for compression in "" .gz .xz; do \
+                    name="${prefix}/Packages${compression}"; \
+                    signed=$(awk -v n="${name}" '/^SHA256:/ { s = 1; next } /^[A-Za-z]/ { s = 0 } s && $3 == n { print $1; exit }' /tmp/sury-InRelease); \
+                    if [ -z "${signed}" ]; then \
+                        echo "sury's InRelease lists no ${name}: trying the next variant" >&2; \
+                        continue; \
+                    fi; \
+                    if ! curl -fsSL "https://packages.sury.org/php/dists/bookworm/${name}" \
+                        -o /tmp/sury-index; then \
+                        echo "cannot fetch ${name}: trying the next variant" >&2; \
+                        continue; \
+                    fi; \
+                    served=$(sha256sum /tmp/sury-index | cut -d' ' -f1); \
+                    if [ "${served}" != "${signed}" ]; then \
+                        echo "sury ${name} hashes ${served}, its signed InRelease says ${signed}: trying the next variant" >&2; \
+                        continue; \
+                    fi; \
+                    case "${compression}" in \
+                        "") cp /tmp/sury-index /tmp/sury-Packages ;; \
+                        .gz) gunzip -c /tmp/sury-index > /tmp/sury-Packages ;; \
+                        .xz) xz -dc /tmp/sury-index > /tmp/sury-Packages ;; \
+                    esac; \
+                    variant="${compression:-plain}"; \
+                    echo "verified index variant '${variant}': ${name} sha256 ${signed} (signed by sury's InRelease)" >&2; \
+                    break; \
+                done; \
+                if [ -z "${variant}" ] && [ "${attempt}" -lt 3 ]; then sleep 10; fi; \
+            done; \
+            awk -v m="${PHP_MINOR}" 'BEGIN { split("php" m "-dev libphp" m "-embed php" m "-curl php" m "-cli php" m "-common php" m "-readline php-common", want, " "); for (i in want) need[want[i]] = 1 } \
+                 /^Package: / { pkg = $2 } \
+                 /^SHA256: / { sha = $2 } \
+                 /^Filename: / { file = $2 } \
+                 /^$/ { if (pkg in need) { parts = split(file, seg, "/"); print sha, seg[parts], file; delete need[pkg] } pkg = ""; sha = ""; file = "" } \
+                 END { if (pkg in need) { parts = split(file, seg, "/"); print sha, seg[parts], file; delete need[pkg] } bad = 0; for (p in need) { print "the verified sury index has no " p >> "/dev/stderr"; bad = 1 } exit bad }' \
+                /tmp/sury-Packages > /tmp/sury-mapping; \
+            while read -r sha basename path; do \
+                curl -fsSL "https://packages.sury.org/php/${path}" \
+                    -o "/tmp/sury-debs/${basename}"; \
+                echo "${sha}  /tmp/sury-debs/${basename}" >> /tmp/sury-SUMS; \
+            done < /tmp/sury-mapping; \
+            sha256sum -c /tmp/sury-SUMS; \
+            apt-get install -y --no-install-recommends /tmp/sury-debs/*.deb \
+                gcc make pkg-config libc6-dev binutils ca-certificates curl bash tar xz-utils \
+                clang libclang-dev; \
+            rm -rf /tmp/sury-*; \
+        else \
+            apt-get install -y --no-install-recommends \
+                "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
+                gcc make pkg-config libc6-dev binutils ca-certificates curl bash tar xz-utils \
+                clang libclang-dev; \
+        fi; \
         rm -rf /var/lib/apt/lists/*; \
     else \
         if [ "${EXTRA_REPO}" = "alpine-edge-testing" ]; then \
