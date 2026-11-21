@@ -29,21 +29,20 @@ driver from hiding the build error.
 2. **`e2e/php_sapi_probe.py` `build()`** — `"--progress=plain"` added to the
    `docker("build", …)` argument list, and the non-zero exit now reports a
    120-line tail instead of the default 40, prefixed with
-   `  … N earlier lines omitted …` when the buffer is longer than that, so a cut
-   log cannot be read as the whole build output. `tail()` itself is unchanged, so
+   `  … N earlier line(s) omitted …` when the buffer is longer than that, so a cut
+   log cannot be read as the whole build output. The tail length lives in one
+   local (`keep`), so the omitted count and the slice cannot disagree, and the
+   marker says `1 earlier line` for a single line (this repo's human-output rule
+   asks for `1 request`, never `1 requests`). `tail()` itself is unchanged, so
    the other call sites keep the silent default. Evidence:
 
    ```
-   $ grep -n "lines=120" e2e/php_sapi_probe.py
-   226:        return False, marker + tail(log, lines=120)
-   $ grep -n "tail(" e2e/php_sapi_probe.py
-   120:def tail(text, lines=40):
-   168:            f"{tail(result.stdout + result.stderr)}"
-   226:        return False, marker + tail(log, lines=120)
-   250:            f"{tail(result.stdout + result.stderr)}"
-   267:            f"readelf -d {shim} failed:\n{tail(result.stdout + result.stderr)}",
-   576:            print(tail(log), file=sys.stderr)
-   585:            print(tail(log), file=sys.stderr)
+   $ grep -n "keep = 120\|omitted\|earlier \|lines=keep\|lines=120" e2e/php_sapi_probe.py
+   224:        keep = 120  # one number, so the count and the slice cannot disagree
+   225:        omitted = len(log.strip().splitlines()) - keep
+   226:        noun = "line" if omitted == 1 else "lines"
+   227:        marker = f"  … {omitted} earlier {noun} omitted …\n" if omitted > 0 else ""
+   228:        return False, marker + tail(log, lines=keep)
    ```
 
    ```python
@@ -52,9 +51,11 @@ driver from hiding the build error.
        # can end exactly before the real `E: Failed to fetch …` apt line (that is
        # how the sury index race took two CI runs to diagnose, MB.60).
        log = result.stdout + result.stderr
-       omitted = len(log.strip().splitlines()) - 120
-       marker = f"  … {omitted} earlier lines omitted …\n" if omitted > 0 else ""
-       return False, marker + tail(log, lines=120)
+       keep = 120  # one number, so the count and the slice cannot disagree
+       omitted = len(log.strip().splitlines()) - keep
+       noun = "line" if omitted == 1 else "lines"
+       marker = f"  … {omitted} earlier {noun} omitted …\n" if omitted > 0 else ""
+       return False, marker + tail(log, lines=keep)
    return True, ""
    ```
 
@@ -211,6 +212,41 @@ guard: OK (3 staged/untracked file(s) checked)
 $ uv run --no-project tools/plan.py validate
 plan OK
 ```
+
+### Marker arithmetic, measured on the edited file rather than asserted
+
+`build()`'s real failure branch was driven by loading `e2e/php_sapi_probe.py`
+itself (`importlib`) and replacing only `leg()` (so no `docker`/matrix call) and
+`docker()` (a failing build whose `stdout` is the fake log) — the marker lines are
+the driver's own:
+
+```
+$ uv run --no-project python /tmp/opencode/mb60_marker_probe.py
+input log lines = 130 (php_sapi_probe.py)
+  ok            = False
+  marker        = '  … 10 earlier lines omitted …'
+  report lines  = 121 (marker + tail)
+  first kept    = '  line 011'
+  last kept     = '  line 130'
+input log lines = 121 (php_sapi_probe.py)
+  ok            = False
+  marker        = '  … 1 earlier line omitted …'
+  report lines  = 121 (marker + tail)
+  first kept    = '  line 002'
+  last kept     = '  line 121'
+input log lines = 120 (php_sapi_probe.py)
+  ok            = False
+  marker        = '(no marker)'
+  report lines  = 120 (marker + tail)
+  first kept    = '  line 001'
+  last kept     = '  line 120'
+```
+
+130 = 10 omitted + 120 kept, 121 = 1 omitted + 120 kept (`1 earlier line`,
+singular), and 120 prints no marker at all. The Dockerfile `echo` keeps its long
+wording on purpose: it names both outcomes of the `if ! apt-get update` guard
+(DNS/expired `Release`/GPG as well as a compression mismatch), so the shorter
+wording suggested in review was rejected rather than applied.
 
 The e2e target was run **twice** on this tree, including once after the review
 round rewrote the comment and the fallback `echo`: the reworded `RUN` really does

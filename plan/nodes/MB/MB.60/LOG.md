@@ -27,3 +27,7 @@ status review -> done
 ## 2026-11-21T12:34 [lead]
 
 commit a3d2f5e
+
+## 2026-11-21T12:39 [lead]
+
+review round 2 (review-arch on a3d2f5e): PASS; applied keep=120 + singular/plural marker; rejected echo shortening (contradicts accepted UX finding)

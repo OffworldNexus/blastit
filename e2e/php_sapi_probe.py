@@ -221,9 +221,11 @@ def build(image, minor, libc="gnu"):
         # can end exactly before the real `E: Failed to fetch …` apt line (that is
         # how the sury index race took two CI runs to diagnose, MB.60).
         log = result.stdout + result.stderr
-        omitted = len(log.strip().splitlines()) - 120
-        marker = f"  … {omitted} earlier lines omitted …\n" if omitted > 0 else ""
-        return False, marker + tail(log, lines=120)
+        keep = 120  # one number, so the count and the slice cannot disagree
+        omitted = len(log.strip().splitlines()) - keep
+        noun = "line" if omitted == 1 else "lines"
+        marker = f"  … {omitted} earlier {noun} omitted …\n" if omitted > 0 else ""
+        return False, marker + tail(log, lines=keep)
     return True, ""
 
 
