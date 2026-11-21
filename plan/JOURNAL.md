@@ -4441,3 +4441,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T12:35 HUMAN H-016 closed by conductor
 - 2026-11-21T12:35 HUMAN H-019 opened by conductor (node MB)
 - 2026-11-21T12:39 [MB.60] (lead) review round 2 (review-arch on a3d2f5e): PASS; applied keep=120 + singular/plural marker; rejected echo shortening (contradicts accepted UX finding)
+- 2026-11-21T12:39 [MB.60] (lead) commit 5fa972e
