@@ -4429,3 +4429,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T11:32 [MB.59] (lead) status active -> done
 - 2026-11-21T11:32 [MB.59] (lead) committed da0e682 (1-line TESTING_PLAN.md edit; guard+validate OK)
 - 2026-11-21T11:33 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
+- 2026-11-21T12:00 [MB.60] (conductor) created (task) Survive sury's stale arm64 Packages.xz in php-sapi Dockerfile and surface build errors
+- 2026-11-21T12:00 AUTOPILOT on by conductor closing the last 2 red checks in MB.60
+- 2026-11-21T12:00 [MB.60] (lead) status ready -> active
+- 2026-11-21T12:00 [MB.60] (lead) attempt 1/3 started
+- 2026-11-21T12:00 [MB.60] (lead) base dffa4b5a0e54dc503621be0ac4edc2ba5c22d964
+- 2026-11-21T12:21 [MB.60] (lead) status active -> review
+- 2026-11-21T12:34 [MB.60] (lead) status review -> done

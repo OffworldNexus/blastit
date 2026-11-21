@@ -95,7 +95,24 @@ https://packages.sury.org/php/ bookworm main" \
             echo "unknown EXTRA_REPO '${EXTRA_REPO}' for this image" >&2; \
             exit 1; \
         fi; \
-        apt-get update; \
+        # This update re-reads the indexes after the extra repository is added, on
+        # every apt leg (with or without one), and it can lose a race against the
+        # repository's own publish: the Surý `InRelease` (2026-11-21T10:18Z) named
+        # `main/binary-arm64/Packages.xz` as 291892 bytes / SHA256 9eda492b…d165
+        # while the mirror served 290956, so apt — which prefers `.xz` — failed the
+        # arm64 leg in ~10s with `File has unexpected size (290956 != 291892)`.
+        # The same suite's `.gz` index was correct, so a retry that asks for the
+        # gz indexes turns a mirror sync race into a slower success instead of a
+        # red leg. This does not weaken the update: if the `.gz` index is also
+        # wrong the retry fails too and the leg still fails, while a missing
+        # package fails the `apt-get install` below, which resolves the very same
+        # package set either way. The fallback stays on this line only — a global
+        # `CompressionTypes::Order::=gz` would hide real index mismatches on every
+        # repository and every leg.
+        if ! apt-get update; then \
+            echo "apt-get update failed; retrying with the .gz indexes (a second failure means the repository is broken or unreachable)" >&2; \
+            apt-get -o Acquire::CompressionTypes::Order::=gz update; \
+        fi; \
         apt-get install -y --no-install-recommends \
             "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
             gcc make pkg-config libc6-dev binutils ca-certificates curl bash tar xz-utils \

@@ -184,6 +184,15 @@ def build(image, minor, libc="gnu"):
     suites = "1" if spec.get("suites", "true") == "true" else "0"
     result = docker(
         "build",
+        # `--progress` needs BuildKit/buildx (the default from docker 23 on); a
+        # classic builder (`DOCKER_BUILDKIT=0`) rejects it with `unknown flag`.
+        # It pins the plain display rather than repairing the swallowed output by
+        # itself: `docker()` captures both streams, so buildx's `auto` would pick
+        # plain under a pipe anyway, while the pin keeps each `RUN`'s own lines in
+        # the log whether the driver runs under a pipe (CI) or in a terminal. The
+        # actual repair for the missing `E: Failed to fetch …` apt line is the
+        # longer failure tail below.
+        "--progress=plain",
         "-f",
         DOCKERFILE,
         "--build-arg",
@@ -208,7 +217,13 @@ def build(image, minor, libc="gnu"):
         capture_output=True,
     )
     if result.returncode != 0:
-        return False, tail(result.stdout + result.stderr)
+        # BuildKit's own failure summary is ~38 lines, so the default 40-line tail
+        # can end exactly before the real `E: Failed to fetch …` apt line (that is
+        # how the sury index race took two CI runs to diagnose, MB.60).
+        log = result.stdout + result.stderr
+        omitted = len(log.strip().splitlines()) - 120
+        marker = f"  … {omitted} earlier lines omitted …\n" if omitted > 0 else ""
+        return False, marker + tail(log, lines=120)
     return True, ""
 
 
