@@ -1,0 +1,25 @@
+# Implementability re-review (pass 2): `docs/design/static-and-spa.md` vs MB.2.5.2
+
+Scope: §4.2–§4.4, §4.6 head/slot bullets, §7.2, §8; `rewrite.rs`, `static_asset.rs`, `scheduler.rs:1036–1109,1205–1254`, `raw.rs:headers`, MB.2.5.2/NODE.md, `critical_rewrite.rs` helper.
+
+## Verified — no finding
+- Head order is present and ordered (§4.3 445–456): pairs for `declares_body` → bool stored → `head_segments` → `Err` to `decide` before `admit_ready` → `Ok(parts)` → `static_pending` → `dispatch_static` "borrows the owned parts once as `Vec<&str>` for `resolve`". The `Vec<String>`→`Vec<&str>` step is shown and matches `critical_rewrite.rs:70–75`.
+- `has_body` is obtainable where stated: `head.headers()` yields `(&[u8], &[u8])` (`raw.rs:247–265`), and the head lives until `raw` moves into `Request` (`scheduler.rs:1079`); §4.3 says "before the payload moves into the request".
+- `has_app` = `RouteInfo.static_forward` exists (`route.rs:35,62–68`); §4.4's equivalence holds because `spa = true` never yields `Missing`.
+- No `rewrite.rs`/`route.rs`/`config.rs` change is forced: `decide`, `declares_body`, `STATIC_ALLOW`, `static_forward`, `static_policy`, `manifest_dir`, `static_max_bytes` all landed.
+- §8 prevents trimming for **both** leaves: "never trim a `MB.2.5.1` oracle", and "every case in `tests/critical_rewrite.rs` is bounded only by the file's 1,600-line ceiling … raises its budget through a Follow-up rather than dropping a §7.2 case".
+
+## MAJOR
+**M1 — the rejection writer §4.2/§4.4/§4.5 names does not exist.** §4.4: "written by the same canned rejection writer as the other three (`canned(405)`, the `Cache-Control: no-store` helper §4.5 names), never by a second header path." In code that is two functions: `canned(status)` (`scheduler.rs:3116`) is only a reason/body table with **no 405 arm** (unknown status → `("Error", "error\n")`), and `respond` (`scheduler.rs:2567`) writes the head but has no extra-header parameter and six call sites. The leaf must guess whether to widen `respond` (touching `refuse_body`, `fail_request`, 200/502/503/504) or add the second path §4.4 forbids. Fix: name the one helper's signature (e.g. `fn static_reject(&mut self, stream_id: u32, status: u16, allow: Option<&'static [u8]>)` appending `Cache-Control: no-store`/`Allow` then delegating to `respond`) and give `canned(405)`'s phrase and body.
+
+**M2 — the target→`&str` conversion is unstated and fail-open if guessed.** `head_segments(target: &str)` but `ReqHeadView::target()` is `&[u8]`, and `parse` does **not** require UTF-8 (`raw.rs:196` `bytes32`, unlike `string32` for `peer_addr`). §4.3 only says "it calls `head_segments(target)`". A cheap implementer will reach for `String::from_utf8_lossy`, turning a literal non-UTF-8 target byte into U+FFFD, naming a different file and possibly ending in `Missing`→forward instead of `Refused(Encoding)`→`400` (R7). Fix: state `std::str::from_utf8(head.target()).map_err(|_| StaticOutcome::Refused(StaticRefusal::Encoding))` — never lossy.
+
+**M3 — `slot_releasable` is untestable as specified.** §4.6 declares it `pub(crate) fn` yet also makes it "the oracle for the 'timeout while parked' arm". `tests/critical_rewrite.rs` compiles the crate as a dependency — exactly why `open_with`/`resolve_with`/`same_inode`/`head_segments` are `#[doc(hidden)] pub`. The protected suite cannot call a `pub(crate)` item; the leaf must silently widen visibility or drop to an unprotected `#[cfg(test)]` unit test. Fix: `#[doc(hidden)] pub fn slot_releasable` and add it to §4.2's "every one of them is in this section" list (one line, like `same_inode`).
+
+## MINOR
+- **m1.** No named `Request` field for the two stored values: §4.3 says only "stores only the resulting `bool`" and "`Ok(parts)` sets `static_pending`"; §4.6 enumerates `static_target`/`static_body`/`pumping`/`static_pending` only. A cheap implementer may drop the parts and re-call `head_segments` in `dispatch_static`, breaking R11's "exactly one percent-decode". Name `static_parts: Vec<String>` and `static_has_body: bool`.
+- **m2.** "Answered there" does not name the pre-insertion pattern: the head `Reject` must `self.requests.insert(...)` before `respond`/`emit_request`/`release`, mirroring the existing `Err(status) => insert; refuse_body` branch (`scheduler.rs:1179–1185`), or R12's `request` event (`outcome: "unmatched"`) is never emitted.
+- **m3.** `decide`'s own comment (`rewrite.rs:71`) and §4.2 call `has_app` "the manifest declares an app"; §4.4 says pass `RouteInfo.static_forward`. They agree only via `spa = true` never yielding `Missing`; repeat that in §4.3 where the value is first chosen.
+- **m4.** §8's resync note names two stale brief lines, both verified — but NODE.md also says "Budget: ≤ 3 files, ≤ 600 changed lines" (superseded by §8's ceiling, never labelled stale, and it is the trimming pressure) and that both `dispatch_queued` walks and `Scheduler::start` "never call `try_spawn`", false for a forward-capable route (§4.6 keeps the lazy spawn). No resync owner/node is named.
+
+VERDICT: FAIL

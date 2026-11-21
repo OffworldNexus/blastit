@@ -2,10 +2,9 @@
 //!
 //! [`Server`] owns the `http.chan` client that every connection shares and the
 //! configuration they read. [`serve`] is the shape init needs: the inherited
-//! listener plus the inherited channel. [`serve_with`] and [`Acceptor`] are the
-//! same thing without the TCP assumption, which is what the tests use.
+//! listener plus the inherited channel. [`serve_with`] is the same loop with the
+//! channel left generic, which is what the tests use.
 
-use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -22,29 +21,11 @@ use crate::conn::{Conn, emit_rejected};
 use crate::error::HttpError;
 use crate::response;
 
-/// Something that hands out accepted client connections.
-///
-/// The front end only needs three things from a listener: the next connection,
-/// a byte stream to talk over, and a string to call the client. That is little
-/// enough to implement over anything — a `TcpListener`, a pre-queued pair of
-/// duplex halves — which is what makes the connection loop testable.
-pub trait Acceptor {
-    /// The connection type this acceptor produces.
-    type Io: AsyncRead + AsyncWrite + Send + Unpin + 'static;
-
-    /// Wait for the next client connection and its address.
-    ///
-    /// The address is the string the app sees as `remote_addr` until a trusted
-    /// `X-Forwarded-For` replaces it. It must be cancellation safe: the accept
-    /// loop drops this future whenever the scheduler channel dies.
-    ///
-    /// # Errors
-    ///
-    /// An I/O error ends the server, the same way a broken `http.chan` does.
-    fn accept(&mut self) -> impl Future<Output = io::Result<(Self::Io, String)>> + Send;
-}
-
 /// The listening socket init inherited (`0.0.0.0:$PORT`, §2.1).
+///
+/// A concrete type rather than an `Acceptor` trait: [`serve_with`] is its one
+/// caller and this its one listener, so a test that needs a different stream
+/// opens a real loopback socket instead of a pre-queued fake.
 pub struct TcpAcceptor {
     listener: TcpListener,
 }
@@ -65,20 +46,24 @@ impl TcpAcceptor {
     }
 }
 
-impl Acceptor for TcpAcceptor {
-    type Io = TcpStream;
-
-    fn accept(&mut self) -> impl Future<Output = io::Result<(TcpStream, String)>> + Send {
-        let listener = &mut self.listener;
-        async move {
-            let (stream, peer) = listener.accept().await?;
-            // The response head and its body are written as separate TCP writes;
-            // with Nagle on, a small body waits for the client's delayed ACK — a
-            // fixed ~40 ms on every response (measured from a packet capture).
-            // Turn it off on the accepted socket.
-            stream.set_nodelay(true)?;
-            Ok((stream, peer.to_string()))
-        }
+impl TcpAcceptor {
+    /// Wait for the next client connection and its address.
+    ///
+    /// The address is the string the app sees as `remote_addr` until a trusted
+    /// `X-Forwarded-For` replaces it. It is cancellation safe: the accept loop
+    /// drops this future whenever the scheduler channel dies.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error ends the server, the same way a broken `http.chan` does.
+    async fn accept(&mut self) -> io::Result<(TcpStream, String)> {
+        let (stream, peer) = self.listener.accept().await?;
+        // The response head and its body are written as separate TCP writes;
+        // with Nagle on, a small body waits for the client's delayed ACK — a
+        // fixed ~40 ms on every response (measured from a packet capture).
+        // Turn it off on the accepted socket.
+        stream.set_nodelay(true)?;
+        Ok((stream, peer.to_string()))
     }
 }
 
@@ -154,10 +139,7 @@ impl Server {
     /// [`HttpError::ChannelClosed`] as soon as the scheduler end of
     /// `http.chan` goes away, and [`HttpError::Accept`] when the listener
     /// itself fails. There is no graceful stop: init drops the process.
-    pub async fn run<L>(&self, mut listener: L) -> Result<(), HttpError>
-    where
-        L: Acceptor,
-    {
+    pub async fn run(&self, mut listener: TcpAcceptor) -> Result<(), HttpError> {
         loop {
             let accepted = tokio::select! {
                 result = listener.accept() => result,
@@ -231,165 +213,22 @@ pub async fn serve(
     serve_with(TcpAcceptor::new(listener), channel, cfg, emit).await
 }
 
-/// [`serve`] with the listener and the channel left generic.
+/// [`serve`] with the channel left generic.
 ///
-/// This is the same function: `serve` only fills in the two types init happens
-/// to use. Tests drive it with a fake acceptor and a duplex stream standing in
-/// for the scheduler.
+/// This is the same function: `serve` only fills in the channel init happens to
+/// use. Tests drive it with a duplex stream standing in for the scheduler.
 ///
 /// # Errors
 ///
 /// The same as [`serve`].
-pub async fn serve_with<L, C>(
-    listener: L,
+pub async fn serve_with<C>(
+    listener: TcpAcceptor,
     channel: C,
     cfg: HttpConfig,
     emit: Emit,
 ) -> Result<(), HttpError>
 where
-    L: Acceptor,
     C: AsyncRead + AsyncWrite + Send + 'static,
 {
     Server::new(channel, cfg, emit).run(listener).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::VecDeque;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
-
-    /// A fake listener handing out pre-queued duplex halves.
-    struct FakeAcceptor {
-        queued: VecDeque<(tokio::io::DuplexStream, String)>,
-    }
-
-    impl Acceptor for FakeAcceptor {
-        type Io = tokio::io::DuplexStream;
-
-        fn accept(
-            &mut self,
-        ) -> impl Future<Output = io::Result<(tokio::io::DuplexStream, String)>> + Send {
-            let next = self.queued.pop_front();
-            async move {
-                match next {
-                    Some(connection) => Ok(connection),
-                    None => Err(io::Error::other("no more fake connections")),
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn serve_with_accepts_from_a_fake_acceptor() {
-        use blastit_frame::{Decoder, Frame, RespHead};
-
-        let (server_side, mut client) = duplex(64 * 1024);
-        let (chan_side, mut scheduler) = duplex(64 * 1024);
-        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = events.clone();
-        let emit: Emit = std::sync::Arc::new(move |event| {
-            sink.lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .push(event);
-        });
-
-        let acceptor = FakeAcceptor {
-            queued: VecDeque::from([(server_side, "203.0.113.9:1234".to_string())]),
-        };
-        let cfg = HttpConfig::default();
-        let task = tokio::spawn(async move { serve_with(acceptor, chan_side, cfg, emit).await });
-
-        client
-            .write_all(b"GET / HTTP/1.1\r\nHost: h\r\n\r\n")
-            .await
-            .unwrap();
-
-        // The request shows up on `http.chan`…
-        let mut decoder = Decoder::new(Limits::default());
-        let mut raw = vec![0u8; 4096];
-        let (id, frame) = loop {
-            let read = scheduler.read(&mut raw).await.unwrap();
-            assert_ne!(read, 0, "the front end closed the channel");
-            decoder.push(&raw[..read]);
-            if let Some(frame) = decoder.next_frame().unwrap() {
-                break frame;
-            }
-        };
-        assert!(matches!(&frame, Frame::ReqHead(head) if head.target == b"/"));
-
-        // … and the answer comes back to the client.
-        let mut wire = Vec::new();
-        Limits::default()
-            .encode(
-                &Frame::RespHead(RespHead {
-                    status: 204,
-                    reason: Vec::new(),
-                    headers: Vec::new(),
-                }),
-                id,
-                &mut wire,
-            )
-            .unwrap();
-        Limits::default()
-            .encode(&Frame::RespEnd, id, &mut wire)
-            .unwrap();
-        scheduler.write_all(&wire).await.unwrap();
-
-        let mut response = vec![0u8; 64];
-        let read = client.read(&mut response).await.unwrap();
-        assert!(
-            response[..read].starts_with(b"HTTP/1.1 204 No Content\r\n"),
-            "{:?}",
-            String::from_utf8_lossy(&response[..read])
-        );
-
-        // The fake acceptor has nothing left to hand out, so the server ends.
-        assert!(matches!(task.await.unwrap(), Err(HttpError::Accept(_))));
-        assert!(
-            events
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn the_tcp_acceptor_reports_its_address() {
-        // A listener bound to port 0 is always available, even in CI.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let acceptor = TcpAcceptor::new(listener);
-            assert_ne!(acceptor.local_addr().unwrap().port(), 0);
-        });
-    }
-
-    #[test]
-    fn the_tcp_acceptor_turns_nagle_off() {
-        // A response's head and its body are two separate TCP writes. With Nagle
-        // on, a small body waits for the client's delayed ACK — a fixed ~40 ms on
-        // every response — so an accepted socket must not have it on.
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            // `connect` completes from the listen backlog, before `accept`.
-            let client = TcpStream::connect(addr).await.unwrap();
-            let mut acceptor = TcpAcceptor::new(listener);
-            let (server, _peer) = acceptor.accept().await.unwrap();
-            assert!(
-                server.nodelay().unwrap(),
-                "an accepted socket must not have Nagle on: a small response body \
-                 would wait for the client's delayed ACK"
-            );
-            drop(client);
-        });
-    }
 }

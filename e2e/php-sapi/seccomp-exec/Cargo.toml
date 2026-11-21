@@ -1,0 +1,15 @@
+[package]
+name = "php-sapi-seccomp-exec"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone on purpose: this is an e2e artefact, not a Blastit workspace member,
+# so it never enters `cargo build/test --workspace`, the root Cargo.lock or a
+# release artefact. It exists so `e2e/php-sapi/` can run the probe under the
+# **real** `SeccompRole::View { egress: false }` filter without adding a
+# `blastit-sys` edge to the zero-dependency `blastit-php-sapi` crate.
+[workspace]
+
+[dependencies]
+blastit-sys = { path = "../../../crates/blastit-sys" }

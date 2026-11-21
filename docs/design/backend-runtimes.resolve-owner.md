@@ -1,0 +1,12 @@
+# Answering the Owner's Architecture Question (`MB.12`)
+
+Serving multiple languages is **not** stuffing runtimes into one binary or bolting ad-hoc daemons onto a Python server — it is pairing one invariant ingress/scheduler/broker pipeline (`Upstream`) with a per-language **`SpawnSpec` + `WorkerRuntime`** that owns discovery, config lockdown, Stage-0 secret stripping, sandboxing, in-runtime CPU accounting, and zero-residue teardown across both `dev` and `prod`:
+
+1. **What it implies for artifacts & hosts:** Only Python WSGI links `libpython` (PyPI wheel); the standalone `blastit` binary (`--no-default-features --features php`, plus `@blastit/cli` on npm) links **zero** `libpython` and **zero** `libphp` — static sites need nothing on the host, while `[route.php]`, `[route.node]`, and `[route.jvm]` discover host NTS `libphp`, `node`, or `java` at Stage-0 boot (`BLASTIT_LIBPHP` / `BLASTIT_NODE` / `BLASTIT_JAVA` overrides) and fail closed before binding if absent.
+2. **What we refuse:** Bundling runtimes into `blastit` (breaks Apache-2.0 licensing, distro extensions, and CVE cadence); external/unmanaged daemons or FastCGI fallbacks (the **only** PHP backend is embedded NTS `libphp` over `view.chan`; a host without `libphp-embed` fails closed at boot naming the package); `listen` knobs in `blastit.toml` (`view.chan` / `<runtime>` sockets are Blastit-owned, concurrency governed by `BLASTIT_MAX_WORKERS`); and spoofable CPU guessing.
+3. **What the user experiences per backend (`dev`, `check`, and `prod` identical):**
+   - **Static:** `[route.static] root = "public"` — zero host runtime, served in-scheduler (`openat2`).
+   - **Python:** `app = "myshop.wsgi:application"` (`uv add blastit`) — CoW zygote `view` per route over `view.chan`, `pytest` `check`, exact thread CPU.
+   - **PHP:** `[route.php] entry = "public/index.php"` + host `libphp-embed` — per-route embedded `libphp` `view` worker over `view.chan` (no pool, no FastCGI), `check -- vendor/bin/phpunit`, exact process CPU.
+   - **Node / Vite:** `[route.node] entry = "build/index.js"` (`@blastit/cli` + `node >= 20`) — per-route `node` worker over reverse-accept `<runtime>/pools/<slot>/accept.sock`, `NODE_OPTIONS` & `AF_INET` locked down, ALS CPU accounting.
+   - **JVM / Tomcat:** `[route.jvm] entry = "target/app.jar"` + `java >= 21` — per-route JVM over reverse-accept `<runtime>/pools/<slot>/accept.sock` with injected `ThreadMXBean` CPU agent.

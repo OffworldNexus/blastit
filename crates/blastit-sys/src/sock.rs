@@ -18,6 +18,56 @@ use rustix::net::{
 use std::os::unix::ffi::OsStrExt;
 
 use crate::Error;
+use crate::fd::open_dir_nofollow;
+
+/// A control-message length, as `usize`.
+///
+/// `struct msghdr::msg_controllen` and `struct cmsghdr::cmsg_len` are `size_t`
+/// in glibc's headers and `socklen_t` (a `u32`) in musl's; a 32-bit target
+/// narrows `size_t` to those same 32 bits. No code here may name one of those
+/// typedefs, because the same source compiles against either libc: every length
+/// is *read* through this function and *written* through [`set_control_len`] or
+/// [`set_cmsg_len`], which resolve to whatever type the header in front of them
+/// declares. A value that cannot be a `usize` saturates, and the caller's
+/// buffer bound then clamps it — the same refusal a forged length already
+/// gets, one step earlier.
+#[inline]
+fn control_len<T>(value: T) -> usize
+where
+    usize: TryFrom<T>,
+{
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// Write `msg_controllen` for a control buffer of `bytes` bytes.
+///
+/// `as _` writes the field in the type the header declares (`size_t` in glibc,
+/// `socklen_t` in musl) instead of in the type one libc happens to call it, so
+/// there is no `cfg` and no second copy of the send path. The buffer is
+/// [`CmsgBuffer::LEN`] bytes and that length is asserted below to fit a
+/// `socklen_t`, so the narrowing cannot lose anything on any target.
+#[inline]
+fn set_control_len(msg: &mut libc::msghdr, bytes: usize) {
+    msg.msg_controllen = bytes as _;
+}
+
+/// Write `cmsg_len` for a control message that carries `payload` bytes.
+///
+/// # Safety
+///
+/// `header` must point at a `cmsghdr` that lies inside a control buffer this
+/// process owns and that is alive for the write.
+unsafe fn set_cmsg_len(header: *mut libc::cmsghdr, payload: usize) {
+    // `CMSG_LEN` takes a `c_uint` and returns one on every Linux libc.
+    let payload = u32::try_from(payload).unwrap_or(u32::MAX);
+    // SAFETY: `CMSG_LEN` is arithmetic from libc's headers; it reads no memory
+    // and its argument is a length, not a pointer.
+    let len = unsafe { libc::CMSG_LEN(payload) };
+    // SAFETY: the caller guarantees `header` points at a live `cmsghdr`. The
+    // write stays a raw-pointer write — the same buffer is also reached through
+    // `CMSG_DATA` — so no `&mut` is created that would claim the whole header.
+    unsafe { (*header).cmsg_len = len as _ };
+}
 
 /// The backlog used by [`bind_unix_listener`].
 ///
@@ -95,7 +145,7 @@ pub fn send_with_fd(sock: BorrowedFd<'_>, bytes: &[u8], fd: BorrowedFd<'_>) -> i
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = buffer.0.len();
+    set_control_len(&mut msg, buffer.0.len());
 
     // SAFETY: `msg_control` points at `buffer`, which is at least
     // `CMSG_SPACE(size_of::<c_int>())` bytes of aligned storage, and
@@ -109,12 +159,14 @@ pub fn send_with_fd(sock: BorrowedFd<'_>, bytes: &[u8], fd: BorrowedFd<'_>) -> i
     unsafe {
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len =
-            libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as libc::size_t;
+        // SAFETY: `cmsg` points into `buffer`, which is alive here.
+        set_cmsg_len(cmsg, std::mem::size_of::<libc::c_int>());
         ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<libc::c_int>(), fd.as_raw_fd());
     }
-    msg.msg_controllen =
-        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) } as usize;
+    // SAFETY: `CMSG_SPACE` is arithmetic from libc's headers; it reads no
+    // memory.
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) };
+    set_control_len(&mut msg, control_len(space));
 
     // SAFETY: `msg` describes one valid iovec and one valid control message,
     // both alive for the duration of the call.
@@ -144,7 +196,7 @@ pub fn recv_with_fd(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize, 
     msg.msg_iov = &mut iov;
     msg.msg_iovlen = 1;
     msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-    msg.msg_controllen = buffer.0.len();
+    set_control_len(&mut msg, buffer.0.len());
 
     // SAFETY: `msg` describes one valid iovec and one valid control buffer,
     // both alive for the duration of the call.
@@ -198,18 +250,23 @@ unsafe fn collect_fds(msg: &libc::msghdr) -> Vec<OwnedFd> {
     // The buffer the kernel was allowed to write into, as bounds to check the
     // peer's `cmsg_len` against.
     let buffer_start = msg.msg_control as usize;
-    let buffer_end = buffer_start.saturating_add(msg.msg_controllen);
+    let buffer_end = buffer_start.saturating_add(control_len(msg.msg_controllen));
     // SAFETY: the caller guarantees `msg` describes a valid control buffer
     // that outlives this function.
     let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(msg) };
     while !cmsg.is_null() {
         // SAFETY: `cmsg` points inside the control buffer `msg` describes.
-        let (level, kind, len) =
-            unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len) };
+        let (level, kind, len) = unsafe {
+            (
+                (*cmsg).cmsg_level,
+                (*cmsg).cmsg_type,
+                control_len((*cmsg).cmsg_len),
+            )
+        };
         if level == libc::SOL_SOCKET && kind == libc::SCM_RIGHTS {
             // SAFETY: `CMSG_LEN(0)` is the header length of an empty control
             // message; what is left after the header is the payload.
-            let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+            let header_len = control_len(unsafe { libc::CMSG_LEN(0) });
             let payload = len.saturating_sub(header_len);
             // SAFETY: the header is inside the buffer, so its data pointer is
             // inside it too.
@@ -254,6 +311,13 @@ impl CmsgBuffer {
         Self([0_u8; Self::LEN])
     }
 }
+
+/// The control buffer must fit the narrowest length field any Linux libc
+/// declares for it (`socklen_t`, `u32`, in musl), or [`set_control_len`] would
+/// truncate the length it writes. Two headers and a descriptor are a few dozen
+/// bytes, so this holds with room to spare on every target — and now it is
+/// checked at compile time instead of being a comment.
+const _: () = assert!(CmsgBuffer::LEN <= libc::socklen_t::MAX as usize);
 
 /// Bind `addr` with `SO_REUSEADDR`, close-on-exec, and listen.
 ///
@@ -320,11 +384,7 @@ pub fn bind_unix_listener(path: &Path, owner_uid: u32, mode: u32) -> io::Result<
     // Hold the directory itself: everything below is done relative to this
     // descriptor, so a symlink swapped in under `path` cannot make init touch
     // something else, and the socket mode is never a path-based `chmod`.
-    let dir = rustix::fs::open(
-        parent,
-        OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
+    let dir = open_dir_nofollow(parent)?;
 
     match rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(stat) => match FileType::from_raw_mode(stat.st_mode) {
@@ -373,10 +433,27 @@ pub fn bind_unix_listener(path: &Path, owner_uid: u32, mode: u32) -> io::Result<
 
 /// Set the mode of the socket file `name` inside `dir`, without following a
 /// symlink at the last component.
+///
+/// # Kernels without `fchmodat2`
+///
+/// `fchmodat2` is Linux 6.5 and newer, and gVisor does not have it. The
+/// decision here is to **degrade, not refuse**: `ENOSYS`/`EINVAL` falls back to
+/// [`chmod_socket_via_proc`], which reaches the same inode through an
+/// `O_PATH|O_NOFOLLOW` descriptor and a `/proc/self/fd/<n>` magic link, and so
+/// keeps the no-symlink-follow guarantee this function exists for. Refusing
+/// would make every pre-6.5 kernel (and every gVisor host) unable to start a
+/// pg proxy at all, for a guarantee the fallback also provides.
+///
+/// The fallback failing is still fatal — the caller returns before `listen`, so
+/// a socket never becomes reachable with the umask's mode. On a host with no
+/// `/proc` both routes are unavailable and that error is what the caller sees;
+/// it names a requirement we cannot meet rather than serving a too-open socket.
 fn chmod_socket(dir: BorrowedFd<'_>, name: &OsStr, path: &Path, mode: u32) -> io::Result<()> {
     match fchmodat2(dir, name, mode) {
         Ok(()) => Ok(()),
-        // No `fchmodat2`: Linux before 6.5, and gVisor today.
+        // No `fchmodat2`: an architecture whose syscall number this crate
+        // cannot trust, a kernel before 6.5, gVisor, or a seccomp filter that
+        // answers `EINVAL`.
         Err(err) if matches!(err.raw_os_error(), Some(libc::ENOSYS) | Some(libc::EINVAL)) => {
             chmod_socket_via_proc(dir, name, path, mode)
         }
@@ -384,8 +461,52 @@ fn chmod_socket(dir: BorrowedFd<'_>, name: &OsStr, path: &Path, mode: u32) -> io
     }
 }
 
+/// `fchmodat2`'s syscall number, where this crate can state it.
+///
+/// `fchmodat2` was added to Linux's *unified* syscall table, where one number
+/// serves every architecture: 452. `libc` 0.2.191 only publishes
+/// `SYS_fchmodat2` for some of those architectures (x86, x86_64, m68k, s390x,
+/// loongarch64) — aarch64, arm and riscv are missing it, which is what broke
+/// the aarch64 build — so the number is written here.
+///
+/// The list is deliberately the architectures that share the unified table.
+/// alpha, mips, parisc and sparc keep their own numbering, where 452 is some
+/// *other* syscall: guessing there would not compile-fail, it would call
+/// something unrelated. On those the constant is `None`, [`fchmodat2`] reports
+/// `ENOSYS` without making a call, and [`chmod_socket`] takes the `/proc`
+/// route it already takes on pre-6.5 kernels.
+#[cfg(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm",
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "s390x",
+    target_arch = "loongarch64",
+))]
+const FCHMODAT2_SYSCALL: Option<libc::c_long> = Some(452);
+
+/// See the unified-table constant above.
+#[cfg(not(any(
+    target_arch = "x86",
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm",
+    target_arch = "riscv32",
+    target_arch = "riscv64",
+    target_arch = "s390x",
+    target_arch = "loongarch64",
+)))]
+const FCHMODAT2_SYSCALL: Option<libc::c_long> = None;
+
 /// `fchmodat2(dirfd, name, mode, AT_SYMLINK_NOFOLLOW)`.
 fn fchmodat2(dir: BorrowedFd<'_>, name: &OsStr, mode: u32) -> io::Result<()> {
+    let Some(number) = FCHMODAT2_SYSCALL else {
+        // Not available as a trustworthy number on this architecture; the
+        // caller reads `ENOSYS` as "no `fchmodat2` here" and falls back.
+        return Err(io::Error::from_raw_os_error(libc::ENOSYS));
+    };
     let name = CString::new(name.as_bytes())
         .map_err(|_| io::Error::other("a file name cannot contain a NUL byte"))?;
     // SAFETY: `fchmodat2` takes a descriptor, a NUL-terminated path, a mode and
@@ -393,7 +514,7 @@ fn fchmodat2(dir: BorrowedFd<'_>, name: &OsStr, mode: u32) -> io::Result<()> {
     // that makes it refuse a symlink at the last component.
     let ret = unsafe {
         libc::syscall(
-            libc::SYS_fchmodat2,
+            number,
             dir.as_raw_fd(),
             name.as_ptr(),
             mode as libc::mode_t,
@@ -522,629 +643,4 @@ fn create_parents(path: &Path) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use std::io::Write;
-
-    use std::os::fd::{AsFd, AsRawFd};
-    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-
-    use rustix::net::sockopt::{set_socket_passcred, socket_passcred, socket_reuseaddr};
-
-    use super::*;
-    use crate::Error;
-    use crate::drop_privileges;
-    use crate::fd::fd_is_cloexec;
-    use crate::testutil::{
-        TempDir, euid, in_child, is_root, must, must_err, must_some, open_fds, read_to_end,
-        root_only, write_all,
-    };
-
-    #[test]
-    fn socketpair_stream_is_connected_and_cloexec() {
-        let (left, right) = must(socketpair_stream());
-        assert!(must(fd_is_cloexec(left.as_fd())));
-        assert!(must(fd_is_cloexec(right.as_fd())));
-        write_all(left.as_fd(), b"ping");
-        let mut buf = [0_u8; 8];
-        // SAFETY: `read` writes at most `buf.len()` bytes into a valid buffer.
-        let read = unsafe { libc::read(right.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
-        assert_eq!(read, 4);
-        assert_eq!(&buf[..4], b"ping");
-    }
-
-    #[test]
-    fn pipe_ends_are_cloexec() {
-        let (read_end, write_end) = must(pipe());
-        assert!(must(fd_is_cloexec(read_end.as_fd())));
-        assert!(must(fd_is_cloexec(write_end.as_fd())));
-        write_all(write_end.as_fd(), b"logs");
-        drop(write_end);
-        assert_eq!(read_to_end(read_end), b"logs");
-    }
-
-    #[test]
-    fn send_with_fd_passes_a_descriptor_that_works() {
-        let (sender, receiver) = must(socketpair_stream());
-        let (log_read, log_write) = must(pipe());
-        assert_eq!(
-            must(send_with_fd(sender.as_fd(), b"payload", log_write.as_fd())),
-            7
-        );
-
-        let mut buf = [0_u8; 16];
-        let (len, fd) = must(recv_with_fd(receiver.as_fd(), &mut buf));
-        assert_eq!(&buf[..len], b"payload");
-        let received = must_some(fd);
-        assert!(
-            must(fd_is_cloexec(received.as_fd())),
-            "MSG_CMSG_CLOEXEC must apply to the received descriptor"
-        );
-
-        // The received descriptor is a duplicate of the write end: writing
-        // through it has to reach the far end of the pipe.
-        write_all(received.as_fd(), b"through the received fd");
-        drop(received);
-        drop(log_write);
-        assert_eq!(read_to_end(log_read), b"through the received fd");
-    }
-
-    #[test]
-    fn recv_with_fd_returns_none_when_no_descriptor_arrives() {
-        let (sender, receiver) = must(socketpair_stream());
-        write_all(sender.as_fd(), b"plain");
-        let mut buf = [0_u8; 16];
-        let (len, fd) = must(recv_with_fd(receiver.as_fd(), &mut buf));
-        assert_eq!(&buf[..len], b"plain");
-        assert!(fd.is_none());
-    }
-
-    #[test]
-    fn recv_with_fd_closes_extra_descriptors_and_refuses_the_message() {
-        // In a forked child, so that "how many descriptors are open" only
-        // counts this test's descriptors: the harness's other tests allocate
-        // and close descriptors while this one runs.
-        let code = in_child(|| {
-            let (sender, receiver) = match socketpair_stream() {
-                Ok(pair) => pair,
-                Err(_) => return 1,
-            };
-            let (first_read, first_write) = match pipe() {
-                Ok(pair) => pair,
-                Err(_) => return 2,
-            };
-            let (second_read, second_write) = match pipe() {
-                Ok(pair) => pair,
-                Err(_) => return 3,
-            };
-            let before = open_fds().len();
-
-            send_many_fds(
-                sender.as_fd(),
-                b"two",
-                &[first_write.as_raw_fd(), second_write.as_raw_fd()],
-            );
-
-            let mut buf = [0_u8; 16];
-            match recv_with_fd(receiver.as_fd(), &mut buf) {
-                Err(err) => match Error::from_io(&err) {
-                    Some(Error::TooManyFds { count }) if *count == 2 => {}
-                    _ => return 4,
-                },
-                Ok(_) => return 5,
-            }
-            if &buf[..3] != b"two" {
-                return 6;
-            }
-            if open_fds().len() != before {
-                return 7;
-            }
-            // Both ends we sent are still ours and still usable.
-            drop((first_read, first_write, second_read, second_write, sender));
-            0
-        });
-        assert_eq!(code, 0, "child failure code {code}");
-    }
-
-    /// Send several descriptors in one message — something the crate's own API
-    /// deliberately refuses to do, so the receiver has to clean up.
-    fn send_many_fds(sock: BorrowedFd<'_>, bytes: &[u8], fds: &[libc::c_int]) {
-        #[repr(align(8))]
-        struct Buffer([u8; 128]);
-        let mut buffer = Buffer([0_u8; 128]);
-        let mut iov = libc::iovec {
-            iov_base: bytes.as_ptr().cast::<libc::c_void>().cast_mut(),
-            iov_len: bytes.len(),
-        };
-        // SAFETY: `msghdr` is a plain C struct; all zero is a valid empty header.
-        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-        msg.msg_iov = &mut iov;
-        msg.msg_iovlen = 1;
-        msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-        msg.msg_controllen = buffer.0.len();
-        // SAFETY: the control buffer is large enough for the descriptors we
-        // write into it, and it outlives the call below.
-        unsafe {
-            let cmsg = libc::CMSG_FIRSTHDR(&msg);
-            assert!(!cmsg.is_null());
-            (*cmsg).cmsg_level = libc::SOL_SOCKET;
-            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            let payload = std::mem::size_of_val(fds);
-            (*cmsg).cmsg_len = libc::CMSG_LEN(payload as u32) as libc::size_t;
-            let data = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
-            for (index, fd) in fds.iter().enumerate() {
-                ptr::write_unaligned(data.add(index), *fd);
-            }
-            msg.msg_controllen = libc::CMSG_SPACE(payload as u32) as usize;
-            let written = libc::sendmsg(sock.as_raw_fd(), &msg, 0);
-            assert_eq!(written as usize, bytes.len());
-        }
-    }
-
-    #[test]
-    fn send_with_fd_refuses_an_empty_payload() {
-        let (sender, _receiver) = must(socketpair_stream());
-        let (_read, write_end) = must(pipe());
-        let err = must_err(send_with_fd(sender.as_fd(), b"", write_end.as_fd()));
-        assert!(
-            matches!(Error::from_io(&err), Some(Error::EmptyPayload)),
-            "got {err}"
-        );
-    }
-
-    #[test]
-    fn recv_with_fd_is_not_confused_by_credentials() {
-        // A socket with SO_PASSCRED also receives SCM_CREDENTIALS; the control
-        // buffer has room for it and the descriptor still arrives.
-        let (sender, receiver) = must(socketpair_stream());
-        must(set_socket_passcred(receiver.as_fd(), true));
-        let (_read, write_end) = must(pipe());
-        assert_eq!(
-            must(send_with_fd(sender.as_fd(), b"x", write_end.as_fd())),
-            1
-        );
-
-        let mut buf = [0_u8; 8];
-        let (len, fd) = must(recv_with_fd(receiver.as_fd(), &mut buf));
-        assert_eq!(&buf[..len], b"x");
-        assert!(fd.is_some(), "SCM_CREDENTIALS must not hide the descriptor");
-    }
-
-    #[test]
-    fn collect_fds_never_reads_past_the_control_buffer() {
-        // A peer (or a future kernel) claiming more descriptors than the
-        // control buffer can hold must not make the receiver take ownership of
-        // anything past the end of the buffer.
-        let (_read, write_end) = must(pipe());
-        // SAFETY: `dup` takes an open descriptor and returns a new one.
-        let first = unsafe { libc::dup(write_end.as_raw_fd()) };
-        // SAFETY: same.
-        let second = unsafe { libc::dup(write_end.as_raw_fd()) };
-        assert!(first > 0 && second > 0, "dup failed");
-
-        #[repr(align(8))]
-        struct Buffer([u8; 64]);
-        let mut buffer = Buffer([0_u8; 64]);
-        let mut iov = libc::iovec {
-            iov_base: std::ptr::null_mut(),
-            iov_len: 0,
-        };
-        // SAFETY: `msghdr` is a plain C struct; all zero is a valid empty header.
-        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
-        msg.msg_iov = &mut iov;
-        msg.msg_control = buffer.0.as_mut_ptr().cast::<libc::c_void>();
-        msg.msg_controllen = buffer.0.len();
-        // SAFETY: the control buffer is 64 bytes, and the header plus one
-        // descriptor fits in the first 20 bytes the kernel would have filled.
-        unsafe {
-            let cmsg = libc::CMSG_FIRSTHDR(&msg);
-            assert!(!cmsg.is_null());
-            (*cmsg).cmsg_level = libc::SOL_SOCKET;
-            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-            // Claims two descriptors...
-            (*cmsg).cmsg_len =
-                libc::CMSG_LEN((2 * std::mem::size_of::<libc::c_int>()) as u32) as libc::size_t;
-            let data = libc::CMSG_DATA(cmsg).cast::<libc::c_int>();
-            ptr::write_unaligned(data, first);
-            ptr::write_unaligned(data.add(1), second);
-        }
-        // ... but the buffer that was filled in only has room for one.
-        msg.msg_controllen =
-            unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) } as usize;
-
-        // SAFETY: the header describes a control buffer that is alive for the
-        // duration of the call and holds descriptors this process owns.
-        let fds = unsafe { collect_fds(&msg) };
-        assert_eq!(fds.len(), 1, "the count must be clamped to the buffer");
-        drop(fds);
-
-        // The second descriptor was never taken, so it is still open and still
-        // ours to close.
-        // SAFETY: `second` came from `dup` and nothing else has closed it.
-        assert_eq!(unsafe { libc::fcntl(second, libc::F_GETFD) }, 0);
-        // SAFETY: `second` is ours.
-        assert_eq!(unsafe { libc::close(second) }, 0);
-    }
-
-    #[test]
-    fn bind_tcp_sets_reuseaddr_and_cloexec() {
-        let addr = must("127.0.0.1:0".parse::<SocketAddr>());
-        let listener = must(bind_tcp(addr, 16));
-        assert!(must(fd_is_cloexec(listener.as_fd())));
-        assert!(must(socket_reuseaddr(listener.as_fd())));
-        assert_ne!(must(listener.local_addr()).port(), 0);
-    }
-
-    #[test]
-    fn bind_tcp_accepts_a_connection() {
-        let addr = must("127.0.0.1:0".parse::<SocketAddr>());
-        let listener = must(bind_tcp(addr, 16));
-        let local = must(listener.local_addr());
-        let client = std::thread::spawn(move || {
-            let mut stream = must(std::net::TcpStream::connect(local));
-            must(stream.write_all(b"hello"));
-        });
-        let (mut accepted, _peer) = must(listener.accept());
-        let mut buf = [0_u8; 8];
-        let mut filled = 0;
-        while filled < 5 {
-            let read = must(std::io::Read::read(&mut accepted, &mut buf[filled..]));
-            assert_ne!(read, 0);
-            filled += read;
-        }
-        assert_eq!(&buf[..5], b"hello");
-        must(client.join());
-    }
-
-    #[test]
-    fn bind_unix_listener_sets_mode_passcred_and_owner() {
-        let dir = TempDir::new("unix-listen");
-        must(std::fs::create_dir_all(dir.path()));
-        let owner = if is_root() { 20_500 } else { euid() };
-        must(make_private_dir(dir.path(), owner, 0o700));
-        let socket = dir.path().join(".s.PGSQL.5432");
-
-        let listener = must(bind_unix_listener(&socket, owner, 0o600));
-        let meta = must(std::fs::symlink_metadata(&socket));
-        assert!(meta.file_type().is_socket(), "the path holds a socket");
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            0o600,
-            "a view's pg socket is 0600"
-        );
-        assert_eq!(meta.uid(), owner, "the socket belongs to the view uid");
-        assert_eq!(meta.gid(), owner, "gid == uid");
-        assert!(
-            must(socket_passcred(listener.as_fd())),
-            "SO_PASSCRED must be on before anything can connect"
-        );
-        assert!(must(fd_is_cloexec(listener.as_fd())));
-
-        let client = must(std::os::unix::net::UnixStream::connect(&socket));
-        let (accepted, _addr) = must(listener.accept());
-        assert!(
-            must(socket_passcred(accepted.as_fd())),
-            "the accepted socket inherits SO_PASSCRED"
-        );
-        write_all(accepted.as_fd(), b"R");
-        drop(client);
-    }
-
-    #[test]
-    fn bind_unix_listener_sets_the_exact_mode() {
-        let dir = TempDir::new("unix-mode");
-        must(std::fs::create_dir_all(dir.path()));
-        let uid = euid();
-        must(make_private_dir(dir.path(), uid, 0o700));
-        for mode in [0o600_u32, 0o640, 0o666, 0o400] {
-            let socket = dir.path().join(format!("s{mode:o}"));
-            let _listener = must(bind_unix_listener(&socket, uid, mode));
-            let meta = must(std::fs::symlink_metadata(&socket));
-            assert_eq!(
-                meta.permissions().mode() & 0o777,
-                mode,
-                "the socket must have exactly the mode it was asked for"
-            );
-        }
-    }
-
-    #[test]
-    fn chmod_socket_via_proc_sets_the_socket_mode() {
-        // The route a kernel without `fchmodat2` takes (gVisor today), exercised
-        // directly because the kernel under test cannot be chosen.
-        let dir = TempDir::new("unix-proc");
-        must(std::fs::create_dir_all(dir.path()));
-        let uid = euid();
-        must(make_private_dir(dir.path(), uid, 0o700));
-        let socket = dir.path().join(".s.PGSQL.5432");
-        let _listener = must(bind_unix_listener(&socket, uid, 0o644));
-
-        let directory = must(rustix::fs::open(
-            dir.path(),
-            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ));
-        let name = must_some(socket.file_name());
-        must(chmod_socket_via_proc(
-            directory.as_fd(),
-            name,
-            &socket,
-            0o640,
-        ));
-        assert_eq!(
-            must(std::fs::symlink_metadata(&socket))
-                .permissions()
-                .mode()
-                & 0o777,
-            0o640
-        );
-    }
-
-    #[test]
-    fn chmod_socket_via_proc_refuses_a_symlink() {
-        let dir = TempDir::new("unix-proc-link");
-        must(std::fs::create_dir_all(dir.path()));
-        let target = dir.path().join("target");
-        must(std::fs::write(&target, b"x"));
-        let link = dir.path().join("link");
-        must(std::os::unix::fs::symlink(&target, &link));
-
-        let directory = must(rustix::fs::open(
-            dir.path(),
-            OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        ));
-        let name = must_some(link.file_name());
-        let err = must_err(chmod_socket_via_proc(directory.as_fd(), name, &link, 0o777));
-        assert!(
-            matches!(Error::from_io(&err), Some(Error::NotASocket { .. })),
-            "got {err}"
-        );
-    }
-
-    #[test]
-    fn a_bound_but_unlistened_socket_refuses_connections() {
-        // Why the mode may lag the `bind` by a few microseconds: until
-        // `listen` runs there is nothing to connect to, whatever the mode is.
-        let dir = TempDir::new("unix-unlistened");
-        must(std::fs::create_dir_all(dir.path()));
-        let socket = dir.path().join(".s.PGSQL.5432");
-        let addr = must(SocketAddrUnix::new(&socket));
-        let fd = must(socket_with(
-            AddressFamily::UNIX,
-            SocketType::STREAM,
-            SocketFlags::CLOEXEC,
-            None,
-        ));
-        must(bind(&fd, &addr));
-        // Bound, not listening: no accept queue exists yet.
-        let err = must_err(std::os::unix::net::UnixStream::connect(&socket));
-        assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused, "got {err:?}");
-        // And with a queue it works, so the assertion above is about `listen`.
-        must(listen(&fd, UNIX_BACKLOG));
-        let _client = must(std::os::unix::net::UnixStream::connect(&socket));
-    }
-
-    #[test]
-    fn bind_unix_listener_replaces_a_stale_socket() {
-        let dir = TempDir::new("unix-stale");
-        must(std::fs::create_dir_all(dir.path()));
-        let owner = euid();
-        let socket = dir.path().join(".s.PGSQL.5432");
-
-        let first = must(bind_unix_listener(&socket, owner, 0o600));
-        // Dropping the listener closes the descriptor but leaves the file
-        // behind, which is what a crash looks like from the next start.
-        drop(first);
-        assert!(
-            must(std::fs::symlink_metadata(&socket))
-                .file_type()
-                .is_socket()
-        );
-
-        let _second = must(bind_unix_listener(&socket, owner, 0o600));
-        assert!(
-            must(std::fs::symlink_metadata(&socket))
-                .file_type()
-                .is_socket()
-        );
-    }
-
-    #[test]
-    fn bind_unix_listener_refuses_a_regular_file() {
-        let dir = TempDir::new("unix-file");
-        must(std::fs::create_dir_all(dir.path()));
-        let socket = dir.path().join(".s.PGSQL.5432");
-        must(std::fs::write(&socket, b"not a socket"));
-
-        let err = must_err(bind_unix_listener(&socket, euid(), 0o600));
-        assert!(
-            matches!(Error::from_io(&err), Some(Error::NotASocket { .. })),
-            "got {err}"
-        );
-        assert!(socket.exists(), "somebody else's file is left alone");
-    }
-
-    #[test]
-    fn bind_unix_listener_refuses_a_symlink() {
-        let dir = TempDir::new("unix-link");
-        must(std::fs::create_dir_all(dir.path()));
-        let target = dir.path().join("target");
-        must(std::fs::write(&target, b"x"));
-        let socket = dir.path().join(".s.PGSQL.5432");
-        must(std::os::unix::fs::symlink(&target, &socket));
-
-        let err = must_err(bind_unix_listener(&socket, euid(), 0o600));
-        assert!(
-            matches!(Error::from_io(&err), Some(Error::NotASocket { .. })),
-            "got {err}"
-        );
-        assert!(
-            must(std::fs::symlink_metadata(&socket))
-                .file_type()
-                .is_symlink(),
-            "the symlink is not unlinked"
-        );
-        assert!(target.exists(), "the target is not touched");
-    }
-
-    #[test]
-    fn bind_unix_listener_refuses_a_directory() {
-        let dir = TempDir::new("unix-dir");
-        must(std::fs::create_dir_all(dir.path()));
-        let socket = dir.path().join(".s.PGSQL.5432");
-        must(std::fs::create_dir(&socket));
-
-        let err = must_err(bind_unix_listener(&socket, euid(), 0o600));
-        assert!(
-            matches!(Error::from_io(&err), Some(Error::NotASocket { .. })),
-            "got {err}"
-        );
-        assert!(
-            must(std::fs::symlink_metadata(&socket))
-                .file_type()
-                .is_dir()
-        );
-    }
-
-    #[test]
-    fn bind_unix_listener_is_closed_to_another_uid() {
-        if !root_only() {
-            return;
-        }
-        let dir = TempDir::new("unix-uid");
-        must(std::fs::create_dir_all(dir.path()));
-        let owner = 20_500_u32;
-        let other = 20_501_u32;
-        must(make_private_dir(dir.path(), owner, 0o700));
-        let socket = dir.path().join(".s.PGSQL.5432");
-        let _listener = must(bind_unix_listener(&socket, owner, 0o600));
-
-        // The view uid can connect: 0700 directory, 0600 socket, both its own.
-        let owner_socket = socket.clone();
-        let code = in_child(move || {
-            if drop_privileges(owner).is_err() {
-                return 1;
-            }
-            match std::os::unix::net::UnixStream::connect(&owner_socket) {
-                Ok(_) => 0,
-                Err(_) => 2,
-            }
-        });
-        assert_eq!(code, 0, "the view uid must connect (child code {code})");
-
-        // Any other uid gets EACCES, which is the identity check of §2.2.
-        let other_socket = socket.clone();
-        let code = in_child(move || {
-            if drop_privileges(other).is_err() {
-                return 1;
-            }
-            match std::os::unix::net::UnixStream::connect(&other_socket) {
-                Ok(_) => 3,
-                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => 0,
-                Err(_) => 4,
-            }
-        });
-        assert_eq!(code, 0, "another uid must get EACCES (child code {code})");
-    }
-
-    #[test]
-    fn make_private_dir_creates_parents_with_separate_modes() {
-        let root = TempDir::new("mkpriv");
-        must(std::fs::create_dir_all(root.path()));
-        let owner = if is_root() { 20_500 } else { euid() };
-        let leaf = root.path().join("views").join("20500");
-        must(make_private_dir(&leaf, owner, 0o700));
-
-        let leaf_meta = must(std::fs::symlink_metadata(&leaf));
-        assert!(leaf_meta.file_type().is_dir());
-        assert_eq!(leaf_meta.permissions().mode() & 0o777, 0o700);
-        assert_eq!(leaf_meta.uid(), owner, "the leaf belongs to the view uid");
-        assert_eq!(leaf_meta.gid(), owner, "gid == uid");
-
-        let parent = must(std::fs::symlink_metadata(root.path().join("views")));
-        assert_eq!(parent.permissions().mode() & 0o777, 0o755);
-        if is_root() {
-            assert_eq!(parent.uid(), 0, "parents stay root-owned");
-        }
-    }
-
-    #[test]
-    fn make_private_dir_accepts_an_existing_directory_and_fixes_its_mode() {
-        let root = TempDir::new("mkpriv-again");
-        let leaf = root.path().join("views").join("20500");
-        must(std::fs::create_dir_all(&leaf));
-        must(std::fs::set_permissions(
-            &leaf,
-            std::fs::Permissions::from_mode(0o777),
-        ));
-        must(make_private_dir(&leaf, euid(), 0o700));
-        // A restart over a warm /run must not fail, and must end up strict.
-        must(make_private_dir(&leaf, euid(), 0o700));
-        assert_eq!(
-            must(std::fs::symlink_metadata(&leaf)).permissions().mode() & 0o777,
-            0o700
-        );
-    }
-
-    #[test]
-    fn make_private_dir_refuses_a_symlink() {
-        let root = TempDir::new("mkpriv-link");
-        let target = root.path().join("target");
-        must(std::fs::create_dir_all(&target));
-        let before = must(std::fs::symlink_metadata(&target))
-            .permissions()
-            .mode()
-            & 0o777;
-        let link = root.path().join("link");
-        must(std::os::unix::fs::symlink(&target, &link));
-
-        let err = must_err(make_private_dir(&link, euid(), 0o700));
-        match Error::from_io(&err) {
-            Some(Error::NotADirectory { path }) => assert_eq!(path, &link),
-            other => panic!("expected NotADirectory, got {other:?} ({err})"),
-        }
-        assert_eq!(
-            must(std::fs::symlink_metadata(&target))
-                .permissions()
-                .mode()
-                & 0o777,
-            before,
-            "the symlink target must not be touched"
-        );
-        assert!(
-            must(std::fs::symlink_metadata(&link))
-                .file_type()
-                .is_symlink(),
-            "the symlink must still be a symlink"
-        );
-    }
-
-    #[test]
-    fn make_private_dir_refuses_a_regular_file() {
-        let root = TempDir::new("mkpriv-file");
-        must(std::fs::create_dir_all(root.path()));
-        let leaf = root.path().join("not-a-dir");
-        must(std::fs::write(&leaf, b"x"));
-        let err = must_err(make_private_dir(&leaf, euid(), 0o700));
-        assert!(
-            matches!(Error::from_io(&err), Some(Error::NotADirectory { .. })),
-            "got {err}"
-        );
-    }
-
-    #[test]
-    fn make_private_dir_refuses_a_parent_that_is_a_file() {
-        let root = TempDir::new("mkpriv-parent");
-        must(std::fs::create_dir_all(root.path()));
-        let file = root.path().join("file");
-        must(std::fs::write(&file, b"x"));
-        let err = must_err(make_private_dir(&file.join("leaf"), euid(), 0o700));
-        assert!(
-            matches!(Error::from_io(&err), Some(Error::NotADirectory { .. })),
-            "got {err}"
-        );
-    }
 }

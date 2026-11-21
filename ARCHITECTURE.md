@@ -1,8 +1,9 @@
 # blastit — Architecture
 
-blastit is a WSGI server for Python that **sandboxes views**. Each view runs
-under its own uid, and a view only gets the capabilities the manifest lists for
-it. For now that means the database: route X may run parameterised queries A
+blastit is a zero-trust application harness for 12-factor web apps (Python WSGI,
+embedded PHP 8.3–8.6, and static sites) that **sandboxes views**. Each view runs
+under its own uid, and a view only gets the capabilities the `Blastfile` lists
+for it. For now that means PostgreSQL: route X may run parameterised queries A
 and B, route Y may run query C, and nothing else. If an attacker takes over a
 view, they get that view's allowlist and nothing more.
 
@@ -55,37 +56,45 @@ Section 9 summarises the parts of both that matter here.
 
 ## 2. Components
 
-A single Rust binary, `blastit`, plays every role. Most roles are chosen by
+A single serving Rust binary, `blastit`, plays every role. Most roles are chosen by
 their position in the process tree. The exception is dbproxy, which is
 re-exec'd with `--role=dbproxy` (§4); that flag grants nothing by itself,
-because the secrets only arrive over an inherited pipe. CPython is embedded
-through `pyo3`, as in the `pywsgi` experiment. The database proxy is
+because the secrets only arrive over an inherited pipe. CPython (`3.13`, `3.14`)
+is `dlopen`ed in stage 1 via an fd-pinned per-minor `libblastit_py3{13,14}` shim
+only when a Python route is active ([ADR-0017](docs/decisions/ADR-0017-universal-distribution.md)),
+the host's NTS `libphp` is `dlopen`ed in a
+PHP route (§2.6), a `static` mount is answered by the scheduler through the
+`blastit-view-static` library (§2.4), so an all-static site needs no interpreter
+at all. The database proxy is
 built on the [`pregresql`](https://github.com/OffworldNexus/pregresql) crate,
 used as a library. On the Python side there is no framework integration at
-all: blastit loads one standard WSGI callable (`BLASTIT_APP`, or the manifest's
-`app`) and calls it. It knows nothing about the framework's routing. Which
+all: blastit loads one standard WSGI callable (`BLASTIT_APP`, or the file's
+`entrypoint`). It knows nothing about the framework's routing. Which
 process serves which request comes from blastit's own routing table in the
-manifest (§6).
+manifest (§6). A second binary, `blastit-lsp`, is the **editor** surface: it
+plays no role in this process tree, and §2.7 says what it may and may not link.
 
-**Execution modes.** Four entry points:
+**Execution modes.** Six entry points:
 
 | Entry point | Mode | Runs |
 |---|---|---|
 | `blastit` | production | stage 0, then `execve` stage 1 under real uids or capabilities; refuses to start without them |
-| `blastit dev` | single-uid simulation | the same five roles under `geteuid()`, loopback by default; a non-loopback bind needs `--host` and `BLASTIT_DEV_EXPOSE=1`, and the banner then says `EXPOSED, no auth`; `--learn` allows what the manifest lacks and records it |
-| `blastit check` (`blastit test`) | audit | `pytest` through dbproxy; `--learn` writes the missing routes and exact `queries` |
-| `blastit-manifest fold` | manifest tooling | the missing grants a log's denials name |
+| `blastit dev` | single-uid simulation | the same five roles under `geteuid()`, loopback by default, with `fanotify` live reload (`--no-reload` turns it off); a non-loopback bind needs `--host` and `BLASTIT_DEV_EXPOSE=1`, and the banner then says `EXPOSED, no auth`; `--learn` allows what the manifest lacks and records it |
+| `blastit check` (`blastit test`) | audit | `pytest` through dbproxy (or static-root audit on an all-static file); `--learn` proposes new views with their exact grants, never a grant on an existing view (`dev --learn` does that) |
+| `blastit fmt` | formatter | lossless canonical formatting of `./Blastfile` (or `--check` in CI) |
+| `blastit lsp` / `blastit-lsp` | language server | stdio JSON-RPC LSP for `Blastfile` diagnostics, formatting, `$?`/`...` hover, and SQL parameterisation Quick Fixes |
 
 The component table below is the production topology; `blastit dev` runs the
-same roles on one uid.
+same roles on one uid. A `static` mount adds no row: the scheduler answers it
+itself (§2.4).
 
-| Component | Count | uid | Python? | Holds | Talks to |
+| Component | Count | uid | Interpreter? | Holds | Talks to |
 |---|---|---|---|---|---|
 | **init** | 1 (PID 1) | 0, or the uid it was started as (D6) | stage 1 only | listen socket, all internal socket ends while forking, preloaded app | everyone (control) |
 | **dbproxy** | 1 (own `execve`) | `UID_BASE+3` | no | **the real DB credentials**, the query policy, one listener per view | views (Unix sockets), PostgreSQL (TCP/TLS) |
 | **http** | 1 | `UID_BASE+1` | no | the listening TCP socket | load balancer, scheduler |
 | **scheduler** | 1 | `UID_BASE+2` | no | the manifest's routing table, worker budget, one channel per view process | http, init, view processes |
-| **view** | 1 per view (lazy) | `UID_BASE+1000+i` | yes | nothing but its own channel | scheduler, dbproxy |
+| **view** | 1 per view (lazy) | `UID_BASE+1000+i` | CPython, or the host's `libphp` for `entrypoint php` (§2.6) | nothing but its own channel | scheduler, dbproxy |
 
 `UID_BASE` defaults to `20000`. DO maps the full 32-bit uid range (the spike
 used uids up to 2³²−2), but we stay below 65536 for portability. None of these
@@ -167,10 +176,15 @@ names the capability-free copy of a standalone install's own binary (which
 writable by neither group nor others, in a directory that is not either: a uid
 that could replace it would decide what the credentials-holding process runs next.
 
-**Distribution.** A tagged release publishes the wheels to PyPI through trusted
-publishing (`.github/workflows/publish-pypi.yml`); from an sdist, the build
-backend builds `blastit-dbproxy` from the workspace inside it, so a source
-install carries the same binary as a wheel.
+**Distribution.** A tagged release publishes `py3-none-*` wheels to PyPI through
+trusted publishing (`.github/workflows/publish-pypi.yml`), native `.deb`/`.rpm`
+packages to signed APT/RPM repositories (`.github/workflows/packages.yml`), and
+standalone archives; from an sdist, `maturin build --bindings bin` builds the same
+universal `blastit` binary from the workspace inside it. [ADR-0017](docs/decisions/ADR-0017-universal-distribution.md)
+(`docs/design/universal-distribution.md`) unifies every Linux package (`.deb`,
+`.rpm`, `.tar.gz`, `py3-none-*` wheels, and the Composer wrapper) around one
+`libpython`-free `blastit` binary that loads CPython (`3.13`, `3.14`) and NTS
+`libphp` (`8.3`–`8.6`) via fd-pinned per-minor `dlopen` shims.
 
 ### 2.2 dbproxy
 
@@ -216,8 +230,8 @@ gVisor.
     on that proxy has no listener at all. The real upstream comes from the
     proxy's inputs: host, port, role, password, database, TLS mode and CA.
 * **`QueryHook`**
-  * `authorize` checks the statement against the route's effective grants:
-    the union of its inline grants, its groups and the global groups (§6).
+  * `authorize` checks the statement against the view's effective grants:
+    the union of its own grants and those of every trait it `use`s (§6).
     Everything else is denied with SQLSTATE `42501` before it reaches the
     server, and logged as a `sql.denied` event (§8.1).
 
@@ -271,15 +285,17 @@ The scheduler is the only component that knows about every view process. It
 is pure Rust, with no interpreter. It is forked before Python is loaded, like
 http.
 
-* **Routing.** It matches the request against the manifest's routing table
-  (§6): each route's path regexes, and optionally its methods, tried in
-  manifest order; the first match wins. If nothing matches, the scheduler
-  answers `404` itself and no Python runs. A catch-all route (`path = ".*"`,
-  listed last) lets the app render its own 404s. Every routing decision is
-  logged as a `request` event (§8.1).
+* **Routing.** It matches the request against the file's routing table
+  (§6): each view's patterns, and optionally its methods, tried in
+  file order; the first match wins. If nothing matches, the scheduler
+  answers `404` itself and no Python runs. A catch-all view (`view fallback
+  "/*" {}`, listed last) lets the app render its own 404s. Every routing
+  decision is logged as a `request` event (§8.1).
 * **Admission.** It keeps one global budget, `BLASTIT_MAX_WORKERS`, which is
-  the number of request threads alive across all view processes. It can also
-  enforce a per-view cap. Excess requests wait in a bounded FIFO
+  the number of live request slots across all view processes (each route owns
+  one threaded Python process or a pool of single-request PHP processes, each
+  admitting `per_process_cap` requests, forked one at a time up to
+  `BLASTIT_MAX_WORKERS`). Excess requests wait in a bounded FIFO
   (`BLASTIT_QUEUE_SIZE`, `BLASTIT_QUEUE_TIMEOUT`); once that overflows, the
   answer is `503`. A request at the head that cannot be served — its route's
   view is not ready — does not hold up the requests behind it whose route can.
@@ -322,6 +338,57 @@ http.
   that went away, a view that died — charges that observed time instead. The
   `request` event keeps both numbers: `cost_ns` (what was charged) and `cpu_ns`
   (what the worker reported, `null` when it reported nothing).
+* **A `5xx` says which failure it was, and only a crash pays the wall.** A
+  status alone cannot tell an application's own server error from a handler
+  that never returned, and both leave the same `RESP_HEAD`, so `DONE` carries
+  the missing fact (`MB.3.41`): `bailed` means a contained `exit()`/`die()`/a
+  fatal was trapped by the SAPI shim. Three rules follow, one per kind:
+  * an app that **answers** a `5xx` itself (a framework's `500`, a script's
+    `http_response_code(500)`) returned from its handler: the request is
+    `outcome: "ok"` — the view answered — with that `status`, and `cost_ns`
+    keeps the clamp above, exactly as a `200` does;
+  * a **contained bailout** answers its `5xx` without returning: `outcome:
+    "bailed"`, and `cost_ns` is the request's own wall time (arrival to last
+    byte) — `R19`'s crash ceiling at the one live thread such a worker has —
+    so a crash loop can never cost less than the client waited, and the view's
+    report is not believed at all;
+  * a `5xx` the **scheduler** wrote itself (the `502` of a view that never
+    answered, the `504` of `BLASTIT_REQUEST_TIMEOUT`, a `503` refusal) keeps its
+    own outcome (`view_died`, `timeout`, `queue_full`/`queue_timeout`) and is
+    charged dispatch to completion, because no view answered it and it never
+    held the worker its arrival span covers. `view_died` therefore still means
+    only "the view process died mid-request".
+
+#### The static responder
+
+A `static` mount is answered by the scheduler itself: same process, same uid,
+same inherited listener — no new role, no new uid, no new socket. The
+**resolution** (`static_asset`), the **decision** (`rewrite`) and the **head**
+(`static_response`) are `blastit-view-static`'s, a library called by the
+scheduler; the scheduler keeps admission, the slot and the descriptor pump, and
+the answer leaves as `blastit-frame`'s `RespHead`/`RespBody` frames through the
+scheduler's own `http.chan` writer — `blastit-view` reaches the scheduler only
+as the request-target decoder it re-exports. Each root's
+dirfd is opened once at boot (`O_PATH|O_DIRECTORY` on
+`manifest_dir.join(root)`); a request's path is resolved beneath that descriptor
+and never re-opened from a joined string.
+
+One total order decides, first match wins: the health path; a route with no
+policy is untouched; a malformed path (`400`) or a dotfile at any depth (`404`,
+except `.well-known` as the first segment); an exact regular file; a directory's
+`index`; `fallback` and `root/index`; the file's `entrypoint` when it declares
+one; otherwise `404`. A refusal is terminal — never the app, never the fallback
+— and the responder answers `GET`/`HEAD` only: a servable target gives `405`
+with exactly `Allow: GET, HEAD`, and a `GET`/`HEAD` that declares a body gives
+`413`. Only a file beneath `root` is reachable: `openat2` with
+`RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_MAGICLINKS` (a per-segment
+`O_NOFOLLOW` walk where the kernel has no `openat2`), an `O_PATH` probe
+classified by `fstat`, then a read-open whose `(st_dev, st_ino)` must match the
+probe — so a symlink, FIFO, socket, device or path swapped between the two opens
+is `404` and is never read. `..`, NUL and the other malformed paths are `400`
+before any syscall, so no refusal depends on the filesystem's state. The
+year-long `Cache-Control` is keyed on the **answering** file's path: a directory
+`index` and a SPA fallback are always `no-cache`.
 
 #### Design choices
 
@@ -335,7 +402,10 @@ http.
   cannot report zero for a request it took real time to answer. It can only buy
   itself the gap between its first frame and its last one — that is, exactly the
   time its own client was waiting for it. A view that says nothing is charged what
-  the scheduler saw.
+  the scheduler saw. The one exception is a view that **bails out** of a `5xx` it
+  had answered (`DONE`'s `bailed`): its report is not believed at all, and it is
+  charged its own wall time instead, because the one report that must never be
+  cheap is a crash loop's.
 * **One lane per route, and one worker budget across routes.** The queue only
   ever serves the route a queued request belongs to, so the lanes are the routes;
   the best flow is compared across them because they all compete for
@@ -386,7 +456,10 @@ its process.)
   is handed to a **pooled request thread** that attaches to the interpreter:
   one that has just finished a request parks and takes the next, retiring once
   it has been idle for a while, so a busy view does not create and destroy a
-  thread per request. That thread builds a standard WSGI `environ` and calls
+  thread per request. The pool, the WSGI `environ`, the response frames and the
+  loop are `blastit-view-python`'s; `blastit-view` carries the frames and the
+  credit windows, and `blastit` is the composition root that forks the view and
+  passes it the forker. That thread builds a standard WSGI `environ` and calls
   the WSGI callable, the same one in every process, so the app does its own
   routing and middleware as usual. It then streams the response back. Because
   a worker serves many requests, per-thread application state such as
@@ -405,9 +478,123 @@ its process.)
 All app code is mapped into every view process. **The sandbox comes from uid
 privileges, not from code isolation**: view A's process can run view B's
 code, but only with A's database allowlist. The same principle makes routing
-mistakes safe. If the manifest's regexes and the app's own URL routing
+mistakes safe. If the file's patterns and the app's own URL routing
 disagree, a request lands in a process whose allowlist doesn't fit, and its
 queries are denied. It fails closed; it never gains a privilege.
+
+### 2.6 php (embedded)
+
+An `entrypoint php` front controller runs (`entry`, for example
+`public/index.php`) inside a normal view process: one unprivileged process per
+slot under `UID_BASE+1000+i`, forked by the stage-1 supervisor exactly like a
+CPython view (the scheduler's queue, the `ctl.chan` lifecycle, and a fresh
+process whenever the scheduler's budget allows one). There is no `php-fpm`, no
+FastCGI stream and no second server: NTS `libphp` serves one request per
+process, so a PHP file's concurrency is the number of live view processes,
+which `BLASTIT_MAX_WORKERS` caps for the whole app — and each of those
+processes runs one request at a time (`BLASTIT_VIEW_MAX_WORKERS` sizes one
+process and its `RLIMIT_NPROC`, never the route's process count). Nothing in
+the `Blastfile` sets either: the scheduler owns parallelism.
+
+**One transport, one runtime.** The worker is `blastit-view-php`'s concrete
+`PhpEmbedRuntime` — there is no runtime trait, because the interface a view has
+is `view.chan` and the process that speaks it — on the same unnamed `view.chan`
+`socketpair` and the same frames as a WSGI view (§3.1): the scheduler's
+upstream session forwards `ReqHead`/`ReqBody` — as `RawFrame`s wherever it does
+not need to decode them — the runtime answers `RESP_HEAD`/`RESP_BODY` under the
+response credit window, and the transport writes `RESP_END_COST` + `DONE`. The
+boot's discovery gate, the `(st_dev, st_ino)` pins and the probe child live in
+that crate too (`discovery`, `pinning`, `probe`); `blastit`'s stage 0 only
+builds their inputs and formats their sentences. The
+request body is buffered in full before PHP starts (the C ABI takes one slice),
+bounded by `max_body_bytes`; `app.output` lines from the request thread reach
+the log pipes like any view's stdout or stderr.
+
+**The load is fd-verified twice.** Stage 0 resolves the host's NTS `libphp`
+(static `.dynsym` inspection: `executor_globals` present, `tsrm_startup` absent)
+and the matching per-PHP-minor shim (`libblastit_php8X-<arch>-<libc>.so`) by
+opening and `fstat`ing them, records `(path, st_dev, st_ino)` in the
+configuration, and never `dlopen`s. Stage 1 re-opens each
+`O_RDONLY|O_CLOEXEC|O_NOFOLLOW`, asserts the identity against that record, and
+passes the descriptors to the child in `ChildIo.keep`; the child `dlopen`s
+`/proc/self/fd/<n>` (libphp `RTLD_NOW|RTLD_GLOBAL`, shim
+`RTLD_NOW|RTLD_LOCAL`), so a file swapped after inspection cannot be loaded.
+No `libphp` symbol is reachable in init, http, scheduler or dbproxy, and there
+is no path variant to fall back to: a host without a usable NTS `libphp` is a
+boot refusal naming the package (`libphp-embed`, `php85-embed`, `php-embedded`)
+or `BLASTIT_LIBPHP`, never a degraded mode. Before the listener binds, stage 1
+forks one contained probe child per `entrypoint php` view (`EmbeddedView`, the
+route's uid, `PR_SET_PDEATHSIG`, `BLASTIT_PROBE_TIMEOUT_MS`) that runs
+`blastit_php_worker_init` + `shutdown`; a shim that cannot start is that boot's
+`exit 1`, not a first request's fault.
+
+**`$_SERVER` is C memory, not a request stream.** The shim builds it from the
+request and the manifest's fixed facts; `SCRIPT_FILENAME` and `DOCUMENT_ROOT`
+come from `entry` and the application root at boot, never from the path or a
+header. There is no argv, no FastCGI `PHP_VALUE`/`PHP_ADMIN_VALUE`, no
+`REDIRECT_STATUS`, and a `Proxy:` header is dropped before it could become
+`HTTP_PROXY`. The `ZEND_INI_SYSTEM` blob — `open_basedir`, `post_max_size` and
+`upload_max_filesize`, `disable_functions` (`exec`, `shell_exec`, `proc_open`,
+`dl`, the `pcntl`/`posix` process calls), `phar.readonly`/`phar.require_hash`,
+`ffi.enable=0`, `allow_url_include=0`, the opcache and assertion switches — is
+rendered once from `IniPolicy` and cannot be changed per request.
+`php_module_startup` runs once per forked worker, on its own main thread, after
+the privilege drop; the seccomp role (`SeccompRole::EmbeddedView { egress }`)
+keeps every view rule and additionally refuses `execve`, `execveat`, `fork`,
+`vfork` and a process-creating `clone` (§7.3).
+
+**What it costs.** The shim measures `CLOCK_PROCESS_CPUTIME_ID` around
+`php_request_startup`..`php_request_shutdown` outside PHP userland, so `cpu_ns`
+cannot be forged by a script; a zero reading is `null`, never "free". A
+contained `exit()`/`die()`/fatal trapped by `zend_first_try`/`zend_catch` ends
+the request as `DoneOutcome::Bailed` (§2.4): the scheduler charges its wall time,
+and `view_died` keeps meaning only that the process died.
+
+### 2.7 The Rust workspace, crate by crate
+
+`members = ["crates/*"]`; the rows are the members, the one thing each owns, and the direct
+dependencies that decide where it can be built. "Any" means the crate's own code is
+platform-neutral — its transitive C library (`pg_query`'s `libpg_query`) is compiled by `cc` on
+each target, which is why a build host needs a C toolchain and `libclang` and an installed
+artifact needs neither.
+
+| Crate | Owns | Direct dependencies | Builds on |
+|---|---|---|---|
+| `blastit` | the composition root: `cli`, stage 0/1, the supervisor, `forking.rs` and every role below; **no per-language worker code, zero `pyo3`** | `blastit-dbproxy`, `blastit-env`, `blastit-events`, `blastit-frame`, `blastit-http`, `blastit-ingress`, `blastit-lsp`, `blastit-manifest`, `blastit-scheduler`, `blastit-sqlpolicy`, `blastit-sys`, `blastit-view`, optional `blastit-py-sapi` (`python`) and `blastit-view-php` (`php`), plus `libc`, `rustix`, `tokio`, `serde`, `serde_json`, `thiserror` | Linux |
+| `blastit-sys` | the OS surface: fork/exec, uids, capabilities, seccomp, signals, `fanotify`, `/proc`, `elf`, `pin` (verified fd-pinning) | `libc`, `rustix`, `thiserror` | Linux |
+| `blastit-dbproxy` | the PostgreSQL broker library: per-route listener, the query allowlist (`blastit --role=dbproxy`) | `async-trait`, `blastit-events`, `blastit-sqlpolicy`, `blastit-sys`, `pregresql`, `rustix`, `serde`, `serde_json`, `thiserror`, `tokio`, `zeroize`, `tokio-postgres` (dev) | Linux |
+| `blastit-scheduler` | the routing table, the worker budget, fair queuing, the static mount's admission and dispatch (`static` feature) | `blastit-events`, `blastit-frame`, `blastit-ingress`, `blastit-manifest`, `blastit-view`, optional `blastit-view-static` (`static`, default here), `rustix`, `serde_json`, `thiserror`, `tokio` | Linux |
+| `blastit-http` | HTTP/1.1 head parsing, the listener, the client-address resolver | `blastit-events`, `blastit-frame`, `httparse`, `thiserror`, `tokio` | Linux (`#[cfg(unix)]`) |
+| `blastit-view` | **transport only**: `wire`, `flow`, `stream`, `loaded`, `error`, `config`, `sync`, `path` (the one request-target decoder) and `spawn` (the fork seam); no worker, no `pyo3`, no SAPI | `blastit-frame`, `blastit-sys`, `thiserror` | Linux |
+| `blastit-view-python` | the WSGI worker: `environ`, `input`, `request`, `response`, `serve` (the pool), `loaded` (the Python tracker), `immortal`, `zygote` (the fork and child half) | `blastit-frame`, `blastit-sys`, `blastit-view`, `pyo3` | Linux; linked by `blastit-py-shim` only |
+| `blastit-py-sapi` | stage-0 Python discovery (`pyvenv.cfg`/ELF gate), `blastit_py_abi_v1` types, and the stage-1 `dlopen` loader (zero `pyo3`) | `blastit-manifest`, `blastit-sys`, `rustix`, `serde`, `serde_json`, `thiserror` | Linux; `blastit` feature `python` |
+| `blastit-py-shim` | per-minor `libblastit_py3{13,14}-<arch>-<libc>.so` `cdylib` shim (`dlopen`ed in stage 1, never linked into `blastit`) | `blastit-py-sapi`, `blastit-sys`, `blastit-view`, `blastit-view-python`, `pyo3`, `serde`, `serde_json` | Linux (`make py-sapi`) |
+| `blastit-view-php` | the embedded worker: `worker` (`PhpEmbedRuntime`, `view.chan` loop), `discovery` (stage-0 ELF gate), `pinning` (library/shim + entry pins), `probe` (the boot probe child), `spawn` (the PHP fork and child half) | `blastit-frame`, `blastit-manifest`, `blastit-php-sapi`, `blastit-sys`, `blastit-view`, `rustix`, `serde_json` | Linux; `blastit` feature `php` |
+| `blastit-view-static` | `static_asset` (`openat2` resolution), `static_response` (MIME/`ETag`/`immutable`), `rewrite` (SPA answer) — a library the scheduler calls, no process | `blastit-manifest`, `blastit-view`, `rustix`, `thiserror` | Linux; `blastit-scheduler` feature `static` |
+| `blastit-php-sapi` | the C SAPI shim's Rust half (the shim is `dlopen`ed, never linked) | none at runtime — a build script compiles the per-minor C ABI | Linux |
+| `blastit-env` | the `BLASTIT_*` / `ALWAYS_STRIP` barrier and the swapped `envp` | `blastit-manifest`, `percent-encoding`, `thiserror`, `url`, `zeroize` | any |
+| `blastit-manifest` | the `Blastfile`: lexer, parser, model, `validate`, `fmt`, warning sites, and the query vocabulary it re-exports from `blastit-sqlpolicy` | `blastit-ingress`, `blastit-sqlpolicy`, `regex`, `serde`, `thiserror` | any |
+| `blastit-sqlpolicy` | the SQL policy: `pg_query` parse, `parameterize`, table grants | `pg_query`, `serde`, `serde_json` | any |
+| `blastit-ingress` | body codecs and the ingress policy type | `percent-encoding`, `serde`, `serde_json`, `thiserror`, `url` | any |
+| `blastit-frame` | the internal frame codec (`RawFrame`, `Ctl`) | `thiserror` | any |
+| `blastit-events` | the log and event shapes | `serde_json`, `thiserror`, `time` | any |
+| **`blastit-lsp`** | the **editor surface** only: the LSP 3.17 subset on stdin/stdout for `Blastfile`s — bin `blastit-lsp`, lib `blastit_lsp::run()` | **exactly** `blastit-manifest` and `serde_json` | **Linux, macOS, Windows** — five targets |
+
+**The editor surface is cross-platform; serving is Linux-only.** `blastit-lsp` is the one artifact
+Blastit publishes for a developer's own machine rather than for a server: it reads framed LSP on
+stdin, writes it on stdout, opens no file or socket **in its own code**, executes nothing, and
+links no crate that can acquire a uid, a capability or a seccomp filter — `blastit-sys`, `rustix`,
+`nix`, the `libc` crate, `pyo3` and `blastit-php-sapi` are absent from its dependency graph. That
+is what makes the portable build honest (`docs/design/blastfile-lsp-zed.md` §1.3) and why it
+**cannot become a serving binary by accident**: the serving crates are not in its graph, so there
+is no listener to bind and no privilege to drop. It is supported unprivileged only: the release
+ships no file capabilities and no page installs it with `setcap` or `sudo`, and the linked
+manifest crate's file API and `libpg_query`'s parse-only C are in the image (the honest claim is
+about the code path the server runs, not about every symbol in the binary). `blastit lsp` is a
+delegation to the same `blastit_lsp::run()`
+(`crates/blastit/src/lib.rs`: `pub use blastit_lsp as lsp;`), so Linux has one server, not two.
+Everything in §2.1–§2.6 — uids, `execve`, seccomp, `libphp` — exists only on Linux, and the
+editor user must not read this table as a promise of a Windows server.
 
 ---
 
@@ -453,11 +640,11 @@ forks whom). `B` is `BLASTIT_UID_BASE`.
 | # | Channel | Type | Created by | Ends | Carries |
 |---|---|---|---|---|---|
 | ① | `http.chan` | `socketpair(AF_UNIX, SOCK_STREAM)` | init | http ↔ scheduler | request/response frames, muxed by `stream_id` |
-| ② | `ctl.chan` | `socketpair(AF_UNIX, SOCK_STREAM)` | init | init ↔ scheduler | `SPAWN`, `SPAWNED`+fd (`SCM_RIGHTS`), `RETIRE`, `EXITED`, `DRAIN` |
+| ② | `ctl.chan` | `socketpair(AF_UNIX, SOCK_STREAM)` | init | init ↔ scheduler | `SPAWN`, `SPAWNED`+fd (`SCM_RIGHTS`), `RETIRE`, `EXITED`, `DRAIN`, `RELOAD` |
 | ③ | `view.chan` | `socketpair(AF_UNIX, SOCK_STREAM)`, one per view process | init, at spawn | scheduler ↔ view | request/response frames, muxed by `req_id`; `DONE` |
-| ④ | pg sockets | named Unix sockets, one per (route, `postgresql` proxy) with a grant, in `/run/blastit/views/<uid>/` (`0700`), each `0600` and owned by the view uid, `SO_PASSCRED` set | init (stage 0), then inherited by dbproxy | one view → dbproxy | PostgreSQL wire protocol; identity = which listener, checked against `SCM_CREDENTIALS` |
+| ④ | pg sockets | named Unix sockets, one per (view, store) with a grant, in `/run/blastit/views/<uid>/` (`0700`), each `0600` and owned by the view uid, `SO_PASSCRED` set | init (stage 0), then inherited by dbproxy | one view → dbproxy | PostgreSQL wire protocol; identity = which listener, checked against `SCM_CREDENTIALS` |
 | ⑤ | upstream | TCP (+TLS) | dbproxy | dbproxy → PostgreSQL | PostgreSQL wire protocol, real role |
-| — | `secrets.pipe` | `pipe2`, inherited across dbproxy's `execve` | init stage 0 | init → dbproxy, one-shot | each proxy's inputs (real credentials), listener fd → (route, proxy) table, the manifest's grants |
+| — | `secrets.pipe` | `pipe2`, inherited across dbproxy's `execve` | init stage 0 | init → dbproxy, one-shot | each store's inputs (real credentials), listener fd → (view, store) table, the file's grants |
 | — | log pipes | `pipe2`: stdout + stderr for every child, plus an events pipe for http, scheduler and dbproxy | init | child → init | app output and structured events; init is the only writer to stdout (§8.1) |
 | — | listen socket | TCP, `SO_REUSEADDR`, backlog `BLASTIT_BACKLOG` | init | → http | inbound connections |
 
@@ -477,13 +664,19 @@ Rules that apply to every channel:
 * **Never trust `SO_PEERCRED` under gVisor.** It returns the local socket's
   own credentials. Use `SCM_CREDENTIALS` (`SO_PASSCRED`) or the identity of
   the endpoint.
+* **`RELOAD` is one all-views transaction.** init sends the empty message with
+  no route; the scheduler retires every idle worker of every route and marks
+  the busy ones stale, so no two views ever serve different versions of a
+  shared or preloaded module.
 
 ### 3.1 Framing
 
 Channels ① and ③ use the same frame format: `u32 length | u8 type | u32 id |
 payload`, in little-endian, with a hard maximum frame size of
 `BLASTIT_FRAME_MAX` (default 1 MiB). Larger bodies are split into several
-`*_BODY` frames.
+`*_BODY` frames. The codec is `blastit-frame`'s; the flow-control primitives,
+the loaded-file datagram and the one request-target decoder are
+`blastit-view`'s, and no view crate implements a second framing (§2.7).
 
 | Direction | Frames |
 |---|---|
@@ -491,6 +684,7 @@ payload`, in little-endian, with a hard maximum frame size of
 | towards the client | `RESP_HEAD {status, reason, headers}`, `RESP_BODY {bytes}`, `RESP_END` / `RESP_END_COST {cost_ns, cpu_present, cpu_ns}`, `RESP_ABORT {reason}` |
 | view → scheduler only | `DONE {req_id, outcome}`, which releases the worker slot; `READY` (id 0), once, when the view can take requests |
 | both ways | `WINDOW {bytes}`: flow-control credit for this stream's body (see below) |
+| `ctl.chan`, init → scheduler | `RELOAD` (`0x45`), empty payload, id 0: every view reloads together (§3) |
 
 `RESP_END` and `RESP_END_COST` are one frame kind with two wire forms: a view
 that measured what the request cost it sends the second, one that has nothing
@@ -505,6 +699,15 @@ version does not know is still forwarded byte for byte by the raw layer.
 zero it did not take. The scheduler clamps `cost_ns` between the time up to
 this view's first response frame and the time it observed itself, and only
 reports `cpu_ns` — never schedules on it.
+
+`DONE`'s `outcome` is `completed`, `aborted`, `errored` or — since `MB.3.41` —
+`bailed`: a contained `exit()`/`die()`/fatal the SAPI shim trapped, so the
+handler never returned. It is the one fact a response's status cannot carry,
+and both a `5xx` an app answers itself and a `5xx` a dying handler leaves behind
+look identical on `RESP_HEAD`. So a `5xx` a view answered is labelled and
+charged when its `DONE` arrives (one frame later, on the same channel): `bailed`
+for the crash, and `ok` with that status for an answer. See "What a request
+costs" above for the three charge rules.
 
 `REQ_HEAD`'s `peer_addr` is the address of the socket the request arrived on,
 exactly as the kernel reported it — `ip:port`, or an address alone for a peer
@@ -568,7 +771,7 @@ sequenceDiagram
     C->>H: HTTP/1.1 request
     H->>H: parse, enforce limits, normalise headers
     H->>S: REQ_HEAD (+ REQ_BODY…, REQ_END)
-    S->>S: match path against the manifest regexes → view (404 if none)
+    S->>S: match the path against the file's patterns → view (404 if none)
     alt worker budget exhausted
         S->>S: wait in queue (BLASTIT_QUEUE_TIMEOUT)
         S-->>H: 503 if the queue is full or the wait times out
@@ -585,7 +788,7 @@ sequenceDiagram
     D->>P: connect with the real role over TLS
     loop each statement
         T->>D: Parse / Bind / Execute (or Query)
-        alt granted to the route (inline, its groups or global groups)
+        alt granted to the view (its own grants, or a trait it uses)
             D->>P: forward
             P-->>D: result
             D-->>T: result
@@ -643,7 +846,7 @@ sequenceDiagram
 
     Note over I0: single-threaded
     I0->>I0: read env, parse BLASTIT_*, parse + validate manifest
-    I0->>I0: read each [proxy.*] input from env → upstream config<br/>render output templates (§5)
+    I0->>I0: read each store's variables from env → upstream config<br/>render the local endpoint (§5)
     I0->>I0: build uid table (http, scheduler, dbproxy, one per route)
     I0->>I0: create /run/blastit/views/<uid> (0700, owned by each view uid)
     I0->>I0: bind one pg listener per (route, proxy) granted<br/>chown to the view uid, 0600, SO_PASSCRED
@@ -663,11 +866,11 @@ sequenceDiagram
     Note over H: setuid(B+1) · start tokio<br/>serve listen fd ↔ http.chan
     I1->>S: fork (before CPython is initialised)
     activate S
-    Note over S: setuid(B+2) · compile the manifest regexes<br/>serve http.chan ↔ ctl.chan
+    Note over S: setuid(B+2) · compile the file's patterns<br/>serve http.chan ↔ ctl.chan
     I1->>I1: init CPython · import BLASTIT_APP and BLASTIT_PRELOAD modules<br/>run BLASTIT_WARMUP (optional)
     I1->>I1: close DB connections · gc.collect()
     I1->>I1: immortalize every reachable object (§9.2) · gc.freeze()
-    opt BLASTIT_VIEW_SPAWN=eager, or views with prefork = true
+    opt BLASTIT_VIEW_SPAWN=eager, or views that declare prefork
         I1->>V: fork × N (see below)
     end
     Note over I1: supervise: waitpid loop, ctl.chan, log pipes, signals
@@ -677,7 +880,10 @@ Two things hold at every step: init is single-threaded whenever it forks, and
 no secret exists in stage 1.
 
 Every view process is created the same way, whether at startup in eager mode
-or on demand:
+or on demand. The fork itself is `blastit-view-python`'s `zygote` for a WSGI
+view and `blastit-view-php`'s `spawn` for a PHP view; `blastit`'s `forking.rs`
+is the one `fork_for` they are handed, and the ordered child sequence below is
+`blastit_sys::child::enter`.
 
 ```mermaid
 sequenceDiagram
@@ -719,85 +925,77 @@ reported as kept when it could not be (M1).
 If anything in a stage fails, the whole container exits non-zero. A
 half-started sandbox is worse than a crash loop that the platform can see.
 
+**The serve path's manifest gates are a value, not a statement.** The production
+serve path parses and validates the manifest, then takes its gates before it
+binds a view socket: `ServeGates::clear` is the only constructor and it *is*
+`raw_ingress_gate` (`ADR-0011`), and `bind_view_sockets` takes `&ServeGates`. A
+boot therefore cannot bind without the gates having passed in this process, and
+deleting the call site is a compile error rather than a silent fail-open. The
+gate's process behaviour is measured through stage 1's re-read of the same
+manifest (`critical_raw_ingress`), because an unprivileged `cargo test` cannot
+reach a stage-0 gate that lives after the capability check; the ordering half is
+the type, which is why it is the witness.
+
 ---
 
 ## 5. Proxies and environment variable swapping
 
 Configuration comes **only** from environment variables. Before stage 1, init
 rewrites the environment that the application will see. The rewrite is
-driven by the `[proxy.*]` sections of the manifest (§6).
+driven by the store sections of the `Blastfile` (§6).
 
-### 5.1 Proxies
+### 5.1 Stores
 
-A **proxy** is a named broker for one external service. It declares:
-* the **protocol** it speaks (`postgresql` for now);
-* the **input** variables it owns: the platform's real configuration and
-  credentials, which only the proxy gets to see;
-* the **output** variables the app sees instead: templates that point at the
-  proxy's local endpoint.
+A **store** is a named broker for one external service. The protocol is the
+keyword, and the file names the variables it owns without holding their values:
 
-```toml
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }
-# No output table: DATABASE_URL is rewritten in place, DATABASE_CA_CERT disappears.
-
-[proxy.analytics]
-protocol = "postgresql"
-input = { url = "ANALYTICS_URL" }
-[proxy.analytics.output]                # the app wants split variables for this one
-ANALYTICS_DB_HOST = "{{ socket_dir }}"
-ANALYTICS_DB_PORT = "{{ port }}"
-ANALYTICS_DB_NAME = "{{ database }}"
-ANALYTICS_DB_USER = "{{ user }}"
+```text
+postgres $DATABASE_URL                 # the default store, one libpq URL
+postgres analytics $ANALYTICS_URL      # a named second store
+postgres {                             # the default store, split slots
+    host $DB_HOST
+    port $DB_PORT
+    user $DB_USERNAME
+    password $DB_PASSWORD
+    database $DB_DATABASE
+}
 ```
 
 With DO's environment, the app ends up seeing:
 
 ```
 platform: DATABASE_URL=postgresql://doadmin:s3cr3t@db-xyz.db.ondigitalocean.com:25060/defaultdb?sslmode=require
-          DATABASE_CA_CERT=-----BEGIN CERTIFICATE-----…
           ANALYTICS_URL=postgresql://reader:t0ps3cr3t@db-abc.db.ondigitalocean.com:25060/analytics?sslmode=require
 app:      DATABASE_URL=postgresql://blastit@/defaultdb?host=/proc/self/cwd&port=5433
-          ANALYTICS_DB_HOST=/proc/self/cwd
-          ANALYTICS_DB_PORT=5432
-          ANALYTICS_DB_NAME=analytics
-          ANALYTICS_DB_USER=blastit
+          ANALYTICS_URL=postgresql://blastit@/analytics?host=/proc/self/cwd&port=5432
 ```
 
 **Rules:**
-* **Inputs.** `input` maps the protocol's input slots to environment variable
-  names. Every input variable is removed from the app's environment unless an
-  output of the same name redefines it. A missing input variable aborts the
-  boot.
-* **Outputs.** `output` maps variable names to templates. Without an `output`
-  table, the protocol's default applies: each input variable is replaced by
-  the equivalent local value under the *same name*. That's the
-  `DATABASE_URL` → `DATABASE_URL` case, which needs no configuration.
-* **Collisions.** An output may not overwrite a variable it doesn't own (one
-  that isn't one of its own inputs), and two proxies may not produce the same
-  variable. Either aborts the boot instead of silently clobbering
-  configuration.
-* **Grants refer to proxies by name.** Routes and groups grant
-  `[route.db]`, `[group.session.analytics]`, and so on (§6). What a grant may
-  contain is defined by the protocol.
+* **Every input variable keeps its name and gets the local value.** A slot's
+  variable is the `$IDENT` written beside it, and `password` and `ca_cert` are
+  removed because they have no local value. The real values are read once, in
+  stage 0, and handed to dbproxy over a pipe.
+* **A URL or the split slots, never both.** A URL's query parameters are
+  allowlisted, so a URL cannot smuggle a session setting or a credential past
+  the broker.
+* **A grant names a store, and a store is declared once.** Routes and traits
+  grant `postgres { … }`, `postgres analytics { … }`, and so on (§6); a grant on
+  a store the file never declared aborts the boot.
+* **The file holds no credential.** A `Blastfile` carrying a password — or a
+  quoted literal where `$IDENT` belongs — is a syntax error, so no credential
+  can be committed with the policy.
 
-**Templates** are deliberately tiny. `{{ field }}` inserts a field and
-`{{ field | urlencode }}` percent-encodes it; there is no logic, no loops and
-no access to the environment. Templates are rendered once, in stage 0. An
-unknown field or filter aborts the boot.
-
-**Secrets can't be templated.** The fields a protocol offers to templates
-describe only the *local* endpoint plus a few non-secret facts. Passwords,
-upstream hosts and CA material never reach a template, so no output can leak
-them.
+The local endpoint is **rendered once, in stage 0**, and the fields it is built
+from describe only the *local* endpoint plus a few non-secret facts. Passwords,
+upstream hosts and CA material never reach the renderer, so no rendered value
+can leak them.
 
 ### 5.2 Protocol `postgresql`
 
 Served by dbproxy (§2.2). One listener per (route, proxy) for routes that
 have a grant on that proxy. Each `postgresql` proxy gets its own local port:
 `5432 + k`, *k* being the proxy's index among the `postgresql` proxies sorted
-by name (so the order of `[proxy.*]` sections doesn't matter).
+by name (so the order a file declares its stores in doesn't matter).
 
 | Input slot | Content | Notes |
 |---|---|---|
@@ -821,7 +1019,7 @@ by name (so the order of `[proxy.*]` sections doesn't matter).
 * `sslmode` → `disable`, since the local leg is a Unix socket;
 * `password` and `ca_cert` → removed.
 
-**Grant contents:** `queries` (§6) and `transaction_control`.
+**Grant contents:** the exact `query` lines and whether `transactions` is granted (§6).
 
 The socket directory travels in a **query parameter** because that is the one
 spelling every consumer resolves: libpq reads `host` and `port` from the query
@@ -838,9 +1036,9 @@ authenticates by socket identity.
 
 ### 5.3 The rest of the environment
 
-1. **Strip.** All `BLASTIT_*` variables, every proxy input, and anything
+1. **Strip.** All `BLASTIT_*` variables, every store input, and anything
    listed in `BLASTIT_ENV_STRIP` (for example `PGPASSWORD`, or DO bindables
-   you injected but don't route through a proxy) are removed.
+   you injected but don't route through a store) are removed.
 2. **Inject.** The process-safety defaults below are added, unless the
    variable is already set:
 
@@ -882,176 +1080,175 @@ Proxies are the general pattern for every future capability: **replace the
 credential with a local endpoint served by a broker that checks the
 manifest**. A new protocol (Redis, S3-style object storage, outbound HTTP
 APIs) adds a protocol definition: input slots, template fields, default
-outputs, grant contents and a broker process. The manifest syntax doesn't
+outputs, grant contents and a broker process. The `Blastfile` syntax doesn't
 change. Secrets that the app itself must hold, such as Django's
 `SECRET_KEY`, can't be swapped and stay visible to every view.
 
 ---
 
-## 6. The manifest
+## 6. The `Blastfile`
 
-The manifest is a file in the image (`BLASTIT_MANIFEST`, default
-`/app/blastit.toml`). It is versioned with the code, because it describes the
-code. dbproxy reads it in stage 0; init and the scheduler read it in stage 1.
+The `Blastfile` is a file in the image (`BLASTIT_MANIFEST`, default
+`./Blastfile`, no upward search). It is versioned with the code, because it
+describes the code. dbproxy reads it in stage 0; init and the scheduler read it
+in stage 1. Its grammar, keywords and error shapes are the
+[Blastfile reference](docs/reference/blastfile.md); this section is what the
+rest of the process tree does with it.
 
-`version`, `app` (`module:attribute`) and `preload` (a module, or a list of
-them, imported once before the fork) are top-level; `BLASTIT_APP` and
-`BLASTIT_PRELOAD` override the last two. A route that takes a body declares
-`[route.ingress]` with `body = "json" | "form" | "none" | "raw"`: `json` and
-`form` are decoded and re-encoded before the app sees them (a body that does not
-fit is a `400`), `none` rejects any body, and `raw` passes untouched and also
-needs `allow_raw = true`. A body to a route without that table is a `413`.
+`entrypoint python` (with its optional `preload` block), `entrypoint php`, or no
+executor at all decide what runs; `BLASTIT_APP` and `BLASTIT_PRELOAD` override
+the first two. A view that takes a body declares a codec with `body json`,
+`form`, `none` or `raw`: `json` and `form` are decoded and re-encoded before the
+app sees them (a body that does not fit is a `400`), `none` rejects any body,
+and `raw` passes untouched and also needs `unvalidated`. A body to a view with
+no `body` is a `413`.
 
-It is **blastit's own routing table**, independent of the framework. Besides
-the proxies (`[proxy.*]`, §5), it has two kinds of entries.
+It is **blastit's own routing table**, independent of the framework. Besides the
+stores (§5), it has three kinds of entries.
 
-* **Routes** (`[[route]]`) are sandboxes: one process, one uid each. A route
-  says which requests go to it (path regexes, optionally methods), what it
-  may do, whether it may open outbound connections, and whether it is
-  preforked. Its grants can be written **directly in the route**
-  (`[route.<database>]`, the usual case), taken from groups, or both.
-* **Groups** are optional named sets of the same grants, for statements that
-  several routes share. A group grants nothing until it is attached: to some
-  routes (`groups = […]` in the route), or to all of them (`groups = […]` at
-  the top level).
+* **Views** are sandboxes: one process, one uid each. A view says which requests
+  go to it (patterns, optionally methods), what it may do, whether it may open
+  outbound connections, and whether it is preforked. Its grants are written
+  **inside the view** (`postgres { … }`, the usual case), taken from traits, or
+  both.
+* **Traits** are optional named sets of the same grants, for statements several
+  views share. A trait grants nothing until a view attaches it with `use`.
+* **Mounts** (`static "/…" { … }`) serve files from one directory and need no
+  process of their own.
 
-A grant, inline or in a group, is per proxy (§5): for a `postgresql` proxy,
-the SQL statements allowed and whether transaction control is allowed.
+A grant, in a view or in a trait, is per store (§5): for a `postgres` store, the
+statements allowed and whether transaction control is allowed.
 
 The app is never asked anything. It receives ordinary WSGI requests and routes
 them itself, exactly as it would behind any other WSGI server.
 
-```toml
-version = 1
-app = "myshop.wsgi:application"     # WSGI callable; BLASTIT_APP overrides it
-preload = ["myshop.urls"]           # imported once, before the fork
-groups = ["session"]                # attached to every route (top-level keys come before any [table])
+```text title="Blastfile"
+app "myshop"
 
-[proxy.db]                          # see §5 for proxies and their variables
-protocol = "postgresql"
-input = { url = "DATABASE_URL", ca_cert = "DATABASE_CA_CERT" }
+entrypoint python "myshop.wsgi:application" {   # WSGI callable; BLASTIT_APP overrides it
+    preload "myshop.urls"                       # imported once, before the fork
+}
+
+postgres $DATABASE_URL                          # see §5 for stores and their variables
+
+postgres analytics $ANALYTICS_URL
 
 # Connection setup, plus what middleware does on every request.
-[group.session.db]                  # grant on proxy "db" (§5)
-transaction_control = true          # BEGIN/COMMIT/ROLLBACK, SAVEPOINT/RELEASE sp_*
-queries = [
-  "SET TIME ZONE 'UTC'",
-  'SELECT "django_session"."session_key", "django_session"."session_data", "django_session"."expire_date" FROM "django_session" WHERE ("django_session"."expire_date" > $1 AND "django_session"."session_key" = $2) LIMIT 21',
-]
+trait session {                                 # grant on the "db" store (§5)
+    postgres {
+        transactions                            # BEGIN/COMMIT/ROLLBACK, SAVEPOINT/RELEASE sp_*
+        query "SET TIME ZONE 'UTC'"
+        query 'SELECT "django_session"."session_key", "django_session"."session_data", "django_session"."expire_date" FROM "django_session" WHERE ("django_session"."expire_date" > $? AND "django_session"."session_key" = $?) LIMIT 21'
+    }
+}
 
-[group.catalog.db]
-queries = [
-  'SELECT "shop_product"."id", "shop_product"."name" FROM "shop_product" WHERE "shop_product"."id" = $1 LIMIT 21',
-]
+trait catalog {
+    postgres {
+        query 'SELECT "shop_product"."id", "shop_product"."name" FROM "shop_product" WHERE "shop_product"."id" = $? LIMIT 21'
+    }
+}
 
-[[route]]
-name = "product-detail"
-path = ['/products/[0-9]+/']        # full match against PATH_INFO
-methods = ["GET", "HEAD"]           # optional; default: any method
-groups = ["catalog"]                # shared with checkout; nothing else needed here
-prefork = true                      # hot route: fork at startup, skip first-hit fork latency
+view product_detail GET "/products/{id:int}" {  # full match against the path
+    use session, catalog                        # shared with checkout; nothing else needed here
+    prefork                                     # hot view: fork at startup, skip first-hit latency
+}
 
-[[route]]
-name = "checkout"
-path = ['/checkout/.*']
-groups = ["catalog"]
-egress = true                       # may open TCP connections (payment API); see §7.3
-[route.ingress]
-body = "form"                       # decoded and re-encoded before the app sees it
-[route.db]                          # inline grants, only for this route
-queries = [
-  'INSERT INTO "shop_order" ("product_id", "qty") VALUES ($1, $2) RETURNING "shop_order"."id"',
-]
+view checkout POST "/checkout" {
+    body form                                   # decoded and re-encoded before the app sees it
+    egress any                                  # may open TCP connections (payment API); see §7.3
+    use session, catalog
+    postgres {                                  # a grant only this view has
+        query 'INSERT INTO "shop_order" ("product_id", "qty") VALUES ($?, $?) RETURNING "shop_order"."id"'
+    }
+}
 
-[[route]]
-name = "admin"                      # staff-only back-office: its SQL is too varied to list
-path = ['/admin/.*']
-[route.db]
-unrestricted = true                 # any statement on "db"; flagged at boot
+view admin GET "/admin/*" {                     # staff-only back-office: its SQL is too varied to list
+    postgres unrestricted                       # any statement on "db"; flagged at boot
+}
 
-[[route]]
-name = "about"
-path = ['/about/']
-[route.db]                          # inline only: no group involved
-queries = ['SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $1 LIMIT 21']
+view about GET "/about/" {
+    postgres {                                  # the view's own block: no trait involved
+        query 'SELECT "cms_page"."body" FROM "cms_page" WHERE "cms_page"."slug" = $? LIMIT 21'
+    }
+}
 
-[[route]]
-name = "restaurants"
-path = ['/restaurants/.*']
-[route.db.tables]                   # instead of listing every statement (D7)
-restaurants_restaurant = { select = ["id", "slug", "name"] }
-restaurants_cuisinetype = { select = "*" }               # every column
-orders_order = { select = "*", insert = "*", update = ["status", "accepted_at"], delete = true }
-[route.db]
-functions = ["st_distance", "unaccent"]                  # beyond the built-in safe set
+view restaurants GET "/restaurants/*" {
+    postgres {                                  # instead of listing every statement
+        select restaurants_restaurant(id, slug, name)
+        select restaurants_cuisinetype          # every column
+        select orders_order                     # a bare table reads any column
+        insert orders_order
+        update orders_order(status, accepted_at)
+        delete orders_order
+        functions st_distance, unaccent         # beyond the built-in safe set
+    }
+    postgres analytics {
+        select events(id)
+    }
+}
 
-[[route]]
-name = "fallback"                   # catch-all: the app renders its own 404s
-path = ['.*']                       # without it, unmatched paths get blastit's own 404
-                                    # only the global groups; add grants if error pages need the DB
+view fallback "/*" {}                           # catch-all: the app renders its own 404s
+                                                # without it, unmatched paths get blastit's own 404
+                                                # only the traits it uses; add grants if error pages need the DB
 ```
 
-* **Effective grants.** A route's allowlist for a database is the union of
-  its inline queries, its groups' queries and the global groups' queries, for
-  that database. `transaction_control` is on if any of them turns it on;
-  `unrestricted` is on if any of them turns it on, but a *group* that turns it
-  on aborts the boot (below), so in practice it is only ever inline. A route
-  with no grant for a database gets no listener for it at all (§2.2).
-* **Table and column grants.** A `postgresql` grant may say which **tables and
-  columns** a route may read and write, instead of — or next to — the statements
-  it may run. `[route.<db>.tables]` has one entry per table: `select`, `insert`
-  and `update` take a list of column names or the string `"*"` (every column),
-  and `delete` is `true`; `functions` lists the function calls allowed beyond the
-  built-in safe set. A statement that is not listed exactly is parsed with
-  PostgreSQL's own parser (`libpg_query` — a second implementation would be a
-  parser differential, and any text the two read differently is a bypass) and
-  allowed when every table, column and function it touches is granted. Anything
-  else is refused: another statement kind, a construct the analysis does not
-  understand, a function nobody granted. Reading a column anywhere — a `WHERE`,
-  an `ORDER BY`, a join condition — is reading it; `*` needs `select = "*"` on
-  every base table it expands to, through derived relations; `count(*)` reads no
-  column; an unqualified column has to be granted on every relation in scope
-  that could provide it; `public.t` is `t` and any other schema keeps its
-  qualified name; `pg_catalog` and `information_schema` are never readable this
-  way; a function call must be in the built-in safe set or in `functions`
-  (`pg_catalog.x` is `x`). A route's tables are the union of its own, its
-  groups' and the global groups', with `"*"` absorbing a column list, and
-  `unrestricted` with `tables` (or `functions`) is a boot error like
-  `unrestricted` with `queries`. Every base table a statement names must appear
-  in the grant, even when no column of it is read (a row count or an EXISTS
-  reveals it); unqualified `pg_*` names are never grantable as tables, since
-  `pg_catalog` comes first on every search path — statements on the catalogue
-  stay exact `queries`; casts to `reg*` and to types other than the built-in
-  plain ones need a `functions` entry. A row lock is the same shape: a
-  locking clause (`FOR UPDATE`, `FOR NO KEY UPDATE`, `FOR SHARE`, `FOR KEY
-  SHARE`, with or without `OF …`, and through a derived relation) needs an
-  `update` entry on every base table it locks — but on **any one column**,
-  because PostgreSQL asks for the UPDATE privilege on a single column of a
-  locked table — so `update = ["id"]` is enough for a route that only reads
-  the rows it locks, while the columns it reads still need `select`; the
-  denial reads `update on t (any column, to lock its rows) not granted`.
-* **Rewriting a manifest from a test suite.** The pytest plugin (D3b) reports,
-  per `(route, proxy)`, the smallest `tables`/`functions` grant covering every
-  statement the route ran, with the TOML to paste in, so a route can be moved
-  from exact queries to table grants in one step. A table a statement only
-  locks gets an `update` entry on one column the route already reads (`id`
-  when it reads one, otherwise the first), never `"*"` — a lock needs the
-  UPDATE privilege on *any one* column, so `"*"` would hand out every column of
-  the table — and the snippet says so in a comment. A statement that locks a
-  table without reading a column of it (`SELECT 1 FROM t FOR UPDATE`, `SELECT *
-  FROM t FOR UPDATE`) names no column at all: the covering grant leaves the
-  `update` entry out, the snippet says to name one (the primary key, say), and
-  the statement stays an exact `queries` entry, which is what the tooling
-  writes for it. A **global** group's grants are reported once and not once
-  per route: a statement it grants is in every route's effective grant, so
-  listing it as unused per route would repeat one dead grant as many times as
-  there are routes (D3c).
+* **Effective grants.** A view's allowlist for a store is the union of its own
+  block, every trait it `use`s, and nothing else: a `Blastfile` has no
+  file-level grant. `transactions` is on if any contributor turns it on;
+  `unrestricted` is on if any contributor turns it on, but a *trait* that turns
+  it on aborts the boot (below), so in practice it is only ever a view's own. A
+  view with no grant for a store gets no listener for it at all (§2.2).
+* **Table and column grants.** A `postgres` grant may say which **tables and
+  columns** a view may read and write, instead of — or next to — the statements
+  it may run. `select <table>(<columns>)` takes a column list, a bare
+  `select <table>` reads every column, `insert` and `update` take a column list,
+  and `delete <table>` deletes rows; `functions` lists the function calls
+  allowed beyond the built-in safe set. A statement that is not listed exactly
+  is parsed with PostgreSQL's own parser (`libpg_query` — a second
+  implementation would be a parser differential, and any text the two read
+  differently is a bypass) and allowed when every table, column and function it
+  touches is granted. Anything else is refused: another statement kind, a
+  construct the analysis does not understand, a function nobody granted. Reading
+  a column anywhere — a `WHERE`, an `ORDER BY`, a join condition — is reading
+  it; a bare `select <table>` covers every column it expands to, through derived
+  relations; `count(*)` reads no column; an unqualified column has to be granted
+  on every relation in scope that could provide it; `public.t` is `t` and any
+  other schema keeps its qualified name; `pg_catalog` and `information_schema`
+  are never readable this way; a function call must be in the built-in safe set
+  or in `functions` (`pg_catalog.x` is `x`). A view's tables are the union of its
+  own and its traits', and `unrestricted` next to a table or `functions` grant is
+  a boot error. Every base table a statement names must appear in the grant, even
+  when no column of it is read (a row count or an EXISTS reveals it); unqualified
+  `pg_*` names are never grantable as tables, since `pg_catalog` comes first on
+  every search path — statements on the catalogue stay exact `query` lines; casts
+  to `reg*` and to types other than the built-in plain ones need a `functions`
+  entry. A row lock is the same shape: a locking clause (`FOR UPDATE`, `FOR NO
+  KEY UPDATE`, `FOR SHARE`, `FOR KEY SHARE`, with or without `OF …`, and through
+  a derived relation) needs an `update` entry on every base table it locks — but
+  on **any one column**, because PostgreSQL asks for the UPDATE privilege on a
+  single column of a locked table — so `update <table>(id)` is enough for a view
+  that only reads the rows it locks, while the columns it reads still need
+  `select`; the denial reads `update on t (any column, to lock its rows) not
+  granted`.
+* **Rewriting a grant from a test suite.** The pytest plugin (D3b) reports, per
+  `(view, store)`, the smallest `tables`/`functions` grant covering every
+  statement the view ran, as the `blastfile` snippet to paste into that view's
+  `postgres` block — the directives `--prefer-tables` prints — so a view can be
+  moved from exact `query` lines to table grants in one step. A table a statement only
+  locks gets an `update` entry on one column the view already reads (`id` when it
+  reads one, otherwise the first), never every column — a lock needs the UPDATE
+  privilege on *any one* column, so a bare grant would hand out every one — and
+  the snippet says so in a comment. A statement that locks a table without
+  reading a column of it (`SELECT 1 FROM t FOR UPDATE`, `SELECT * FROM t FOR
+  UPDATE`) names no column at all: the covering grant leaves the `update` entry
+  out, the snippet says to name one (the primary key, say), and the statement
+  stays an exact `query`, which is what the tooling writes for it.
 * **The test database.** A `pytest-django` suite is the one case where the
   secret-free environment is not enough: `django_db_setup` has to create its
   `test_*` database on the real server, or every migration and flush lands in
   the developer's own database. When `pytest-django` is importable and the
   project sets `DJANGO_SETTINGS_MODULE` or has a `./manage.py`, the orchestrator
-  writes the real proxy inputs to a one-shot `0600` file instead; the plugin is
+  writes the real store inputs to a one-shot `0600` file instead; the plugin is
   imported by `-p` *before* Django builds its settings, so it reads that file,
   names it in `DJANGO_SETUP` and unlinks it, and applies the real values only
   long enough for `DATABASES` to be evaluated. `os.environ` is then scrubbed back
@@ -1061,99 +1258,69 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   finalizer on `django_db_setup` closes proxied sessions and restores the saved
   dictionaries just before `teardown_databases` drops `test_*` on the real
   server (R30, ADR-0004).
-* **Global groups, in the report and in the tooling.** A statement a route is
-  granted only through a group attached to every route (`groups = […]` at the
-  top level) is never in that route's `unused`; the report has a section of its
-  own for it, `unused_global`, and a statement appears there only when *no*
-  route matched it. A global group's `tables`/`functions` grant is reported the
-  same way, once, when no observed statement needed it. A route whose only
-  evidence is a live server's log (below) reports no `unused` grants at all: the
-  log records the statements that were **denied**, never the ones that ran, so
-  no grant of it can be called dead, and `unused_global` stays empty for the
-  proxies such a route has a grant on.
+* **Traits, in the report and in the tooling.** A statement a view is granted
+  only through a trait it `use`s is never in that view's `unused` when another
+  view that uses the same trait ran it: the report keeps an `unused_global`
+  section for a grant no request needed anywhere, and a statement appears there
+  only when *no* view matched it — the key stays in the document for `--json`
+  consumers. A trait's table grant is reported the same way, once, when no
+  observed statement needed it. A view whose only evidence is a live server's log
+  (below) reports no `unused` grants at all: the log records the statements that
+  were **denied**, never the ones that ran, so no grant of it can be called dead.
 * **A live server, served by blastit itself.** A suite that drives a live server
   — Playwright against `live_server` — makes its traffic in a server process of
   its own, which the plugin cannot see from the test process. `blastit_live_server`
   (and `--blastit-live-server`, which serves pytest-django's own `live_server`
   the same way) starts the real blastit on a free port, with the project's
-  manifest and the *test* database, waits for the health path, and on teardown
+  `Blastfile` and the *test* database, waits for the health path, and on teardown
   folds the log's `request` and `sql.denied` events into the same observations
   the report is built from — so real front-end traffic is checked against the
-  manifest and a missing grant comes out as `missing`. It runs production
+  file and a missing grant comes out as `missing`. It runs production
   `blastit` with root or passwordless `sudo`, and otherwise `blastit dev` on one
   uid (R39); it skips when the project passes no `--blastit-manifest`, names no
-  WSGI callable, has a postgresql proxy that does not take its URL from one
+  WSGI callable, has a `postgres` store that does not take its URL from one
   variable, or has no `django_db_setup` fixture to create the test database in.
   It preloads the project's root URLconf, which is what this section asks a
   Django project to do anyway; and it serves the project from a copy in a
   temporary directory when the view uids cannot read it where it lives, never
-  changing a mode outside the project. A denial carries a route and no request
+  changing a mode outside the project. A denial carries a view and no request
   id, so it is attached to the first request the log shows for it.
-* **Folding denials from logs.** `blastit-manifest fold LOG… --manifest
-  blastit.toml [--write] [--prefer-tables] [--allow-dangerous]` reads the same
-  event stream and prints — or, with `--write`, merges into the file — the
-  grants the statements a production log denied are missing: the exact
-  `queries` by default, or the smallest `tables`/`functions` grant covering
-  them. It never adds a grant to an `unrestricted` route, deduplicates, and
-  keeps a statement no table grant can describe — a system catalogue, a lock
-  with no column to name — as an exact query, saying why.
-
-  **An exact `queries` entry is trusted as it is.** blastit compares the text
-  and runs what it matches: it does not look at what a statement calls, so a
-  `queries` entry for `SELECT set_config(…)`, `SELECT pg_read_file(…)`,
-  `SELECT lo_import(…)` or a statement calling `pg_terminate_backend` runs that
-  function with the app's privileges. That is what a table grant is for — it
-  checks tables, columns and functions — and it is why `fold` refuses, unless
-  `--allow-dangerous` is given, a statement whose kind a grant is not an
-  allowlist for (DDL, `SET` and `RESET`, `COPY`, `DO`, `CALL`, `LOCK`, `GRANT`,
-  `REVOKE`, `TRUNCATE`, `VACUUM`, `LISTEN`, `NOTIFY`, the transaction commands)
-  *and* one that calls a function outside blastit's safe set. PostgreSQL's own
-  parser says which kind it is and the analysis says which functions it calls;
-  neither is guessed at from the text. A text holding several statements is
-  refused with or without the flag: a grant is one statement, so it has to be
-  split. Whatever is refused is listed on stderr with the reason, and nothing of
-  it is written.
-
-  Statements are compared, and merged, with blastit's own normaliser and
-  table-grant analysis (`normalize`, `analyze`, `covering`), so the tool has no
-  rules of its own to drift from. Every edit is proved before it is written: the
-  result is re-parsed, compared key by key to the plan, and audited with
-  blastit's own `audit` with the log's traffic as observations, so a grant the
-  plan does not explain cannot reach the file — and a route the log's requests
-  no longer route to is reported as unchecked rather than passed silently.
-* **`unrestricted = true`** in a route's own grant (`[route.<db>]`) means
-  exactly what it says: that route may run any statement on that proxy,
+* **`unrestricted`** in a view's own grant (`postgres unrestricted`) means
+  exactly what it says: that view may run any statement on that store,
   transaction control included. It is still a sandbox — the listener, the uid
-  check, the other proxies' grants and the credential barrier all stay — it
+  check, the other stores' grants and the credential barrier all stay — it
   simply has nothing left to check on this one, so dbproxy logs no statement
-  for it. It is accepted **inline on a route only**: a group can be attached
-  to every route at once, which would turn the whole manifest into one
-  sandbox, so `unrestricted` in a group is a boot error, and every
-  unrestricted (route, proxy) is reported as a `manifest.warning` at boot.
+  for it. It is accepted **in a view only**: a trait can be attached to many
+  views at once, which would turn much of the file into one sandbox, so
+  `unrestricted` in a trait is a boot error, and every unrestricted
+  `(view, store)` is reported as a `manifest.warning` at boot.
   Its user is a staff-only back-office (Django's admin) whose SQL is too
   varied to list, where the guarantee that remains is that the process still
   never sees the credentials.
-  A grant that lists `queries` next to `unrestricted = true` is a boot error
-  too (`unrestricted grants take no queries`): the list would read as a
-  restriction, and it isn't one.
-* **Validation at boot.** An unknown group, a duplicate route name, an
-  invalid regex or `unrestricted` in a group aborts the boot. A group that is
-  attached nowhere, and a route that is unrestricted on a proxy, are reported
-  as warning events.
+  A grant that lists `query` lines next to `unrestricted` is a boot error
+  too: the list would read as a restriction, and it isn't one.
+* **Validation at boot.** An unknown trait, a duplicate view name, an invalid
+  pattern, `unrestricted` in a trait or a grant on an undeclared store aborts
+  the boot. A trait no view `use`s, and a view that is unrestricted on a store,
+  are reported as warning events.
 * **Routing.**
-  * Routes are tried in manifest order, and the first one whose `path` (and
-    `methods`, if set) matches wins.
-  * A regex must match the whole of `PATH_INFO`, which is the percent-decoded
-    path the app will see. They use Rust `regex` syntax, which guarantees
-    linear-time matching, so a hostile URL can't stall the scheduler.
+  * Views are tried in file order, and the first one whose method and pattern
+    match wins; a `static` mount whose prefix matches and holds the file answers
+    before any view (§2.4).
+  * A quoted pattern matches the whole path (`{id:int}`, `{id:uuid}` and `*` are
+    its three forms); `regex '…'` is a full regular expression. Both use Rust
+    `regex` syntax, which guarantees linear-time matching, so a hostile URL
+    can't stall the scheduler.
   * `BLASTIT_SCRIPT_NAME` strips a mount prefix first, as WSGI does.
 * **Getting the routing wrong is safe, if annoying.** A misrouted request runs
-  in a process whose allowlist doesn't fit its queries, so they're denied
+  in a process whose allowlist doesn't fit its statements, so they're denied
   (§2.5), and every denial is logged (§8.1).
-* **uid assignment** is `UID_BASE + 1000 + index of the route in the
-  manifest`. Every process derives it from the same file, and init also hands
-  the table to dbproxy. uids only live as long as the container, so reordering
-  the manifest between deploys doesn't matter.
+* **uid assignment** is `UID_BASE + 1000 + the sandbox's index in the file`.
+  Every process derives it from the same file, and init also hands the table to
+  dbproxy. A multi-endpoint `view` is one sandbox, so its endpoints share one
+  uid. uids only live as long as the container, so reordering the file between
+  deploys doesn't matter.
+
 * **Matching** is exact, on the normalised SQL text: trimmed, trailing `;`
   removed, whitespace collapsed (the pregresql demo's rule), and — because a
   real app's SQL is not the same bytes twice — with the *shape* of the text
@@ -1190,11 +1357,15 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
     URL configuration on the first request. Anything imported only after the
     fork is private to one process. List such modules in `BLASTIT_PRELOAD`
     (for Django, the root URLconf), or touch them in `BLASTIT_WARMUP`.
-* **Writing the manifest is out of scope for blastit itself.** Every denied
-  statement is logged with its route, database and normalised SQL (§8.1), so
-  future tooling can build or extend the manifest from those logs, for
-  example after a test-suite run. Each pass may only reveal the first denial
-  of each request, because a denied statement usually aborts the request.
+* **Writing the file.** blastit owns three writers and no fourth: `blastit
+  dev --learn` records the views and the exact statements the app ran,
+  `blastit check --learn` proposes a view for a path the suite requested, and
+  `blastit fmt` puts the result in the canonical layout. Every edit goes through
+  the same lossless tree and is re-parsed and validated before it is written, so
+  a comment above a view stays above it and a refusal leaves the file untouched.
+  Every denied statement is logged with its view, store and normalised SQL (§8.1);
+  each `--learn` pass may only reveal the first denial of each request, because a
+  denied statement usually aborts the request.
 
 ---
 
@@ -1239,7 +1410,7 @@ path = ['.*']                       # without it, unmatched paths get blastit's 
   `uv python install` puts one in `~/.local/share/uv/python`, and `~` is often
   `0750`, so `libpython`'s built-ins keep working and every pure-Python module
   fails. The file a child has to `execve` — `BLASTIT_EXEC`, or a wheel's
-  `_bin/blastit-dbproxy` — has to be executable by dbproxy's uid, or stage 0 dies
+  `_bin/blastit` — has to be executable by dbproxy's uid, or stage 0 dies
   with `exec dbproxy: Permission denied (os error 13)` and nothing else. blastit
   asks the kernel with `access(2)`, as the uid in question, before either can
   happen, and refuses the boot naming the first directory that blocks, its mode
@@ -1273,11 +1444,12 @@ that it is the default rather than an option, and the `boot` event says
 whether the filters are on.
 
 The filter is a **refusal list**: the default action is allow, and what it
-refuses it refuses with `EPERM`, so a syscall it says nothing about cannot be
-what breaks a request. It is installed while the child is still
-single-threaded — in the zygote before a view serves anything, and in http,
-scheduler and dbproxy before their runtime exists — because it cannot be
-removed and applies to every thread, present or future.
+refuses it refuses with `EPERM` — `clone3` is the one exception, below — so a
+syscall it says nothing about cannot be what breaks a request. It is installed
+while the child is still single-threaded — in the zygote or the PHP fork before
+a view serves anything, and in http, scheduler and dbproxy before their runtime
+exists — because it cannot be removed and applies to every thread, present or
+future.
 
 * **Every role** refuses `ptrace`, `process_vm_readv`, `process_vm_writev`,
   `bpf`, `keyctl`, `add_key`, `request_key`, `perf_event_open`, `userfaultfd`,
@@ -1289,8 +1461,8 @@ removed and applies to every thread, present or future.
   steer another process, load code into the kernel, or move between namespaces
   and mounts; none is part of serving a request.
 * **`socket()`** is checked on the address family in `args[0]`:
-  * **views:** `AF_UNIX` only. A view whose manifest entry has
-    `egress = true` may also use `AF_INET`/`AF_INET6`. Every other family —
+  * **views:** `AF_UNIX` only. A view whose `Blastfile` entry declares
+    `egress any` may also use `AF_INET`/`AF_INET6`. Every other family —
     `AF_NETLINK` and the rest — is `EPERM`.
   * **http, scheduler:** no `socket()` at all. They only use inherited fds:
     both run on an inherited listener, an inherited `AF_UNIX` channel pair and
@@ -1302,6 +1474,23 @@ removed and applies to every thread, present or future.
 * **`socketpair()`** stays `AF_UNIX`-only for every role, http and scheduler
   included: a pair of descriptors the process already owns is not a new way
   out of it, and std and tokio create one internally on some platforms.
+* **`clone3` is the one refusal that is not `EPERM`.** It fails with `ENOSYS`
+  so glibc's `pthread_create` falls back to the still-allowed `clone`; a
+  `clone` that requests any `CLONE_NEW*` flag (including `CLONE_NEWTIME`) is
+  `EPERM` for every role, because a process may not reach for a namespace.
+  `setsid` and `setpgid` are `EPERM` too: a worker cannot leave init's
+  supervision by starting a new session or process group. A view's own
+  `setpgid(0, 0)` runs inside `blastit_sys::child::enter`, between
+  `ChildIo::prepare` and the filter install, so the call being refused is never
+  the legitimate one.
+* **`SeccompRole::EmbeddedView` (a PHP view, §2.6)** keeps every rule above and
+  the view's `socket()` families, and additionally refuses `execve`, `execveat`,
+  `fork`, `vfork` and a `clone` without `CLONE_THREAD` with `EPERM`. Its workers
+  are forked **before** the filter goes on, so nothing legitimate in a request
+  creates a process; a request that tries is escaping the process-wide CPU
+  charge, which is the one thing that would make a crash loop cheap (`R14`).
+  Thread-creating `clone` stays allowed: PHP extensions and glibc itself start
+  threads.
 * **A foreign architecture is fatal.** The filter compares
   `seccomp_data.arch` against the build's `AUDIT_ARCH_*`
   (`AUDIT_ARCH_X86_64`/`AUDIT_ARCH_AARCH64`) and kills the process when it
@@ -1330,7 +1519,8 @@ manifest buys.
 | `SIGTERM` to PID 1 | http stops accepting and finishes in-flight requests until `BLASTIT_GRACEFUL_TIMEOUT`, then `SIGTERM` → `SIGKILL` to everyone, then exit |
 
 **Sizing.** Choose `BLASTIT_MAX_WORKERS` ≤ the DB plan's connection limit,
-because each request thread can hold one upstream connection.
+because each live request slot (thread or PHP worker process) can hold one
+upstream connection.
 
 The fair queue's tables are bounded by configuration, not by the number of
 clients: `BLASTIT_FQ_OUTER_MAX` outer flows per worker, and
@@ -1345,9 +1535,10 @@ about 1 MiB on Linux. On top of that, each 2 MiB chunk of shared memory it
 writes to gets copied (§9.2). So:
 
 * `BLASTIT_VIEW_SPAWN=lazy` (the default) means only views that are actually
-  hit cost memory. Views marked `prefork = true` in the manifest are forked at
+  hit cost memory. Views that declare `prefork` are forked at
   startup, which removes the first-hit fork latency (12–60 ms on DO).
-* `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes. When a
+* `BLASTIT_MAX_VIEW_PROCESSES` caps the number of live view processes (the
+  pools' workers plus any fork in flight, charged one fork at a time). When a
   new one is needed, the least-recently-used **evictable** one is retired: a
   process that is `READY`, has nothing in flight and has no request waiting in
   the admission queue for its own route. A process that has not answered the
@@ -1411,9 +1602,9 @@ writes to gets copied (§9.2). So:
 
 stdout is blastit's only output, and it is an **event stream: one event per
 line**. Events cover two things: what blastit decided (routing, denials,
-process lifecycle) and what the app printed. blastit doesn't analyse the
-stream. Future, out-of-scope tooling can parse it to find missing grants or
-routing drift.
+process lifecycle) and what the app printed. The `sql.denied` events are what an
+operator or a CI job reads offline to add the `Blastfile` grants a run proved
+missing (§6).
 
 **Formats.** `BLASTIT_LOG_FORMAT=json` (the default, for the server) prints one
 JSON object per line. `pretty` prints the same events as coloured, aligned,
@@ -1456,14 +1647,17 @@ line is unparseable. So every event is kept to at most 2048 bytes:
 
 | Event | From | Level | Fields | Emitted when |
 |---|---|---|---|---|
-| `request` | scheduler | info (warn for 5xx) | `request_id`, `method`, `path`, `route` (null if unmatched), `rule` (index of the matching `path` regex), `status`, `outcome` (`ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`, `view_died`, `client_gone`), `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `cost_ns`, `cpu_ns`, `remote_addr` | once per request, at the end; this is the routing decision |
+| `request` | scheduler | info (warn for 5xx) | `request_id`, `method`, `path`, `route` (null if unmatched), `rule` (index of the matching `path` regex), `status`, `outcome` (`ok`, `unmatched`, `queue_full`, `queue_timeout`, `timeout`, `view_died`, `bailed`, `client_gone`), `queued_ms`, `duration_ms`, `bytes_in`, `bytes_out`, `cost_ns`, `cpu_ns`, `remote_addr` | once per request, at the end; this is the routing decision |
 | `sql.denied` | dbproxy | warn | `route`, `pid` (view process), `proxy`, `kind` (`query`, `parse`, `function_call`, `copy`, …), `sql` (normalised), `sqlstate`, `in_transaction`, `reason` (the policy's explanation, for example `select on auth_user.password not granted`; never a parameter value) | a statement was rejected |
 | `pg.refused` | dbproxy | warn | `route`, `proxy`, `reason` (`credentials_mismatch`, `too_many_connections`, `upstream_unreachable`, …) | a connection to the proxy was refused |
 | `http.rejected` | http | info | `remote_addr`, `status` (400, 413, 431, 501…), `reason` | a request was refused before reaching the scheduler |
-| `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`) | view process lifecycle |
+| `process.spawned` / `process.exited` / `process.retired` | init, scheduler | info (warn for crashes) | `route`, `pid`, `uid`, `fork_ms`, `status` or `signal`, `reason` (`idle`, `max_requests`, `stuck_threads`, `memory_pressure`, `reload`) | view process lifecycle |
 | `process.cap` | scheduler | info | `estimate_bytes` (the measured cost of one view process), `cap` (the live view process cap it buys) | the measured cost or the cap changed (§8 Sizing); never once per request |
 | `app.output` | init | info (stdout) / warn (stderr) | `stream`, `line`, `part`, `parts` | the app or a library printed something |
-| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root` or `capabilities`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the preset in force with the settings it supplied and the ones an explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`; E1 — `preset` is written as `null` in a `boot` that has none, and the supplied settings' values are the preset's own, never the operator's), the rendered output variable *names* per proxy (never values), the warning text (for example an unattached group) | lifecycle of the whole server |
+| `runtime` | init | info | `kind` (`python`, `php`, `static`), plus `version` and `environment` (`python`), `version`, `libphp` and `php_ini` (`php`), or `mounts` (`static`) | once at boot and after each `dev.reload` |
+| `reload` | init | info | `directories` (how many directories the watch pass marked; the human form spells `1 directory` in the singular) | once, by a `blastit dev` boot whose marking pass placed its marks (§4.7) |
+| `dev.reload` / `dev.reload.unavailable` | init | info / warn | `scope`, `changed`, `duration_ms` (`dev.reload`); `reason` (`dev.reload.unavailable`) | `blastit dev` `fanotify` live reload |
+| `boot`, `ready`, `shutdown`, `manifest.warning` | init | info / warn | stage, counts, durations, `seccomp`, `privilege` (`root`, `capabilities`, or `unprivileged-dev`, D6) with `capabilities` (the set init holds, rootless mode only) and `bounding_set` (`dropped` or `kept`, M1), the preset in force with the settings it supplied and the ones an explicit variable overrode (`preset`, `preset_settings`, `preset_overridden`; E1 — `preset` is written as `null` in a `boot` that has none, and the supplied settings' values are the preset's own, never the operator's), the rendered output variable *names* per proxy (never values), the warning text (for example a trait no view uses) | lifecycle of the whole server |
 
 A `remote_addr` field is the same address the app sees in `REMOTE_ADDR`: a
 bare IP, never `ip:port` (§2.5). A port is never a log field at all — it is a
@@ -1473,11 +1667,19 @@ key of `environ`, not of an event, and it reaches the app and nothing else.
 process's own measurement, clamped between the time from dispatch to the
 view's first response frame and the time the scheduler observed to the end
 of the response, or that observed time when no report arrived. It is always a
-number. `cpu_ns` is the thread CPU time the view measured over the same span,
-and `null` when the view had none to report — no `RESP_END_COST`, or no thread
-clock on its interpreter — so a reader never has to guess which happened.
-`duration_ms` still ends at the last response byte, whether or not the number
-arrives with it.
+number. Three shapes fall outside that clamp, and none of them is decided by
+the status alone: a `5xx` a view **bails out of** (`outcome: "bailed"`) is
+charged its own wall time, arrival to last byte, so a crash loop cannot cost
+less than the client waited; a `5xx` an app **answers** itself
+(`outcome: "ok"` with that status) is charged the clamp like any other answer;
+and a `5xx` the scheduler wrote itself (`502`/`503`/`504`, `outcome:
+"view_died"`/`"queue_full"`/`"timeout"`) is charged dispatch to completion, so
+a request the scheduler failed never pays the queue wait it spent before it
+reached a worker. `cpu_ns` is the thread CPU time the view measured over the
+same span, and `null` when the view had none to report — no `RESP_END_COST`, or
+no thread clock on its interpreter — so a reader never has to guess which
+happened. `duration_ms` still ends at the last response byte, whether or not the
+number arrives with it.
 
 The `boot` event of the **`preload`** stage is the one that says what the app
 cost before the fork: `immortalized` and `immortalize_ms` for §9.2 #9's pass
@@ -1517,13 +1719,13 @@ with `request` events.
 | `PORT` | `8080` | set by DO; we bind `0.0.0.0:$PORT` |
 | `BLASTIT_APP` | — | WSGI app, `module:attr` |
 | `BLASTIT_PRELOAD` | — | extra modules imported before the fork (comma-separated) |
-| `BLASTIT_MANIFEST` | `/app/blastit.toml` | manifest path |
+| `BLASTIT_MANIFEST` | `./Blastfile` | the file Blastit reads |
 | `BLASTIT_SCRIPT_NAME` | — | mount prefix stripped before routing, passed as `SCRIPT_NAME` |
 | `BLASTIT_LOG_FORMAT` | `json` | `json` (one event per line) \| `pretty` (coloured, for humans) |
 | `BLASTIT_LOG_LEVEL` | `info` | minimum level of events printed |
 | `BLASTIT_UID_BASE` | `20000` | base of the uid layout |
-| `BLASTIT_MAX_WORKERS` | `16` | global number of live request threads |
-| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | per-view thread cap (also sets `RLIMIT_NPROC`) |
+| `BLASTIT_MAX_WORKERS` | `16` | global number of live request slots (a Python thread, or a PHP worker process) |
+| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | requests per view process; also sets its `RLIMIT_NPROC`; does not bound a pooled route's process count |
 | `BLASTIT_QUEUE_SIZE` / `BLASTIT_QUEUE_TIMEOUT` | `256` / `10s` | admission queue |
 | `BLASTIT_FAIR_QUEUING` | `0` | `1` orders the admission queue fairly (§2.4) instead of by arrival; `0` is exactly the FIFO |
 | `BLASTIT_FQ_OUTER_PREFIX_V4` / `_V6` | `24` / `56` | how much of a client address an outer flow keeps; read as `32` / `128` when longer |
@@ -1538,7 +1740,7 @@ with `request` events.
 | `BLASTIT_FQ_INNER_INCLUDE_IP` | `1` | whether the full client address is part of the inner flow key |
 | `BLASTIT_REQUEST_TIMEOUT` | `30s` | time until the client gets a `504` |
 | `BLASTIT_STUCK_THREADS` | `4` | overdue threads before a view process is recycled |
-| `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` \| `eager` (`prefork = true` in the manifest overrides per view) |
+| `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` \| `eager` (`prefork` in the file overrides per view) |
 | `BLASTIT_VIEW_IDLE_TIMEOUT` / `BLASTIT_VIEW_MAX_REQUESTS` | `600s` / `0` (off) | view process recycling |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | live view process cap (LRU retirement) |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | expected cost per view process: the starting divisor of the derived cap, and the floor of the measured one |
@@ -1603,7 +1805,7 @@ operator:
 | | `BLASTIT_FAIR_QUEUING` | `on` | as above |
 | | `BLASTIT_LOG_FORMAT` | `json` | stdout is the container's log |
 | | *assumption* | `capabilities` | this is the rootless deployment of D6: init runs as a dedicated uid holding six capabilities, not as root |
-| | *not set* | `BLASTIT_EXEC`, the `BLASTIT_PROXY_<NAME>_*` caps | both name something only the deployment knows: the capability-free copy of the binary (a wheel names its own interpreter), and the manifest's proxies |
+| | *not set* | `BLASTIT_EXEC`, the `BLASTIT_PROXY_<NAME>_*` caps | both name something only the deployment knows: the capability-free copy of the binary (a wheel names its own interpreter), and the file's stores |
 
 ---
 
@@ -1652,12 +1854,12 @@ is written up in
    — which is what every child of a capability-carrying file sees, its bounding
    set being empty — and a rootless init keeps its capabilities across
    `setresuid`, because the kernel only clears the sets when a uid crosses 0.
-   Together they mean the capability belongs on a **dedicated copy** of the file
-   init starts from (mode `0500`, owned by init's uid, whose uid is then a
-   dedicated one), that a wheel install `execve`s its separate `blastit-dbproxy`
-   for the credentials-holding role, and that a standalone install names its
-   capability-free copy in `BLASTIT_EXEC`. The check is by **device and inode**
-   over every name the shared interpreter has, because the kernel grants the
+   Together they mean the capability belongs on a **dedicated copy** of the
+   `blastit` binary init starts from (mode `0500`, owned by init's uid, whose uid
+   is then a dedicated one), and that both wheel and package installs serve
+   `--role=dbproxy` from the capability-free `blastit` binary named in
+   `BLASTIT_EXEC`. The check is by **device and inode** so a symlink chain cannot
+   hide a shared binary carrying file capabilities, because the kernel grants the
    attribute of the file an `execve` resolves to, not of the name it was given.
 
 ### 9.2 Memory
@@ -1744,7 +1946,10 @@ is written up in
     only thread and holds the GIL for its whole supervision loop, so it forks
     between `PyOS_BeforeFork()` and `PyOS_AfterFork_Parent()`, and the child
     inherits the GIL, calls `PyOS_AfterFork_Child()`, and then only calls
-    `blastit_view::serve`, which releases it for its I/O loop.
+    `blastit_view_python::serve`, which releases it for its I/O loop. The fork
+    lives in `blastit-view-python`'s `zygote`; `blastit` supplies the forker and
+    the child sequence (`blastit_sys::child::enter`), never a second
+    `PyOS_AfterFork_*` call.
 13. **Embedded CPython can't find the distro's `site-packages` by itself.**
     Append them to `sys.path` before the first import.
 
@@ -1863,20 +2068,6 @@ Still open:
   step: repeat the measurement with Django + the scientific stack preloaded,
   immortalized and warmed up, and check how much a realistic request
   dirties.
-* **Immortalization across CPython versions.** The low-32-bit marker is
-  verified on 3.12. 3.13 should behave the same; 3.14 and the free-threaded
-  build use a different refcount layout and need their own handling.
-* **pregresql#1** (§2.2): review and merge. Then check
-  `message_credentials` under DO's gVisor with the real crate; the spike only
-  checked `SCM_CREDENTIALS` from Python.
-* **SQL variants.** `IN ($1, $2, …)` lists of varying length, Django's dynamic
-  savepoint names, and named cursors (`DECLARE "_django_curs_…"`) all break
-  exact matching. We will probably need a fingerprint-style normaliser
-  (collapse `IN` lists, wildcard identifier suffixes) instead of exact text.
 * **Parameter constraints.** Should the manifest ever constrain parameter
   values (for example "`$1` must equal the session's user id")? Out of scope
-  for v1.
-* **Keeping the routing table in sync with the app.** The two route
-  independently, so they can drift. blastit only logs the evidence
-  (`request` and `sql.denied` events); turning it into manifest changes is
-  left to future tooling.
+  for `0.2.0`.

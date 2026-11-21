@@ -1,0 +1,45 @@
+---
+id: MB.3.13.2
+title: "MB.3.13 part 2: stage0 BLASTIT_LIBPHP / distro NTS libphp discovery and the NTS+minor ABI boot gate, with ADR-0010 s4's two exact messages"
+kind: task
+status: done
+owner: implementer
+priority: 1
+depends_on: [MB.3.13.1, MB.3.28]
+paths:
+  - crates/blastit/src/stage0.rs
+  - crates/blastit/src/config.rs
+  - crates/blastit/src/cli.rs
+  - docs/reference/settings.md
+attempts: 1
+max_attempts: 3
+escalation: none
+created: "2026-11-14T17:04"
+updated: "2026-11-14T23:30"
+---
+
+# Goal
+
+stage0 BLASTIT_LIBPHP / distro NTS libphp discovery and the NTS+minor ABI boot gate, with ADR-0010 s4's two exact messages
+
+# Context
+
+- Design of record: `docs/design/backend-runtimes.md`, `ADR-0010` (`MB.3.13` part 2).
+- The worker is an ordinary view worker: `UID_BASE + 1000 + i`, a private runtime dir with
+  only granted proxy sockets, `max_requests` recycling. The PHP-specific parts are the
+  `dlopen` of the host NTS `libphp.so`, the matching shim from `MB.3.12`, and the vtable.
+- The boundary is the **seccomp filter**; the INI policy is defence in depth (see the egress
+  doctrine in `MB.3.13`'s parent body).
+- Never lazy: a boot-time failure is `exit 1` with an actionable message, never a
+  first-request fault.
+
+# Acceptance
+
+```console
+$ cargo test -p blastit --locked
+$ make check
+```
+- The rule this part owns has a denied case and an accepted twin, and the failure is a boot
+  refusal rather than a degraded request.
+- No `libphp` symbol is reachable outside the view worker.
+- No backend-kind `match` in dispatch.

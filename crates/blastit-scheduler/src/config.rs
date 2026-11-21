@@ -6,10 +6,12 @@
 //! defaults of those variables.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use blastit_frame::{ClientIpConfig, Limits};
+use blastit_manifest::StaticMount;
 
 /// How long the scheduler waits before asking init for a view it just lost
 /// (§2.4: "don't spin: back off before respawning the same route").
@@ -275,6 +277,23 @@ pub struct SchedulerConfig {
     /// `BLASTIT_VIEW_MEM_ESTIMATE`, in bytes: what one more view process is
     /// expected to cost.
     pub view_mem_estimate: u64,
+    /// The manifest's directory, absolute: static roots are declared relative
+    /// to it (design §4.7).
+    ///
+    /// Stage 1 sets it once, from the manifest path it discovered; the
+    /// scheduler never re-derives it. Empty means "not set", which only
+    /// matters to a manifest that declares a `static` mount.
+    pub manifest_dir: PathBuf,
+    /// The largest static file served, in bytes: `STATIC_MAX_FILE_BYTES`, with
+    /// no environment variable and no manifest key (design §4.6).
+    pub static_max_bytes: u64,
+    /// The file's top-level `static "<prefix>"` mounts, in file order (§9.1).
+    ///
+    /// A mount is not a route: it owns no uid and starts no process, so the
+    /// scheduler receives it beside the route table. Every root is opened from
+    /// [`SchedulerConfig::manifest_dir`] before the first request, and a request
+    /// path is matched against the mounts before any view (§9.2).
+    pub mounts: Vec<StaticMount>,
 }
 
 impl Default for SchedulerConfig {
@@ -303,6 +322,17 @@ impl Default for SchedulerConfig {
             memory_check_interval: MEMORY_CHECK_INTERVAL,
             mem_total_bytes: None,
             view_mem_estimate: 32 * 1024 * 1024,
+            manifest_dir: PathBuf::new(),
+            // The one source of the ceiling is the responder's constant
+            // (`STATIC_MAX_FILE_BYTES`, no environment variable, no manifest
+            // key, design §4.6). A build that compiled no responder serves no
+            // file — `run` refuses a manifest with a mount — so the field keeps
+            // its shape and no number.
+            #[cfg(feature = "static")]
+            static_max_bytes: crate::static_asset::STATIC_MAX_FILE_BYTES,
+            #[cfg(not(feature = "static"))]
+            static_max_bytes: 0,
+            mounts: Vec::new(),
         }
     }
 }
@@ -318,112 +348,5 @@ impl SchedulerConfig {
     /// both a usage to read and a watermark to compare it against.
     pub fn watches_memory(&self) -> bool {
         self.memory_usage.is_some() && self.mem_high_watermark_bytes.is_some()
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    /// One mebibyte, for arithmetic that reads the way §8 writes it.
-    const MIB: u64 = 1024 * 1024;
-
-    #[test]
-    fn the_reserve_is_a_tenth_or_sixty_four_mib() {
-        assert_eq!(mem_reserve(1024 * MIB), 1024 * MIB / 10, "10 % of 1 GiB");
-        assert_eq!(mem_reserve(512 * MIB), MIN_MEM_RESERVE, "64 MiB wins");
-        assert_eq!(
-            mem_reserve(640 * MIB),
-            MIN_MEM_RESERVE,
-            "exactly at the floor"
-        );
-        assert_eq!(mem_reserve(8 * 1024 * MIB), 8 * 1024 * MIB / 10);
-    }
-
-    #[test]
-    fn the_derived_cap_is_the_free_memory_over_the_estimate() {
-        // A 1 GiB instance with a 200 MiB heap: reserve is 102.4 MiB, 32 MiB
-        // per view, so (1024 − 200 − 102.4) / 32 = 22 views.
-        let cap = derived_view_cap(1024 * MIB, 200 * MIB, 32 * MIB);
-        assert_eq!(cap, 22);
-    }
-
-    #[test]
-    fn the_derived_cap_is_never_below_one() {
-        // Almost all of the memory is gone: there is still one view's worth of
-        // hope, because a cap of zero would make blastit refuse every request.
-        assert_eq!(derived_view_cap(1024 * MIB, 1024 * MIB, 32 * MIB), 1);
-        assert_eq!(derived_view_cap(0, 0, 32 * MIB), 1);
-        // A reading above `total` (a cgroup that is being reclaimed) cannot
-        // underflow.
-        assert_eq!(derived_view_cap(64 * MIB, u64::MAX, 32 * MIB), 1);
-        // An estimate of zero would divide by zero; it is treated as one byte,
-        // and a width that does not fit a `u32` is clamped.
-        assert!(derived_view_cap(1024 * MIB, 0, 0) > 1);
-        assert_eq!(derived_view_cap(u64::MAX / 2, 0, 1), u32::MAX);
-    }
-
-    #[test]
-    fn a_probe_reports_what_it_reads() {
-        let probe = MemoryProbe::new(|| Some(42));
-        assert_eq!(probe.read(), Some(42));
-        assert_eq!(format!("{probe:?}"), "MemoryProbe");
-        let unreadable = MemoryProbe::new(|| None);
-        assert_eq!(unreadable.read(), None);
-        let clone = probe.clone();
-        assert_eq!(clone.read(), Some(42));
-    }
-
-    #[test]
-    fn the_watermark_needs_both_a_probe_and_a_watermark() {
-        let mut cfg = SchedulerConfig::default();
-        assert!(!cfg.watches_memory());
-        cfg.mem_high_watermark_bytes = Some(1);
-        assert!(!cfg.watches_memory(), "no probe");
-        cfg.memory_usage = Some(MemoryProbe::new(|| Some(0)));
-        assert!(cfg.watches_memory());
-        cfg.mem_high_watermark_bytes = None;
-        assert!(!cfg.watches_memory(), "no watermark");
-    }
-
-    #[test]
-    fn fair_queuing_is_off_by_default() {
-        let cfg = SchedulerConfig::default();
-        assert!(
-            !cfg.fair_queuing,
-            "§2.4 defaults BLASTIT_FAIR_QUEUING to off"
-        );
-    }
-
-    #[test]
-    fn the_fair_defaults_are_the_documented_ones() {
-        let fair = FairConfig::default();
-        assert_eq!(fair.outer_prefix_v4, 24);
-        assert_eq!(fair.outer_prefix_v6, 56);
-        assert_eq!(fair.outer_max, 65_536);
-        assert_eq!(fair.inner_max_per_outer, 1_024);
-        assert_eq!(fair.inner_max, 262_144);
-        assert_eq!(fair.burst, Duration::from_millis(20));
-        assert_eq!(fair.max_debt, Duration::from_secs(5));
-        assert_eq!(fair.debt_ttl, Duration::from_secs(30));
-        assert!(fair.inner_include_ip);
-        assert_eq!(
-            fair.inner_headers,
-            [
-                "user-agent",
-                "accept-language",
-                "sec-ch-ua",
-                "sec-ch-ua-platform",
-                "sec-ch-ua-mobile",
-                "authorization"
-            ]
-        );
-        assert_eq!(fair.inner_cookies, ["sessionid", "session"]);
-        assert_eq!(
-            fair.client_ip,
-            ClientIpConfig::default(),
-            "the scheduler resolves the client exactly as the front end does"
-        );
     }
 }

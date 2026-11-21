@@ -1,0 +1,15 @@
+app "shop"
+
+postgres $ANALYTICS_URL
+
+view catalog {
+    GET "/catalog"
+    postgres unrestricted
+}
+
+view products GET "/products" {
+    postgres {
+        transactions
+        select products(id)
+    }
+}

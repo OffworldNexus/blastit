@@ -1,30 +1,67 @@
 # Docker Compose behind Traefik
 
+Compose gives the rootless path: a dedicated uid with file capabilities, PgBouncer on the bridge
+network, Traefik at the edge.
+
 ```console
 $ blastit --preset compose-traefik
 ```
 
-## What it sets
+That is the boot, not a print: without root or the capabilities it exits `1`, naming the missing
+`cap_*` and pointing at `blastit dev`. The stack sets `BLASTIT_PRESET` instead.
+
+## What the preset sets
 
 | Setting | Value | Why |
 |---|---|---|
-| `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | Traefik always adds its own observation; the rightmost entry is what it saw |
+| `BLASTIT_CLIENT_IP_HEADER` | `x-forwarded-for` | already the default; Traefik appends what it saw, and `*` reads the rightmost entry |
 | `BLASTIT_TRUSTED_PROXIES` | `*` | no untrusted peer can reach Blastit's port |
 | `BLASTIT_FAIR_QUEUING` | `on` | one burst must not starve the others |
-| `BLASTIT_LOG_FORMAT` | `json` | stdout is the container's log |
-| *(assumption)* | `capabilities` | the rootless deployment: a dedicated uid with seven capabilities |
+| `BLASTIT_LOG_FORMAT` | `json` | already the default; stdout is the container's log |
+| *(assumption)* | `capabilities` | the rootless deployment: a dedicated uid with the capability set |
 
-`*` reads the **rightmost** entry. A list of private Docker ranges is worse:
-when every entry is inside it, the resolver reads the leftmost one, which the
-client invented. Traefik overwrites `X-Forwarded-Proto`, so `wsgi.url_scheme` is
-`https` behind its TLS entry point and a client cannot choose it.
+## The topology
 
-!!! warning "The assumption is the deployment's to keep"
+```mermaid
+flowchart TB
+    client(["client"])
+    edge["Traefik · TLS"]
+    subgraph app["app container · capabilities"]
+        ingress["ingress"]
+        sched["scheduler"]
+        view["view · one uid per route"]
+        dbproxy["dbproxy"]
+    end
+    migrate["migrate container"]
+    pool["pgbouncer · 5432"]
+    db[("db · postgres:18")]
 
-    Publish no port for the app, and keep containers you do not trust off that
-    network: every peer is trusted.
+    client --> edge --> ingress --> sched --> view
+    view -- "socket" --> dbproxy
+    dbproxy -- "TCP" --> pool --> db
+    migrate -. "direct, no pool" .-> db
+```
 
-## Traefik
+Each container hop is a bridge network, not the internet; the
+[model](index.md#the-topology) is unchanged inside the box.
+
+## Preset defaults
+
+| Thing | Value | Why |
+|---|---|---|
+| app container | `user: 10000`, the capability set, `mem_limit: 1g` | a file-capability copy turns every process of that uid into init, so the uid is the app's alone |
+| runtime directory | `tmpfs /run/blastit`, mode `0711`, owned by 10000 | `/run` belongs to root, and a rootless init cannot create its own; `0711` lets a view traverse into its own `0700` directory without listing the others |
+| pool | PgBouncer, `transaction`, `DEFAULT_POOL_SIZE=20`, `MAX_CLIENT_CONN=100`, `MAX_PREPARED_STATEMENTS=200` | 20 server connections for up to 100 clients, and prepared statements are rewritten rather than refused |
+| pool auth | `scram-sha-256` | the image's `md5` default fails against PostgreSQL 18's SCRAM passwords |
+| migrate | its own container, `user: 10001`, the owner role on `db:5432` | a migration bug cannot run the capable copy |
+| grant | a one-shot `postgres:18` after `migrate` completes | the tables must exist before `GRANT … ON ALL TABLES` |
+| TLS | Traefik `:443` with `tls: {}`; ACME or your own certificate | the router redirects `:80`; until you add a resolver it serves Traefik's self-signed certificate |
+| database TLS | `sslmode=disable` on the bridge | for a network database use `verify-full` **and** a `ca_cert` |
+| health | `pg_isready` on PgBouncer's own port, `/_blastit/health` for the app | `app` never dials a pool that is not listening, and the image ships no `HEALTHCHECK` |
+
+## The steps
+
+### 1. Traefik
 
 ```yaml title="dynamic.yml"
 http:
@@ -50,21 +87,106 @@ http:
 ```
 
 Mount this as `dynamic.yml` and name it in the provider:
-`--providers.file.filename=/etc/traefik/dynamic.yml`. (`traefik.yml` is the
-static file; Traefik exits if a dynamic document is there.) The `tls: {}` router
-serves Traefik's self-signed certificate: add a `certificatesResolvers` block for
-ACME, or mount your own certificate before exposing it.
+`--providers.file.filename=/etc/traefik/dynamic.yml`. (`traefik.yml` is the static file; Traefik
+exits if a dynamic document is there.) `shop.example.com` is your host — change it in both rules —
+and `REPLACE_WITH_REGISTRY` is yours in every `image:` line.
 
-## Compose
+### 2. Values
+
+Create `.env` and git-ignore it before the first build; every `${...:?}` is in it:
+
+```dotenv title=".env"
+DB_OWNER_PASSWORD=REPLACE_WITH_OWNER_PASSWORD
+DB_PASSWORD=REPLACE_WITH_APP_PASSWORD
+DJANGO_SECRET_KEY=REPLACE_WITH_50_CHAR_SECRET
+TAG=REPLACE_WITH_GIT_SHA
+```
+
+`openssl rand -hex 16` twice fills the passwords and `openssl rand -base64 50` the key; `TAG` is
+`git rev-parse --short HEAD`. Compose reads `./.env` itself, so export `TAG` only so the build tags
+the image the stack pulls. Never commit the file.
+
+### 3. Grants
+
+```sql title="db/grants.sql"
+-- Broad backstop: narrow it to one GRANT per table and verb as routes grow.
+DO $$ BEGIN
+  CREATE ROLE app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER ROLE app PASSWORD :'pw';
+-- The zone the app expects; every pooled session inherits it.
+ALTER ROLE app SET timezone = 'UTC';
+GRANT CONNECT ON DATABASE shop TO app;
+GRANT USAGE ON SCHEMA public TO app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app;
+-- Tables a later migration adds:
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO app;
+```
+
+### 4. The image { #rootless }
+
+Docker's `cap_add` only sets the container's *bounding* set: a non-root `user:` process gets **no**
+capabilities from it, so the image puts file capabilities on a dedicated copy of what init starts
+from. One image serves every interface:
+
+```dockerfile title="Dockerfile"
+# One image serves every interface: the package brings `blastit` and its shims,
+# `python3.13` runs a WSGI view, and the distro's NTS `libphp` runs a front
+# controller. A static-only app drops the python and libphp packages below.
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl libcap2-bin libphp-embed php-pgsql python3.13 python3.13-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
+
+WORKDIR /app
+COPY requirements.txt .
+RUN python3.13 -m venv .venv && .venv/bin/pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+# `chown` clears a file capability, so nothing re-owns the file after `setcap`.
+ARG BLASTIT_UID=10000
+RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
+    && lib=/usr/share/blastit/lib \
+    && cp "$lib/blastit" "$lib/blastit-init" \
+    && chown "$BLASTIT_UID:$BLASTIT_UID" "$lib/blastit-init" \
+    && chmod 0500 "$lib/blastit-init" \
+    && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+         "$lib/blastit-init"
+
+ENV PYTHONUNBUFFERED=1 BLASTIT_EXEC=/usr/share/blastit/lib/blastit
+EXPOSE 8080
+```
+
+A file with capabilities turns any process of that uid into init: Blastit refuses a deployment
+where a *shared* interpreter carries them ([security model](../security.md#the-mechanisms)). The
+copy sits beside the installed shims in `/usr/share/blastit/lib`, so it is the only capable file
+and `entrypoint php` still finds them. `BLASTIT_EXEC` names that capability-free
+copy for the `dbproxy` child, which cannot exec a file carrying the capabilities,
+while `blastit-init` keeps them. `python3.13` is there for a WSGI view; a
+static-only app drops it and `libphp` from the `apt-get` line and the rest is unchanged.
+
+### 5. Compose
+
+Start from the [Django guide](../frameworks/python/django.md#manifest)'s `Blastfile`, with every
+view's grants filled in — an empty `postgres {}` denies every statement. A split store (with
+`ca_cert`) is for a TLS-verified network database. Deploy only a file `blastit check` passes
+([CI/CD](../ci.md#what-it-fails-on)), and have `settings.py` read the host:
+`ALLOWED_HOSTS = [os.environ["ALLOWED_HOST"]]`.
 
 ```yaml title="compose.yaml"
 name: shop
 
 x-app-env: &app-env
-  DATABASE_URL: postgresql://app:${DB_PASSWORD:?}@db:5432/shop?sslmode=disable
+  # The pool's host, not `db`.
+  DATABASE_URL: postgresql://app:${DB_PASSWORD:?}@pgbouncer:5432/shop?sslmode=disable
+  # Must equal `Host(...)` in dynamic.yml: Django answers 400 otherwise.
+  ALLOWED_HOST: shop.example.com
   DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?}
   BLASTIT_PRESET: compose-traefik
-  BLASTIT_VIEW_MEM_ESTIMATE: 140MiB
+  BLASTIT_VIEW_MEM_ESTIMATE: 140MiB  # one view; ~7 in 1 GB
 
 services:
   db:
@@ -77,10 +199,28 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql
 
-  # The schema owner, used by migrations only: its own DATABASE_URL, never the
-  # web service's. Trusted code, run outside blastit.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.26.1-p0
+    environment:
+      DB_HOST: db
+      DB_USER: app
+      DB_PASSWORD: ${DB_PASSWORD:?}
+      DB_NAME: shop
+      # md5 (the image default) fails against PostgreSQL 18's SCRAM passwords.
+      AUTH_TYPE: scram-sha-256
+      POOL_MODE: transaction
+      MAX_PREPARED_STATEMENTS: "200"
+      DEFAULT_POOL_SIZE: "20"
+      MAX_CLIENT_CONN: "100"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "app", "-d", "shop"]
+      retries: 60
+    depends_on:
+      db: { condition: service_healthy }
+
   migrate:
     image: registry.example.com/shop:${TAG:?}
+    # Not init's uid: a migration bug cannot run the capable copy.
     user: "10001:10001"
     environment:
       DATABASE_URL: postgresql://owner:${DB_OWNER_PASSWORD:?}@db:5432/shop?sslmode=disable
@@ -109,12 +249,15 @@ services:
     mem_limit: 1g
     tmpfs:
       # /run belongs to root; this is the runtime directory, owned by init's uid.
-      - /run/blastit:mode=0700,uid=10000,gid=10000
+      # `0711`: each view gets its own `0700` directory inside, and only needs to
+      # traverse this one (a `0700` here would lock every view out of its own).
+      - /run/blastit:mode=0711,uid=10000,gid=10000
     environment: *app-env
-    command: ["/usr/local/bin/python3.13-init", "-m", "blastit"]
+    command: ["/usr/share/blastit/lib/blastit-init"]
     expose: ["8080"]
     depends_on:
       grant: { condition: service_completed_successfully }
+      pgbouncer: { condition: service_healthy }
 
   traefik:
     image: traefik:v3.7.16
@@ -131,78 +274,31 @@ volumes:
   pgdata:
 ```
 
-```sql title="db/grants.sql"
--- One GRANT per table and verb your blastit.toml grants; add columns when the
--- grant is narrower than the table.
-DO $$ BEGIN
-  CREATE ROLE app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-ALTER ROLE app PASSWORD :'pw';
-GRANT CONNECT ON DATABASE shop TO app;
-GRANT USAGE ON SCHEMA public TO app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON shop_product TO app;
-```
+`user:` is the dedicated uid that can run the capable copy, and `command:` names that copy —
+`["/usr/share/blastit/lib/blastit-init"]` for every interface. The app's
+`DATABASE_URL` names `pgbouncer`; `migrate` and `grant` name `db` — never swap the two.
 
-No `ports:` on the app, and `user:` is a **dedicated** uid: it can run the
-capable copy below, so nothing else may use it. `sslmode=disable` means the
-password and every query cross the compose bridge in plaintext: fine while `db`
-is on that same host, never for a database reached over a network — give
-`[proxy.db] input` a `ca_cert`, as [the DigitalOcean
-page](digitalocean-paas.md#spec) shows. `owner` creates the schema and is used
-only by `migrate`; `app` owns no table and has no DDL, and `db/grants.sql` gives
-it exactly what the manifest grants. The proxy's role is the backstop; the
-per-route grants stay the wall. `mem_limit: 1g` matches the `140MiB` estimate
-with room for the workers.
-
-## Image
-
-Docker's `cap_add` only sets the container's *bounding* set: a non-root `user:`
-process gets **no** capabilities from it. The image therefore puts file
-capabilities on a dedicated copy of the interpreter.
-
-```dockerfile title="Dockerfile"
-FROM python:3.13-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
-    && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir -r requirements.txt blastit
-COPY . .
-
-ENV PYTHONUNBUFFERED=1
-
-# `chown` clears a file capability, so nothing re-owns the file after `setcap`.
-ARG BLASTIT_UID=10000
-RUN useradd --uid "$BLASTIT_UID" --user-group --create-home --shell /usr/sbin/nologin blastit \
-    && interpreter="$(readlink -f /usr/local/bin/python3.13)" \
-    && cp "$interpreter" "${interpreter%/*}/python3.13-init" \
-    && chown "$BLASTIT_UID:$BLASTIT_UID" "${interpreter%/*}/python3.13-init" \
-    && chmod 0500 "${interpreter%/*}/python3.13-init" \
-    && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
-         "${interpreter%/*}/python3.13-init"
-
-EXPOSE 8080
-```
-
-Blastit refuses a deployment where a shared interpreter carries those
-capabilities; [the security model](../security.md#the-mechanisms) says why.
+### 6. Build and start
 
 ```console
 $ TAG=$(git rev-parse --short HEAD)
 $ docker build -t registry.example.com/shop:$TAG . && docker push registry.example.com/shop:$TAG
-$ docker compose --env-file .env up -d
+$ docker compose up -d
 $ docker compose logs app | head -1
 {"event":"boot","stage":"stage0","seccomp":true,"privilege":"capabilities","bounding_set":"dropped"}
 ```
 
-`--env-file` keeps `DB_PASSWORD` and `DJANGO_SECRET_KEY` out of your shell
-history; the compose file reads them with `${DB_PASSWORD:?}`.
+The boot line is trimmed (`ts`, `level`, `component` and `preset` elided). If nothing appears, run
+`docker compose logs grant`: a grant job that aborts stops `app` from starting.
 
-## Rootless
+## Before the first deploy
 
-The file carries seven capabilities: six required (`setuid`, `setgid`, `chown`,
-`fowner`, `dac_override`, `kill`) and `cap_setpcap`, which is wanted. Give them to
-a **dedicated copy** of the file init starts from — mode `0500`, owned by init's
-uid, next to the original. A file with capabilities turns any process of its uid
-into init, which is why the uid must be dedicated.
+Publish no port for the app and keep foreign containers off its network: the preset trusts every
+peer (`*`), so Traefik must be the only way in ([client address](anything-else.md#client-ip-header)).
+`BLASTIT_MAX_WORKERS` × instances must fit the pool's client limit, and the app's role must not own
+the tables it reads. Then [measure the client address](index.md#measure-your-ingress) through Traefik.
+
+## Where next
+
+Verify it with [the client-address check](index.md#measure-your-ingress), then read
+[fair queuing](fair-queuing.md). Splitting the same app? [DigitalOcean](digitalocean-paas.md).

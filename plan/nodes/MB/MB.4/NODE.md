@@ -4,13 +4,13 @@ title: "Vite & Node HTTP Upstream & node2shell Defense (0.2.2)"
 kind: epic
 status: ready
 priority: 2
-depends_on: [MB.3]
+depends_on: [MB.3, MB.9]
 paths: ["e2e/**"]
 attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T10:42"
-updated: "2026-11-13T10:42"
+updated: "2026-11-14T01:54"
 ---
 
 # Goal
@@ -21,6 +21,7 @@ Ship **Vite & Node** HTTP upstream backend support (`0.2.2`) with seamless stati
 
 - Mandatory DX-First sequence (`docs/frameworks/node.md` + `inventory.toml` + `dx`/`ai-ergonomics` critics -> HTTP upstream & SSR/asset split design + ADR -> leaf implementation + protected `critical_*.rs` tests -> `e2e/` + `node2shell` exploit regression).
 - Split process-lifecycle/cleanup tasks from `--learn` wire attribution tasks (`MA` escalation lesson).
+- **The Node upstream is one more `Upstream` implementation** (`MB.9`): it registers a `BackendBuilder`, is built at boot and held per route as `Arc<dyn Upstream>`, and dispatch never learns that "Node" exists. The contract, the static/WSGI ports and the shared conformance table land in `MB.9` **before** this milestone's implementation starts; if the Node design needs a contract change, that is a plan change, not a second dispatch path.
 
 # Acceptance
 

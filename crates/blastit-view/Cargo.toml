@@ -10,15 +10,20 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[dependencies]
-blastit-frame = { version = "0.1.2", path = "../blastit-frame" }
-# No `auto-initialize`: a view process is forked from an interpreter that
-# `init` has already initialised (§4, §9.3), and library code must never
-# start or stop one.
-pyo3 = { version = "0.30.1" }
-thiserror = "2.0.21"
+[features]
+# No features at all (`MB.36.5`): the framing, the credit windows and the
+# loaded-file codec are plain `std` and always compiled, and each view kind is a
+# sibling crate — `blastit-view-python` (CPython), `blastit-view-php` (`libphp`)
+# and `blastit-view-static` (the responder). A `--workspace` build or another
+# crate's defaults therefore cannot drag `libpython` or `libphp` into an artifact
+# that serves no view (`docs/knowledge/LESSONS.md` `MB.17`, `ADR-0016`).
+default = []
 
-[dev-dependencies]
-# The tests own the interpreter: they attach to it themselves, and
-# `auto-initialize` is what lets them (see `tests/gil.rs`).
-pyo3 = { version = "0.30.1", features = ["auto-initialize"] }
+[dependencies]
+blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
+# The child's identity, filter and `RLIMIT_*` (`SpawnContext`), the `Fork` a
+# forker answers with, and the one documented order of the child sequence
+# (design §4.4 D1/D2). The view crates get the privileged primitives from the
+# crate that owns them, never from a second spelling.
+blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
+thiserror = "2.0.21"

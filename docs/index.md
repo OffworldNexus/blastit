@@ -1,5 +1,5 @@
 ---
-description: "A zero-trust WSGI server: one sandbox per route, no database credentials in the app, only the SQL each route needs."
+description: "A Linux zero-trust application server for Python WSGI, embedded PHP and static sites: one sandbox per route, no database credentials in the app."
 hide:
   - toc
 ---
@@ -8,63 +8,118 @@ hide:
 
 # Small bird. Small blast radius.
 
-**blastit serves your WSGI app unchanged and splits it into one sandbox per
-route.** Each route gets its own process, its own uid and its own database
-allowlist, so a bug in the least important page is worth that page, not the app.
+**Blastit is a Linux application server that runs behind your ingress.** Traefik,
+DigitalOcean App Platform, Cloudflare or nginx terminate TLS and HTTP/2; blastit
+isolates what they forward — one `view` per route, with its own process, uid and
+SQL allowlist — so a bug in the least important page is worth that page.
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
 [How it works](how-it-works.md){ .md-button }
 
+```console
+$ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
+$ blastit dev
+$ blastit check
+```
+
+The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM
+(Fedora/RHEL/Rocky/Alma) repository and installs `blastit`; where it cannot use a
+system package manager it puts the release archive in `~/.local/bin` instead
+([install reference](install.md)).
+
+!!! note "Linux, and one file for every interface"
+
+    `entrypoint python "module:attr"` starts a WSGI callable; `entrypoint php
+    "public/index.php"` runs a PSR-7/PSR-15 front controller on the host's embedded
+    NTS `libphp` (8.3, 8.4, 8.5 and 8.6); no `entrypoint` plus a `static` mount
+    serves a built front end. One `blastit` binary serves all three. `blastit-lsp`
+    runs natively on Linux, macOS and Windows; on a macOS or Windows laptop, run
+    the server in Docker/Compose or a Linux VM, because serving rests on Linux
+    kernel facilities ([why Linux](local.md)).
+
 ## One file, no code changes
 
-```toml title="blastit.toml"
-version = 1
-app = "myshop.wsgi:application"
+=== "Python (WSGI)"
+    ```text title="Blastfile"
+    app "myshop"
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+    entrypoint python "myshop.wsgi:application"
 
-[[route]]
-name = "catalog"
-path = ['/products/.*']
-methods = ["GET", "HEAD"]
+    postgres $DATABASE_URL
 
-[route.db.tables]
-products = { select = ["id", "name", "price"] }
+    view catalog GET "/products/*" {
+        postgres {
+            select products(id, name, price)
+        }
+    }
+    ```
+
+=== "PHP"
+    ```text title="Blastfile"
+    app "myshop"
+
+    entrypoint php "public/index.php"
+
+    postgres $DATABASE_URL
+
+    view api POST "/api/*" {
+        body json
+        postgres {
+            insert orders(customer_id, total)
+        }
+    }
+
+    view app GET "/*" {
+    }
+    ```
+
+=== "Static & SPA"
+    ```text title="Blastfile"
+    static "/" {
+        root "public"
+        fallback "index.html"
+        immutable "/assets/*"
+    }
+    ```
+
+Views, grants and the entry point live in one file; your framework keeps its own
+routing, and views are tried in the order written. Every served file carries an
+`ETag`, so a deploy invalidates cached copies. The three commands above do not
+change: `blastit dev` on your machine, `blastit check` in CI, and
+`blastit --preset digitalocean-paas` under real uids in production.
+
+## The trust boundary
+
+```mermaid
+flowchart LR
+    client(["client"]) --> edge["cloud ingress · TLS, HTTP/2"]
+    edge --> ingress["ingress · validates"] --> sched["scheduler · fair queue"] --> view["view · one uid per view"]
+    view -- "socket" --> dbproxy["dbproxy · the only credentials"]
+    dbproxy --> db[("PostgreSQL")]
 ```
 
-```console
-$ uv run blastit dev                   # your laptop, no root
-$ uv run blastit check                 # CI: proves nothing was forgotten
-$ blastit --preset digitalocean-paas   # production: real uids, or it refuses
-```
-
-Routes, grants and the app's entry point live in this one file, next to your
-code. Your framework keeps its own routing. New here? [Getting
-started](getting-started.md) builds a smaller app in three steps.
+No view holds a database password, and no view opens a TCP socket unless its own
+block says so. [Security model](security.md) has the argument.
 
 ## What you get
 
 | | |
 |---|---|
-| **One sandbox per route** | its own process and uid; a misrouted request lands in an allowlist that does not fit |
-| **No credentials in the app** | the real database URL stays in a proxy; your code gets a local one |
+| **One sandbox per view** | own process and uid; a misrouted request lands in an allowlist that does not fit |
+| **No credentials in the app** | the real URL stays in a proxy; your code gets a local one |
 | **Only the SQL it needs** | statements and table/column grants, checked on the wire |
-| **One command to prove it** | `blastit check` fails on an unrouted request, a missing or dead grant, an unexercised route, or a body with no declared validation |
+| **One command to prove it** | `blastit check` fails on an unrouted request, a missing or dead grant, an unexercised view, or an undeclared body |
 
-## What it costs
+??? note "Platforms"
 
-* one process per live route, forked from a preloaded parent;
-* root or a small capability set at boot — `blastit dev` needs neither;
-* one manifest, `blastit.toml`.
+    Linux x86_64 and aarch64, glibc and musl: one `py3-none` wheel per platform
+    runs `blastit check`, `fmt` and `fold` on any CPython 3.12+, and serving WSGI
+    views needs CPython 3.13 or 3.14 on the host. PHP is the distro's NTS
+    `libphp` 8.3–8.6. Static sites need no language runtime. On musl,
+    `apk add libgcc`.
 
-## Is it for you?
+## Where next
 
-Yes for WSGI (Django, Flask, SQLAlchemy, psycopg 3), PostgreSQL and Linux.
-No for HTTP/2, WebSockets or non-CPython interpreters.
-
-!!! note "Pre-release"
-
-    0.1.1 is the first developer-experience release; the manifest may still
-    change before 1.0.
+* [Getting started](getting-started.md) · [The Blastfile](blastfile.md)
+* [Install](install.md) · [Local](local.md) · [CI/CD](ci.md)
+* [Deployments](deploy/index.md) · [Security](security.md)

@@ -1,62 +1,113 @@
 name: Build a wheel
 description: >
-  Build one blastit wheel in manylinux_2_28 — the extension, the Python package,
-  and the Python-free `blastit-dbproxy` binary the wheel carries (§4, D2) — and
-  upload it as an artifact.
+  Build one universal `py3-none-<platform>` blastit wheel with
+  `scripts/build-wheel.sh` and upload it as an artifact.
 
-  `scripts/build-wheel.sh` does the same thing on a developer's machine; the
-  container is what makes the wheel work on an older glibc than the runner's, so
-  CI builds in there. Both the development wheels
-  (`.github/workflows/wheels.yml`) and the published ones
-  (`.github/workflows/publish-pypi.yml`) come from here, so the released wheel is
-  the one every commit to `develop` already built and smoked.
+  **`scripts/build-wheel.sh` is the build** (`MB.42.3.3`). This action used to run
+  `maturin-action` directly with `--features blastit-py/extension-module`, a crate
+  `MB.42.2.2.2` deleted: that step failed with *the package `blastit` does not
+  contain this feature*, and had it built it would have produced a `cp3NN`
+  extension wheel — while `wheels.yml` and `publish-pypi.yml` upload and count
+  `py3-none` wheels, so the release published zero of four. The script builds
+  `maturin build --bindings bin` inside the manylinux container, repacks the result
+  (`scripts/repack_universal_wheel.py`), and reads the finished archive back:
+  `*.dist-info/WHEEL` must say `py3-none-<platform>` with `Root-Is-Purelib:
+  false`, every staged shim must be inside `blastit/_bin/` at mode 0755, and every
+  embedded ELF is measured (`check-portable-elf.sh`: no `libpython`/`libphp`, no
+  build-host `RUNPATH`, nothing above the floor, no test-only boot seam). The
+  action is a thin, honest caller: one place builds and proves a wheel, on a
+  developer's machine and in CI alike.
+
+  A wheel this action builds carries the two CPython shims the builder image can
+  compile. The four PHP shims need a distro's `php_config.h`, so they only travel
+  when a caller stages them (`shims-from:`); `publish-pypi.yml` is that caller —
+  its wheel legs download the `shim-*` artifacts and pass `require-shims: all`,
+  which fails closed when six are not there. `wheels.yml` has no shim legs and
+  keeps the default `py` promise.
 
 inputs:
-  python:
-    description: CPython version to build for, as maturin's `--interpreter` takes it (`3.13`)
-    required: true
   artifact:
     description: Name to upload the wheel under
     required: true
   manylinux:
-    description: manylinux tag to build in
+    description: >
+      manylinux tag to build in (`2_28`). It selects
+      `quay.io/pypa/manylinux_<tag>_<arch>`; the wheel's platform tag is read back
+      from the built wheel (`scripts/build-wheel.sh` refuses a promise that
+      disagrees with it).
     required: false
     default: "2_28"
+  platform:
+    description: >
+      The platform tag the leg promises (`manylinux_2_28`), from
+      `scripts/platform_matrix.py`. `scripts/build-wheel.sh` refuses a wheel whose
+      own `Tag:` disagrees and one whose tag claims a newer glibc than the
+      builder image.
+    required: false
+    default: "manylinux_2_28"
+  require-shims:
+    description: >
+      `py` (the two CPython shims the builder image compiles) or `all` (those plus
+      the four PHP shims a caller staged with `shims-from:`). `scripts/build-wheel.sh`
+      fails closed when the count is short.
+    required: false
+    default: "py"
+  shims-from:
+    description: >
+      Directory holding PHP shims a previous job built (the `shim-*` artifacts of
+      `.github/workflows/php-sapi.yml`, or of `publish-pypi.yml`'s `shims` job).
+      Empty when there are none: no PHP headers exist in the wheel builder, so
+      this is the only way a wheel carries them.
+    required: false
+    default: ""
 
 runs:
   using: composite
   steps:
     - uses: dtolnay/rust-toolchain@stable
-    - name: Build in manylinux_2_28
-      uses: PyO3/maturin-action@v1
-      with:
-        manylinux: ${{ inputs.manylinux }}
-        args: --release --out dist --interpreter python${{ inputs.python }} --features blastit-py/extension-module
-        # Inside the container, so the Python-free dbproxy binary the wheel
-        # carries is built against the same old glibc as the extension.
-        before-script-linux: |
-          dnf install -y --setopt=install_weak_deps=False clang && dnf clean all
-          cargo build --release --locked -p blastit-dbproxy --bin blastit-dbproxy
-          install -D -m 0755 target/release/blastit-dbproxy python/blastit/_bin/blastit-dbproxy
-    - name: The wheel carries dbproxy, executable
+    # Refused here rather than built on the runner: a host build would carry the
+    # runner's glibc tag, and `--max-glibc 2_28` would reject it after the compile.
+    - name: Refuse a wheel with no manylinux container
       shell: bash
       run: |
         set -euo pipefail
-        for wheel in dist/*.whl; do
-            # A wheel is a zip and the file name is stored uncompressed, so
-            # finding it needs no tool; the mode lives in the zip's attributes,
-            # which is what `zipinfo -l` prints in its first column.
-            if ! grep -qa "blastit/_bin/blastit-dbproxy" "$wheel"; then
-                echo "$wheel has no dbproxy binary in it: blastit refuses to start without it" >&2
-                exit 1
-            fi
-            if ! zipinfo -l "$wheel" | awk '{ print $1, $NF }' | grep -qx -- "-..x..x..x blastit/_bin/blastit-dbproxy"; then
-                echo "dbproxy is not executable in $wheel" >&2
-                exit 1
-            fi
-            echo "$wheel ok"
-        done
+        if [ -z "${{ inputs.manylinux }}" ]; then
+          echo "::error::build-wheel needs a non-empty \`manylinux:\`: scripts/build-wheel.sh builds inside quay.io/pypa/manylinux_<tag>_<arch>, and that image is the wheel's platform tag."
+          exit 1
+        fi
+        echo "building in quay.io/pypa/manylinux_${{ inputs.manylinux }}_<arch>; the platform tag is manylinux_${{ inputs.manylinux }}"
+    - name: Build the universal wheel (scripts/build-wheel.sh)
+      shell: bash
+      run: |
+        set -euo pipefail
+        extra=()
+        if [ -n "${{ inputs.shims-from }}" ]; then
+            extra+=(--shims-from "${{ inputs.shims-from }}")
+        fi
+        bash scripts/build-wheel.sh \
+            --manylinux "${{ inputs.manylinux }}" \
+            --require-shims "${{ inputs.require-shims }}" \
+            "${extra[@]}" \
+            --out dist
+    # The wheel's tag, its payload modes and the shims it promised are asserted
+    # inside `scripts/build-wheel.sh` (it reads the finished archive back), so a
+    # leg's wheel is proved once, by the script that built it.
+    # One wheel, three interpreters — the promise a `py3-none` tag makes — is
+    # `e2e/run_packaging.py --leg wheel`'s: it installs the wheel with `pip` into
+    # the images `scripts/platform_matrix.py --matrix wheels` names for this
+    # leg (`python:3.12/3.13/3.14-slim`, the `-alpine` images for a musllinux
+    # wheel), drives `--version`, `blastit fmt` and `blastit check`, and serves a
+    # WSGI view through the shipped shim. One harness, no second copy of the
+    # install commands.
+    - uses: astral-sh/setup-uv@v10.3.2
+    - name: Install the wheel in the matrix's images and drive it (e2e/run_packaging.py)
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv run --no-project e2e/run_packaging.py --require-legs --leg wheel \
+            --wheel "$(ls dist/blastit-*-py3-none-*.whl | head -n 1)"
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact }}
-        path: dist/*.whl
+        path: dist/*-py3-none-*.whl
+        if-no-files-found: error

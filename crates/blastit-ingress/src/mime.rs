@@ -99,23 +99,3 @@ pub(crate) fn is_utf8_charset(charset: Option<&str>) -> bool {
         Some(charset) => charset == "utf-8" || charset == "utf8",
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splits_quoted_parameters() {
-        let (essence, charset) = parse(Some(
-            "application/json; boundary=\";charset=x\"; charset=UTF-8",
-        ));
-        assert_eq!(essence, "application/json");
-        assert_eq!(charset.as_deref(), Some("utf-8"));
-    }
-
-    #[test]
-    fn caps_the_essence() {
-        let long = "a".repeat(MAX_MIME_REPORT_BYTES * 2);
-        assert_eq!(parse(Some(&long)).0.len(), MAX_MIME_REPORT_BYTES);
-    }
-}

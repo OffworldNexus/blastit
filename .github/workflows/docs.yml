@@ -5,6 +5,11 @@ name: Docs
 # deploys it on every push to `develop`, on `workflow_dispatch`, and on a pushed
 # `v*` tag.
 #
+# This workflow owns the pages: the nav/orphan check, the `--strict` build, the
+# package's offline suites, and the installer the README's hero advertises as a
+# served asset. `ci.yml` runs no docs job — one workflow, one owner (`MB.56.4.4`
+# removed the duplicate `docs-gate`).
+#
 # The site is the only thing GitHub Pages serves here now: the PEP 503 wheel
 # index that `release.yml` used to publish was retired in E4, and releases go to
 # PyPI instead. Deploying from `develop` is also what makes the README's links
@@ -12,15 +17,22 @@ name: Docs
 #
 # `--strict` cannot see a page that `docs/` holds but the nav does not name, and
 # it publishes those pages all the same (`site/orphan/index.html`,
-# `docs/testing/AUDIT-MA.3.md` F3). The runnable-docs inventory is the list of
-# pages the gate executes, so the same inventory check `make docs-test` starts
-# with runs here, before the build, together with the assertion that closes the
-# orphan class itself: every Markdown page under `docs/` that `exclude_docs` does
-# not keep out of the build must be named by the nav. A page/nav/inventory drift
-# is then a red Docs check instead of an orphan page on the site. `ci.yml`'s
-# `docs-gate` job runs the whole gate; a job cannot `needs` another workflow's
-# job, so the check is repeated (it needs no wheel and no cargo, only the
-# repository).
+# `docs/testing/AUDIT-MA.3.md` F3). The step below closes that class itself:
+# every Markdown page under `docs/` that `exclude_docs` does not keep out of the
+# build must be named by the nav, so a page/nav drift is a red Docs check instead
+# of an orphan page on the site. It needs no wheel and no cargo, only the
+# repository.
+#
+# The installer the README's hero advertises is a *served asset*, not a page:
+# https://offworldnexus.github.io/blastit/install.sh must be the exact bytes this
+# repository reviewed. The "Publish and prove install.sh" step makes that a fact
+# instead of a property of the site builder: it copies `docs/install.sh` into the
+# built `site/`, compares the two with `cmp`, fetches the file back over HTTP and
+# compares that too, then pipes the served URL into `sh -s -- --help`. The pipe
+# is how a new user runs it, and it is a help-only smoke: no repository is
+# touched, nothing is installed. (The installer's own install stories are
+# `e2e/run_packaging.py --leg install|alpine`, run by `packages.yml` and
+# `publish-pypi.yml`.)
 
 on:
   push:
@@ -46,43 +58,32 @@ env:
 
 jobs:
   build:
-    name: build (--strict)
+    name: 'pages: nav/orphan check, strict build, served install.sh + offline suites'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@v10.3.2
-      # The inventory half of `make docs-test`, which needs no wheel: the page
-      # list the gate executes must equal the public pages `zensical.toml` names,
-      # every listed page must parse into the fences the inventory indexes, and
-      # every fence mode/reason/fixture must be valid. Any problem is printed
-      # with the file to fix and fails the job before a page is published.
-      #
-      # The inventory only compares the pages it *names*, so on its own it cannot
-      # see a brand-new page that neither it nor the nav mentions (the orphan
-      # class). The second half closes that: every Markdown page under `docs_dir`
-      # that `exclude_docs` does not keep out must be named by the nav, exactly
-      # as `--strict` would publish it.
-      - name: Check the runnable-docs inventory and the page list
+      # The page list `zensical.toml` publishes must be the one its nav names:
+      # every Markdown page under `docs_dir` that `exclude_docs` does not keep
+      # out has to appear in the nav, exactly as `--strict` would publish it. An
+      # orphan page ships a URL nothing links to, which is a page the review
+      # never read.
+      - name: Check the page list (no orphan page reaches the site)
         env:
           UV_PYTHON_DOWNLOADS: never
         run: |
+          set -euo pipefail
           uv run --no-project python - <<'PY'
           import fnmatch
           import sys
           import tomllib
           from pathlib import Path
 
-          sys.path.insert(0, "python/tests/runnable_docs")
-
-          from harness import load_inventory
-          from run import INVENTORY, check_inventory
-
           problems: list[str] = []
-          pages = load_inventory(INVENTORY)
-          problems += check_inventory(pages)
 
           # `zensical.toml` is where the site and the gate both get their page
           # list from, so the orphan check reads what the build reads:
@@ -129,31 +130,84 @@ jobs:
           for orphan in orphans:
               problems.append(
                   f"{orphan} is published by the site but named by neither the nav "
-                  "nor the runnable-docs inventory"
+                  "nor an exclude_docs rule"
               )
 
           for problem in problems:
-              print(f"inventory: {problem}", file=sys.stderr)
+              print(f"pages: {problem}", file=sys.stderr)
           if problems:
               print(
-                  "inventory: the runnable-docs gate and the site disagree; fix "
-                  "python/tests/runnable_docs/inventory.toml or zensical.toml's nav",
+                  "pages: the site and its nav disagree; fix zensical.toml's nav",
                   file=sys.stderr,
               )
               sys.exit(1)
-          fences = sum(len(page.fences) for page in pages)
-          print(
-              f"inventory: {len(pages)} pages / {fences} fences accounted, "
-              f"{len(named)} nav pages, 0 orphan pages"
-          )
+          print(f"pages: {len(named)} nav pages, 0 orphan pages")
           PY
       - name: Install Zensical
         run: pipx install "zensical==$ZENSICAL_VERSION"
       # `--strict` aborts on a warning, and link validation is on by default:
       # every internal link and every link anchor is resolved, so a renamed
       # heading or a moved page fails this job.
-      - name: Build
+      - name: Build the site with --strict
         run: zensical build --strict
+      # The package's offline suites (`python/tests/test_check_pytest_gate.py`,
+      # `test_launcher.py`) plus the `install.sh` POSIX-sh parse: no wheel, no
+      # network, no root. This is the job that keeps them on a pull request now
+      # that `ci.yml` runs no docs job.
+      - name: The package's offline suites and install.sh's syntax
+        run: make docs-unit
+      # The hero's one command is served from the site root, so the served bytes
+      # must be the reviewed bytes. The build happens to copy `docs/install.sh`
+      # in this pinned Zensical, which is not a guarantee the gate can lean on:
+      # the copy is explicit, `cmp` proves it, the HTTP GET proves what Pages will
+      # hand a user, and the pipe proves a real `curl … | sh` still reaches
+      # usage.
+      #
+      # Three version guards live beside it: `BLASTIT_DEFAULT_VERSION` must equal
+      # `Cargo.toml`'s version, the embedded digest table must be keyed by that
+      # same constant (so a release has one version to bump), and a `v*` tag may
+      # not publish a table whose rows are still `-` — an archive install would
+      # then verify against the origin's own SHA256SUMS, which shares the
+      # download's trust root and adds no assurance.
+      - name: Publish and prove install.sh (the README's one command)
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          pinned=$(sed -n 's/^BLASTIT_DEFAULT_VERSION="\(.*\)"/\1/p' docs/install.sh)
+          if [ "$version" != "$pinned" ]; then
+            echo "::error file=docs/install.sh::BLASTIT_DEFAULT_VERSION=$pinned but Cargo.toml says $version: bump the installer's default with the release"
+            exit 1
+          fi
+          if ! grep -qF '"$BLASTIT_DEFAULT_VERSION":' docs/install.sh; then
+            echo "::error file=docs/install.sh::the embedded digest table must be keyed by BLASTIT_DEFAULT_VERSION"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && grep -qE "printf '%s.n' - ;;" docs/install.sh; then
+            echo "::error file=docs/install.sh::this is the $GITHUB_REF tag but the embedded digest table still holds '-' rows: stamp the four release digests before tagging"
+            exit 1
+          fi
+          cp docs/install.sh site/install.sh
+          chmod 0755 site/install.sh
+          cmp docs/install.sh site/install.sh
+          uv run --no-project python -m http.server 8731 --bind 127.0.0.1 --directory site &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          url=http://127.0.0.1:8731/install.sh
+          ready=0
+          for _ in $(seq 1 50); do
+            if curl -fsS -o /dev/null "$url" 2>/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::the built site does not serve /install.sh"
+            exit 1
+          fi
+          curl -fsSL "$url" | cmp - docs/install.sh
+          curl -fsSL "$url" | sh -s -- --help >/dev/null
+          echo "install.sh: published for v$version, served byte-identical, and 'curl … | sh -s -- --help' exits 0"
       - uses: actions/configure-pages@v5
       - name: Upload the site
         uses: actions/upload-pages-artifact@v3
@@ -161,7 +215,7 @@ jobs:
           path: site
 
   deploy:
-    name: deploy (GitHub Pages)
+    name: deploy the site to GitHub Pages
     needs: build
     # A pull request builds the site and stops there: the `github-pages`
     # environment allows `develop` and `v*` only, so a deployment from a

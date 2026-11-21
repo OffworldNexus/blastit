@@ -8,7 +8,7 @@
 #![allow(dead_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use blastit_events::Event;
 use blastit_frame::{
-    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, INITIAL_WINDOW, Limits, ReqHead, RequestCost,
-    RespHead, Scheme,
+    Ctl, Decoder, DoneOutcome, ExitStatus, Frame, INITIAL_WINDOW, Limits, MIN_LENGTH, ReqHead,
+    RequestCost, RespHead, Scheme, TypeCode,
 };
 use blastit_manifest::{Manifest, RoutingTable, UidLayout};
 use blastit_scheduler::{
@@ -54,6 +54,10 @@ pub enum Script {
     WaitCancel,
     /// No `READY` at all, then the socket closes after `after`.
     NeverReady { after: Duration },
+    /// `READY` only after `after`, then silence: a worker that has been reported
+    /// (`SPAWNED`) but is still starting — the window growth must wait for
+    /// before the first memory measurement (§4.3).
+    ReadyAfter { after: Duration },
     /// `READY`, then the socket closes.
     ReadyThenExit,
     /// `READY`, then the socket closes as soon as a request arrives.
@@ -91,6 +95,61 @@ pub enum Script {
         body: Vec<u8>,
         cost: RequestCost,
         gate: Arc<Semaphore>,
+    },
+    /// `READY`, then a response with **any** status, and a `DONE` carrying a
+    /// chosen outcome: the frames `MB.3.41` moved a completed `5xx`'s label and
+    /// its `R19` charge onto.
+    ///
+    /// The head and body go out the moment the request arrives, so the
+    /// scheduler's floor — dispatch to the view's first frame — stays at
+    /// nothing. With a `gate`, the response *end* and then the `DONE` each wait
+    /// for a permit, so a test places both on the paused clock; without one,
+    /// both follow immediately. That is what lets a test tell the three spans
+    /// apart: the report the view sends, the time the scheduler observed
+    /// (dispatch to `DONE`), and the event's own arrival-to-last-byte
+    /// `duration_ms`.
+    AnswerStatus {
+        status: u16,
+        body: Vec<u8>,
+        /// `RESP_END_COST`'s report when set, a plain `RESP_END` when not.
+        cost: Option<RequestCost>,
+        /// What the `DONE` says: `Bailed` for a contained `exit()`/`die()`/
+        /// fatal, `Completed` for a handler that returned — even out of a
+        /// `5xx` it answered itself.
+        outcome: DoneOutcome,
+        /// One permit per frame that waits, in order: the response end, then
+        /// the `DONE`.
+        gate: Option<Arc<Semaphore>>,
+    },
+    /// `READY`, then a `status` head and a `DONE` whose outcome byte is `code`,
+    /// written raw.
+    ///
+    /// The typed encoder only produces the four outcomes this build defines, so
+    /// this is the one way to put a value it does not (`4`) on a `view.chan` —
+    /// which only a compromised, or a later, view would send.
+    RawDone { status: u16, code: u8 },
+    /// `READY`, then each request is held until `gate` grants it a permit; the
+    /// request is then finished with **only** a `DONE` carrying `outcome`.
+    ///
+    /// This is a request the scheduler answered itself (`expire_requests`
+    /// writes a `504` and cancels the view), whose thread is still alive and
+    /// finishes afterwards — the shape `MB.3.45` has to keep out of the
+    /// bailout bill.
+    LateDone {
+        outcome: DoneOutcome,
+        gate: Arc<Semaphore>,
+    },
+    /// `READY`, then each request is held until `gate` is notified; the channel
+    /// is then closed, after writing the answer if one is given.
+    ///
+    /// With an answer this is `php.rs`'s designed retire: `RESP_HEAD`,
+    /// `RESP_END_COST` and `DONE`, then the process exits — the frames init's
+    /// `Ctl::Exited` may overtake on the other channel (`MB.3.45`). Without
+    /// one it is a view that really died mid-request: the channel closes with
+    /// nothing written.
+    SilentThenExit {
+        answer: Option<(u16, RequestCost, DoneOutcome)>,
+        gate: Arc<Notify>,
     },
 }
 
@@ -161,6 +220,26 @@ pub struct Log {
     pub retires: Vec<(usize, String)>,
     /// Every process init forked, as `(route, pid)`.
     pub pids: Vec<(usize, u32)>,
+    /// The fake view tasks, with the process init gave them, so a test can stop
+    /// one the way a dead process stops itself (`MB.3.45`).
+    pub handles: Vec<(usize, u32, JoinHandle<()>)>,
+    /// Frames a worker received, as `(route, pid, request id, frame)`.
+    ///
+    /// [`Log::received`] is route-keyed and stays that way: a pool's tests need
+    /// to say *which* worker of a route saw a frame.
+    pub by_process: Vec<(usize, u32, u32, Frame)>,
+    /// `(route, pid)` of every worker whose channel closed.
+    pub closed_by_process: Vec<(usize, u32)>,
+    /// `RETIRE` messages init received, as `(route, pid, reason)`.
+    ///
+    /// [`Log::retires`] keeps its `(route, reason)` shape for the suites that
+    /// assert on it; the pid lives here.
+    pub retired_pids: Vec<(usize, u32, String)>,
+    /// Every `SPAWNED` the fake init actually delivered, as `(route, pid)`.
+    ///
+    /// With [`Options::park_spawned`] set this trails [`Log::pids`], which is
+    /// what makes "one `SPAWN` in flight" observable.
+    pub spawned_sent: Vec<(usize, u32)>,
 }
 
 impl Log {
@@ -173,6 +252,15 @@ impl Log {
             .collect()
     }
 
+    /// The frames worker `pid` received.
+    pub fn received_by_pid(&self, pid: u32) -> Vec<(u32, Frame)> {
+        self.by_process
+            .iter()
+            .filter(|(_, seen, _, _)| *seen == pid)
+            .map(|(_, _, id, frame)| (*id, frame.clone()))
+            .collect()
+    }
+
     /// The request ids view `route` saw `REQ_HEAD` for.
     pub fn request_ids(&self, route: usize) -> Vec<u32> {
         self.received
@@ -182,11 +270,29 @@ impl Log {
             .collect()
     }
 
+    /// The request ids worker `pid` saw `REQ_HEAD` for.
+    pub fn request_ids_of(&self, pid: u32) -> Vec<u32> {
+        self.by_process
+            .iter()
+            .filter(|(_, seen, _, frame)| *seen == pid && matches!(frame, Frame::ReqHead(_)))
+            .map(|(_, _, id, _)| *id)
+            .collect()
+    }
+
     /// Whether view `route` received a frame matching `pred`.
     pub fn saw(&self, route: usize, pred: impl Fn(&Frame) -> bool) -> bool {
         self.received
             .iter()
             .any(|(seen, _, frame)| *seen == route && pred(frame))
+    }
+
+    /// Every pid `route` was asked to retire, with the reason, in order.
+    pub fn retired_pids_of(&self, route: usize) -> Vec<(u32, String)> {
+        self.retired_pids
+            .iter()
+            .filter(|(seen, _, _)| *seen == route)
+            .map(|(_, pid, reason)| (*pid, reason.clone()))
+            .collect()
     }
 }
 
@@ -443,6 +549,30 @@ impl Http {
         Some(frames)
     }
 
+    /// Waits for the response head for `id`, spinning so time stands still.
+    ///
+    /// This is what a test waits on when the *head* is the thing that must be on
+    /// the wire before it moves the clock: the view's own log entry is written
+    /// before it sends anything, so it cannot say the floor exists yet. The head
+    /// stays in the inbox, where [`Http::response`] picks it up.
+    pub async fn await_head(&mut self, id: u32) -> RespHead {
+        for _ in 0..SPIN_BUDGET {
+            self.poll();
+            let head = self.inbox.iter().find_map(|(stream, frame)| match frame {
+                Frame::RespHead(head) if *stream == id => Some(head.clone()),
+                _ => None,
+            });
+            if let Some(head) = head {
+                return head;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!(
+            "no response head for stream {id}; inbox holds {:?}",
+            self.inbox
+        );
+    }
+
     /// Waits for a complete response for `id`, spinning so time stands still.
     pub async fn response(&mut self, id: u32) -> Vec<Frame> {
         for _ in 0..SPIN_BUDGET {
@@ -521,16 +651,29 @@ pub struct World {
 /// The knobs a test turns before [`World::start`].
 pub struct Options {
     pub cfg: SchedulerConfig,
+    /// The `Blastfile` the world boots, as a user would write it.
     pub manifest: String,
     pub scripts: Arc<Mutex<HashMap<usize, Script>>>,
     pub exit_on_retire: bool,
     /// A fake memory model whose usage the fake init grows on every fork.
     pub memory_model: Option<Arc<Memory>>,
+    /// `per_process_cap` overrides, by route: what an `entrypoint php` route
+    /// says (`ADR-0015` decision 1).
+    pub per_process_caps: HashMap<usize, u32>,
+    /// `process_pool` overrides, by route.
+    pub process_pools: HashMap<usize, bool>,
+    /// Scripts that apply to the `index`-th `SPAWN` of a route (0-based) instead
+    /// of that route's script, so one route can hold its first request and lose
+    /// its second fork before `READY` (R9).
+    pub scripts_by_spawn: BTreeMap<(usize, usize), Script>,
+    /// When set, the fake init parks every owed `SPAWNED` and delivers one per
+    /// permit, so a test can say how many forks are in flight (§4.3, R3).
+    pub park_spawned: Option<Arc<Semaphore>>,
 }
 
 impl Options {
-    /// The default configuration and a one-route manifest that matches
-    /// everything.
+    /// The default configuration and a one-view `Blastfile` that matches
+    /// everything, with the unacknowledged `raw` body a streaming test needs.
     pub fn new() -> Self {
         Self {
             cfg: SchedulerConfig {
@@ -540,17 +683,20 @@ impl Options {
                 request_timeout: Duration::from_secs(30),
                 ..SchedulerConfig::default()
             },
-            manifest: "version = 1\n[[route]]\nname = \"app\"\npath = ['.*']\n\
-                 [route.ingress]\nbody = \"raw\"\nallow_raw = true\n"
-                .to_string(),
+            manifest: "view app \"/*\" {\n  body raw unvalidated\n}\n".to_string(),
             scripts: Arc::new(Mutex::new(HashMap::new())),
             exit_on_retire: true,
             memory_model: None,
+            per_process_caps: HashMap::new(),
+            process_pools: HashMap::new(),
+            scripts_by_spawn: BTreeMap::new(),
+            park_spawned: None,
         }
     }
 
-    /// Replaces the manifest.
-    pub fn manifest(mut self, source: &str) -> Self {
+    /// Replaces the manifest with a `Blastfile`, read by the product's one
+    /// parser ([`Manifest::from_blastfile_str`]).
+    pub fn blastfile(mut self, source: &str) -> Self {
         self.manifest = source.to_string();
         self
     }
@@ -564,12 +710,37 @@ impl Options {
         self
     }
 
+    /// Gives the `index`-th `SPAWN` of `route` (0-based) its own script.
+    pub fn script_for_spawn(mut self, route: usize, index: usize, script: Script) -> Self {
+        self.scripts_by_spawn.insert((route, index), script);
+        self
+    }
+
     /// Makes `model` the machine's memory: the scheduler reads it through a
     /// probe, and the fake init grows it by the model's per-view cost on every
     /// `SPAWN`, the way §9.2 #2 says a fork does.
     pub fn memory(mut self, model: Arc<Memory>) -> Self {
         self.cfg.memory_usage = Some(model.probe());
         self.memory_model = Some(model);
+        self
+    }
+
+    /// Sets route `route`'s per-process request ceiling (`per_process_cap`).
+    pub fn cap_route(mut self, route: usize, cap: u32) -> Self {
+        self.per_process_caps.insert(route, cap);
+        self
+    }
+
+    /// Sets whether route `route` may own more than one process
+    /// (`process_pool`).
+    pub fn pool_route(mut self, route: usize, pooled: bool) -> Self {
+        self.process_pools.insert(route, pooled);
+        self
+    }
+
+    /// Parks every owed `SPAWNED` behind `gate`: one delivery per permit.
+    pub fn park_spawned(mut self, gate: Arc<Semaphore>) -> Self {
+        self.park_spawned = Some(gate);
         self
     }
 }
@@ -583,9 +754,26 @@ impl Default for Options {
 impl World {
     /// Starts the scheduler with a fake init and a fake client.
     pub fn start(options: Options) -> Self {
-        let manifest = Manifest::from_toml_str(&options.manifest).expect("valid manifest");
+        let manifest = Manifest::from_blastfile_str(&options.manifest).expect("valid manifest");
         let table = RoutingTable::new(&manifest).expect("valid routing table");
-        let routes = routes_from_manifest(&manifest, &UidLayout::default());
+        let mut routes = routes_from_manifest(&manifest, &UidLayout::default());
+        // The concurrency facts are boot data the composition root writes from
+        // the provider it admitted (`ADR-0015` decision 1); nothing in the
+        // manifest can say them, so the test says them here.
+        for (route, cap) in &options.per_process_caps {
+            if let Some(info) = routes.get_mut(*route) {
+                info.per_process_cap = Some(*cap);
+            }
+        }
+        for (route, pooled) in &options.process_pools {
+            if let Some(info) = routes.get_mut(*route) {
+                info.process_pool = *pooled;
+            }
+        }
+        // The mounts are the file's, not a route's (§9.2): the real boot hands
+        // them over beside the route table, so the fake one does too.
+        let mut cfg = options.cfg.clone();
+        cfg.mounts = manifest.mounts().to_vec();
         let (scheduler_end, client_end) = UnixStream::pair().expect("http socketpair");
         let (to_init, mut from_scheduler) = mpsc::unbounded_channel::<Ctl>();
         let (to_scheduler, from_init) = mpsc::unbounded_channel::<(Ctl, Option<OwnedFd>)>();
@@ -599,26 +787,56 @@ impl World {
         let view_log = log.clone();
 
         let fake = FakeCtl { to_init, from_init };
-        let run = tokio::spawn(run(
-            options.cfg.clone(),
-            routes,
-            table,
-            scheduler_end,
-            fake,
-            emit,
-        ));
+        let run = tokio::spawn(run(cfg.clone(), routes, table, scheduler_end, fake, emit));
 
         let scripts = options.scripts.clone();
         let exit_on_retire = options.exit_on_retire;
         let memory_model = options.memory_model.clone();
+        let scripts_by_spawn = options.scripts_by_spawn.clone();
+        let park_spawned = options.park_spawned.clone();
         let init_log = log.clone();
         tokio::spawn(async move {
             let mut pid = 1000u32;
-            while let Some(message) = from_scheduler.recv().await {
+            // How many `SPAWN`s each route has had, so a test can script one
+            // particular fork of a route.
+            let mut forks: BTreeMap<usize, usize> = BTreeMap::new();
+            // Owed `SPAWNED`s, when the test parked them (§4.3).
+            let mut owed: VecDeque<(usize, u32, OwnedFd)> = VecDeque::new();
+            loop {
+                // A permit, or a message; whichever comes first. With nothing
+                // parked this is just the receive the fake init always did.
+                let message = if owed.is_empty() {
+                    from_scheduler.recv().await
+                } else if let Some(gate) = &park_spawned {
+                    tokio::select! {
+                        biased;
+                        message = from_scheduler.recv() => message,
+                        permit = gate.clone().acquire_owned() => {
+                            if let Ok(permit) = permit {
+                                permit.forget();
+                            }
+                            deliver_spawned(&mut owed, &to_scheduler, &init_log);
+                            continue;
+                        }
+                    }
+                } else {
+                    deliver_spawned(&mut owed, &to_scheduler, &init_log);
+                    from_scheduler.recv().await
+                };
+                let Some(message) = message else { break };
                 match message {
                     Ctl::Spawn { route } => {
                         pid += 1;
                         let route = route as usize;
+                        let index = forks.entry(route).or_insert(0);
+                        let script = scripts_by_spawn
+                            .get(&(route, *index))
+                            .cloned()
+                            .or_else(|| scripts.lock().expect("scripts lock").get(&route).cloned())
+                            .unwrap_or(Script::Answer {
+                                body: b"hello".to_vec(),
+                            });
+                        *index += 1;
                         // §9.2 #2: by the time init reports the fork, the copy
                         // it costs is part of the aggregate reading.
                         if let Some(model) = &memory_model {
@@ -626,27 +844,23 @@ impl World {
                         }
                         let (for_scheduler, for_view) =
                             UnixStream::pair().expect("view socketpair");
-                        let script = scripts
-                            .lock()
-                            .expect("scripts lock")
-                            .get(&route)
-                            .cloned()
-                            .unwrap_or(Script::Answer {
-                                body: b"hello".to_vec(),
-                            });
                         init_log.lock().expect("log lock").spawns.push(route);
                         init_log.lock().expect("log lock").pids.push((route, pid));
-                        tokio::spawn(view_task(route, for_view, script, init_log.clone()));
+                        let handle =
+                            tokio::spawn(view_task(route, pid, for_view, script, init_log.clone()));
+                        init_log
+                            .lock()
+                            .expect("log lock")
+                            .handles
+                            .push((route, pid, handle));
                         let std_stream: StdUnixStream =
                             for_scheduler.into_std().expect("std UnixStream");
                         let fd: OwnedFd = std_stream.into();
-                        let _ = to_scheduler.send((
-                            Ctl::Spawned {
-                                route: route as u32,
-                                pid,
-                            },
-                            Some(fd),
-                        ));
+                        if park_spawned.is_some() {
+                            owed.push_back((route, pid, fd));
+                        } else {
+                            send_spawned(&to_scheduler, &init_log, route, pid, fd);
+                        }
                     }
                     Ctl::Retire {
                         route,
@@ -657,12 +871,41 @@ impl World {
                             .lock()
                             .expect("log lock")
                             .retires
-                            .push((route as usize, reason));
+                            .push((route as usize, reason.clone()));
+                        init_log.lock().expect("log lock").retired_pids.push((
+                            route as usize,
+                            view_pid,
+                            reason,
+                        ));
                         if exit_on_retire {
                             let _ = to_scheduler.send((
                                 Ctl::Exited {
                                     route,
                                     pid: view_pid,
+                                    status: ExitStatus::Signal(9),
+                                },
+                                None,
+                            ));
+                        }
+                    }
+                    // A real init kills every view of every route on a reload
+                    // and reports each exit; the fake one does the same, though
+                    // the scheduler is the sender of this message, so it never
+                    // sees one.
+                    Ctl::Reload => {
+                        let pids: Vec<(usize, u32)> = init_log
+                            .lock()
+                            .expect("log lock")
+                            .handles
+                            .iter()
+                            .map(|(route, pid, _)| (*route, *pid))
+                            .collect();
+                        for (route, pid) in pids {
+                            stop_view(&init_log, pid);
+                            let _ = to_scheduler.send((
+                                Ctl::Exited {
+                                    route: route as u32,
+                                    pid,
                                     status: ExitStatus::Signal(9),
                                 },
                                 None,
@@ -675,7 +918,7 @@ impl World {
         });
 
         Self {
-            cfg: options.cfg,
+            cfg,
             http: Http::new(client_end),
             events,
             log: view_log,
@@ -704,14 +947,27 @@ impl World {
         let _ = self.ctl.send((message, Some(fd)));
     }
 
-    /// Tells init the view for `route` is gone, the way a crashed process
-    /// would be reaped.
+    /// Tells init the view for `route` is gone, the way a crashed process would
+    /// be reaped: the fake process stops too, so its end of `view.chan` closes
+    /// after whatever it already wrote (`MB.3.45`).
     pub fn ctl_exit(&self, route: usize, pid: u32) {
+        self.stop_view(pid);
         self.ctl_send(Ctl::Exited {
             route: route as u32,
             pid,
             status: ExitStatus::Signal(9),
         });
+    }
+
+    /// Stops the fake view process `pid`, which drops its end of `view.chan` —
+    /// the ordered close a real exit produces.
+    ///
+    /// A test that wants the scheduler to hear about the exit *before* the
+    /// channel closes — the race `Ctl::Exited` can win against `view.chan`, the
+    /// `MB.3.48` flake — sends [`Ctl::Exited`] with [`World::ctl_send`] and
+    /// closes the channel from the script instead.
+    pub fn stop_view(&self, pid: u32) {
+        stop_view(&self.log, pid);
     }
 
     /// Moves the paused clock forward, then lets the scheduler settle.
@@ -848,21 +1104,30 @@ impl CtlChannel for FakeCtl {
 /// A `Hold` script keeps reading while it holds its requests: the view task
 /// races its `view.chan` against a gate permit, so a held request does not
 /// stop the process from receiving the rest of the request — or a `CANCEL`.
-async fn view_task(route: usize, stream: UnixStream, mut script: Script, log: Arc<Mutex<Log>>) {
+async fn view_task(
+    route: usize,
+    pid: u32,
+    stream: UnixStream,
+    mut script: Script,
+    log: Arc<Mutex<Log>>,
+) {
     let (mut read, mut write) = stream.into_split();
     let mut decoder = Decoder::new(Limits::default());
     let mut buf = vec![0u8; 8192];
     let mut pending: VecDeque<u32> = VecDeque::new();
-    if !matches!(script, Script::NeverReady { .. }) {
+    if let Script::ReadyAfter { after } = script {
+        tokio::time::sleep(after).await;
+        send_frame(&mut write, 0, &Frame::Ready).await;
+    } else if !matches!(script, Script::NeverReady { .. }) {
         send_frame(&mut write, 0, &Frame::Ready).await;
     }
     if let Script::NeverReady { after } = script {
         tokio::time::sleep(after).await;
-        log.lock().expect("log lock").closed.push(route);
+        close_view(&log, route, pid);
         return;
     }
     if matches!(script, Script::ReadyThenExit) {
-        log.lock().expect("log lock").closed.push(route);
+        close_view(&log, route, pid);
         return;
     }
     loop {
@@ -877,14 +1142,15 @@ async fn view_task(route: usize, stream: UnixStream, mut script: Script, log: Ar
                 loop {
                     match decoder.next_frame() {
                         Ok(Some((id, frame))) => {
-                            log.lock()
-                                .expect("log lock")
-                                .received
-                                .push((route, id, frame.clone()));
+                            {
+                                let mut log = log.lock().expect("log lock");
+                                log.received.push((route, id, frame.clone()));
+                                log.by_process.push((route, pid, id, frame.clone()));
+                            }
                             match script.step(id, &frame, &mut write).await {
                                 Step::Continue => {}
                                 Step::Close => {
-                                    log.lock().expect("log lock").closed.push(route);
+                                    close_view(&log, route, pid);
                                     return;
                                 }
                                 Step::Hold(id) => pending.push_back(id),
@@ -892,7 +1158,7 @@ async fn view_task(route: usize, stream: UnixStream, mut script: Script, log: Ar
                         }
                         Ok(None) => break,
                         Err(_) => {
-                            log.lock().expect("log lock").closed.push(route);
+                            close_view(&log, route, pid);
                             return;
                         }
                     }
@@ -911,7 +1177,56 @@ async fn view_task(route: usize, stream: UnixStream, mut script: Script, log: Ar
             }
         }
     }
-    log.lock().expect("log lock").closed.push(route);
+    close_view(&log, route, pid);
+}
+
+/// Records that worker `pid` of `route` closed its `view.chan`, both ways the
+/// log carries it.
+fn close_view(log: &Arc<Mutex<Log>>, route: usize, pid: u32) {
+    let mut log = log.lock().expect("log lock");
+    log.closed.push(route);
+    log.closed_by_process.push((route, pid));
+}
+
+/// Stops the fake view task of `pid`, which drops its end of `view.chan` — the
+/// ordered close a real killed process produces.
+fn stop_view(log: &Arc<Mutex<Log>>, pid: u32) {
+    let log = log.lock().expect("log lock");
+    if let Some((_, _, handle)) = log.handles.iter().find(|(_, id, _)| *id == pid) {
+        handle.abort();
+    }
+}
+
+/// Delivers one `SPAWNED`, with the `view.chan` descriptor init holds for it.
+fn send_spawned(
+    to_scheduler: &mpsc::UnboundedSender<(Ctl, Option<OwnedFd>)>,
+    log: &Arc<Mutex<Log>>,
+    route: usize,
+    pid: u32,
+    fd: OwnedFd,
+) {
+    let _ = to_scheduler.send((
+        Ctl::Spawned {
+            route: route as u32,
+            pid,
+        },
+        Some(fd),
+    ));
+    log.lock()
+        .expect("log lock")
+        .spawned_sent
+        .push((route, pid));
+}
+
+/// Delivers the first parked `SPAWNED`, if the test left one owed.
+fn deliver_spawned(
+    owed: &mut VecDeque<(usize, u32, OwnedFd)>,
+    to_scheduler: &mpsc::UnboundedSender<(Ctl, Option<OwnedFd>)>,
+    log: &Arc<Mutex<Log>>,
+) {
+    if let Some((route, pid, fd)) = owed.pop_front() {
+        send_spawned(to_scheduler, log, route, pid, fd);
+    }
 }
 
 impl Script {
@@ -980,7 +1295,7 @@ impl Script {
                     .await;
                 }
             }
-            Script::NeverReady { .. } | Script::ReadyThenExit => {}
+            Script::NeverReady { .. } | Script::ReadyAfter { .. } | Script::ReadyThenExit => {}
             Script::ExitOnHead => {
                 if head {
                     return Step::Close;
@@ -1104,6 +1419,61 @@ impl Script {
                     }
                 }
             }
+            Script::AnswerStatus {
+                status,
+                body,
+                cost,
+                outcome,
+                gate,
+            } => {
+                if head {
+                    let (status, body, cost, outcome) = (*status, body.clone(), *cost, *outcome);
+                    send_frame(write, id, &resp_head(status, body.len())).await;
+                    if !body.is_empty() {
+                        send_frame(write, id, &Frame::RespBody(body)).await;
+                    }
+                    // The response end, then the `DONE`: each waits for its own
+                    // permit, so the two frames land wherever the test puts
+                    // them on the paused clock.
+                    wait_gate(gate).await;
+                    match cost {
+                        Some(cost) => send_frame(write, id, &Frame::RespEndCost { cost }).await,
+                        None => send_frame(write, id, &Frame::RespEnd).await,
+                    }
+                    wait_gate(gate).await;
+                    send_frame(write, id, &Frame::Done { outcome }).await;
+                }
+            }
+            Script::RawDone { status, code } => {
+                if head {
+                    let (status, code) = (*status, *code);
+                    send_frame(write, id, &resp_head(status, 0)).await;
+                    send_raw_done(write, id, code).await;
+                }
+            }
+            Script::LateDone { outcome, gate } => {
+                if head {
+                    let outcome = *outcome;
+                    // Wait for this request's permit, then report the thread's
+                    // end with no response of its own: the scheduler answered,
+                    // the view only finishes.
+                    if let Ok(permit) = gate.clone().acquire_owned().await {
+                        permit.forget();
+                    }
+                    send_frame(write, id, &Frame::Done { outcome }).await;
+                }
+            }
+            Script::SilentThenExit { answer, gate } => {
+                if head {
+                    gate.notified().await;
+                    if let Some((status, cost, outcome)) = *answer {
+                        send_frame(write, id, &resp_head(status, 0)).await;
+                        send_frame(write, id, &Frame::RespEndCost { cost }).await;
+                        send_frame(write, id, &Frame::Done { outcome }).await;
+                    }
+                    return Step::Close;
+                }
+            }
             Script::Deaf { window } => {
                 if head {
                     // Hand out credit and then never read again: the process is
@@ -1206,6 +1576,31 @@ async fn send_frame(write: &mut tokio::net::unix::OwnedWriteHalf, id: u32, frame
     let _ = write.write_all(&wire).await;
 }
 
+/// Waits for one permit from `gate`, when the script has one, and consumes it.
+async fn wait_gate(gate: &Option<Arc<Semaphore>>) {
+    if let Some(gate) = gate
+        && let Ok(permit) = gate.clone().acquire_owned().await
+    {
+        permit.forget();
+    }
+}
+
+/// Writes a `DONE` frame with a raw outcome byte, which the typed encoder
+/// refuses.
+///
+/// A `DONE` is `u32 length | u8 type | u32 id | u8 outcome`, so an outcome this
+/// build does not define is one byte the scheduler's decoder must reject
+/// instead of guessing at.
+async fn send_raw_done(write: &mut tokio::net::unix::OwnedWriteHalf, id: u32, code: u8) {
+    let mut wire = Vec::new();
+    let length = MIN_LENGTH + 1;
+    wire.extend_from_slice(&length.to_le_bytes());
+    wire.push(TypeCode::Done.code());
+    wire.extend_from_slice(&id.to_le_bytes());
+    wire.push(code);
+    let _ = write.write_all(&wire).await;
+}
+
 /// A request head for `method` and `target`.
 pub fn head(method: &str, target: &str) -> ReqHead {
     ReqHead {
@@ -1270,9 +1665,12 @@ pub fn aborted(frames: &[Frame]) -> bool {
     matches!(frames.last(), Some(Frame::RespAbort { .. }))
 }
 
-/// A manifest route source line.
+/// A one-view `Blastfile` source line: `view <name> regex '<path>'`.
+///
+/// The pattern is the v1 regex verbatim, so a suite states the path rule it
+/// always did and the one parser compiles it (§8.1).
 pub fn route(name: &str, path: &str) -> String {
-    format!("[[route]]\nname = \"{name}\"\npath = ['{path}']\n")
+    format!("view {name} regex '{path}' {{}}\n")
 }
 
 /// Waits until a view holds a request, and gives back that request's id.

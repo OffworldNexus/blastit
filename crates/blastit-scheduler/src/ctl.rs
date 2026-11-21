@@ -285,39 +285,3 @@ impl CtlChannel for UnixCtl {
         }
     }
 }
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ctl_messages_encode_with_id_zero() {
-        let limits = Limits::default();
-        let mut wire = Vec::new();
-        limits
-            .encode(&Frame::Ctl(Ctl::Spawn { route: 7 }), 0, &mut wire)
-            .unwrap();
-        assert_eq!(wire.len(), HEADER_LEN + 4);
-        assert_eq!(wire[4], Ctl::Spawn { route: 7 }.code());
-        assert_eq!(&wire[5..9], &[0, 0, 0, 0]);
-        assert_eq!(&wire[9..], &7u32.to_le_bytes());
-
-        // A message that does not fit the channel's limit is refused, not
-        // truncated.
-        let tight = Limits::new(16).unwrap();
-        assert!(
-            tight
-                .encode(
-                    &Frame::Ctl(Ctl::Retire {
-                        route: 1,
-                        pid: 2,
-                        reason: "x".repeat(64),
-                    }),
-                    0,
-                    &mut Vec::new(),
-                )
-                .is_err()
-        );
-    }
-}

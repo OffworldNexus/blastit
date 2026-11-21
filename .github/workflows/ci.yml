@@ -1,5 +1,17 @@
 name: CI
 
+# The pull-request gate: what a change must prove before it can land on
+# `develop`. Every job names the `TESTING_PLAN.md` story it proves, and the
+# Docker-backed story suites run where Docker exists — the application/runtime
+# suite (§2) here, the installation stories (§3) in `packages.yml`/`wheels.yml`,
+# and the production presets (§6) in `nightly.yml`.
+#
+# The privileged host-tree suites this file once ran as root (`smoke (root)`) are
+# gone: the containerized `e2e/run_prod.py` (`nightly.yml`) is the witness for
+# what root does in production, and it proves it in real containers instead of on
+# a runner that shares its kernel with the harness. `docs.yml` owns the page and
+# package-suite checks, so this file no longer duplicates them.
+
 on:
   push:
     branches: [develop]
@@ -21,7 +33,7 @@ env:
 
 jobs:
   lint:
-    name: fmt + clippy + doc
+    name: 'lint: fmt, clippy -D warnings, rustdoc'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,13 +47,13 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo doc --workspace --no-deps --locked
+      - run: cargo clippy --workspace --all-targets --locked --features python -- -D warnings
+      - run: cargo doc --workspace --no-deps --locked --features python
         env:
           RUSTDOCFLAGS: -D warnings
 
   test:
-    name: test
+    name: 'unit + integration: SQL grants against a real PostgreSQL'
     runs-on: ubuntu-latest
     services:
       # A real PostgreSQL for dbproxy's tests (blastit-dbproxy reads BLASTIT_TEST_PG_URL).
@@ -65,11 +77,46 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-targets --locked
-      - run: cargo test --workspace --doc --locked
+      # The per-minor CPython shims are a **build artifact** (`target/py-sapi`),
+      # so a `cargo test` that never built them passes only by accident.
+      # `make python-runtime` builds both minors and fails closed
+      # (`PY_SAPI_REQUIRE_ALL=1`) when an interpreter is missing, and
+      # `uv python install` is what puts CPython 3.13 *and* 3.14 on the runner
+      # (setup-python above pins 3.13 for PYO3 only).
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: |
+          set -euo pipefail
+          uv python install 3.13 3.14
+          # `uv python install` puts CPython under `$UV_PYTHON_INSTALL_DIR`
+          # (`~/.local/share/uv`), not on `PATH`, so every consumer that asks for
+          # `/usr/local/bin/python3.13` finds nothing (`MB.49`). The link is the
+          # interpreter `uv` just installed, never a second one.
+          for minor in 3.13 3.14; do
+            sudo --non-interactive ln -sfn "$(uv python find --no-project "$minor")" "/usr/local/bin/python$minor"
+          done
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
+      # Ubuntu 24.04+ (today's `ubuntu-latest`) ships
+      # `kernel.apparmor_restrict_unprivileged_userns=1`, so an unprivileged
+      # child cannot create a user namespace and
+      # `critical_fanotify::an_overlay_parent_handle_is_the_at_handle_fid_handle`
+      # dies writing `/proc/self/setgroups` with `EACCES` (errno 13) — a red
+      # `test` job that says nothing about the code under test. The sysctl only
+      # exists on the kernels that restrict it, so the `-e` keeps older images
+      # untouched, and `--non-interactive` turns a sudo that would prompt into an
+      # immediate readable error.
+      - name: Allow unprivileged user namespaces for the fanotify overlay test (Ubuntu 24.04+)
+        run: |
+          set -euo pipefail
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo --non-interactive sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+      - run: cargo test --workspace --all-targets --locked --features python
+      - run: cargo test --workspace --doc --locked --features python
 
   msrv:
-    name: msrv (1.88)
+    name: MSRV 1.88 builds the workspace
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,32 +129,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets --locked
 
-  smoke:
-    name: smoke (root)
+  # R42: a protected critical test may never be skipped. The protection itself is
+  # the file convention plus the per-node `paths` review, so the guard is one
+  # grep (`make critical-skip-check`) with no cargo, no wheel and no network — it
+  # has to run on a pull request, not only at the release gate.
+  critical-guard:
+    name: 'R42: no skip construct in a protected critical test'
     runs-on: ubuntu-latest
-    # MA.9: this job once sat inside one step for 35+ minutes until the
-    # workflow's 360-minute ceiling, and an in-flight job has no downloadable
-    # log, so the only visible symptom was "still running" (run 43407063422).
-    # Every phase below is independently bounded, so a regression is a red phase
-    # whose log and `::error::` name what blocked (a healthy run is ~5 minutes).
-    # The bounds do not sum to a promise, though: 1 + 2 + 10 + 12 + 3 = 28
-    # worst-case minutes, so the 20-minute `timeout-minutes` below - not any
-    # single step - is the outer bound in a pathological run where several
-    # phases go long at once. (A cold `rust-cache` is the one legitimate way to
-    # approach it: the build step below is then the long one.)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Test ripple: `make critical-skip-check`'
+        run: make critical-skip-check
+
+  # `MB.56.4.4` review: with `smoke (root)` retired, one assertion is still only
+  # valid as uid 0 — `e2e_cli`'s `a_binary_owned_by_another_uid_is_refused` —
+  # and under the unprivileged `test` job it prints `SKIP` and passes. This job
+  # runs **one** test binary as root (not the old eight), and
+  # `BLASTIT_REQUIRE_ROOT_TESTS=1` turns that skip into a failure.
+  root-only:
+    name: 'root-only: a binary owned by another uid is refused (uid 0)'
+    runs-on: ubuntu-latest
     timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: blastit
-          POSTGRES_PASSWORD: ci-not-secret
-          POSTGRES_DB: blastit
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U blastit" --health-interval 2s --health-timeout 2s --health-retries 30
-    env:
-      BLASTIT_TEST_PG_URL: postgresql://blastit:ci-not-secret@127.0.0.1:5432/blastit
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -115,270 +158,65 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      # The runner image ships /opt and its tool cache world-writable; blastit refuses an
-      # interpreter a view uid could plant a module in, as it should.
-      # This step runs before the preflight, so it must not be able to wait on
-      # anything either: `--non-interactive` turns "sudo wants a password" into an
-      # instant readable error, and the step is bounded so a wedged `chmod -R` is a
-      # red step rather than a job that idles to its timeout (MA.9).
-      - name: Make /opt and the tool cache non-world-writable (as root)
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Build as the runner and hand root one absolute path: root never runs
+      # `cargo`, so it cannot rebuild into the runner's `target/`, and this job
+      # proves one bounded assertion instead of serialising a whole crate.
+      - name: Build the e2e_cli test binary (runner user, no root)
+        timeout-minutes: 10
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          # Rust 1.100 puts the harness under `target/debug/build/blastit/.../out`,
+          # not `target/debug/deps`: ask cargo for the artifact it just built
+          # instead of guessing at a path that moved.
+          binary=$(cargo test -p blastit --locked --features python --test e2e_cli --no-run \
+            --message-format=json \
+            | "$PYTHON" -c 'import json, sys; matches = [
+                message["executable"] for message in map(json.loads, sys.stdin)
+                if message.get("reason") == "compiler-artifact"
+                and message.get("profile", {}).get("test")
+                and message.get("executable")
+            ]; print(matches[-1] if matches else "")')
+          if [ -z "$binary" ]; then
+            echo "::error::cargo built no e2e_cli test binary: the root-only assertion would silently disappear"
+            exit 1
+          fi
+          echo "$binary" > "$RUNNER_TEMP/e2e_cli.bin"
+          echo "root phase will run: $binary"
+      # A sudo that wants a password can only block on /dev/tty with nothing in
+      # the log; `--non-interactive` makes that an instant, readable red step.
+      - name: Preflight (sudo is non-interactive)
         timeout-minutes: 1
         run: |
           set -euo pipefail
-          sudo --non-interactive chmod go-w /opt
-          sudo --non-interactive chmod -R go-w /opt/hostedtoolcache
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Preflight: prove, in seconds, that root is reachable *without a prompt*
-      # and that cargo resolves for root with the homes this job hands it, and
-      # echo what was resolved. `--non-interactive` is the point: a sudo that
-      # would have asked for a password now exits non-zero immediately instead of
-      # blocking on /dev/tty with nothing in the log (MA.9 candidate 1). Nothing
-      # here prints the whole environment: only the variables the test binaries
-      # need are echoed, and the PostgreSQL URL is reduced to "set".
-      - name: Preflight (sudo is non-interactive, cargo runs as root)
-        timeout-minutes: 2
+          sudo --non-interactive id -u >/dev/null
+          echo "sudo: root reachable non-interactively"
+      - name: Run the one binary as root (a root-only skip is fatal)
+        timeout-minutes: 5
         run: |
-          set -euo pipefail
-          echo "sudo: $(sudo --version | head -1)"
-          if ! root_uid="$(sudo --non-interactive id -u)"; then
-            echo "::error::sudo --non-interactive id -u failed: this runner's sudo wants a password (or denies the command), so the privileged step could only block on a prompt. That is MA.9 candidate 1; the NOPASSWD rule no longer matches what this job runs."
-            exit 1
-          fi
-          echo "sudo: root uid $root_uid, resolved non-interactively"
-          echo "runner: uid=$(id -u) user=$(id -un) cwd=$PWD"
-          echo "runner cargo: $(command -v cargo) ($(cargo --version))"
-          if [ -z "${PYO3_PYTHON:-}" ]; then
-            echo "::error::PYO3_PYTHON is empty: the setup-python step did not reach GITHUB_ENV, and every test binary would lose libpython (tests/smoke.rs derives LD_LIBRARY_PATH from it)."
-            exit 1
-          fi
-          if [ -z "${BLASTIT_TEST_PG_URL:-}" ]; then
-            echo "::error::BLASTIT_TEST_PG_URL is empty: the service's URL did not reach the environment, and the smoke tests would silently skip every PostgreSQL check."
-            exit 1
-          fi
-          echo "runner python: PYO3_PYTHON=$PYO3_PYTHON"
-          echo "homes: RUSTUP_HOME=${RUSTUP_HOME:-<unset>} CARGO_HOME=${CARGO_HOME:-<unset>}"
-          echo "postgres: BLASTIT_TEST_PG_URL=set"
+          set -o pipefail
+          binary=$(cat "$RUNNER_TEMP/e2e_cli.bin")
           sudo --non-interactive env \
+            "HOME=$HOME" \
             "PATH=$HOME/.cargo/bin:$PATH" \
-            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
-            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
             "PYO3_PYTHON=$PYO3_PYTHON" \
-            "BLASTIT_TEST_PG_URL=$BLASTIT_TEST_PG_URL" \
-            sh -c 'echo "root: uid=$(id -u) home=$HOME"; echo "root cargo: $(command -v cargo) ($(cargo --version))"; echo "root PYO3_PYTHON=$PYO3_PYTHON"; test -x "$PYO3_PYTHON" || { echo "::error::root cannot execute PYO3_PYTHON=$PYO3_PYTHON"; exit 1; }'
-      # Build every test target of the crate as the **runner** user, and hand the
-      # privileged step nothing but absolute binary paths: root never runs
-      # `cargo test`, so root can never start a `blastit` rebuild into the
-      # runner-owned `target/` with the runner's `CARGO_HOME` (MA.9 candidate 2:
-      # a silent rebuild behind ~31 serial smoke tests is indistinguishable from
-      # a deadlock). `--message-format=json` names every test binary; the human
-      # build progress still streams on stderr.
-      #
-      # MA.10: exactly one suite is deliberately not handed to root.
-      # `critical_dev_and_fail_closed::unprivileged_production_has_no_single_uid_fallback`
-      # spawns the production binary and waits for it to exit 1. Production fails
-      # closed *because capability detection refuses*, which is only true for an
-      # unprivileged caller: as uid 0 production legitimately boots and serves, so
-      # the spawned child never exits, `Command::output()` waits forever, and the
-      # per-binary timeout below names a "blocked" test that is in fact correct.
-      # The test is right and running it as root is an invalid input to it, so this
-      # job runs every other binary and the filter below *fails the step* if that
-      # one ever disappears (the exclusion would be dead and its coverage claim
-      # false) or if an exclusion is ever added silently.
-      - name: Build the test binaries (runner user, no root)
-        timeout-minutes: 10
-        run: |
-          set -euo pipefail
-          cargo test -p blastit --locked --no-run --message-format=json > "$RUNNER_TEMP/artifacts.json"
-          python3 - "$RUNNER_TEMP/artifacts.json" "$RUNNER_TEMP/test-binaries.txt" \
-            "$RUNNER_TEMP/excluded-binaries.txt" <<'PY'
-          import json
-          import re
-          import sys
-
-          # The one suite this job must not hand to root, and why (see the comment
-          # above this step): its assertion is only valid for an unprivileged
-          # caller. Keep this set exactly one entry long.
-          EXCLUDED = {"critical_dev_and_fail_closed"}
-          # cargo names a test binary `<target>-<16 hex metadata hash>`; the stem is
-          # the target name. Two targets can share a stem (this crate's lib and bin
-          # are both `blastit`), so the stem is not a unique key and the kept list
-          # keeps both.
-          HASH_SUFFIX = re.compile(r"-[0-9a-f]{8,}$")
-
-
-          def stem(executable):
-              """The target name cargo built, or a hard failure on an odd name."""
-              name = executable.rsplit("/", 1)[-1]
-              if not HASH_SUFFIX.search(name):
-                  sys.exit(
-                      f"{name} does not look like a cargo test binary name "
-                      "(<target>-<hash>), so the target name cannot be derived and an "
-                      "exclusion would silently stop matching. Fail rather than guess"
-                  )
-              return HASH_SUFFIX.sub("", name)
-
-
-          # `--message-format=json` is JSON Lines, not one array.
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              artifacts = [json.loads(line) for line in stream if line.strip()]
-          binaries = sorted({
-              artifact["executable"]
-              for artifact in artifacts
-              if artifact.get("reason") == "compiler-artifact"
-              and (artifact.get("profile") or {}).get("test") is True
-              and artifact.get("executable")
-          })
-          if not binaries:
-              sys.exit("no test binary in cargo's JSON: there is nothing to run as root")
-
-          stems = [stem(binary) for binary in binaries]
-          kept = [binary for binary, name in zip(binaries, stems) if name not in EXCLUDED]
-          excluded = [name for name in stems if name in EXCLUDED]
-
-          # The exclusion must be exactly the one known suite, and that suite must
-          # still exist: an exclusion that matches nothing is dead, and its coverage
-          # claim ("the `test` job still runs it unprivileged") would be false.
-          if set(excluded) != EXCLUDED:
-              missing = sorted(EXCLUDED - set(excluded))
-              sys.exit(
-                  f"the unprivileged-only suite(s) {missing} did not appear in cargo's "
-                  "output: renamed, removed, or not built? The root phase's exclusion is "
-                  "dead and the coverage claim is false. Update the exclusion (and the "
-                  "comment above this step) or restore the suite"
-              )
-          if len(excluded) != 1:
-              listed = len(EXCLUDED)
-              noun = "entry" if listed == 1 else "entries"
-              sys.exit(
-                  f"the exclusion would skip {len(excluded)} test binaries ({excluded}) but "
-                  f"the exclusion list has {listed} {noun}, not exactly one: every extra "
-                  "exclusion needs its own proof and comment"
-              )
-          if not kept:
-              sys.exit("every test binary was excluded: the root phase would prove nothing")
-          # Non-fatal, because this is a budget warning and not a correctness
-          # failure: each binary costs at most 120 s (90 s timeout + 30 s
-          # --kill-after), and the run step's 12-minute bound (720 s) holds only
-          # five with slack. The sixth reaches 720 s exactly, so the step's own
-          # overhead is already enough to cut it off before its `::error::`.
-          if len(kept) * 120 >= 720:
-              print(
-                  f"::warning::the root phase now runs {len(kept)} test binaries at up to "
-                  f"120 s each = {len(kept) * 120} s, at or beyond the run step's 720 s "
-                  "(12-minute) bound: raise `timeout-minutes` on 'Run every test binary as "
-                  "root, one at a time' with the count so every binary still reaches its "
-                  "own timeout error annotation"
-              )
-
-          with open(sys.argv[2], "w", encoding="utf-8") as out:
-              out.write("\n".join(kept) + "\n")
-          with open(sys.argv[3], "w", encoding="utf-8") as out:
-              out.write("\n".join(sorted(set(excluded))) + "\n")
-
-          print(f"{len(binaries)} test binaries built as the runner user; {len(kept)} run as root:")
-          for binary in kept:
-              print(f"  {binary}")
-          for name in sorted(set(excluded)):
-              print(f"excluded from the root phase: {name}")
-              print(
-                  "  reason: its assertion is only valid unprivileged (production "
-                  "refuses because capability detection fails; as root it serves, so "
-                  "the spawned child never exits and the suite blocks)"
-              )
-              print(
-                  "  covered unprivileged: the `test` job (cargo test --workspace "
-                  "--all-targets) in CI, and `make test-critical` locally"
-              )
-          PY
-      # The job's purpose, unchanged: init has to be PID-1's uid (root) to bind
-      # the view sockets and drop privileges, so every test binary the build step
-      # kept is run here as uid 0, one target at a time. `critical_dev_and_fail_closed`
-      # is not among them (see the build step): production failing closed depends on
-      # an *unprivileged* caller, so as root that suite would wait forever on a child
-      # that legitimately serves, and the `test` job already runs it as the runner.
-      # `--nocapture` plus `tee` make the log carry the in-flight
-      # `test <name> ...` line as it happens, so a test that blocks is named in
-      # the log while it blocks, not inferred afterwards (MA.9 candidate 3), and
-      # `timeout` bounds each binary instead of the whole step. The budget adds
-      # up: 90 s per binary, plus the up-to-30 s `--kill-after` a binary that
-      # ignores SIGTERM costs before SIGKILL, so at most 2 minutes per binary and
-      # five kept binaries is 10 minutes — inside this step's 12-minute bound, so
-      # every binary reaches its own timeout and its own `::error::` naming the
-      # blocked test instead of being cut off by the step. (The whole suite takes
-      # ~5 s when healthy, so 90 s is ~18x headroom; at six kept binaries the
-      # worst case reaches this step's whole 12-minute bound with no slack left
-      # for the loop's own overhead, so the build step prints a non-fatal
-      # `::warning::` naming the count, the budget and this step, and the bound
-      # is raised deliberately rather than a wedged binary being cut off.)
-      - name: Run every test binary as root, one at a time
-        timeout-minutes: 12
-        run: |
-          set -euo pipefail
-          mapfile -t binaries < "$RUNNER_TEMP/test-binaries.txt"
-          log="$RUNNER_TEMP/root-tests.log"
-          # 90 s per binary + up to 30 s kill-after: 5 × 2 min = 10 min, inside
-          # this step's 12-minute bound.
-          binary_timeout=90
-          : > "$log"
-          if [ -s "$RUNNER_TEMP/excluded-binaries.txt" ]; then
-            echo "not run as root (excluded in the build step): $(tr '\n' ' ' < "$RUNNER_TEMP/excluded-binaries.txt")"
-          fi
-          echo "running ${#binaries[@]} test binaries as uid 0, one at a time"
-          for binary in "${binaries[@]}"; do
-            echo "==> root: $binary"
-            set +e
-            timeout --kill-after=30s "${binary_timeout}s" \
-              sudo --non-interactive env \
-                "PATH=$HOME/.cargo/bin:$PATH" \
-                "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
-                "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
-                "PYO3_PYTHON=$PYO3_PYTHON" \
-                "BLASTIT_TEST_PG_URL=$BLASTIT_TEST_PG_URL" \
-                stdbuf -oL -eL "$binary" --test-threads=1 --nocapture 2>&1 \
-              | tee -a "$log"
-            status=${PIPESTATUS[0]}
-            set -e
-            if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
-              echo "::error::$binary did not finish as root within ${binary_timeout}s: the last 'test <name> ...' line in root-tests.log is the test that blocked (MA.9 candidate 3), not a deadlock in the job."
-              exit 1
-            fi
-            if [ "$status" -ne 0 ]; then
-              echo "::error::$binary failed as root (exit $status)"
-              exit "$status"
-            fi
-          done
-      # `cargo test -p blastit` also runs the crate's doc tests, which are the
-      # one part that still needs cargo as root. It reports "running 0 tests"
-      # today; the step exists so a future doc test cannot silently stop running
-      # under root. rustdoc compiles each snippet, so it is bounded separately.
-      - name: Run the crate's doc tests as root
-        timeout-minutes: 3
-        run: |
-          set -euo pipefail
-          sudo --non-interactive env \
-            "PATH=$HOME/.cargo/bin:$PATH" \
-            "RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" \
-            "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}" \
-            "PYO3_PYTHON=$PYO3_PYTHON" \
-            cargo test -p blastit --doc --locked -- --test-threads=1 \
-            2>&1 | tee "$RUNNER_TEMP/root-doctests.log"
-      # An in-flight job has no downloadable log, which is why the hang left no
-      # evidence at all; keep what the steps teed.
-      - name: Upload the root test logs
+            "BLASTIT_REQUIRE_ROOT_TESTS=1" \
+            stdbuf -oL -eL "$binary" --test-threads=1 --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/root-only.log"
+      - name: Upload the root-only log
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-root-logs
-          path: |
-            ${{ runner.temp }}/root-tests.log
-            ${{ runner.temp }}/root-doctests.log
-            ${{ runner.temp }}/artifacts.json
+          name: root-only-logs
+          path: ${{ runner.temp }}/root-only.log
           if-no-files-found: ignore
 
   e2e:
-    name: e2e (Django under blastit, Docker)
-    runs-on: ubuntu-latest
+    name: '§2 apps: PHP 8.4, Django & Flask on 3.13/3.14, static (Docker)'
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -388,334 +226,219 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
-        env:
-          MATURIN: maturin
-      - name: Run the scenario under blastit
-        run: python e2e/run.py
-        env:
-          E2E_DOCKERFILE: Dockerfile.prebuilt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: e2e-app-log
-          path: e2e/app.log
-          if-no-files-found: ignore
-
-  rootless:
-    name: e2e rootless (capabilities, Docker)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        id: python
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
-        env:
-          MATURIN: maturin
-      - name: Run the scenario with capabilities instead of root
-        run: python e2e/rootless/run.py --local --dockerfile Dockerfile.prebuilt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: rootless-app-log
-          path: e2e/rootless/out/
-          if-no-files-found: ignore
-
-  wheel-smoke:
-    name: wheel in a uv virtualenv (modelw/base, CPython 3.14)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        id: python
-        with:
-          python-version: "3.14"
-      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
-        env:
-          MATURIN: maturin
-      - run: e2e/venv-smoke.sh
-
-  pytest-plugin:
-    name: pytest plugin (CPython 3.14, PostgreSQL)
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_USER: blastit
-          POSTGRES_PASSWORD: ci-not-secret
-          POSTGRES_DB: blastit
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U blastit" --health-interval 2s --health-timeout 2s --health-retries 30
-    env:
-      DATABASE_URL: postgresql://blastit:ci-not-secret@127.0.0.1:5432/blastit
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        id: python
-        with:
-          python-version: "3.14"
-      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
-      # The runner image ships /opt and its tool cache world-writable; blastit refuses an
-      # interpreter a view uid could plant a module in, as it should.
-      - run: sudo chmod go-w /opt && sudo chmod -R go-w /opt/hostedtoolcache
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Build the wheel
-        run: pipx install maturin && scripts/build-wheel.sh
-        env:
-          MATURIN: maturin
-      - name: Install the wheel and the test tools
-        run: |
-          python -m venv /tmp/blastit-tests
-          /tmp/blastit-tests/bin/pip install dist/blastit-*.whl pytest pytest-django pytest-xdist django 'psycopg[binary]'
-      - name: Run the plugin's tests
-        # `python/tests/runnable_docs/fixtures/*` are runnable-docs fixture apps,
-        # driven by the docs harness from their own directory: each fixture app
-        # that collects tests has its own `pytest.ini`, and the imports only
-        # resolve with the fixture directory on `sys.path`. Collected from here
-        # they error at collection. Ignore them here rather than in a global
-        # `norecursedirs`, which would also change what the harness collects
-        # inside those directories.
-        run: /tmp/blastit-tests/bin/pytest python/tests -q --ignore=python/tests/runnable_docs/fixtures
-
-  # `make check` runs the docs gate and both critical-test guards; this job and
-  # `guards` are what run them on a pull request. Nothing else here calls `make`
-  # (`docs/testing/AUDIT-MA.3.md` finding F6), so before these two jobs a PR
-  # could ship a broken console fence or weaken a protected test and stay green.
-  docs-gate:
-    name: docs gate (every documented console fence)
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      # `scripts/build-wheel.sh` falls back to `uvx maturin`, which would reach
-      # the index mid-gate; the job installs maturin with pipx and names it.
-      MATURIN: maturin
-      # The harness installs `pytest==9.2.0` from the *global* uv cache and
-      # refuses the network (`Harness.install_pytest`). The path it reads is
-      # `uv cache dir`, which this variable pins at a directory we can cache, so
-      # the one dependency is filled once instead of on every PR.
-      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        id: python
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      # `scripts/build-wheel.sh` (via maturin) builds the extension against this
-      # interpreter, so the wheel carries the `cp${PYTHON_VERSION}` tag — and that
-      # tag is what `harness.interpreter_for` reads to decide which CPython the
-      # fences need.
-      - name: Pin PYO3_PYTHON so the wheel matches the pinned CPython
-        run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      # The two WSGI legs run on the host's CPython 3.13/3.14 and load the
+      # per-minor shims, and `run_apps.py` mounts the release binary into every
+      # container: build both before the suite starts.
       - uses: astral-sh/setup-uv@v10.3.2
-      # Every fence runs in the environment `harness.Harness.base_env` builds:
-      # `HOME` is a throwaway directory, `PATH` is `dirname(uv)` plus
-      # `/usr/local/bin:/usr/bin:/bin`, and `UV_PYTHON_DOWNLOADS=never` forbids a
-      # download. `actions/setup-python` installs CPython under
-      # `/opt/hostedtoolcache`, which is none of those (`debian`'s `/usr/bin`
-      # holds 3.12), so `uv venv --python 3.13` inside the gate cannot see the
-      # interpreter the job pinned and the first fence aborts before it runs.
-      # Link it into a directory the sanitised `PATH` keeps.
-      - name: Put the pinned CPython on the gate's sanitised PATH
-        run: |
-          set -euo pipefail
-          interpreter="$(python -c 'import sys; print(sys.executable)')"
-          linked="/usr/local/bin/python${PYTHON_VERSION}"
-          sudo ln -sfn "$interpreter" "$linked"
-          ls -l "$linked"
-          "$linked" -c 'import sys; print("linked:", sys.version.split()[0], sys.executable)'
-      # The symlink above is load-bearing and otherwise invisible until the gate
-      # is minutes in and fails on fence 1. Reproduce the harness's environment
-      # here, byte for byte, and create a venv in it: a red probe names the fix
-      # while the job is seconds old.
-      - name: Prove the gate's sanitised environment resolves CPython ${{ env.PYTHON_VERSION }}
-        run: |
-          set -euo pipefail
-          probe="$RUNNER_TEMP/path-probe"
-          rm -rf "$probe"
-          mkdir -p "$probe/home/tmp"
-          if ! env -i \
-              HOME="$probe/home" \
-              PATH="$(dirname "$(command -v uv)"):/usr/local/bin:/usr/bin:/bin" \
-              LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-              TMPDIR="$probe/home/tmp" \
-              UV_CACHE_DIR="$probe/cache" \
-              UV_PYTHON_DOWNLOADS=never \
-              UV_LINK_MODE=copy \
-              uv venv --python "$PYTHON_VERSION" "$probe/venv" 2>&1 | tee "$probe.log"
-          then
-            echo "::error::the gate's sanitised PATH cannot resolve CPython ${PYTHON_VERSION} with UV_PYTHON_DOWNLOADS=never, so every fence would abort at 'uv venv'. /usr/local/bin/python${PYTHON_VERSION} must point at actions/setup-python's interpreter."
-            exit 1
-          fi
-          resolved="$("$probe/venv/bin/python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-          if [ "$resolved" != "$PYTHON_VERSION" ]; then
-            echo "::error::$probe/venv/bin/python is CPython $resolved, not ${PYTHON_VERSION}: the gates would run on an interpreter the job did not pin"
-            exit 1
-          fi
-          "$probe/venv/bin/python" -c 'import sys; print("probe:", sys.version.split()[0], "resolved from the sanitised PATH")'
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install maturin
-        run: pipx install maturin
-      - name: Restore the uv cache the gate reads
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.UV_CACHE_DIR }}
-          key: uv-docs-gate-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-pytest-9.2.0
-      # The gate is offline by contract, so a missing cache entry must not be
-      # discovered by the gate itself: fill it here, where the network is
-      # allowed, and let `make docs-test` read it.
-      - name: Fill the uv cache with the gate's one dependency
-        run: |
-          uv venv --python "$PYTHON_VERSION" "$RUNNER_TEMP/pytest-cache"
-          uv pip install --python "$RUNNER_TEMP/pytest-cache/bin/python" pytest==9.2.0
-          uv cache dir
-      - name: Execute every documented console fence
+      - name: Install the CPython minors the shims need
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
+      - name: Build the binary under test
+        run: cargo build -p blastit --release --locked
+      - name: Run the application suite (e2e/run_apps.py)
         run: |
           set -o pipefail
-          make docs-test 2>&1 | tee "$RUNNER_TEMP/docs-test.log"
-      # The verdict table is on stdout, and the harness deletes the per-fence
-      # logs with its work directory, so the tee'd stream is the only artefact.
-      - name: Upload the verdict table
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: docs-gate-verdict
-          path: ${{ runner.temp }}/docs-test.log
-          if-no-files-found: warn
+          uv run --no-project e2e/run_apps.py 2>&1 | tee "$RUNNER_TEMP/apps.log"
+      # A leg whose host fact is missing (Docker, a CPython minor, the shims)
+      # prints `SKIP` and exits 0, so a green job would prove nothing. The
+      # printout is the verdict: every framework/static leg PASSed and nothing
+      # skipped.
+      - name: 'guard: every §2 app leg served, none skipped'
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/apps.log"
+          status=0
+          if skipped=$(grep -nE '^SKIP ' "$log"); then
+            echo "::error::an application leg skipped instead of serving: this runner is missing a host fact the suite needs"
+            echo "$skipped"
+            status=1
+          fi
+          for evidence in \
+              'PASS  django 3\.13 ' 'PASS  flask 3\.13 ' \
+              'PASS  django 3\.14 ' 'PASS  flask 3\.14 ' \
+              'PASS  php 8\.4 ' 'PASS  static '; do
+            if ! grep -qE "$evidence" "$log"; then
+              echo "::error::the proof line is missing from the run: $evidence"
+              status=1
+            fi
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "--- $log (tail) ---"
+            tail -n 80 "$log"
+            exit 1
+          fi
+          echo "the application legs served: $(grep -cE '^PASS  (django|flask|php|static)' "$log") leg(s)"
 
-  guards:
-    name: critical-test guards
+  # `MB.17`: a plain `cargo build -p blastit` must be the artifact you can copy
+  # onto a server that never had Python. Two proofs, because they fail
+  # differently: `readelf` shows the binary links no `libpython` and carries no
+  # `RUNPATH` into the build host's uv cache, and execution inside an image with
+  # no CPython at all shows the boot path never reaches an interpreter. The
+  # second is the one that would have caught 0.2.0's shipped binary: it linked
+  # `libpython3.14.so.1.0` *and* a `RUNPATH` pointing at one developer's
+  # `~/.local/share/uv/python/...`.
+  #
+  # This binary is built **on the runner** and executed in `debian:trixie-slim`,
+  # which is allowed by the only arm of `MB.3.58`'s rule that permits it: the
+  # image's glibc (2.41) is at least the runner's (2.39). Being newer is a
+  # property of today's runner, not a promise, so the step below reads both
+  # numbers and fails with them named.
+  standalone:
+    name: '§3 standalone binary: no libpython, serves with no CPython in the image'
     runs-on: ubuntu-latest
-    # Every step is one diff plus one short script; five minutes turns a wedged
-    # `git diff` (a paging prompt, a stalled fetch) into a red check instead of a
-    # job that idles until the workflow's default ceiling.
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
-      # The guard diffs `origin/<base>`: a shallow clone has neither the base
-      # branch nor its merge base, and the diff would silently be empty.
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the default (standalone) binary
+        run: cargo build -p blastit --locked
+      - name: It links no interpreter and no build-host RUNPATH
+        run: scripts/check-portable-elf.sh target/debug/blastit
+      # The execution proof is only an execution proof while the image has no
+      # Python: if a future debian:trixie-slim ships one, this fails and the
+      # image (or the assertion) has to be reconsidered rather than the check
+      # quietly becoming an inspection.
+      - name: The image really has no Python
+        run: |
+          set -euo pipefail
+          docker run --rm debian:trixie-slim sh -eu -c '
+            for candidate in python python3 python3.13 python3.14; do
+              if command -v "$candidate" >/dev/null 2>&1; then
+                echo "error: debian:trixie-slim now ships $candidate at $(command -v "$candidate")" >&2
+                exit 1
+              fi
+            done
+            echo "debian:trixie-slim: no CPython on PATH"'
+      # `MB.3.58`: this binary was built on the runner (glibc 2.39 today), and a
+      # container only runs what it built itself or what needs no more than it
+      # has. The check reads the floor out of the ELF and the version out of the
+      # image, so the day `ubuntu-latest` outgrows `debian:trixie-slim` this job
+      # says which two numbers disagree instead of failing at `execve` with
+      # `weak version 'GLIBC_…' not found`.
+      - name: The runtime image is not older than the builder
+        run: >-
+          scripts/check-exec-env.sh --image debian:trixie-slim
+          --binary target/debug/blastit
+      - name: Serve a static fixture where no Python exists
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/target/debug/blastit:/usr/local/bin/blastit:ro" \
+            -v "$PWD/scripts/standalone-runtime-check.sh:/usr/local/bin/standalone-runtime-check.sh:ro" \
+            -e BLASTIT_BIN=/usr/local/bin/blastit \
+            debian:trixie-slim bash /usr/local/bin/standalone-runtime-check.sh --require-no-python
+
+  # The editor binaries (`MB.35`): five targets, declared once in
+  # `scripts/platform_matrix.py --matrix lsp` and built on each **native** runner.
+  # A leg is a proof only after `scripts/lsp_smoke.py` drove a real session
+  # against the archive it publishes — macOS and Windows included, because those
+  # are exactly the files the Zed extension downloads (§8.3a).
+  matrix:
+    name: the leg list (scripts/platform_matrix.py)
+    runs-on: ubuntu-24.04
+    outputs:
+      lsp: ${{ steps.legs.outputs.lsp }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - id: legs
+        run: echo "lsp=$(uv run --no-project scripts/platform_matrix.py --matrix lsp)" >> "$GITHUB_OUTPUT"
+
+  lsp:
+    name: '§7.4 blastit-lsp (${{ matrix.target }}) drives a real session'
+    needs: matrix
+    # The native runner per leg comes from the matrix: an artifact nothing
+    # executed is a claim, not a proof (`MB.35.1`).
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.lsp) }}
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - uses: astral-sh/setup-uv@v10.3.2
-      # R42: a protected critical test may never be skipped.
-      - name: No skip construct in a protected critical test (R42)
-        run: make critical-skip-check
-      # `tools/critical_guard.py` only *enforces* when it is given `--node`: a
-      # task node's `paths` authorize a modified or deleted protected test, and
-      # without `--node` the guard reports every change and exits 0 (`_run`).
-      # A release PR into `develop` bundles every task node of that release, so CI
-      # collects all `kind: task` nodes changed since the base ref (`origin/<base>`
-      # on a PR, `github.event.before` on a push to `develop`) and passes their
-      # union (`--node N1 --node N2 ...`) in a single guard check: every breaking
-      # change to a protected critical test must be covered by at least one task
-      # node in the diff.
-      #
-      # `issuer`/`epic`/`milestone` nodes are left out on purpose: their `paths`
-      # are the delegation of their children (`crates/**`, `python/tests/**` in
-      # `MA.3`) and their `NODE.md` changes on every status transition, so
-      # including them would make this gate vacuous on every real branch.
-      - name: Protected critical tests are unchanged, or changed task nodes authorize them
-        env:
-          PUSH_BEFORE: ${{ github.event.before }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Per target: a warm `target/<triple>` from another OS must never be
+          # linked into this archive.
+          key: lsp-${{ matrix.target }}
+      # `pg_query`'s build runs bindgen, which needs the clang C API by name, and
+      # `clang-sys` 1.9.1 has no registry fallback: `windows-latest` leaves
+      # `LIBCLANG_PATH` unset and the search stops at clang-sys's own list, so the
+      # `bin` directory that holds `libclang.dll` is pinned here
+      # (`docs/research/2026-11-17-cross-platform-blastit-lsp.md` §Q1).
+      - name: Pin LIBCLANG_PATH (research §Q1)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+      # A Linux leg is built inside the image whose glibc *is* its floor and the
+      # floor is asserted by the build (`MB.3.60`'s class, an editor binary this
+      # time); the Apple and Windows legs build on the runner's own toolchain,
+      # because no container has their C library.
+      - name: Build the archive (native, or inside the matrix builder image)
+        shell: bash
         run: |
           set -euo pipefail
-          if [ -n "${GITHUB_BASE_REF:-}" ]; then
-            base="origin/${GITHUB_BASE_REF}"
-          elif [ -n "${PUSH_BEFORE:-}" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
-            base="$PUSH_BEFORE"
-          else
-            base="origin/develop"
+          args=(--target "${{ matrix.target }}" --out dist
+                --archive "${{ matrix.archive }}"
+                --executable "${{ matrix.executable }}"
+                --dir "${{ matrix.dir }}")
+          if [ -n "${{ matrix.builder_image }}" ]; then
+              args+=(--image "${{ matrix.builder_image }}" --max-glibc "${{ matrix.glibc_floor }}")
           fi
-          log="$RUNNER_TEMP/critical-guard.log"
-          guard="tools/critical_guard.py"
-          : > "$log"
+          bash scripts/build-lsp.sh "${args[@]}"
+      # §14.4.1: unpack the archive the release will publish, assert its three
+      # entries, and smoke **the extracted file** — never the build tree's copy.
+      # The directory and the executable are the matrix's, so the unpack cannot
+      # disagree with what the build staged.
+      - name: Unpack the archive and smoke the extracted file
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="dist/smoke-${{ matrix.target }}"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          case "${{ matrix.archive }}" in
+              *.zip) "${{ matrix.python }}" -m zipfile -e "dist/${{ matrix.archive }}" "$tmp" ;;
+              *) tar -xzf "dist/${{ matrix.archive }}" -C "$tmp" ;;
+          esac
+          ( cd "$tmp/${{ matrix.dir }}" && ls | sort | tr '\n' ',' && echo )
+          # The archive's own list, verified with the tool this OS has:
+          # `sha256sum -c` on Linux/Windows, `shasum -a 256 -c` on macOS (which
+          # ships no coreutils; `-a 256` matters because `shasum -c` means SHA-1).
+          ( cd "$tmp/${{ matrix.dir }}" && ${{ matrix.sha_verify }} )
+          "${{ matrix.python }}" scripts/lsp_smoke.py \
+              --binary "$tmp/${{ matrix.dir }}/${{ matrix.executable }}"
 
-          # A failing `git diff` aborts here (bad base, no such ref) rather than
-          # being read as "nothing changed": a guard that cannot see the base
-          # must never pass.
-          node_files="$(git diff --name-only "$base" -- plan/nodes)"
-          mapfile -t nodes < <(
-            printf '%s\n' "$node_files" \
-              | awk -F/ '$NF == "NODE.md" && NF > 3 { print $(NF - 1) }' \
-              | sort -u
-          )
-          echo "guards: base $base; plan nodes changed by this diff: ${nodes[*]:-(none)}"
-
-          node_args=()
-          for node in "${nodes[@]}"; do
-            node_file="$(printf '%s\n' "$node_files" \
-              | awk -F/ -v id="$node" '$NF == "NODE.md" && $(NF - 1) == id' | tail -1)"
-            if [ ! -f "$node_file" ]; then
-              echo "guards: node $node has no NODE.md in this tree (deleted or renamed); skipping"
-              continue
-            fi
-            kind="$(sed -n 's/^kind:[[:space:]]*//p' "$node_file" | head -1)"
-            case "$kind" in
-              issuer | epic | milestone)
-                echo "guards: node $node is a '${kind}' container, not a task: its paths delegate, they do not authorize"
-                continue
-                ;;
-            esac
-            echo "guards: task node $node ($node_file) authorizes its paths"
-            node_args+=(--node "$node")
-          done
-
-          if [ "${#node_args[@]}" -gt 0 ]; then
-            set +e
-            uv run --no-project "$guard" --base "$base" "${node_args[@]}" 2>&1 | tee -a "$log"
-            status=${PIPESTATUS[0]}
-            set -e
-            if [ "$status" -eq 0 ]; then
-              echo "guards: changed task node(s) cover every protected critical test change since $base"
-              exit 0
-            fi
-            echo "::error::one or more protected critical test modifications since $base are not authorized by any changed task node (exit $status)"
-            exit "$status"
-          fi
-
-          # No task node changed at all: run the guard in report mode so any
-          # offending files are in the log, then fail on any `[VIOLATION:`.
-          set +e
-          uv run --no-project "$guard" --base "$base" 2>&1 | tee -a "$log"
-          status=${PIPESTATUS[0]}
-          set -e
-          if [ "$status" -ne 0 ]; then
-            echo "::error::critical_guard could not inspect $base (exit $status)"
-            exit "$status"
-          fi
-          if ! grep -q '^critical-guard: ' "$log"; then
-            echo "::error::critical_guard printed no report: the guard did not run"
-            exit 1
-          fi
-          if grep -q '\[VIOLATION:' "$log"; then
-            grep -n '\[VIOLATION:' "$log" || true
-            echo "::error::a protected critical test was modified or deleted since $base and no task node this branch changes lists it in its paths. Fix it by adding the file's glob to the paths of the node whose task edits it (plan/nodes/**/NODE.md, kind: task), or report STATUS: blocked. Only a task node's paths authorize a protected change."
-            exit 1
-          fi
-          echo "guards: no protected critical test was modified or deleted since $base"
-      # The guard's report is the failure signal, and it only exists in the tee'd
-      # stream: keep it when the step is red.
-      - name: Upload the guard log
-        if: failure()
-        uses: actions/upload-artifact@v4
+  wheel-smoke:
+    name: '§3 py3-none wheel: installed and served in bare CPython images'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: python
         with:
-          name: critical-guard-log
-          path: ${{ runner.temp }}/critical-guard.log
-          if-no-files-found: warn
+          python-version: "3.14"
+      - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `e2e/run_packaging.py --leg wheel` installs the wheel into the images
+      # `scripts/platform_matrix.py --matrix wheels` names and serves a WSGI view
+      # through the shipped shim, so the wheel must carry both CPython shims
+      # (`MB.47.2`).
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Install the CPython minors the shims need
+        run: uv python install 3.13 3.14
+      - name: Build the per-minor CPython shims (fails closed)
+        run: make python-runtime
+      - name: Build the wheel
+        run: pipx install maturin && scripts/build-wheel.sh --require-shims py --out dist
+        env:
+          MATURIN: maturin
+      - name: Install it in every image its leg names and drive it (e2e/run_packaging.py)
+        run: uv run --no-project e2e/run_packaging.py --require-legs --leg wheel --wheel "$(ls dist/blastit-*-py3-none-*.whl | head -n 1)"

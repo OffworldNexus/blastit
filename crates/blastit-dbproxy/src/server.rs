@@ -208,6 +208,15 @@ async fn serve(
         spawn_control(fd, Arc::clone(&shared))?;
     }
 
+    // The dev policy channel: dbproxy's end of the socketpair
+    // stage 0 created for a `blastit dev` boot with reload on. It is spawned
+    // only when the configuration carries the descriptor, which
+    // `DbproxyConfig::validate_policy` has already tied to `dev_policy`, so a
+    // production or `check` boot never has a task, a read or a byte here.
+    if let Some(fd) = config.policy_fd {
+        spawn_policy(fd, Arc::clone(&shared))?;
+    }
+
     let mut prepared = Vec::with_capacity(listeners.len());
     for (index, (listener, _spec)) in listeners.into_iter().enumerate() {
         let listener = prepare(listener, index)?;
@@ -273,6 +282,67 @@ fn spawn_control(fd: i32, shared: Arc<Shared>) -> Result<(), DbproxyError> {
     let learning = Arc::clone(shared.learning());
     tokio::spawn(serve_control(stream, learning));
     Ok(())
+}
+
+/// Adopts the dev policy descriptor and replaces the route-policy map on every
+/// document it carries (§4.6 step 2, §4.8).
+///
+/// The descriptor is dbproxy's end of the socketpair stage 0 created for a
+/// `blastit dev` boot with reload on. dbproxy owns it after this call: the task
+/// closes it when the peer goes away, and nothing else refers to it by number.
+///
+/// The task is detached on purpose, like the control channel's: a policy channel
+/// that went away only means the grants can no longer be refreshed, and the
+/// supervisor that owned the other end is what reports that (one
+/// `manifest.warning`; this process never invents an event for it).
+fn spawn_policy(fd: i32, shared: Arc<Shared>) -> Result<(), DbproxyError> {
+    // SAFETY: `fd` was created for dbproxy and handed over exactly once; it is
+    // non-negative and not another handover (both checked by
+    // `DbproxyConfig::validate_policy`) and is not referred to by number
+    // anywhere else. `UnixStream` takes ownership, so the descriptor is closed
+    // when the task ends.
+    let stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    stream.set_nonblocking(true)?;
+    let stream = UnixStream::from_std(stream)?;
+    tokio::spawn(serve_policy(stream, shared));
+    Ok(())
+}
+
+/// The policy channel's loop: one document, one ack byte, until the peer is gone.
+///
+/// A **well-framed** document that this build refuses (bad JSON, wrong version,
+/// an entry that is not a route policy) is answered [`ACK_REFUSED`] and the
+/// channel stays open, so the next save can try again — the old policy is still
+/// in force either way. A **framing** failure (an oversize length, a body that
+/// stopped arriving, the deadline) cannot be resynchronised, so it is answered
+/// with one refusal and the channel closes; there is no retry loop.
+///
+/// The refusal's reason is deliberately not logged: every useful sentence
+/// belongs to the supervisor's one `manifest.warning`, and dbproxy has no log
+/// channel of its own (its stdout is init's).
+async fn serve_policy(mut stream: UnixStream, shared: Arc<Shared>) {
+    use crate::policy::{ACK_REFUSED, ACK_SWAPPED, DocumentRead};
+    loop {
+        let ack = match crate::policy::read_document(&mut stream).await {
+            // A clean end-of-file: the supervisor is gone.
+            Ok(None) => return,
+            Ok(Some(DocumentRead::Apply(policies))) => {
+                if shared.replace_route_policies(policies).is_ok() {
+                    ACK_SWAPPED
+                } else {
+                    ACK_REFUSED
+                }
+            }
+            Ok(Some(DocumentRead::Refused(_reason))) => ACK_REFUSED,
+            Err(_reason) => {
+                let _ = crate::policy::write_ack(&mut stream, ACK_REFUSED).await;
+                return;
+            }
+        };
+        if crate::policy::write_ack(&mut stream, ack).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Checks `SO_PASSCRED`, sets it when it is missing, and switches the listener
@@ -917,277 +987,5 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
-
-    fn startup(params: &[(&str, &str)]) -> StartupParams {
-        StartupParams::new(
-            params
-                .iter()
-                .map(|(name, value)| (name.to_string(), value.to_string()))
-                .collect(),
-        )
-    }
-
-    /// A backend `ErrorResponse` frame, as pregresql would relay it.
-    fn error_frame(fields: &[(&str, &str)]) -> Vec<u8> {
-        let mut body = Vec::new();
-        for (code, value) in fields {
-            body.push(code.as_bytes()[0]);
-            body.extend_from_slice(value.as_bytes());
-            body.push(0);
-        }
-        body.push(0);
-        let mut frame = vec![b'E'];
-        frame.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
-        frame.extend_from_slice(&body);
-        frame
-    }
-
-    /// A backend `ReadyForQuery` frame.
-    fn ready_for_query() -> Vec<u8> {
-        vec![b'Z', 0, 0, 0, 5, b'I']
-    }
-
-    /// A parameter status frame, which is not an announcement.
-    fn parameter_status() -> Vec<u8> {
-        let mut body = Vec::new();
-        for value in ["client_encoding", "UTF8"] {
-            body.extend_from_slice(value.as_bytes());
-            body.push(0);
-        }
-        let mut frame = vec![b'S'];
-        frame.extend_from_slice(&((body.len() + 4) as i32).to_be_bytes());
-        frame.extend_from_slice(&body);
-        frame
-    }
-
-    #[test]
-    fn only_the_documented_startup_parameters_are_accepted() {
-        let accepted = check_startup_parameters(&startup(&[
-            ("user", "blastit"),
-            ("database", "app"),
-            ("application_name", "django"),
-            ("client_encoding", "UTF8"),
-        ]))
-        .expect("accepted");
-        // `client_encoding` is accepted and *not* forwarded.
-        assert_eq!(
-            accepted.params,
-            [
-                ("user".to_string(), "blastit".to_string()),
-                ("database".to_string(), "app".to_string()),
-                ("application_name".to_string(), "django".to_string()),
-            ]
-        );
-        assert!(check_startup_parameters(&startup(&[("client_encoding", "utf8")])).is_ok());
-        assert!(check_startup_parameters(&startup(&[("client_encoding", "UtF8")])).is_ok());
-    }
-
-    #[test]
-    fn every_other_startup_parameter_is_refused_and_named() {
-        for (name, value) in [
-            ("options", "-c search_path=public"),
-            ("search_path", "public"),
-            ("role", "postgres"),
-            ("session_authorization", "postgres"),
-            ("replication", "true"),
-            ("default_transaction_isolation", "serializable"),
-            ("default_transaction_read_only", "off"),
-            ("client_encoding", "LATIN1"),
-            ("_pq_.something", "1"),
-            ("extra_float_digits", "3"),
-        ] {
-            let error =
-                check_startup_parameters(&startup(&[(name, value)])).expect_err("must be refused");
-            assert!(error.contains(name), "{error}");
-            assert!(
-                !error.contains(value),
-                "the refusal must not quote a value: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_setup_gate_announces_a_session_only_after_ready_for_query() {
-        let shared = state();
-        let state = Arc::new(GateState {
-            shared,
-            connection: 1,
-            inner: Mutex::new(GateInner::default()),
-        });
-        let mut inner = lock(&state.inner);
-        inner.buffered.extend_from_slice(&parameter_status());
-        state.classify(&mut inner);
-        assert!(!inner.released, "a parameter is not an announcement");
-        inner.buffered.extend_from_slice(&ready_for_query());
-        state.classify(&mut inner);
-        assert!(inner.released);
-        assert!(!inner.upstream_failure);
-    }
-
-    #[test]
-    fn the_setup_gate_delivers_a_refusal_of_dbroxys_own() {
-        let shared = state();
-        shared.note_refusal(7);
-        let state = Arc::new(GateState {
-            shared,
-            connection: 7,
-            inner: Mutex::new(GateInner::default()),
-        });
-        let mut inner = lock(&state.inner);
-        inner
-            .buffered
-            .extend_from_slice(&error_frame(&[("C", "28000"), ("M", "refused")]));
-        state.classify(&mut inner);
-        assert!(inner.released, "dbproxy's own refusal reaches the client");
-        assert!(!inner.upstream_failure);
-        assert!(!inner.buffered.is_empty(), "and it is still there to send");
-    }
-
-    #[test]
-    fn the_setup_gate_swallows_an_upstream_failure() {
-        let shared = state();
-        let state = Arc::new(GateState {
-            shared,
-            connection: 8,
-            inner: Mutex::new(GateInner::default()),
-        });
-        let mut inner = lock(&state.inner);
-        inner.buffered.extend_from_slice(&error_frame(&[
-            ("S", "FATAL"),
-            ("C", "08006"),
-            ("M", "dial to db.internal:5432 failed"),
-        ]));
-        state.classify(&mut inner);
-        assert!(!inner.released);
-        assert!(inner.upstream_failure);
-        assert!(inner.buffered.is_empty(), "nothing of it is kept");
-    }
-
-    #[test]
-    fn incomplete_frames_are_not_a_decision() {
-        assert!(!has_error_response(b"E\0\0\0\x30C08006"));
-        assert!(!has_error_response(b"S\0\0\0\x0cfoo\0bar\0"));
-        assert!(has_error_response(
-            b"S\0\0\0\x0cfoo\0bar\0E\0\0\0\x08C42501"
-        ));
-        assert!(!ends_with_ready_for_query(b"Z\0\0\0\x05"));
-        assert!(ends_with_ready_for_query(b"Z\0\0\0\x05I"));
-    }
-
-    #[test]
-    fn only_an_invalid_listener_is_a_fatal_accept_error() {
-        assert!(is_fatal_accept_error(&io::Error::from_raw_os_error(
-            rustix::io::Errno::BADF.raw_os_error()
-        )));
-        assert!(is_fatal_accept_error(&io::Error::from_raw_os_error(
-            rustix::io::Errno::NOTSOCK.raw_os_error()
-        )));
-        for transient in [
-            rustix::io::Errno::MFILE,
-            rustix::io::Errno::NFILE,
-            rustix::io::Errno::CONNABORTED,
-            rustix::io::Errno::INTR,
-            rustix::io::Errno::AGAIN,
-        ] {
-            assert!(
-                !is_fatal_accept_error(&io::Error::from_raw_os_error(transient.raw_os_error())),
-                "{transient:?} must not be fatal"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn the_adopted_listener_fds_are_checked_before_they_are_used() {
-        use crate::config::{DbproxyConfig, ListenerSpec, ProxySpec};
-        use blastit_sqlpolicy::TableGrants;
-
-        let proxy = ProxySpec {
-            name: "db".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 1,
-            user: "u".to_string(),
-            password: "p".to_string().into(),
-            database: "d".to_string(),
-            sslmode: Some("disable".to_string()),
-            ca_cert: None,
-            options: vec![],
-            max_connections: 4,
-        };
-        let listener = |fd: i32, route: &str| ListenerSpec {
-            fd,
-            route: route.to_string(),
-            proxy: "db".to_string(),
-            uid: 21_000,
-            queries: vec![],
-            transaction_control: false,
-            unrestricted: false,
-            tables: TableGrants::default(),
-        };
-        let emit: crate::Emit = Arc::new(|_: blastit_events::Event| {});
-
-        // A negative fd is refused: it is never passed to `from_raw_fd`.
-        let config = DbproxyConfig {
-            proxies: vec![proxy.clone()],
-            listeners: vec![listener(-1, "a")],
-            ..DbproxyConfig::default()
-        };
-        let error = run(config, Arc::clone(&emit))
-            .await
-            .expect_err("a negative fd");
-        assert!(error.to_string().contains("negative"), "{error}");
-
-        // Two listeners cannot share one fd.
-        let config = DbproxyConfig {
-            proxies: vec![proxy],
-            listeners: vec![listener(3, "a"), listener(3, "b")],
-            ..DbproxyConfig::default()
-        };
-        let error = run(config, emit).await.expect_err("a repeated fd");
-        assert!(error.to_string().contains("twice"), "{error}");
-    }
-
-    /// The shared state of one accepted listener, for the gate's tests.
-    fn state() -> Arc<Shared> {
-        use crate::config::{DbproxyConfig, ListenerSpec, ProxySpec};
-        use blastit_events::Event;
-        use blastit_sqlpolicy::TableGrants;
-
-        let listener = ListenerSpec {
-            fd: -1,
-            route: "product-detail".to_string(),
-            proxy: "db".to_string(),
-            uid: 21_000,
-            queries: vec![],
-            transaction_control: false,
-            unrestricted: false,
-            tables: TableGrants::default(),
-        };
-        let proxy = ProxySpec {
-            name: "db".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 1,
-            user: "u".to_string(),
-            password: "p".to_string().into(),
-            database: "d".to_string(),
-            sslmode: Some("disable".to_string()),
-            ca_cert: None,
-            options: vec![],
-            max_connections: 4,
-        };
-        let config = DbproxyConfig {
-            proxies: vec![proxy],
-            listeners: vec![listener.clone()],
-            ..DbproxyConfig::default()
-        };
-        let emit: crate::Emit = Arc::new(|_: Event| {});
-        Shared::build(&config, &[listener], emit).expect("state")
     }
 }

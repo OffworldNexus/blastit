@@ -1,0 +1,20 @@
+# The `php2shell` probe manifest: the same front controller as `Blastfile`,
+# with no store, so the matrix runs on a host that has no PostgreSQL.
+#
+# It is a separate file rather than a store-less copy of `Blastfile` because the
+# probe rows are about the request channel (argv, INI, `SCRIPT_FILENAME`), not
+# about the shop: a store in this file would make every probe depend on a
+# database the row does not exercise.
+entrypoint php "public/index.php"
+
+static "/" {
+    root "public"
+}
+
+view api regex '/api/.*' {
+    body form
+}
+
+view app regex '.*' {
+    body form
+}

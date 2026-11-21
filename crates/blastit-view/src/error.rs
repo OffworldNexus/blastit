@@ -1,8 +1,8 @@
-//! The one error type [`crate::serve`] returns.
+//! The one error type a view kind's serve loop returns.
 
 use thiserror::Error;
 
-/// Everything that can make [`crate::serve`] return early.
+/// Everything that can make a view's serve loop return early.
 ///
 /// Errors are *channel* errors, plus a bad configuration: the scheduler end of
 /// `view.chan` could not be read, the bytes on it are not a frame stream, the
@@ -10,12 +10,14 @@ use thiserror::Error;
 /// credit allowed (§3.1's flow control), or the process was configured with
 /// something that cannot be served. Whatever an application does — raising,
 /// returning junk, being cancelled — is handled inside its own request thread
-/// and never reaches the caller of [`crate::serve`]; it shows up as the `DONE`
-/// frame's outcome and, for a broken channel, as a write error inside that
-/// thread.
+/// and never reaches the caller; it shows up as the `DONE` frame's outcome and,
+/// for a broken channel, as a write error inside that thread.
 ///
-/// When `serve` returns an error it has already waited for every request thread
-/// it started, so the process can exit without leaking work.
+/// The type lives here, beside the transport it describes, because every view
+/// kind reports through it: `blastit-view-python`'s `serve` returns it, and so
+/// will a second worker. When a serve loop returns an error it has already
+/// waited for every request thread it started, so the process can exit without
+/// leaking work.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ViewError {
@@ -34,8 +36,9 @@ pub enum ViewError {
     #[error("view protocol error: {0}")]
     Protocol(String),
 
-    /// The process was handed a configuration it cannot serve (see
-    /// [`crate::ViewConfig::validate`]).
+    /// The process was handed a configuration it cannot serve — for a WSGI
+    /// view, a mount point that could not be stripped unambiguously
+    /// (`blastit-view-python`'s `WsgiConfig::validate`).
     #[error("invalid view configuration: {0}")]
     Config(String),
 }

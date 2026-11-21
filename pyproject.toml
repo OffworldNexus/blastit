@@ -1,29 +1,42 @@
 # The wheel a project installs (`pip install blastit`, `uv add blastit`).
 #
-# Same shape as granian's: a pyo3 extension for the server itself
-# (`blastit._blastit`, built from `crates/blastit-py`), a Python package for the
-# console script (`python/blastit`), and maturin as the build backend. Nothing
-# here detects a virtualenv: the CLI *is* a Python program, so it runs on the
-# interpreter of the environment it is installed in, and so does stage 1 of the
-# server (§4).
+# One universal Rust binary (`crates/blastit`) plus a pure-stdlib Python package
+# (`python/blastit`) whose every console script ends in one `os.execvpe` of it,
+# so the same wheel runs on every CPython `>=3.12` with no per-minor artifact.
 #
-# The backend is `blastit_build`, which is maturin's with one thing in front of
-# it: a PEP 517 build also builds `blastit-dbproxy` and puts it in the package,
-# so `pip install blastit` from the sdist yields the same working wheel the
-# manylinux builds do (see `blastit_build.py`). `maturin build` itself — what
-# `scripts/build-wheel.sh` and CI run — never loads this file.
+# **Two stages, one artifact family (`MB.42.3`, design §6.1).** `maturin build
+# --bindings bin` produces a wheel whose only payloads are the `blastit` binary
+# (in `<name>.data/scripts/`) and the Python package; `scripts/repack_universal_wheel.py`
+# then relocates that binary beside `blastit-lsp` and the PHP/Python shims under
+# `blastit/_bin/`, writes the three console scripts, sets `Root-Is-Purelib:
+# false` and retags the file `py3-none-<platform>`. Four wheels, one per
+# `{arch} x {libc}`, serve CPython 3.12, 3.13 and 3.14 alike.
+#
+# The backend is maturin's own: `maturin build` is what `scripts/build-wheel.sh`
+# and CI run. A PEP 517 build (`pip install .`, `uv sync`) is **not** the shipped
+# artifact: it runs maturin alone, which installs the binary as `bin/blastit`
+# (found through the `blastit._blastit` `sys.executable` fallback), with no
+# `blastit/_bin/` directory, no `blastit-lsp` and no repack. Only
+# `scripts/build-wheel.sh` produces the `py3-none-<platform>` wheel that carries
+# one universal program beside the editor binary and the shims.
+# One program makes the binary enough — it plays every role, the
+# credentials-holding one included (`--role=dbproxy`), so no second artifact has
+# to be built in front of maturin.
 [build-system]
 # 1.9.3 is the first release that carries `license-files` into the sdist, which
 # is where a source install reads them from (§ E4).
 requires = ["maturin>=1.9.3,<2.0"]
-build-backend = "blastit_build"
-backend-path = ["."]
+build-backend = "maturin"
 
 [project]
 name = "blastit"
 description = "A sandboxing WSGI server: uids, per-route database grants, and no framework integration"
 readme = "README.md"
-requires-python = ">=3.13"
+# `>=3.12`: the wheel is `py3-none-*` and carries no extension, so the CLI
+# (`blastit`, `check`, `fmt`, `lsp`) runs on 3.12 exactly as on 3.13/3.14.
+# WSGI *views* still need 3.13/3.14 (a per-minor shim, §1) and refuse on 3.12
+# with the support sentence.
+requires-python = ">=3.12"
 # SPDX expression (PEP 639), with the file it names; the Apache 2.0 text is at
 # `LICENSE`, and PEP 639 says a project with a license expression must not also
 # carry a `License ::` classifier.
@@ -44,9 +57,11 @@ classifiers = [
     # Linux only: the sandboxes are uids, seccomp and `execve` (§7).
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
-    # The extension is not abi3 and no wheel is built for PyPy.
+    # The wheel carries no extension: it is `py3-none-*` and every CPython
+    # `>=3.12` loads the same bytes (design §6.1).
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Internet :: WWW/HTTP :: WSGI :: Server",
@@ -55,22 +70,19 @@ classifiers = [
 # nothing but the standard library.
 dependencies = []
 
-[project.scripts]
-blastit = "blastit.__main__:main"
-# D3c: the manifest tooling, next to the server. `blastit-manifest fold` reads
-# blastit's own JSON logs and prints (or writes) the grants a manifest is
-# missing, over the same normalisation and table-grant analysis the pytest
-# plugin uses. `python -m blastit.fold` does the same for an environment where
-# only the package is importable.
-blastit-manifest = "blastit.fold:main"
-
-# D3b: pytest finds the plugin by itself once the wheel is installed, so a
-# project only has to ask for a manifest (`pytest --blastit-manifest
-# blastit.toml`) — no conftest, no `-p`. The module imports nothing but pytest,
-# the standard library and, when a manifest is given, Django, so a test suite
-# that never asks for it pays for one option group in `--help`.
-[project.entry-points.pytest11]
-blastit = "blastit.pytest_plugin"
+# The two console scripts the wheel installs (`blastit`, `blastit-lsp`, design
+# §6.1) are written by `scripts/repack_universal_wheel.py` into the repacked
+# `*.dist-info/entry_points.txt`, **not** declared here as `[project.scripts]`:
+# maturin refuses that combination outright ("Defining scripts and working with a
+# binary doesn't mix well", checked against `maturin 1.9`), and the bin-binding
+# build is what makes the artifact interpreter-free. The repack is the second
+# stage of the same build, so the two names have exactly one owner
+# (`CONSOLE_SCRIPTS` in that script) and the repack writes the matching
+# `entry_points.txt` entries, so each target is importable by construction.
+#
+# Until `MB.42.3` a `bindings = "bin"` wheel put the binary in the interpreter's
+# `bin/` and shipped none of them; the repack relocates it to `blastit/_bin/`
+# (where `blastit._blastit` looks first) and restores them.
 
 [project.urls]
 Homepage = "https://github.com/OffworldNexus/blastit"
@@ -80,19 +92,40 @@ Issues = "https://github.com/OffworldNexus/blastit/issues"
 Changelog = "https://github.com/OffworldNexus/blastit/blob/develop/CHANGELOG.md"
 
 [tool.maturin]
-manifest-path = "crates/blastit-py/Cargo.toml"
-module-name = "blastit._blastit"
+# The universal binary is the wheel's program (`bindings = "bin"`): the Python
+# package is a bridge to it, not an extension. A `bin` binding needs no
+# interpreter at build time, which is what makes one artifact portable.
+manifest-path = "crates/blastit/Cargo.toml"
+bindings = "bin"
 python-source = "python"
-# The wheel carries `blastit/_bin/blastit-dbproxy`, the Python-free binary stage 0
-# `execve`s for the credentials-holding role (§4, D2). `scripts/build-wheel.sh`
-# builds it and puts it in the package before maturin runs, and it is gitignored
-# there — which maturin's walk of `python-source` *does* respect, so the path is
-# named explicitly. Without this line the wheel has no dbproxy binary in it and
-# blastit refuses to start.
+# The wheel carries one program under `blastit/_bin/` — `blastit`, which runs the
+# credentials-holding role as `--role=dbproxy` — and nothing has to be staged
+# into the package before maturin runs. The `include` list below is the sdist's
+# cargo tree and nothing else.
 include = [
-    { path = "python/blastit/_bin/blastit-dbproxy", format = "wheel" },
-    # The build backend isn't part of the cargo workspace or of `python-source`,
-    # so the sdist has to be told about it: without this file, `pip install` of
-    # that sdist has no `blastit_build` module to import.
-    { path = "blastit_build.py", format = "sdist" },
+    # **Every** workspace member, not just the graph `crates/blastit` reaches.
+    # The workspace is `members = ["crates/*"]`, and a source install builds the
+    # sdist's `crates/blastit` with cargo, which resolves the whole workspace
+    # first. Two members no shipped binary depends on — `blastit-py-shim` (the
+    # per-minor cdylib `make py-sapi` builds) and `blastit-view-python` (which
+    # only that shim links) — are not on that graph, so maturin's walk drops them
+    # and `cargo metadata --locked` dies before the build starts with "cannot
+    # update the lock file because --locked was passed". The glob keeps a future
+    # member in the sdist without a second edit here.
+    #
+    # An `include` glob is **not** `.gitignore`-filtered (unlike maturin's walk
+    # of `python-source`): from a dirty checkout the same glob would carry
+    # `crates/*/target`, `__pycache__` and profiler output into the sdist — and
+    # those reach `pip install .` here and every local rehearsal. Hence the
+    # `exclude` list below, which is the price of the glob.
+    { path = "crates/**/*", format = "sdist" },
+]
+
+exclude = [
+    # A directories' *contents* need `/**` here: a bare `crates/**/target` does
+    # not drop the files underneath it (checked against maturin 1.16).
+    { path = "crates/**/target/**", format = "sdist" },
+    { path = "crates/**/__pycache__/**", format = "sdist" },
+    { path = "crates/**/.venv/**", format = "sdist" },
+    { path = "crates/**/*.profraw", format = "sdist" },
 ]

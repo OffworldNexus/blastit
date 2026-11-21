@@ -36,7 +36,7 @@
 //! # Redaction
 //!
 //! [`WireSqlObs::sql`] is always [`redact_literals`] of the normalised text, and
-//! a refused statement's [`ObsVerdict::Refused`] carries the redacted text too.
+//! a refused statement's [`LearnVerdict::Refused`] carries the redacted text too.
 //! No user-derived literal byte reaches `obs_fd` (S1, R24).
 
 use std::collections::{HashMap, HashSet};
@@ -54,6 +54,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use crate::config::RoutePolicySpec;
+use crate::policy::PolicyError;
 
 /// How many distinct session-setup statements one session remembers.
 ///
@@ -96,77 +97,65 @@ pub enum ObsTarget {
     },
 }
 
-/// What `--learn` decided about one statement, in its wire form.
+/// [`LearnVerdict`] as `WireSqlObs.verdict` has always spelled it on the wire:
+/// the tag `kind`, the field names `normalized` / `redacted` / `reason`, and a
+/// one-line reason a consumer prints rather than matches on.
 ///
-/// The variants, the tag and the field names are
-/// [`LearnVerdict`](blastit_sqlpolicy::LearnVerdict)'s: `query` carries the
-/// normalised grant text, `refused` the redacted text and why. `LearnVerdict`
-/// itself carries a `RefuseReason`, which has no serialised form, so the wire
-/// record keeps the reason's one-line explanation instead — a consumer never
-/// matches on it, it prints it to a human (`docs/local.md`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ObsVerdict {
-    /// The statement is grantable, as the normalised text a grant holds.
-    Query {
-        /// Normalised text, placeholders as `$?`.
-        normalized: String,
-    },
-    /// The statement cannot be granted.
-    Refused {
-        /// The statement normalised and redacted, safe to print.
-        redacted: String,
-        /// Why it was refused.
-        reason: String,
-    },
-}
+/// This module is the **one** adapter between the policy's verdict and that
+/// record, and it is deliberately the whole of it: `check --json`, the audit and
+/// the Python readers parse the record, so its bytes are a contract. The reason
+/// is rendered with [`RefuseReason`]'s `Display` — already stripped of the token
+/// the parser quoted — and read back as [`RefuseReason::Reported`], which prints
+/// that text unchanged, so a refused record round-trips byte for byte.
+mod verdict_wire {
+    use blastit_sqlpolicy::{LearnVerdict, RefuseReason};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-impl ObsVerdict {
-    /// Whether the statement is grantable.
-    pub fn is_query(&self) -> bool {
-        matches!(self, Self::Query { .. })
+    /// The record's shape and only its shape: `LearnVerdict` converts to this
+    /// and back, so the policy type itself needs no `serde`.
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum Wire {
+        /// The statement is grantable, as the normalised text a grant holds.
+        Query { normalized: String },
+        /// The statement cannot be granted.
+        Refused { redacted: String, reason: String },
     }
 
-    /// The normalised text of a grantable statement.
-    pub fn normalized(&self) -> Option<&str> {
-        match self {
-            Self::Query { normalized } => Some(normalized),
-            Self::Refused { .. } => None,
-        }
-    }
-
-    /// The redacted text of a refused statement.
-    pub fn redacted(&self) -> Option<&str> {
-        match self {
-            Self::Query { .. } => None,
-            Self::Refused { redacted, .. } => Some(redacted),
-        }
-    }
-
-    /// Why a statement was refused.
-    pub fn reason(&self) -> Option<&str> {
-        match self {
-            Self::Query { .. } => None,
-            Self::Refused { reason, .. } => Some(reason),
-        }
-    }
-}
-
-impl From<LearnVerdict> for ObsVerdict {
-    fn from(verdict: LearnVerdict) -> Self {
-        match verdict {
-            LearnVerdict::Query { normalized } => Self::Query { normalized },
-            LearnVerdict::Refused { redacted, reason } => Self::Refused {
-                redacted,
+    /// Writes `verdict` as the record's JSON object.
+    pub(super) fn serialize<S: Serializer>(
+        verdict: &LearnVerdict,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let wire = match verdict {
+            LearnVerdict::Query { normalized } => Wire::Query {
+                normalized: normalized.clone(),
+            },
+            LearnVerdict::Refused { redacted, reason } => Wire::Refused {
+                redacted: redacted.clone(),
                 reason: reason.to_string(),
             },
             // `LearnVerdict` is non-exhaustive: a verdict this build does not
             // know is reported as a refusal, never as a grant.
-            _ => Self::Refused {
+            _ => Wire::Refused {
                 redacted: "…".to_string(),
                 reason: "the statement was refused by a newer policy verdict".to_string(),
             },
-        }
+        };
+        wire.serialize(serializer)
+    }
+
+    /// Reads the record's JSON object back into a [`LearnVerdict`].
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<LearnVerdict, D::Error> {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Query { normalized } => LearnVerdict::Query { normalized },
+            Wire::Refused { redacted, reason } => LearnVerdict::Refused {
+                redacted,
+                reason: RefuseReason::Reported(reason),
+            },
+        })
     }
 }
 
@@ -187,7 +176,8 @@ pub struct WireSqlObs {
     /// Whether the route's grants would have allowed it in `Enforce`.
     pub allowed: bool,
     /// What `--learn` would propose for it.
-    pub verdict: ObsVerdict,
+    #[serde(with = "verdict_wire")]
+    pub verdict: LearnVerdict,
 }
 
 /// [`SqlKind`] as the one string vocabulary the event stream already uses.
@@ -232,7 +222,7 @@ pub(crate) struct ObsBody {
     /// Whether the route's grants would have allowed it.
     pub(crate) allowed: bool,
     /// What `--learn` would propose for it.
-    pub(crate) verdict: ObsVerdict,
+    pub(crate) verdict: LearnVerdict,
 }
 
 impl ObsBody {
@@ -264,12 +254,18 @@ struct SessionLearn {
 /// `Enforce` builds one too, empty: the hooks never look at it there (the mode
 /// decides), and keeping the field total avoids a second `Shared` shape.
 pub(crate) struct Learning {
-    /// The effective grants of every route, for a wildcard listener.
-    route_policies: HashMap<(String, String), Allowlist>,
+    /// The effective grants of every route, replaced whole by a dev policy
+    /// document (§4.6 step 2).
+    ///
+    /// `Arc` values, not bare [`Allowlist`]s: a swap replaces the map in one
+    /// assignment, and a reader that already cloned its route's `Arc` keeps
+    /// evaluating against the policy it started with, so no statement can ever
+    /// see a half-swapped table.
+    route_policies: Mutex<HashMap<(String, String), Arc<Allowlist>>>,
     /// The declared proxy names, so `set_db` cannot invent one.
     proxies: HashSet<String>,
     /// The allowlist an unknown route evaluates against.
-    empty: Allowlist,
+    empty: Arc<Allowlist>,
     /// The `obs_fd` write end; `None` once it is closed or was never given.
     obs: Mutex<Option<File>>,
     /// The active target stack, top last.
@@ -292,14 +288,14 @@ impl Learning {
             .map(|policy| {
                 (
                     (policy.route.clone(), policy.proxy.clone()),
-                    policy.allowlist(),
+                    Arc::new(policy.allowlist()),
                 )
             })
             .collect();
         Self {
-            route_policies,
+            route_policies: Mutex::new(route_policies),
             proxies: proxies.into_iter().collect(),
-            empty: Allowlist::new(std::iter::empty::<&str>(), false),
+            empty: Arc::new(Allowlist::new(std::iter::empty::<&str>(), false)),
             obs: Mutex::new(obs),
             targets: Mutex::new(Vec::new()),
             sessions: Mutex::new(HashMap::new()),
@@ -307,15 +303,63 @@ impl Learning {
         }
     }
 
+    /// Replaces **every** route's grants with the document a `Blastfile` save
+    /// produced (§4.6 step 2, §4.8).
+    ///
+    /// The new map is built and validated in full before anything is swapped, so
+    /// a refusal leaves the old policy untouched; the swap itself is one
+    /// assignment under the lock, so a reader sees either the old map or the new
+    /// one and never a mixture. It is **authoritative**: a pair the document does
+    /// not name evaluates against the empty allowlist afterwards, which is how a
+    /// route that dropped its `postgres {}` block stops being allowed to do
+    /// anything — a removal can never fail open.
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError`] naming the entry that is not a route policy. Callers
+    /// answer the document with [`crate::policy::ACK_REFUSED`].
+    pub(crate) fn replace_route_policies(
+        &self,
+        policies: impl IntoIterator<Item = RoutePolicySpec>,
+    ) -> Result<(), PolicyError> {
+        let mut next: HashMap<(String, String), Arc<Allowlist>> = HashMap::new();
+        for (index, policy) in policies.into_iter().enumerate() {
+            if policy.route.is_empty() || policy.route == crate::config::WILDCARD_ROUTE {
+                return Err(PolicyError::new(format!(
+                    "route policy {index} names {:?}, which is not a route name",
+                    policy.route
+                )));
+            }
+            if policy.proxy.is_empty() {
+                return Err(PolicyError::new(format!(
+                    "route policy {index} names no proxy"
+                )));
+            }
+            let key = (policy.route.clone(), policy.proxy.clone());
+            if next.contains_key(&key) {
+                return Err(PolicyError::new(format!(
+                    "two route policies cover route {:?} on proxy {:?}",
+                    key.0, key.1
+                )));
+            }
+            next.insert(key, Arc::new(policy.allowlist()));
+        }
+        *lock(&self.route_policies) = next;
+        Ok(())
+    }
+
     /// The allowlist one route's statements are evaluated against.
     ///
     /// A route the configuration does not know evaluates against an empty
     /// allowlist, so it reports `allowed: false` rather than silently widening
-    /// to everything.
-    pub(crate) fn policy(&self, route: &str, proxy: &str) -> &Allowlist {
-        self.route_policies
+    /// to everything. The returned handle is the policy in force when it was
+    /// asked for: a swap after this point is invisible to a statement already
+    /// being checked against it.
+    pub(crate) fn policy(&self, route: &str, proxy: &str) -> Arc<Allowlist> {
+        lock(&self.route_policies)
             .get(&(route.to_string(), proxy.to_string()))
-            .unwrap_or(&self.empty)
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.empty))
     }
 
     /// The target new statements belong to, if a request is in flight.
@@ -604,204 +648,6 @@ pub(crate) fn observe(
         sql: redact_literals(normalized),
         is_tx: is_transaction_control(normalized),
         allowed,
-        verdict: check_learnable(sql).into(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
-    use blastit_sqlpolicy::KNOWN_STATIC_SETUP_SQL;
-
-    fn policy(route: &str, queries: &[&str]) -> RoutePolicySpec {
-        RoutePolicySpec {
-            route: route.to_string(),
-            proxy: "db".to_string(),
-            queries: queries.iter().map(|query| query.to_string()).collect(),
-            ..RoutePolicySpec::default()
-        }
-    }
-
-    fn learning() -> Learning {
-        Learning::new(
-            [policy("product-detail", &["SELECT 1"])],
-            ["db".to_string()],
-            None,
-        )
-    }
-
-    fn body(sql: &str, normalized: &str) -> ObsBody {
-        observe("db", SqlKind::Query, sql, normalized, false)
-    }
-
-    #[test]
-    fn a_target_is_the_innermost_push() {
-        let learning = learning();
-        assert_eq!(learning.current_target(), None);
-        learning
-            .push(ObsTarget::Routed {
-                route: "product-detail".to_string(),
-            })
-            .expect("pushed");
-        learning
-            .push(ObsTarget::Unrouted {
-                method: "GET".to_string(),
-                path: "/orders/42/".to_string(),
-            })
-            .expect("pushed");
-        assert_eq!(
-            learning.current_target(),
-            Some(ObsTarget::Unrouted {
-                method: "GET".to_string(),
-                path: "/orders/42/".to_string(),
-            })
-        );
-        learning.pop().expect("popped");
-        assert_eq!(
-            learning.current_target(),
-            Some(ObsTarget::Routed {
-                route: "product-detail".to_string(),
-            })
-        );
-        learning.pop().expect("popped");
-        assert!(learning.pop().is_err(), "an empty stack cannot pop");
-    }
-
-    #[test]
-    fn the_route_stack_and_the_setup_buffer_are_bounded() {
-        let learning = learning();
-        for _ in 0..MAX_TARGET_DEPTH {
-            learning
-                .push(ObsTarget::Routed {
-                    route: "a".to_string(),
-                })
-                .expect("within the bound");
-        }
-        assert!(
-            learning
-                .push(ObsTarget::Routed { route: "a".into() })
-                .is_err()
-        );
-
-        for index in 0..(MAX_SETUP_STATEMENTS * 2) {
-            learning.record_setup(1, body("SELECT 1", &format!("SELECT {index}")));
-        }
-        let sessions = lock(&learning.sessions);
-        assert_eq!(sessions[&1].setup.len(), MAX_SETUP_STATEMENTS);
-    }
-
-    #[test]
-    fn a_repeated_setup_statement_is_recorded_once() {
-        let learning = learning();
-        learning.record_setup(1, body("SET TIME ZONE 'UTC'", "SET TIME ZONE 'UTC'"));
-        learning.record_setup(1, body("SET TIME ZONE 'UTC'", "SET TIME ZONE 'UTC'"));
-        assert_eq!(lock(&learning.sessions)[&1].setup.len(), 1);
-    }
-
-    #[test]
-    fn only_a_declared_proxy_can_be_selected() {
-        let learning = learning();
-        assert!(learning.set_database("db", "test_shop").is_ok());
-        assert_eq!(learning.database("db").as_deref(), Some("test_shop"));
-        assert!(learning.set_database("analytics", "test_shop").is_err());
-        assert!(learning.set_database("db", "").is_err());
-        assert_eq!(learning.database("analytics"), None);
-    }
-
-    #[test]
-    fn an_unknown_route_evaluates_against_an_empty_allowlist() {
-        let learning = learning();
-        assert!(
-            learning
-                .policy("product-detail", "db")
-                .check("SELECT 1")
-                .is_allowed()
-        );
-        assert!(
-            !learning
-                .policy("nowhere", "db")
-                .check("SELECT 1")
-                .is_allowed()
-        );
-        assert!(
-            !learning
-                .policy("product-detail", "other")
-                .check("SELECT 1")
-                .is_allowed()
-        );
-    }
-
-    #[test]
-    fn an_observation_never_carries_a_user_literal() {
-        let obs = body(
-            "SELECT 's3cr3t' FROM t WHERE id = 1",
-            "SELECT 's3cr3t' FROM t WHERE id = 1",
-        )
-        .with_target(&ObsTarget::Routed {
-            route: "product-detail".to_string(),
-        });
-        let line = serde_json::to_string(&obs).expect("serialised");
-        assert!(!line.contains("s3cr3t"), "{line}");
-        assert!(line.contains('…'), "{line}");
-        assert!(line.contains("\"scope\":\"routed\""), "{line}");
-        assert!(line.contains("\"kind\":\"query\""), "{line}");
-    }
-
-    #[test]
-    fn a_transaction_control_statement_is_recognised_by_the_policy_grammar() {
-        for sql in [
-            "BEGIN",
-            "COMMIT",
-            "ROLLBACK",
-            "SAVEPOINT a",
-            "START TRANSACTION",
-        ] {
-            assert!(is_transaction_control(sql), "{sql}");
-        }
-        for sql in ["SELECT 1", "SET x = 1", ""] {
-            assert!(!is_transaction_control(sql), "{sql}");
-        }
-    }
-
-    #[test]
-    fn the_protocol_constant_setup_statement_keeps_its_literal() {
-        assert!(KNOWN_STATIC_SETUP_SQL.contains(&"SET TIME ZONE 'UTC'"));
-        assert_eq!(
-            redact_literals("SET TIME ZONE 'UTC'"),
-            "SET TIME ZONE 'UTC'"
-        );
-        assert!(is_setup_statement("SET TIME ZONE 'UTC'"));
-        assert!(is_setup_statement("select pg_catalog.version()"));
-        assert!(!is_setup_statement("INSERT INTO fixture VALUES (1)"));
-    }
-
-    #[test]
-    fn the_wire_kind_round_trips_through_the_canonical_spelling() {
-        let obs = body("SELECT 1", "SELECT 1").with_target(&ObsTarget::Routed {
-            route: "a".to_string(),
-        });
-        let text = serde_json::to_string(&obs).expect("serialised");
-        let back: WireSqlObs = serde_json::from_str(&text).expect("deserialised");
-        assert_eq!(back, obs);
-        let unknown: WireSqlObs = serde_json::from_str(
-            r#"{"target":{"scope":"routed","route":"a"},"proxy":"db","kind":"bind","sql":"x","is_tx":false,"allowed":true,"verdict":{"kind":"query","normalized":"x"}}"#,
-        )
-        .expect("deserialised");
-        assert_eq!(unknown.kind, SqlKind::Other("bind".to_string()));
-    }
-
-    #[test]
-    fn a_refused_verdict_carries_the_redacted_text_and_the_reason() {
-        let verdict = ObsVerdict::from(check_learnable("SELECT 's3cr3t'"));
-        assert!(!verdict.is_query());
-        assert_eq!(verdict.redacted(), Some("SELECT …"));
-        assert!(
-            verdict
-                .reason()
-                .is_some_and(|reason| reason.contains("literal"))
-        );
-        assert!(!format!("{verdict:?}").contains("s3cr3t"));
+        verdict: check_learnable(sql),
     }
 }

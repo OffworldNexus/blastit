@@ -1,13 +1,31 @@
 /*
- * One rule, added by E2.
+ * The two things the theme cannot express on its own.
  *
- * The reference pages carry tables with four or five columns of prose — the
- * settings reference most of all — and on a phone one of those is wider than
- * the viewport, which stretches the whole page and makes the text tiny. Below
- * the tablet breakpoint the table scrolls inside its own box instead.
+ * 1. Layout. The reference pages carry tables with four or five columns of
+ *    prose — the settings reference most of all — and on a phone one of those
+ *    is wider than the viewport, which stretches the whole page and makes the
+ *    text tiny. Below the tablet breakpoint the table scrolls inside its own
+ *    box instead.
  *
- * The palette and the colours are `docs/brand/brand.css` (E3); this file is
- * only about layout.
+ * 2. The Blastfile token palette (MB.32.1). The brand colours in
+ *    `docs/brand/brand.css` own the surfaces and the ink; these rules only
+ *    colour the token spans `docs/javascripts/blastfile-highlight.js` creates
+ *    inside a highlighted `Blastfile` block. Each class is one Zensical's own
+ *    Pygments CSS already styles (`.highlight .k` and friends), so no rule here
+ *    has to invent a selector the theme ignores.
+ *
+ *    Every rule is scoped through `code[data-blastfile-highlighted]`, the
+ *    marker the lexer sets only on a fence it classified as a `Blastfile`.
+ *    Scheme scoping alone would recolour every `console`, `python` and `json`
+ *    fence on the site, which is the one thing this palette must not do; every
+ *    other fence keeps the theme's own colour, because only the theme's
+ *    `.highlight .k` rule matches there.
+ *
+ *    Every value is checked against the code surface of its own scheme —
+ *    `--md-code-bg-color`, which `brand.css` maps to `--blastit-surface` — at
+ *    WCAG AA (4.5:1) by `python/tests/test_docs_assets.py`; a nudge below the
+ *    floor fails there with the ratio it produced, and a rule that loses the
+ *    `code[data-blastfile-highlighted]` step fails too.
  */
 @media screen and (max-width: 44.9375em) {
   .md-typeset__table {
@@ -25,3 +43,33 @@
     min-width: max-content;
   }
 }
+
+/* Light scheme: every token >= 4.5:1 on #fffcf5 (the code surface). */
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .c1 { color: #56616b; font-style: italic; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .k { color: #223846; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .kd { color: #81371c; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .kc { color: #9b4723; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .kt { color: #5a2f70; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .nf { color: #3f3a36; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .nv { color: #2f5670; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .s1 { color: #2a6b4f; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .s2 { color: #1f5c63; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .se { color: #7a2f6b; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .p { color: #56616b; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .mi { color: #8a5a00; }
+[data-md-color-scheme="default"] .highlight code[data-blastfile-highlighted] .o { color: #3f3a36; }
+
+/* Dark scheme: every token >= 4.5:1 on #1b232c (the code surface). */
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .c1 { color: #a5b0b8; font-style: italic; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .k { color: #f3c997; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .kd { color: #eb9a6c; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .kc { color: #ff9ecb; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .kt { color: #d7a8e8; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .nf { color: #a8c7dd; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .nv { color: #8fd6b4; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .s1 { color: #b8e0a0; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .s2 { color: #a9d3d8; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .se { color: #e0b0d8; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .p { color: #b9c6cf; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .mi { color: #f0c07a; }
+[data-md-color-scheme="slate"] .highlight code[data-blastfile-highlighted] .o { color: #cbd5dc; }

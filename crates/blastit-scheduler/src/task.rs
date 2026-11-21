@@ -51,7 +51,7 @@ pub(crate) enum PushError {
 }
 
 /// The sending half of one peer's channel.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Outbound {
     tx: mpsc::UnboundedSender<OutFrame>,
     pending: Arc<AtomicUsize>,
@@ -344,109 +344,4 @@ pub(crate) async fn read_raw_frames<R, M, Map, End>(
         }
     }
     let _ = tx.send(end(failure)).await;
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use std::io;
-    use std::pin::Pin;
-    use std::sync::Mutex;
-    use std::task::{Context, Poll};
-
-    /// A sink that counts its `poll_write` calls, so a test can prove a burst
-    /// of queued frames leaves as one write rather than one each.
-    #[derive(Clone, Default)]
-    struct Recorder {
-        written: Arc<Mutex<Vec<u8>>>,
-        writes: Arc<AtomicUsize>,
-    }
-
-    impl Recorder {
-        /// How many times the writer handed bytes to the sink.
-        fn writes(&self) -> usize {
-            self.writes.load(Ordering::SeqCst)
-        }
-
-        /// Everything the sink was handed, in order.
-        fn written(&self) -> Vec<u8> {
-            self.written.lock().unwrap().clone()
-        }
-    }
-
-    impl AsyncWrite for Recorder {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<io::Result<usize>> {
-            self.writes.fetch_add(1, Ordering::SeqCst);
-            self.written.lock().unwrap().extend_from_slice(buf);
-            Poll::Ready(Ok(buf.len()))
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    #[tokio::test]
-    async fn a_burst_of_queued_frames_leaves_in_one_write() {
-        let limits = Limits::default();
-        let (out, rx, pending) = Outbound::new(limits, 1 << 20);
-        let id = 7;
-        let frames = 5usize;
-        for byte in 0..frames {
-            let pushed = out.push(id, Frame::RespBody(vec![byte as u8; 8]));
-            assert!(pushed.is_ok(), "the queue has room");
-        }
-        // Closing the queue lets `write_peer` finish once it has drained it.
-        drop(out);
-
-        let recorder = Recorder::default();
-        write_peer(recorder.clone(), limits, rx, pending.clone()).await;
-
-        assert_eq!(recorder.writes(), 1, "a drained burst is one syscall");
-        assert_eq!(
-            pending.load(Ordering::Acquire),
-            0,
-            "every byte was released"
-        );
-
-        // That one write carried every frame, in the order they were queued.
-        let mut decoder = Decoder::new(limits);
-        decoder.push(&recorder.written());
-        let mut seen = 0usize;
-        while let Some((frame_id, frame)) = decoder.next_frame().expect("decode") {
-            assert_eq!(frame_id, id);
-            assert_eq!(frame, Frame::RespBody(vec![seen as u8; 8]));
-            seen += 1;
-        }
-        assert_eq!(seen, frames);
-    }
-
-    #[tokio::test]
-    async fn a_batch_stops_at_its_frame_cap() {
-        let limits = Limits::default();
-        let (out, rx, pending) = Outbound::new(limits, 1 << 20);
-        // One more than a batch may carry: the first write takes a full batch,
-        // the rest goes out in following ones.
-        let queued = BATCH_FRAMES + 1;
-        for _ in 0..queued {
-            let pushed = out.push(1, Frame::RespEnd);
-            assert!(pushed.is_ok(), "the queue has room");
-        }
-        drop(out);
-
-        let recorder = Recorder::default();
-        write_peer(recorder.clone(), limits, rx, pending.clone()).await;
-
-        assert_eq!(recorder.writes(), 2, "the tail is a batch of its own");
-        assert_eq!(pending.load(Ordering::Acquire), 0);
-    }
 }

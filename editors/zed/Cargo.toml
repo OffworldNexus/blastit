@@ -1,0 +1,15 @@
+[package]
+name = "blastit-zed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Keep the extension out of Blastit's root workspace (`members = ["crates/*"]`
+# would otherwise claim this package and refuse to build it).
+[workspace]

@@ -7,7 +7,7 @@
 [project]
 site_name = "blastit"
 site_url = "https://offworldnexus.github.io/blastit/"
-site_description = "A zero-trust WSGI harness: one sandbox per route, no database credentials in the app, and only the SQL each route needs."
+site_description = "A Linux zero-trust application server for Python WSGI, embedded PHP and static sites: one sandbox per route, no database credentials in the app, and only the SQL each route needs."
 site_author = "Offworld Nexus"
 copyright = "&copy; 2026 Offworld Nexus &middot; Apache 2.0"
 
@@ -21,6 +21,8 @@ site_dir = "site"
 nav = [
   { "Home" = "index.md" },
   { "Getting started" = "getting-started.md" },
+  { "Install" = "install.md" },
+  { "The Blastfile" = "blastfile.md" },
   { "Local development" = "local.md" },
   { "CI/CD" = "ci.md" },
   { "Deployments" = [
@@ -32,12 +34,21 @@ nav = [
   ] },
   { "Frameworks" = [
     "frameworks/index.md",
-    { "Django" = "frameworks/django.md" },
-    { "Flask, SQLAlchemy and raw WSGI" = "frameworks/flask.md" },
+    { "Python (WSGI)" = [
+      "frameworks/python/index.md",
+      { "Django" = "frameworks/python/django.md" },
+      { "Flask, SQLAlchemy and raw WSGI" = "frameworks/python/flask.md" },
+    ] },
+    { "PHP (embedded libphp)" = [
+      "frameworks/php/index.md",
+      { "Symfony" = "frameworks/php/symfony.md" },
+      { "Laravel" = "frameworks/php/laravel.md" },
+    ] },
+    { "Static sites and SPAs" = "frameworks/static-and-spa.md" },
   ] },
   { "Reference" = [
     "reference/cli.md",
-    { "The manifest" = "reference/manifest.md" },
+    { "Blastfile reference" = "reference/blastfile.md" },
     { "Settings" = "reference/settings.md" },
     { "Log events" = "reference/log-events.md" },
   ] },
@@ -48,6 +59,12 @@ nav = [
 ]
 
 extra_css = ["brand/brand.css", "stylesheets/extra.css"]
+
+# The Blastfile highlighter (`MB.32.1`): one classic script, no build step and no
+# network. It loads after the theme bundle on every page, including the pages
+# `navigation.instant` swaps in, and colours only a `Blastfile` fence; a
+# `text` block that is not one is left exactly as rendered.
+extra_javascript = ["javascripts/blastfile-highlight.js"]
 
 # `archive/` and `spikes/` are working material, not pages, and so are the brand
 # files a human works with rather than reads. Everything else under `brand/` is

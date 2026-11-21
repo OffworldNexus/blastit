@@ -37,9 +37,7 @@
 //! use tokio::net::UnixStream;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let manifest = Manifest::from_toml_str(
-//!     "version = 1\n[[route]]\nname = \"about\"\npath = ['/about/']\n",
-//! )?;
+//! let manifest = Manifest::from_blastfile_str("view about \"/about/\" {}\n")?;
 //! let table = RoutingTable::new(&manifest)?;
 //! let routes = routes_from_manifest(&manifest, &UidLayout::default());
 //! let emit = Arc::new(|event: Event| println!("{event:?}"));
@@ -64,9 +62,16 @@ mod config;
 mod ctl;
 mod error;
 mod fair;
-mod path;
+// The one request-target decoder lives in the transport crate (D3), re-exported
+// here so `crate::path::…` keeps naming it from one place.
+pub use blastit_view::path;
 mod route;
 mod scheduler;
+// The static view kind: this crate dispatches, `blastit-view-static`
+// resolves and answers (ADR-0016 decision 1). A build without `static` refuses a
+// manifest that declares a mount at boot instead of linking the responder.
+#[cfg(feature = "static")]
+pub use blastit_view_static::{rewrite, static_asset, static_response};
 mod task;
 
 pub use crate::config::{

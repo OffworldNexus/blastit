@@ -1,0 +1,94 @@
+==================
+a keyword is legal as a view name
+==================
+view view GET "/x" {
+    body none
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (directive
+        (keyword)
+        (codec)))))
+
+==================
+a keyword is legal as a trait, view and store name
+==================
+trait session {
+    postgres {
+        transactions
+    }
+}
+
+view session {
+    GET "/session"
+    use session
+}
+
+postgres view $DATABASE_URL
+
+---
+
+(source_file
+  (trait_decl
+    (name)
+    (block
+      (grant
+        (block
+          (mode
+            (keyword))))))
+  (view_decl
+    (name)
+    (block
+      (endpoint
+        (method)
+        (string))
+      (use_directive
+        (name))))
+  (store_decl
+    (name)
+    (env_var)))
+
+==================
+a bare `query` is a legal function name and a legal granted table
+==================
+view v "/x" {
+    postgres {
+        functions query
+        select query
+        insert query
+        update query
+        delete query
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (string)
+    (block
+      (grant
+        (block
+          (mode
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl)
+          (directive
+            (keyword))
+          (query_decl))))))

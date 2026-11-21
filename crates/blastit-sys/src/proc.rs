@@ -19,23 +19,123 @@ use crate::pid::{Pid, impossible};
 /// deliberate race. When the count cannot be read at all the answer is
 /// [`Error::ThreadCount`], and the C1b binary treats that as fatal: if the
 /// invariant cannot be *checked*, init does not fork.
+///
+/// **It allocates nothing.** The file is read with raw `open`/`read`/`close`
+/// into a fixed stack buffer: [`fork`] and [`crate::install`] call this from
+/// inside a child of `fork()`, where an allocation can wait forever on a lock
+/// another thread held at the instant of the fork.
 pub fn thread_count() -> io::Result<usize> {
-    let status = std::fs::read_to_string("/proc/self/status")?;
-    for line in status.lines() {
-        if let Some(rest) = line.strip_prefix("Threads:") {
-            return match rest.trim().parse::<usize>() {
-                Ok(threads) => Ok(threads),
-                Err(_) => Err(Error::ThreadCount {
-                    detail: "the Threads: line of /proc/self/status is not a number",
+    // SAFETY: the path is a NUL-terminated literal and neither flag takes an
+    // argument.
+    let fd = unsafe {
+        libc::open(
+            c"/proc/self/status".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    if fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let found = scan_threads(fd);
+    // SAFETY: `fd` was opened above and nothing else in this process owns it.
+    unsafe { libc::close(fd) };
+    match found? {
+        Some(threads) => Ok(threads),
+        None => Err(Error::ThreadCount {
+            detail: "/proc/self/status has no Threads: line",
+        }
+        .into()),
+    }
+}
+
+/// The `Threads:` value of the `/proc/self/status` behind `fd`, or `None` when
+/// the file has no such line.
+///
+/// Reads in fixed-size chunks and carries its state between them, so the field
+/// may straddle a read boundary. Every step is a syscall or arithmetic on this
+/// frame — [`thread_count`] runs in a child of `fork()`.
+fn scan_threads(fd: libc::c_int) -> io::Result<Option<usize>> {
+    /// The field this scan looks for.
+    const FIELD: &[u8] = b"Threads:";
+    /// How much of the file is read at a time.
+    const CHUNK: usize = 512;
+
+    /// What the scan is waiting for next.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        /// Matching the `Threads:` prefix.
+        Field,
+        /// Past the colon, before the first digit (a tab, usually).
+        Value,
+        /// Reading the digits.
+        Digits,
+    }
+
+    let mut buffer = [0_u8; CHUNK];
+    let mut phase = Phase::Field;
+    let mut matched = 0;
+    let mut value = 0_usize;
+    loop {
+        // SAFETY: `buffer` is `CHUNK` bytes of writable storage, which `read`
+        // fills at most completely.
+        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast::<libc::c_void>(), CHUNK) };
+        if read == -1 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(err);
+        }
+        if read == 0 {
+            break;
+        }
+        for &byte in &buffer[..read as usize] {
+            match phase {
+                Phase::Field => {
+                    if byte == FIELD[matched] {
+                        matched += 1;
+                        if matched == FIELD.len() {
+                            phase = Phase::Value;
+                        }
+                    } else {
+                        // Restart, keeping a first byte that could begin again.
+                        matched = usize::from(byte == FIELD[0]);
+                    }
                 }
-                .into()),
-            };
+                Phase::Value => {
+                    if byte.is_ascii_digit() {
+                        value = usize::from(byte - b'0');
+                        phase = Phase::Digits;
+                    } else if byte == b'\n' {
+                        return Err(not_a_number());
+                    }
+                }
+                Phase::Digits => {
+                    if byte.is_ascii_digit() {
+                        value = value
+                            .checked_mul(10)
+                            .and_then(|current| current.checked_add(usize::from(byte - b'0')))
+                            .ok_or_else(not_a_number)?;
+                    } else {
+                        return Ok(Some(value));
+                    }
+                }
+            }
         }
     }
-    Err(Error::ThreadCount {
-        detail: "/proc/self/status has no Threads: line",
+    match phase {
+        Phase::Digits => Ok(Some(value)),
+        Phase::Value => Err(not_a_number()),
+        Phase::Field => Ok(None),
     }
-    .into())
+}
+
+/// The `Threads:` line was there but held no number.
+fn not_a_number() -> io::Error {
+    Error::ThreadCount {
+        detail: "the Threads: line of /proc/self/status is not a number",
+    }
+    .into()
 }
 
 /// The result of a successful [`fork`].
@@ -120,126 +220,4 @@ pub unsafe fn fork_unchecked() -> io::Result<Fork> {
 /// `connect("/proc/self/cwd/.s.PGSQL.5432")` work (§2.2).
 pub fn chdir(path: &Path) -> io::Result<()> {
     rustix::process::chdir(path).map_err(Into::into)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::mpsc;
-
-    use super::*;
-    use crate::error::Error;
-    use crate::pid::ExitStatus;
-    use crate::testutil::{child_ok, in_child, must, spawn_exiting, wait_for};
-
-    #[test]
-    fn thread_count_reports_at_least_the_calling_thread() {
-        let threads = must(thread_count());
-        assert!(threads >= 1, "a process has at least one thread: {threads}");
-    }
-
-    #[test]
-    fn fork_refuses_when_a_second_thread_is_alive() {
-        let (release, hold) = mpsc::channel::<()>();
-        let (started, ready) = mpsc::channel::<()>();
-        let handle = std::thread::spawn(move || {
-            let _ = started.send(());
-            // Park until the test is done: this thread only has to exist.
-            let _ = hold.recv();
-        });
-        must(ready.recv());
-
-        let outcome = fork();
-        let _ = release.send(());
-        let _ = handle.join();
-
-        match outcome {
-            Ok(fork) => panic!("fork() must refuse while another thread is alive, got {fork:?}"),
-            Err(err) => match Error::from_io(&err) {
-                Some(Error::NotSingleThreaded { threads }) => {
-                    assert!(*threads >= 2, "the check saw {threads} threads");
-                }
-                other => panic!("expected NotSingleThreaded, got {other:?} ({err})"),
-            },
-        }
-    }
-
-    #[test]
-    fn fork_unchecked_makes_a_child_that_is_not_the_parent() {
-        let parent = Pid::current();
-        let code = in_child(move || {
-            if Pid::current() == parent {
-                return 1;
-            }
-            // SAFETY: `getppid` takes no arguments and cannot fail.
-            if unsafe { libc::getppid() } != parent.as_raw() {
-                return 2;
-            }
-            0
-        });
-        assert_eq!(code, 0, "child failure code {code}");
-    }
-
-    #[test]
-    fn fork_unchecked_reports_the_child_pid_to_the_parent() {
-        let pid = spawn_exiting(0);
-        assert_ne!(pid, Pid::current());
-        assert_eq!(wait_for(pid), ExitStatus::Code(0));
-        assert_eq!(wait_for(spawn_exiting(7)), ExitStatus::Code(7));
-    }
-
-    #[test]
-    fn fork_accepts_a_single_threaded_child() {
-        // The harness is multi-threaded, so the checked `fork()` is only
-        // allowed inside a forked child, which has exactly one thread.
-        child_ok("fork in a single-threaded child", || {
-            match fork() {
-                Err(_) => 1,
-                Ok(crate::Fork::Child) => {
-                    // SAFETY: `_exit` never returns.
-                    unsafe { libc::_exit(42) }
-                }
-                Ok(crate::Fork::Parent(pid)) => {
-                    let mut status = 0;
-                    // SAFETY: `waitpid` writes one status word into `status`.
-                    let waited = unsafe { libc::waitpid(pid.as_raw(), &mut status, 0) };
-                    if waited != pid.as_raw() {
-                        return 2;
-                    }
-                    match ExitStatus::from_raw(status) {
-                        Some(ExitStatus::Code(42)) => 0,
-                        _ => 3,
-                    }
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn chdir_moves_the_working_directory() {
-        let dir = crate::testutil::TempDir::new("chdir");
-        must(std::fs::create_dir_all(dir.path()));
-        let target = dir.path().to_path_buf();
-        let code = in_child(move || {
-            if chdir(&target).is_err() {
-                return 1;
-            }
-            match std::env::current_dir() {
-                Ok(now) if now == target => {}
-                Ok(_) => return 2,
-                Err(_) => return 3,
-            }
-            0
-        });
-        assert_eq!(code, 0, "child failure code {code}");
-    }
-
-    #[test]
-    fn chdir_reports_a_missing_directory() {
-        let code = in_child(|| match chdir(Path::new("/nonexistent-blastit-sys")) {
-            Ok(()) => 1,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => 0,
-            Err(_) => 2,
-        });
-        assert_eq!(code, 0, "child failure code {code}");
-    }
 }

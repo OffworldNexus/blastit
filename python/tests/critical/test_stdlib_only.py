@@ -5,12 +5,9 @@ into a project's environment: the server is the extension
 (`blastit._blastit`), and the CLI is standard library code. `pyproject.toml`
 says `dependencies = []`, and this file proves it the way a user's resolver
 sees it — by parsing the file — and proves the source agrees by walking every
-module's top-level imports.
-
-`pytest_plugin.py` is the one exception: it is a pytest entry point, loaded by
-pytest itself, so `import pytest` is the plugin's host, not a dependency of the
-package. Every other third-party framework hook (Django, psycopg) is imported
-lazily inside a function and never at module import time.
+module's top-level imports. There is no exception: the package is the launcher
+and the `check` gate, and both import only the standard library (a framework
+hook, when one is needed, is imported lazily inside a function).
 """
 
 from __future__ import annotations
@@ -81,11 +78,7 @@ class TestNoRuntimeDependencies(unittest.TestCase):
     def test_every_module_imports_only_the_stdlib_or_blastit(self) -> None:
         allowed = set(sys.stdlib_module_names) | {"blastit"}
         for path in package_modules():
-            imports = top_level_imports(path)
-            if path.name == "pytest_plugin.py":
-                # The plugin is loaded by pytest, so pytest is its host.
-                imports = imports - {"pytest"}
-            offenders = imports - allowed
+            offenders = top_level_imports(path) - allowed
             self.assertEqual(offenders, set(), f"{path.name} imports {offenders}")
 
     def test_the_extension_is_not_imported_at_package_import_time(self) -> None:

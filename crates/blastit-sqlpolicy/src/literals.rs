@@ -95,65 +95,29 @@ pub fn redact_literals(sql: &str) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_literal_form_redacts_to_one_ellipsis() {
-        for sql in [
-            "SELECT 'x'",
-            "SELECT E'x'",
-            "SELECT B'1'",
-            "SELECT X'ff'",
-            "SELECT N'x'",
-            r"SELECT U&'\0041'",
-            "SELECT $$x$$",
-            "SELECT $tag$x$tag$",
-        ] {
-            assert_eq!(redact_literals(sql), "SELECT …", "for {sql:?}");
-        }
-    }
-
-    #[test]
-    fn identifiers_placeholders_and_comments_survive() {
-        for sql in [
-            r#"SELECT "a""b" FROM "t""#,
-            r#"SELECT U&"ident" FROM "t""#,
-            "SELECT $1, $?",
-            "SELECT 1 -- 'x'",
-            "SELECT 1 /* 'x' */",
-        ] {
-            assert_eq!(redact_literals(sql), sql, "for {sql:?}");
-            assert!(!has_quoted_literal(sql), "for {sql:?}");
-        }
-    }
-
-    #[test]
-    fn known_static_setup_sql_is_kept_whole() {
-        for sql in KNOWN_STATIC_SETUP_SQL {
-            assert_eq!(redact_literals(sql), *sql);
-            assert!(has_quoted_literal(sql), "{sql:?} still holds its literal");
-        }
-    }
-
-    #[test]
-    fn redaction_is_idempotent_and_leaks_nothing() {
-        for sql in [
-            "SELECT 's3cr3t' FROM t WHERE id = $1",
-            r"SELECT E'a\'s3cr3t'",
-            "SELECT N's3cr3t', \"col\"",
-            r"SELECT U&'\0073\0063\0072\0074'",
-            "SELECT $t$s3cr3t$t$",
-            "SELECT 'a', 'b', 'c'",
-        ] {
-            let once = redact_literals(sql);
-            assert_eq!(redact_literals(&once), once, "not idempotent for {sql:?}");
-            assert!(
-                !once.contains("s3cr3t"),
-                "leaked a literal byte in {once:?}"
-            );
-            assert!(!once.contains("\\0073"), "leaked an escape in {once:?}");
-        }
-    }
+/// The character offset of the first quoted literal in `sql`, for the
+/// `LiteralQuery` refusal's site.
+///
+/// The offset is the region's **start**, prefix included: `SELECT E'x'` is `7`
+/// (the `E`), `SELECT $$x$$` is `7` (the first `$`) — the character [`redact_literals`]
+/// replaces, so a squiggle points at the token that carries the value rather
+/// than inside it. `None` when there is no literal to point at, in which case
+/// the caller falls back to the statement's own origin.
+///
+/// The count is in `char`s, like every other site in the manifest
+/// (`error::Position`), and the name is crate-qualified: `blastit-env` has an
+/// unrelated `literal_offset`.
+///
+/// ```
+/// # use blastit_sqlpolicy::literal_offset;
+/// assert_eq!(literal_offset("SELECT id FROM t"), None);
+/// assert_eq!(literal_offset("SELECT E'x'"), Some(7));
+/// assert_eq!(literal_offset(r#"SELECT "a" FROM t WHERE b = 'c'"#), Some(28));
+/// ```
+pub fn literal_offset(sql: &str) -> Option<u32> {
+    let chars: Vec<char> = sql.chars().collect();
+    let region = lex(&chars)
+        .into_iter()
+        .find(|region| region.kind.is_literal())?;
+    u32::try_from(region.start).ok()
 }

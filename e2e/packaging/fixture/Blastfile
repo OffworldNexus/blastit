@@ -1,0 +1,4 @@
+static "/" {
+    root "public"
+    fallback "index.html"
+}

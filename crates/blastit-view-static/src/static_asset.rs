@@ -1,0 +1,760 @@
+//! Resolving one decoded request path to a regular file strictly beneath a
+//! declared static root (`R7`, `R11`, design §4.2, §5.1–§5.2).
+//!
+//! This module owns the decode-to-segments half of the boundary and the
+//! filesystem half. It never builds a header: `rewrite.rs` decides and
+//! `static_response.rs` responds.
+//!
+//! The boundary is one `O_PATH|O_DIRECTORY|O_CLOEXEC` dirfd per root, opened
+//! once on `manifest_dir.join(root)`, and then `openat2` with
+//! [`STATIC_RESOLVE_FLAGS`] for every candidate. A candidate is probed
+//! `O_PATH`, classified by `fstat`, and only a regular file is re-opened
+//! `O_RDONLY|O_CLOEXEC|O_NONBLOCK|O_NOCTTY`, with the `(st_dev, st_ino)`
+//! identity check between the two opens ([`same_inode`]). A special file is
+//! therefore never read-opened and a path swapped between the probe and the
+//! read answers `Hidden`. Kernels without `openat2` fall back to a
+//! per-segment `O_NOFOLLOW` walk ([`Backend::Walk`]) that answers identically.
+//!
+//! Never `canonicalize()` plus a string prefix: that resolves one path and
+//! opens another (TOCTOU), follows symlinks, and is the check the
+//! traversal CVE class defeats.
+//!
+//! A final segment ending in `.php`, `.phtml` or `.phar` (ASCII
+//! case-insensitively) is never served: [`head_segments`] and
+//! [`StaticRoot::resolve`] answer [`StaticOutcome::Hidden`] before any
+//! descriptor is opened, so the canonical layout (`[route.static] root =
+//! "public"` beside `[route.php] entry = "public/index.php"`) cannot disclose
+//! the front controller's source. The rule is a per-request `404`, not a boot
+//! refusal: `entry` legitimately lives under `root`.
+
+use std::io;
+use std::os::fd::OwnedFd;
+use std::path::Path;
+
+use blastit_manifest::StaticPolicy;
+use blastit_manifest::blastfile::StaticImmutable;
+use rustix::fs::{FileType, Mode, OFlags, ResolveFlags, Stat, fstat, open, openat, openat2};
+use rustix::io::Errno;
+
+use blastit_view::path::{path_of_target, percent_decode};
+
+/// The longest decoded request path a static route resolves, in bytes
+/// (`R7`). Checked before any syscall, so `ENAMETOOLONG` is unreachable.
+pub const MAX_STATIC_PATH_BYTES: usize = 4096;
+
+/// The longest single path segment, in bytes (`R7`, `NAME_MAX`).
+pub const MAX_SEGMENT_BYTES: usize = 255;
+
+/// The read chunk a static body is pumped in, in bytes (`R10`).
+pub const STATIC_CHUNK_BYTES: usize = 64 * 1024;
+
+/// The default ceiling for one static file, in bytes (`R10`). The only source
+/// of `SchedulerConfig::static_max_bytes`: no environment variable, no
+/// manifest key.
+pub const STATIC_MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Every pid/uid/control byte of a decoded path below this is refused
+/// (`R7`): NUL and the C0 range, exactly [`blastit_view::path`]'s rule.
+const CONTROL_LIMIT: u8 = 0x20;
+
+/// The exact `RESOLVE_*` composition [`StaticRoot::resolve`] passes to
+/// `openat2`. Exported so a consumer can assert the bits instead of
+/// restating them (the only unprivileged oracle for the flag set).
+///
+/// Mounts are deliberately followed: `RESOLVE_NO_XDEV` is not used, because a
+/// bind-mounted asset directory under `root` is legitimate and the boundary
+/// claimed is "beneath `root` in the path namespace", not one filesystem.
+#[doc(hidden)]
+pub const STATIC_RESOLVE_FLAGS: ResolveFlags = ResolveFlags::BENEATH
+    .union(ResolveFlags::NO_SYMLINKS)
+    .union(ResolveFlags::NO_MAGICLINKS);
+
+/// Why a decoded request path was refused with `400` (`R7`, design §5.2 rows
+/// 1–13).
+///
+/// [`StaticRefusal::Encoding`] is the one variant [`segments`] cannot itself
+/// return: it takes an already-decoded `&str`, and the single percent-decode
+/// (`blastit_view::path`) answers `400` for a malformed escape or invalid UTF-8
+/// before this function runs. The variant exists so the responder's `400`
+/// mapping is one table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaticRefusal {
+    /// A `..` segment after the one decode.
+    Traversal,
+    /// A second leading `/` (`//x` or `/%2Fx`), the absolute form a naive
+    /// `root + path` join treats as a filesystem path.
+    Absolute,
+    /// A backslash anywhere.
+    Backslash,
+    /// A NUL or other C0 control byte.
+    Control,
+    /// The decoded bytes were not a valid path string (malformed escape,
+    /// invalid UTF-8): refused by the decode step, never by [`segments`].
+    Encoding,
+    /// Over [`MAX_STATIC_PATH_BYTES`].
+    TooLong,
+    /// One segment over [`MAX_SEGMENT_BYTES`].
+    SegmentTooLong,
+}
+
+/// What resolving one path found (design §4.2, §4.3 steps 3–11).
+#[derive(Debug)]
+pub enum StaticOutcome {
+    /// An exact file, a directory `index`, or the SPA `index`.
+    File(StaticFile),
+    /// Nothing at that path: the caller may forward (design §4.3 steps 9–10).
+    Missing,
+    /// `spa = true` and `root/index` is missing: `404`, final.
+    ///
+    /// The declared `fallback` file is missing or refused (§9.2 step 3, §9.3).
+    FallbackMissing,
+    /// The entry exists but is not servable (a dotfile, a PHP source, a
+    /// symlink, a special or oversize file): `404`, final.
+    Hidden,
+    /// The path itself was malformed: `400`, final.
+    Refused(StaticRefusal),
+}
+
+/// Which of the three answers a [`StaticFile`] is (design §4.5 cache rule).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnswerKind {
+    /// The request path named the file.
+    Exact,
+    /// The request path named a directory whose `index` answered.
+    DirectoryIndex,
+    /// The request path named nothing; the declared `fallback` answered
+    /// (§9.2 step 3).
+    SpaFallback,
+}
+
+/// One servable static file, read-open and identity-checked.
+#[derive(Debug)]
+pub struct StaticFile {
+    /// The answering file's URL path, built from the **resolved** segments, so
+    /// every alias of one file shares one key: `/assets//app.js` and
+    /// `/assets/app.js` have the same `url_path`, `ETag` and cache header.
+    pub url_path: String,
+    /// Which of the three answers this is.
+    pub kind: AnswerKind,
+    /// `O_RDONLY`, `fstat`-verified regular file.
+    pub file: OwnedFd,
+    /// `st_size` at the read open.
+    pub len: u64,
+    /// The metadata the head is built from.
+    pub meta: StaticMeta,
+}
+
+/// The metadata of one static file, from the read-open `fstat`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StaticMeta {
+    /// `st_size`, equal to [`StaticFile::len`].
+    pub size: u64,
+    /// `st_mtime`, seconds.
+    pub mtime_secs: i64,
+    /// `st_mtime`, nanoseconds.
+    pub mtime_nsec: u32,
+}
+
+/// Why a static root could not be opened (design §4.2, §4.7).
+///
+/// `run` maps it into `SchedulerError::Protocol("static root <root>:
+/// <source>")`, which exits the role: a root the responder cannot open is not
+/// a degraded answer, it is a broken declaration.
+#[derive(Debug, thiserror::Error)]
+#[error("static root {root}: {source}")]
+pub struct StaticError {
+    /// The root exactly as the manifest wrote it.
+    pub root: String,
+    /// What `open` failed with.
+    pub source: io::Error,
+}
+
+/// The two ways a candidate is opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Backend {
+    /// `openat2` with [`STATIC_RESOLVE_FLAGS`]: one syscall, kernel-enforced
+    /// boundaries.
+    Openat2,
+    /// A per-segment `O_NOFOLLOW` `openat` walk, for kernels without
+    /// `openat2` (`ENOSYS`/`EINVAL`). Selectable in tests, so it is not dead
+    /// code.
+    Walk,
+}
+
+/// One declared static root: its dirfd and the policy that shapes an answer.
+#[derive(Debug)]
+pub struct StaticRoot {
+    /// The root exactly as declared, for boot-time messages.
+    // Read by `SchedulerError::Protocol`'s message and the boot probe; this
+    // leaf only stores it.
+    #[allow(dead_code)]
+    pub(crate) root: String,
+    /// The one `O_PATH|O_DIRECTORY|O_CLOEXEC` dirfd every lookup starts from.
+    pub(crate) dirfd: OwnedFd,
+    /// The `index` file, relative to `root` (validation guarantees no
+    /// leading `/`, no `.`/`..` segment and no dotfile segment).
+    pub(crate) index: String,
+    /// The declared `fallback` file, relative to `root`, or `None` when a miss
+    /// is the caller's (§9.3).
+    ///
+    /// The file is resolved **under `root` at request time**, never at boot, so
+    /// a build output that appears after the boot still answers.
+    pub(crate) fallback: Option<String>,
+    /// The mount prefix this root answers under (`"/"` for the retired reader's
+    /// mount at the URL root).
+    ///
+    /// Only [`StaticFile::url_path`] reads it: a file's cache key and its
+    /// `immutable` match are evaluated against the path the **client** asked
+    /// for (§9.4), so the prefix has to be put back after the strip.
+    pub(crate) prefix: String,
+    /// The mount's `immutable` policy, exactly as the manifest lowered it: the
+    /// patterns were compiled by the one pattern compiler when the mount was
+    /// lowered, so a request matches without compiling anything (§4.5, §9.4).
+    ///
+    /// This is the manifest's **own** matcher — the same
+    /// [`StaticImmutable::matches`] a `view` path is matched with — so a
+    /// `static` mount and a `view` can never disagree about a pattern. Bare
+    /// `immutable` year-caches every exact file; an `index` or `fallback`
+    /// answer stays `no-cache` because the responder asks this only about an
+    /// exact answer (`S3`).
+    // Read by `static_response.rs`'s cache rule.
+    pub(crate) immutable: StaticImmutable,
+    /// The per-file ceiling, from `SchedulerConfig::static_max_bytes`
+    /// ([`STATIC_MAX_FILE_BYTES`] until `run` overrides it).
+    pub(crate) max_bytes: u64,
+    /// Which backend this root exercises: fixed by `open_with` from the
+    /// kernel's `openat2` support, so every lookup takes one path.
+    backend: Backend,
+}
+
+/// What an `O_PATH` probe found.
+enum Landing {
+    /// A regular file within the ceiling, with its `O_PATH` descriptor.
+    File(OwnedFd, Stat),
+    /// A directory: the `index` lookup owns the next step.
+    Directory,
+    /// `ENOENT`/`ENOTDIR`: nothing at this path.
+    Missing,
+    /// Anything else: the path exists but is not servable.
+    Hidden,
+}
+
+impl StaticRoot {
+    /// Opens `root` beneath `manifest_dir`, as the scheduler's uid.
+    ///
+    /// This is the only place a symlink is followed, and only on the
+    /// operator's own declaration (`root = "current/public"` must work).
+    pub fn open(manifest_dir: &Path, policy: &StaticPolicy) -> Result<Self, StaticError> {
+        Self::open_with(manifest_dir, policy, Backend::Openat2)
+    }
+
+    /// [`StaticRoot::open`] with the backend chosen explicitly.
+    ///
+    /// `#[doc(hidden)] pub` so a caller outside this crate can select the
+    /// backend explicitly; the crate-level default is [`StaticRoot::open`].
+    #[doc(hidden)]
+    pub fn open_with(
+        manifest_dir: &Path,
+        policy: &StaticPolicy,
+        backend: Backend,
+    ) -> Result<Self, StaticError> {
+        let path = manifest_dir.join(&policy.root);
+        let dirfd = open(
+            &path,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|source| StaticError {
+            root: policy.root.clone(),
+            source: io::Error::from(source),
+        })?;
+        // A kernel without openat2 is detected once, at boot, so every later
+        // lookup takes the same path and the two backends stay comparable.
+        let backend = if backend == Backend::Walk || !supports_openat2(&dirfd) {
+            Backend::Walk
+        } else {
+            Backend::Openat2
+        };
+        Ok(Self {
+            root: policy.root.clone(),
+            dirfd,
+            index: policy.index.clone(),
+            fallback: policy.fallback.clone(),
+            prefix: "/".to_string(),
+            // The policy *is* the matcher: `StaticImmutable::{None, All,
+            // Patterns}` already holds the anchored programs the parser built at
+            // lower time, so this clones a policy and compiles nothing else.
+            // There is no second matcher, and a `regex '…'` entry, a nested
+            // `"/assets/*"` or a quoted pattern over the old 256-byte guard all
+            // match exactly what the manifest's own matcher says.
+            immutable: policy.immutable.clone(),
+            max_bytes: STATIC_MAX_FILE_BYTES,
+            backend,
+        })
+    }
+
+    /// This root with the mount prefix it answers under (§9.4).
+    ///
+    /// `StaticRoot::open` defaults to the URL root, which is the retired
+    /// reader's only mount and every unit fixture's shape.
+    pub fn with_prefix(mut self, prefix: &str) -> Self {
+        self.prefix = prefix.to_string();
+        self
+    }
+
+    /// This root with the per-file ceiling `run` was configured with (§4.6).
+    ///
+    /// [`STATIC_MAX_FILE_BYTES`] is the default `StaticRoot::open` installs and
+    /// the only constant `SchedulerConfig::static_max_bytes` defaults to; the
+    /// scheduler applies its configured value through this one setter, so a
+    /// caller outside this crate cannot reach behind the root to change it.
+    pub fn with_max_bytes(mut self, max_bytes: u64) -> Self {
+        self.max_bytes = max_bytes;
+        self
+    }
+
+    /// Resolves `segments` (already decoded, already split by [`segments`]),
+    /// **including** the declared `fallback` a miss answers with (§9.3).
+    ///
+    /// A final PHP-source segment (`.php`/`.phtml`/`.phar`) is
+    /// [`StaticOutcome::Hidden`] before any descriptor is opened, and so is any
+    /// candidate answer (`index`, the declared `fallback`) that ends that way.
+    ///
+    /// The scheduler's §9.2 pipeline does **not** use this form for step 1: a
+    /// mount that answers the `fallback` here would shadow every view, which is
+    /// exactly what §9.2 forbids. It resolves with [`StaticRoot::resolve_file`]
+    /// and asks [`StaticRoot::resolve_fallback`] only at step 3. This form is
+    /// the one-policy answer the responder and rewrite suites assert.
+    pub fn resolve(&self, segments: &[&str]) -> StaticOutcome {
+        self.resolve_with(segments, None)
+    }
+
+    /// §9.2 step 1: the **file** this request path answers, or `Missing`.
+    ///
+    /// A miss is `Missing` — never the declared `fallback`, which is step 3's
+    /// ([`StaticRoot::resolve_fallback`], consulted after every view). A
+    /// `FallbackMissing` is therefore impossible here: the fallback is not
+    /// looked at, so a broken one cannot decide a path a view claims.
+    pub fn resolve_file(&self, segments: &[&str]) -> StaticOutcome {
+        self.lookup(segments, None, false)
+    }
+
+    /// [`StaticRoot::resolve`], with a hook between the `O_PATH` probe and the
+    /// read open.
+    ///
+    /// The protected suite uses `Some` to swap the leaf for a different inode
+    /// and prove the [`same_inode`] check answers `Hidden` — the only way to
+    /// exercise the TOCTOU arm without a real race.
+    #[doc(hidden)]
+    pub fn resolve_with(&self, segments: &[&str], after_probe: Option<&dyn Fn()>) -> StaticOutcome {
+        self.lookup(segments, after_probe, true)
+    }
+
+    /// The shared body of [`StaticRoot::resolve`] and
+    /// [`StaticRoot::resolve_file`]: `with_fallback` is the only difference.
+    fn lookup(
+        &self,
+        segments: &[&str],
+        after_probe: Option<&dyn Fn()>,
+        with_fallback: bool,
+    ) -> StaticOutcome {
+        // `resolve` is `pub`, so the "the walk cannot leave the root" guarantee
+        // is enforced here and not only by [`segments`]'s caller: a `..`, an
+        // empty segment or an embedded `/` would let the per-segment walk open
+        // a directory outside the root (`openat(dir, "..")` succeeds).
+        if segments
+            .iter()
+            .any(|segment| segment.is_empty() || *segment == ".." || segment.contains('/'))
+        {
+            return StaticOutcome::Hidden;
+        }
+        let rel = segments.join("/");
+        match self.probe(&rel) {
+            Landing::File(file, stat) => {
+                self.finish(file, stat, &rel, AnswerKind::Exact, after_probe)
+            }
+            Landing::Directory => {
+                let candidate = if rel.is_empty() {
+                    self.index.clone()
+                } else {
+                    format!("{rel}/{}", self.index)
+                };
+                match self.probe(&candidate) {
+                    Landing::File(file, stat) => self.finish(
+                        file,
+                        stat,
+                        &candidate,
+                        AnswerKind::DirectoryIndex,
+                        after_probe,
+                    ),
+                    Landing::Hidden => StaticOutcome::Hidden,
+                    // A directory with no servable `index` "falls through like
+                    // any missing path" (design §4.3 step 7). §9.2 step 1 is
+                    // `Missing`, so the view table is consulted first.
+                    Landing::Directory | Landing::Missing => {
+                        if with_fallback {
+                            self.missed(after_probe)
+                        } else {
+                            StaticOutcome::Missing
+                        }
+                    }
+                }
+            }
+            Landing::Missing => {
+                if with_fallback {
+                    self.missed(after_probe)
+                } else {
+                    StaticOutcome::Missing
+                }
+            }
+            Landing::Hidden => StaticOutcome::Hidden,
+        }
+    }
+
+    /// A miss: the declared `fallback`, or `Missing` for the caller (§9.2 step
+    /// 3, §9.3).
+    ///
+    /// The fallback is a **file** now, not a flag answering `index`: resolving
+    /// it here keeps the file's own name for the cache key and the `Hidden`
+    /// rules. A fallback that is missing, a dotfile, a symlink or a
+    /// `.php`/`.phtml`/`.phar` source is [`StaticOutcome::FallbackMissing`].
+    fn missed(&self, after_probe: Option<&dyn Fn()>) -> StaticOutcome {
+        let Some(fallback) = self.fallback.as_deref() else {
+            return StaticOutcome::Missing;
+        };
+        match self.probe(fallback) {
+            Landing::File(file, stat) => {
+                self.finish(file, stat, fallback, AnswerKind::SpaFallback, after_probe)
+            }
+            // A refused fallback is a `404` either way, and the fallback has no
+            // third answer.
+            Landing::Directory | Landing::Missing | Landing::Hidden => {
+                StaticOutcome::FallbackMissing
+            }
+        }
+    }
+
+    /// Resolves the declared `fallback` file alone, for step 3 of §9.2.
+    ///
+    /// Used when a request matched a mount but neither a file nor a view
+    /// answered: only the mount's own `fallback` may, and only for `GET`/`HEAD`.
+    pub fn resolve_fallback(&self) -> StaticOutcome {
+        self.missed(None)
+    }
+
+    /// The probe→read-open half: run the hook, re-open, and prove identity.
+    fn finish(
+        &self,
+        probe: OwnedFd,
+        probe_stat: Stat,
+        rel: &str,
+        kind: AnswerKind,
+        after_probe: Option<&dyn Fn()>,
+    ) -> StaticOutcome {
+        if let Some(hook) = after_probe {
+            hook();
+        }
+        // The probe stays open until the identity check: the probed inode is
+        // pinned, so a reused inode number at the same path cannot satisfy the
+        // `(st_dev, st_ino)` comparison below.
+        let read_flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
+        let Ok(file) = self.open_beneath(rel, read_flags) else {
+            // `EACCES`, `EISDIR`, a vanished file: hidden, never served.
+            return StaticOutcome::Hidden;
+        };
+        let Ok(stat) = fstat(&file) else {
+            return StaticOutcome::Hidden;
+        };
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+            return StaticOutcome::Hidden;
+        }
+        let identity = same_inode(
+            (probe_stat.st_dev, probe_stat.st_ino),
+            (stat.st_dev, stat.st_ino),
+        );
+        drop(probe);
+        if !identity {
+            return StaticOutcome::Hidden;
+        }
+        let len = u64::try_from(stat.st_size).unwrap_or(0);
+        if len > self.max_bytes {
+            return StaticOutcome::Hidden;
+        }
+        StaticOutcome::File(StaticFile {
+            url_path: self.url_path(rel),
+            kind,
+            file,
+            len,
+            meta: StaticMeta {
+                size: len,
+                mtime_secs: stat.st_mtime,
+                mtime_nsec: u32::try_from(stat.st_mtime_nsec).unwrap_or(0),
+            },
+        })
+    }
+
+    /// The client's path, rebuilt from the mount prefix and the stripped
+    /// remainder (§9.4).
+    ///
+    /// `rel` is the resolved path **below** `root` and carries no leading `/`,
+    /// so the join is not `prefix + "/" + rel` (that yields `//assets/app.js`
+    /// for the root mount): it is the prefix alone for the mount's own
+    /// directory, `/{rel}` under the URL root, and `prefix/rel` otherwise.
+    /// `immutable "/assets/*"` therefore matches the same file whichever mount
+    /// serves it.
+    fn url_path(&self, rel: &str) -> String {
+        if rel.is_empty() {
+            return self.prefix.clone();
+        }
+        if self.prefix == "/" {
+            return format!("/{rel}");
+        }
+        format!("{}/{rel}", self.prefix)
+    }
+
+    /// Classifies one `O_PATH` probe.
+    ///
+    /// A final PHP-source segment (`.php`/`.phtml`/`.phar`) answers `Hidden`
+    /// before this function opens anything, so a source file under `root` is
+    /// neither probed nor read — a `000`-mode source is therefore a `404`, not
+    /// a read failure.
+    fn probe(&self, rel: &str) -> Landing {
+        if rel.rsplit('/').next().is_some_and(is_php_source) {
+            return Landing::Hidden;
+        }
+        let descriptor = match self.open_beneath(rel, OFlags::PATH | OFlags::CLOEXEC) {
+            Ok(descriptor) => descriptor,
+            Err(Errno::NOENT | Errno::NOTDIR) => return Landing::Missing,
+            // Every other errno is a refusal: a symlink at any depth
+            // (`ELOOP`), a permission (`EACCES`), a resource failure, or an
+            // errno this release has never heard of (design §5.1's total
+            // table).
+            Err(_) => return Landing::Hidden,
+        };
+        let Ok(stat) = fstat(&descriptor) else {
+            return Landing::Hidden;
+        };
+        let len = u64::try_from(stat.st_size).unwrap_or(0);
+        match classify(FileType::from_raw_mode(stat.st_mode), len, self.max_bytes) {
+            Ok(()) => Landing::File(descriptor, stat),
+            Err(StaticOutcome::Missing) => Landing::Directory,
+            Err(_) => Landing::Hidden,
+        }
+    }
+
+    /// `openat2` where the kernel has it, the `O_NOFOLLOW` walk otherwise.
+    ///
+    /// `walk` adds `O_NOFOLLOW` itself, so a read open is one call with the
+    /// read flags and a probe is one with `O_PATH`.
+    fn open_beneath(&self, rel: &str, flags: OFlags) -> Result<OwnedFd, Errno> {
+        match self.backend {
+            Backend::Openat2 => match self.openat2(rel, flags) {
+                // A kernel that reports no `openat2` (or rejects the flags)
+                // still gets the boundary: the walk. `open` already probed
+                // this once, so the arm is defence.
+                Err(Errno::NOSYS | Errno::INVAL) => self.walk(rel, flags),
+                other => other,
+            },
+            Backend::Walk => self.walk(rel, flags),
+        }
+    }
+
+    /// One `openat2` beneath the dirfd; the path is relative by construction.
+    fn openat2(&self, rel: &str, flags: OFlags) -> Result<OwnedFd, Errno> {
+        let path = if rel.is_empty() { "." } else { rel };
+        openat2(
+            &self.dirfd,
+            path,
+            flags,
+            Mode::empty(),
+            STATIC_RESOLVE_FLAGS,
+        )
+    }
+
+    /// The per-segment fallback: every intermediate must be a real directory
+    /// and the leaf a real entry, all opened `O_NOFOLLOW`.
+    ///
+    /// A symlink intermediate answers `ELOOP` exactly as
+    /// `RESOLVE_NO_SYMLINKS` does on the `openat2` path (an `O_NOFOLLOW` open
+    /// that lands on a symlink succeeds, so the type is checked explicitly),
+    /// and a non-directory intermediate answers `ENOTDIR` as `openat2` would.
+    /// `..`, `.` and empty segments are already gone, so the walk cannot leave
+    /// the root.
+    fn walk(&self, rel: &str, leaf_flags: OFlags) -> Result<OwnedFd, Errno> {
+        let probe = OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut current = openat(&self.dirfd, ".", probe | OFlags::DIRECTORY, Mode::empty())?;
+        if rel.is_empty() {
+            // The path "/" is the root directory itself (design §4.3 step 6:
+            // descend to `index`), never an empty-name lookup.
+            return Ok(current);
+        }
+        let parts: Vec<&str> = rel.split('/').collect();
+        let (leaf, parents) = match parts.split_last() {
+            Some(split) => split,
+            // `split` on `""` never yields an empty slice; keep the total case
+            // explicit rather than unreachable.
+            None => return Err(Errno::INVAL),
+        };
+        for part in parents {
+            let next = openat(&current, *part, probe, Mode::empty())?;
+            let stat = fstat(&next)?;
+            match FileType::from_raw_mode(stat.st_mode) {
+                FileType::Directory => current = next,
+                FileType::Symlink => return Err(Errno::LOOP),
+                _ => return Err(Errno::NOTDIR),
+            }
+        }
+        openat(
+            &current,
+            *leaf,
+            leaf_flags | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+    }
+}
+
+/// Whether this kernel can `openat2` at all (`ENOSYS`), or accepts the resolve
+/// flags (`EINVAL` on a kernel that knows the syscall but not one of them).
+fn supports_openat2(dirfd: &OwnedFd) -> bool {
+    match openat2(
+        dirfd,
+        ".",
+        OFlags::PATH | OFlags::CLOEXEC,
+        Mode::empty(),
+        STATIC_RESOLVE_FLAGS,
+    ) {
+        Ok(_) => true,
+        Err(Errno::NOSYS | Errno::INVAL) => false,
+        // An unrelated errno says nothing about the syscall's existence.
+        Err(_) => true,
+    }
+}
+
+/// The probe→read-open identity check, over plain `(st_dev, st_ino)` tuples so
+/// a protected integration test can build every row (`rustix::fs::Stat` is
+/// `#[non_exhaustive]` and has no constructor).
+#[doc(hidden)]
+pub fn same_inode(probe: (u64, u64), read: (u64, u64)) -> bool {
+    probe == read
+}
+
+/// One decode already happened (`blastit_view::path`). The decoded path must begin
+/// with exactly one `/`: a second leading `/` (from `//x` or `/%2Fx`) is
+/// [`StaticRefusal::Absolute`], because it is the form a naive `root + path`
+/// join treats as an absolute filesystem path.
+///
+/// Interior `//` collapses and `.` segments are dropped; `..` is refused. No
+/// Unicode normalization and no second decode, so `%252e` is the literal text
+/// `%2e`.
+pub fn segments(decoded: &str) -> Result<Vec<&str>, StaticRefusal> {
+    if decoded.len() > MAX_STATIC_PATH_BYTES {
+        return Err(StaticRefusal::TooLong);
+    }
+    if decoded.bytes().any(|byte| byte < CONTROL_LIMIT) {
+        return Err(StaticRefusal::Control);
+    }
+    let rest = match decoded.strip_prefix('/') {
+        Some(rest) => rest,
+        // A request target is absolute-form; anything else is not a path this
+        // resolver has a meaning for, and is refused as the absolute shape.
+        None => return Err(StaticRefusal::Absolute),
+    };
+    if rest.starts_with('/') {
+        return Err(StaticRefusal::Absolute);
+    }
+    if decoded.contains('\\') {
+        return Err(StaticRefusal::Backslash);
+    }
+    let mut segments = Vec::new();
+    for segment in rest.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return Err(StaticRefusal::Traversal);
+        }
+        if segment.len() > MAX_SEGMENT_BYTES {
+            return Err(StaticRefusal::SegmentTooLong);
+        }
+        segments.push(segment);
+    }
+    Ok(segments)
+}
+
+/// The scheduler's head half of design §4.3 (steps 3–4), on a raw request
+/// target: cut at `?`, exactly one percent-decode, [`segments`], then the
+/// [`is_dotfile`] rule and the [`is_php_source`] rule.
+///
+/// `Ok` is the segment list to hand to [`StaticRoot::resolve`]; `Err` is the
+/// final outcome for that path (`Refused` for a malformed one, `Hidden` for a
+/// dotfile or a `.php`/`.phtml`/`.phar` source). `#[doc(hidden)] pub` so the
+/// protected suite table-drives the production decode and dotfile wiring
+/// instead of restating them.
+#[doc(hidden)]
+pub fn head_segments(target: &str) -> Result<Vec<String>, StaticOutcome> {
+    let decoded = percent_decode(path_of_target(target.as_bytes()))
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    let Some(decoded) = decoded else {
+        return Err(StaticOutcome::Refused(StaticRefusal::Encoding));
+    };
+    let parts = segments(&decoded).map_err(StaticOutcome::Refused)?;
+    if is_dotfile(&parts) {
+        return Err(StaticOutcome::Hidden);
+    }
+    // `404`, final, before the method and body gates: a `POST /index.php` with
+    // a body is a source-disclosure probe, never a `405`/`413` (design
+    // §4.4). The file is not opened here or later.
+    if parts.last().is_some_and(|segment| is_php_source(segment)) {
+        return Err(StaticOutcome::Hidden);
+    }
+    Ok(parts.into_iter().map(str::to_string).collect())
+}
+
+/// The dotfile rule (design §4.3 step 4): a segment starting with `.` is
+/// hidden, unless the first segment is exactly `.well-known`.
+///
+/// The exemption covers the first segment only, so
+/// `/.well-known/acme-challenge/token` is public and `/.well-known/.env` is
+/// not. `.` and `..` never reach this rule: [`segments`] has already handled
+/// them.
+pub fn is_dotfile(segments: &[&str]) -> bool {
+    segments.iter().enumerate().any(|(position, segment)| {
+        segment.starts_with('.') && !(position == 0 && *segment == ".well-known")
+    })
+}
+
+/// Whether one path segment names PHP source: its final `.`-separated
+/// extension is `php`, `phtml` or `phar`, ASCII case-insensitively.
+///
+/// A static root never answers such a path, whatever the method or body, and
+/// never opens it: the file may legitimately be the route's `entry` living
+/// beneath `root`, but its bytes are not public. `.php5`, `php` and
+/// `manual.php.txt` are not PHP source by this rule.
+pub fn is_php_source(segment: &str) -> bool {
+    match segment.rsplit_once('.') {
+        Some((_, extension)) => {
+            extension.eq_ignore_ascii_case("php")
+                || extension.eq_ignore_ascii_case("phtml")
+                || extension.eq_ignore_ascii_case("phar")
+        }
+        None => false,
+    }
+}
+
+/// The whole-file classification, pure: the row a `fstat` result lands in.
+///
+/// * `Ok(())` — a regular file at or below `max_bytes`: servable.
+/// * `Err(StaticOutcome::Missing)` — a directory: not a file at this path, so
+///   the caller descends to `index` and, when that is missing too, reports
+///   `Missing` (design §4.3 steps 6–7).
+/// * `Err(StaticOutcome::Hidden)` — everything else: a FIFO, a socket, a
+///   character or block device, a symlink, an unknown filesystem object, or a
+///   regular file over `max_bytes`. The `_` arm is this table's total case.
+pub fn classify(kind: FileType, len: u64, max_bytes: u64) -> Result<(), StaticOutcome> {
+    match kind {
+        FileType::RegularFile if len <= max_bytes => Ok(()),
+        FileType::RegularFile => Err(StaticOutcome::Hidden),
+        FileType::Directory => Err(StaticOutcome::Missing),
+        _ => Err(StaticOutcome::Hidden),
+    }
+}

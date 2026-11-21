@@ -2,7 +2,7 @@
 id: MB.2
 title: "Static Asset Serving & Clean URL Rewriting (0.2.0)"
 kind: epic
-status: ready
+status: done
 priority: 2
 depends_on: [MB.1]
 paths: ["e2e/**"]
@@ -10,7 +10,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-13T10:42"
-updated: "2026-11-13T10:42"
+updated: "2026-11-14T00:45"
 ---
 
 # Goal

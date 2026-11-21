@@ -1,7 +1,7 @@
 //! What `--learn` may propose, and what a session may replay (R25, R31, ADR-0003).
 //!
 //! `--learn` runs every statement a request sends and then writes the ones it
-//! saw into `blastit.toml`. A statement that cannot be written as a grant must
+//! saw into the `Blastfile`. A statement that cannot be written as a grant must
 //! therefore be refused *before* it is proposed, or `--learn` would produce a
 //! manifest that does not boot: a redacted `…`, a literal only this request
 //! carried, a second statement hidden behind the first, or a statement that
@@ -99,6 +99,16 @@ pub enum RefuseReason {
     CopyProgram,
     /// The statement calls a [`DANGEROUS_LEARN_FUNCTIONS`] entry.
     DangerousFunction(String),
+    /// Only the one-line explanation of a refusal survived: the text a
+    /// `WireSqlObs.verdict` record carries (`{"kind":"refused",…,"reason":…}`).
+    ///
+    /// [`check_learnable`] never returns it — it is the record's round-trip
+    /// carrier, built when a refused observation written by this or an older
+    /// build is read back. [`Display`](std::fmt::Display) prints the text
+    /// unchanged, because it was already rendered (and stripped of any token
+    /// the parser quoted) by whoever wrote the record; that is what makes the
+    /// record serialise byte for byte again.
+    Reported(String),
 }
 
 impl std::fmt::Display for RefuseReason {
@@ -127,6 +137,7 @@ impl std::fmt::Display for RefuseReason {
                 f,
                 "`{name}` reaches the server's files or network; it cannot be learned"
             ),
+            Self::Reported(text) => f.write_str(text),
         }
     }
 }
@@ -654,210 +665,29 @@ fn parse_form(normalized: &str) -> String {
             out.extend(text);
             continue;
         }
-        let mut i = 0;
-        while i < text.len() {
-            if text[i] == '$' && text.get(i + 1) == Some(&'?') {
+        // The code text is consumed one token at a time: `rest` is the part that
+        // is left, so every step strictly shortens it and the rewrite cannot
+        // stall on a hostile statement.
+        let mut rest = text;
+        while let Some(first) = rest.first() {
+            if *first == '$' && rest.get(1) == Some(&'?') {
                 out.push_str("$1");
-                i += 2;
+                // `get(1)` proved the second character exists, so this drops
+                // both of them.
+                rest = rest.get(2..).unwrap_or_default();
                 continue;
             }
-            let end = code_token_end(text, i);
-            out.extend(&text[i..end]);
-            i = end;
+            // One whole code token, copied verbatim: `a$?` is a single
+            // identifier and keeps its `$`.
+            let end = code_token_end(rest, 0).clamp(1, rest.len());
+            let Some((token, tail)) = rest.split_at_checked(end) else {
+                // Unreachable: `end` is clamped to `1..=rest.len()`. Stopping
+                // keeps the rewrite finite rather than panicking on the way out.
+                break;
+            };
+            out.extend(token);
+            rest = tail;
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_parameterised_statement_is_grantable() {
-        let verdict = check_learnable(r#"SELECT "t"."id" FROM "t" WHERE "t"."id" = $1"#);
-        assert_eq!(
-            verdict.normalized(),
-            Some(r#"SELECT "t"."id" FROM "t" WHERE "t"."id" = $?"#)
-        );
-        assert!(verdict.is_query());
-        assert!(verdict.reason().is_none());
-    }
-
-    #[test]
-    fn every_inline_literal_form_is_refused() {
-        for sql in [
-            "SELECT 'x'",
-            "SELECT E'x'",
-            "SELECT B'1'",
-            "SELECT X'ff'",
-            "SELECT N'x'",
-            r"SELECT U&'\0041'",
-            "SELECT $$x$$",
-            "SELECT $t$x$t$",
-        ] {
-            let verdict = check_learnable(sql);
-            assert_eq!(
-                verdict.reason(),
-                Some(&RefuseReason::InlineLiteral),
-                "{sql:?}"
-            );
-            assert_eq!(verdict.redacted(), Some("SELECT …"), "{sql:?}");
-        }
-    }
-
-    #[test]
-    fn a_redacted_placeholder_is_refused() {
-        let verdict = check_learnable("SELECT … FROM t");
-        assert_eq!(verdict.reason(), Some(&RefuseReason::RedactedPlaceholder));
-    }
-
-    #[test]
-    fn unparseable_and_multi_statement_are_refused() {
-        assert!(matches!(
-            check_learnable("SELEC 1").reason(),
-            Some(RefuseReason::Unparseable(_))
-        ));
-        assert!(matches!(
-            check_learnable("").reason(),
-            Some(RefuseReason::Unparseable(_))
-        ));
-        assert_eq!(
-            check_learnable("SELECT 1; SELECT 2").reason(),
-            Some(&RefuseReason::MultipleStatements(2))
-        );
-    }
-
-    #[test]
-    fn a_parser_message_never_carries_the_token() {
-        assert_eq!(
-            sanitize_parser_message("Invalid statement: syntax error at or near \"s3cr3t\""),
-            "Invalid statement: syntax error"
-        );
-        assert_eq!(
-            sanitize_parser_message("invalid Unicode escape value at or near \"'\\0073'\""),
-            "invalid Unicode escape value"
-        );
-        assert_eq!(
-            sanitize_parser_message("invalid input syntax for type integer: \"hunter2\""),
-            "invalid input syntax for type integer: \"…\""
-        );
-        assert_eq!(
-            sanitize_parser_message("syntax error at end of input"),
-            "syntax error at end of input"
-        );
-        // The refusal stores the stripped message, so even `Debug` is safe.
-        let verdict = check_learnable("SELECT 's3cr3t");
-        let debug = format!("{verdict:?}");
-        assert!(!debug.contains("s3cr3t"), "{debug:?}");
-        let Some(reason) = verdict.reason() else {
-            panic!("the statement must be refused: {verdict:?}");
-        };
-        let rendered = reason.to_string();
-        assert!(!rendered.contains("s3cr3t"), "{rendered:?}");
-    }
-
-    #[test]
-    fn copy_program_is_refused() {
-        for sql in [
-            "COPY t FROM PROGRAM 'id'",
-            "COPY (SELECT 1) TO PROGRAM 'id'",
-        ] {
-            assert_eq!(
-                check_learnable(sql).reason(),
-                Some(&RefuseReason::CopyProgram),
-                "{sql:?}"
-            );
-        }
-        // `COPY … TO STDOUT` runs no command, so it is only refused for the
-        // literal it would need to carry a value.
-        assert_eq!(
-            check_learnable("COPY t TO STDOUT").reason(),
-            None,
-            "a plain COPY is grantable"
-        );
-    }
-
-    #[test]
-    fn every_dangerous_function_is_refused() {
-        for name in DANGEROUS_LEARN_FUNCTIONS {
-            let sql = format!("SELECT {name}($1)");
-            let verdict = check_learnable(&sql);
-            assert_eq!(
-                verdict.reason(),
-                Some(&RefuseReason::DangerousFunction((*name).to_string())),
-                "{sql:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_function_of_the_same_name_in_another_schema_is_not_refused() {
-        let verdict = check_learnable("SELECT public.pg_read_file($1)");
-        assert!(verdict.is_query());
-    }
-
-    #[test]
-    fn a_call_and_a_three_part_name_are_refused() {
-        for sql in [
-            "CALL pg_read_file($1)",
-            "CALL pg_catalog.pg_read_file($1)",
-            "SELECT pg_catalog.pg_catalog.pg_read_file($1)",
-        ] {
-            let verdict = check_learnable(sql);
-            assert!(
-                matches!(verdict.reason(), Some(RefuseReason::DangerousFunction(_))),
-                "{sql:?} -> {verdict:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn known_static_setup_is_grantable_before_the_parser_runs() {
-        for sql in KNOWN_STATIC_SETUP_SQL {
-            let verdict = check_learnable(sql);
-            assert_eq!(verdict.normalized(), Some(*sql), "{sql:?}");
-        }
-    }
-
-    #[test]
-    fn introspection_setup_is_recognised() {
-        for sql in [
-            "SET TIME ZONE 'UTC'",
-            "SET search_path = public",
-            "SHOW standard_conforming_strings",
-            "SELECT pg_catalog.version()",
-            "SELECT current_schema()",
-            "SELECT to_regtype($?)",
-            "SELECT * FROM pg_catalog.pg_type WHERE oid = $?",
-        ] {
-            assert!(is_introspection_setup_sql(sql), "{sql:?}");
-        }
-        for sql in [
-            "SELECT * FROM auth_user",
-            "SELECT pg_read_file('/etc/passwd')",
-            "SELECT pg_get_userbyid($?)",
-            "SELECT * FROM tables",
-            "SELECT * FROM columns",
-            "SELECT * FROM schemata",
-            "DROP TABLE t",
-            "SET x; DROP TABLE t",
-            "SELECT 1; SHOW x",
-            "",
-        ] {
-            assert!(!is_introspection_setup_sql(sql), "{sql:?}");
-        }
-        assert!(is_introspection_setup_sql(
-            "SELECT * FROM information_schema.tables"
-        ));
-    }
-
-    #[test]
-    fn parse_form_only_rewrites_code_placeholders() {
-        assert_eq!(parse_form("SELECT $?"), "SELECT $1");
-        assert_eq!(parse_form("SELECT '$?'"), "SELECT '$?'");
-        assert_eq!(parse_form(r#"SELECT "a$?""#), r#"SELECT "a$?""#);
-        assert_eq!(parse_form("SELECT a$?"), "SELECT a$?");
-        assert_eq!(parse_form("SELECT 1"), "SELECT 1");
-    }
 }

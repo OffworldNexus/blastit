@@ -2,7 +2,7 @@
 //! §4).
 //!
 //! These share the frame header with `http.chan` and `view.chan` but use their
-//! own type-code range (`0x40`–`0x44`) and always carry `id == 0`. Payload
+//! own type-code range (`0x40`–`0x45`) and always carry `id == 0`. Payload
 //! layout:
 //!
 //! | Type | Code | Payload |
@@ -12,6 +12,11 @@
 //! | `RETIRE` | `0x42` | `route u32`, `pid u32`, `reason string32` |
 //! | `EXITED` | `0x43` | `route u32`, `pid u32`, `status u8 tag + i32` |
 //! | `DRAIN` | `0x44` | empty |
+//! | `RELOAD` | `0x45` | empty |
+//!
+//! `EXITED` with `pid == 0` names no process: it answers a `SPAWN` init could
+//! not honour (a refused or failed fork), so the scheduler frees that route's
+//! spawn slot instead of looking for a worker (`ADR-0015` decision 8).
 //!
 //! The scheduler's end of a new `view.chan` is **not** part of the `SPAWNED`
 //! payload: it travels alongside the message as a file descriptor with
@@ -138,16 +143,29 @@ pub enum Ctl {
         reason: String,
     },
     /// Init → scheduler: the view is gone and has been reaped.
+    ///
+    /// A `pid` of `0` names no process: it is how init answers a `SPAWN` it
+    /// could not honour (a refused or failed fork, `ADR-0015` decision 8), and
+    /// it frees that route's spawn slot without touching a worker.
     Exited {
         /// Route index the view served.
         route: u32,
-        /// Pid of the process.
+        /// Pid of the process, or `0` for a `SPAWN` that was not honoured.
         pid: u32,
         /// How it ended.
         status: ExitStatus,
     },
     /// Scheduler → init: finish in-flight work and stop spawning.
     Drain,
+    /// Init → scheduler: every view process this boot serves must be reloaded
+    /// (`ADR-0014` decision 3, `ADR-0015` decision 7).
+    ///
+    /// The scheduler retires every worker of every route that is idle or not yet
+    /// `READY`, marks the busy ones stale so nothing new reaches them and retires
+    /// them at `DONE`, and retires on arrival a worker whose `SPAWN` predates the
+    /// reload. The message carries no payload: one save is one reload for the
+    /// whole process tree, never one per route.
+    Reload,
 }
 
 impl Ctl {
@@ -159,6 +177,7 @@ impl Ctl {
             Self::Retire { .. } => TypeCode::Retire,
             Self::Exited { .. } => TypeCode::Exited,
             Self::Drain => TypeCode::Drain,
+            Self::Reload => TypeCode::Reload,
         }
     }
 
@@ -188,7 +207,7 @@ impl Ctl {
                 sink.put_u32(*pid);
                 status.write(sink)
             }
-            Self::Drain => Ok(()),
+            Self::Drain | Self::Reload => Ok(()),
         }
     }
 
@@ -215,6 +234,7 @@ impl Ctl {
                 status: ExitStatus::read(reader)?,
             }),
             TypeCode::Drain => Ok(Self::Drain),
+            TypeCode::Reload => Ok(Self::Reload),
             _ => Err(FrameError::OutOfRange {
                 field: "ctl type code",
                 detail: "not a ctl.chan message",

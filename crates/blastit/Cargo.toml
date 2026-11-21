@@ -14,20 +14,66 @@ workspace = true
 name = "blastit"
 path = "src/main.rs"
 
+[features]
+# A plain `cargo build -p blastit` is the **universal** artifact (design
+# `universal-distribution.md` §1.1): `python` `dlopen`s the host's `libpython`
+# and the per-minor shim at stage 1, and links neither, so the binary carries no
+# `DT_NEEDED` and no `RUNPATH` into the build host's interpreter cache
+# (`MB.42.2.1.4`, `MB.17`). `php` and `static` need nothing at link time either.
+default = ["python", "php", "static"]
+# Every embedded-CPython role: the `BLASTIT_APP` import, the WSGI views, the
+# immortalisation pass and `blastit dev --learn`. It pulls the shim's frozen ABI
+# and loader (`blastit-py-sapi`), never a linked interpreter: the WSGI worker is
+# `blastit-py-shim`, built once per CPython minor by `make py-sapi`.
+python = ["dep:blastit-py-sapi"]
+# Embedded PHP routes (`entrypoint php`, ADR-0010). `libphp` is never linked: a
+# view `dlopen`s the host's NTS library and the per-minor shim, and the loader
+# that does it is `blastit-php-sapi`'s, reached through `blastit-view-php`. The
+# standalone binary therefore carries no `DT_NEEDED` on `libphp`
+# (`make rs-no-python`), and a build without this feature carries no discovery
+# gate either: it refuses an `entrypoint php` with one sentence (`R13`).
+php = ["dep:blastit-view-php"]
+# File-serving routes (`static "<prefix>"`, ARCHITECTURE.md §9.2). On by
+# default: a manifest with a mount must serve, and a build that leaves this
+# off refuses that manifest at boot (`SchedulerError::StaticNotCompiled`)
+# instead of linking the responder. `blastit-scheduler` is pulled in with
+# `default-features = false` so this one line, and not a dependency default,
+# is what decides whether the static responder is in the binary.
+static = ["blastit-scheduler/static"]
+
+# The LLVM profile flush in `src/coverage.rs` (`MB.40.2`). Only for a coverage
+# run, and only together with instrumentation:
+# `RUSTFLAGS="-C instrument-coverage" cargo test --features coverage`, or
+# `BLASTIT_COVERAGE=1` for a target that already passes `RUSTFLAGS` and cannot
+# add a feature to every workspace crate. `build.rs` turns either switch into
+# `cfg(coverage)`, because `-C instrument-coverage` emits no such cfg.
+coverage = []
+
 [dependencies]
-blastit-dbproxy = { version = "0.1.2", path = "../blastit-dbproxy" }
-blastit-env = { version = "0.1.2", path = "../blastit-env" }
-blastit-events = { version = "0.1.2", path = "../blastit-events" }
-blastit-frame = { version = "0.1.2", path = "../blastit-frame" }
-blastit-http = { version = "0.1.2", path = "../blastit-http" }
-blastit-ingress = { version = "0.1.2", path = "../blastit-ingress" }
-blastit-manifest = { version = "0.1.2", path = "../blastit-manifest" }
-blastit-scheduler = { version = "0.1.2", path = "../blastit-scheduler" }
-blastit-sqlpolicy = { version = "0.1.2", path = "../blastit-sqlpolicy" }
-blastit-sys = { version = "0.1.2", path = "../blastit-sys" }
-blastit-view = { version = "0.1.2", path = "../blastit-view" }
+blastit-dbproxy = { version = "0.2.0", path = "../blastit-dbproxy" }
+blastit-env = { version = "0.2.0", path = "../blastit-env" }
+blastit-events = { version = "0.2.0", path = "../blastit-events" }
+blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
+blastit-http = { version = "0.2.0", path = "../blastit-http" }
+blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
+blastit-lsp = { version = "0.2.0", path = "../blastit-lsp" }
+blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+# The per-minor CPython shim's ABI, discovery and loader (`MB.42`): stage 0
+# resolves the interpreter and pins `libpython` + the shim, and stage 1 adopts
+# the two descriptors. Optional, so a build without `python` carries none of it.
+blastit-py-sapi = { version = "0.2.0", path = "../blastit-py-sapi", optional = true }
+# The PHP half of a view (`MB.36.5`): the embedded worker, the boot's discovery
+# gate, the `(st_dev, st_ino)` pins and the probe child. Optional, so a build
+# without `php` links neither this nor `blastit-php-sapi` (`R13`).
+blastit-view-php = { version = "0.2.0", path = "../blastit-view-php", optional = true }
+blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler", default-features = false }
+blastit-sqlpolicy = { version = "0.2.0", path = "../blastit-sqlpolicy" }
+blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
+blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+# The Python half of a view is the per-minor shim, `dlopen`ed at stage 1 (design
+# §1.1/§1.2): this crate links no `pyo3` and no `libpython`, and the frozen ABI
+# it speaks is `blastit-py-sapi`'s.
 libc = "0.2.191"
-pyo3 = "0.30.1"
 rustix = { version = "1.1.5", features = ["event", "fs", "process", "net", "pipe", "stdio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

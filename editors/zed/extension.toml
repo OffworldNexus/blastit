@@ -1,0 +1,18 @@
+id = "blastfile"
+name = "Blastfile"
+version = "0.1.0"
+schema_version = 1
+authors = ["Offworld Nexus"]
+description = "Blastfile: Blastit's routing table and permission model"
+repository = "https://github.com/OffworldNexus/blastit"
+
+[grammars.blastfile]
+repository = "https://github.com/OffworldNexus/blastit"
+rev = "5bbd2441dcd2f7429d9e9e7835eb5814a6102179"
+path = "editors/tree-sitter-blastfile"
+
+[language_servers.blastit-lsp]
+languages = ["Blastfile"]
+
+[language_servers.blastit-lsp.language_ids]
+Blastfile = "blastfile"

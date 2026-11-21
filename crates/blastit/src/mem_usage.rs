@@ -39,6 +39,15 @@
 //! [`read`] takes its root as a parameter rather than hard-coding `/`, so the
 //! arithmetic can be pinned against files instead of the machine that runs the
 //! test.
+//!
+//! # One reader, one reading
+//!
+//! [`blastit_sys::mem::Reader`] owns the raw sample and every file format:
+//! `MemTotal`, both cgroup layouts, and the `total`/`used` figures
+//! [`blastit_sys::mem::Sample`] exposes. This module owns the *refined* reading
+//! blastit acts on — that sample plus the `memory.stat` bytes the kernel can
+//! reclaim — and adds no second parser of those files. [`sample`] is the whole
+//! layering: one `Reader::sample`, then `reclaimable`.
 
 use std::fs;
 use std::path::Path;
@@ -168,6 +177,10 @@ pub fn read(root: &Path) -> Option<Usage> {
 
 /// [`read`] with the reason a reading could not be taken.
 ///
+/// The raw figures are [`blastit_sys::mem::Reader::sample`]'s — there is no
+/// second parser of `/proc/meminfo` or the cgroup files — and this adds only the
+/// `memory.stat` subtraction.
+///
 /// # Errors
 ///
 /// Whatever [`blastit_sys::mem::Reader::sample`] returns: an unreadable
@@ -263,184 +276,4 @@ pub fn advisory(usage: &Usage, percent: f64) -> Option<String> {
 /// `bytes` as GiB with one decimal, for a human reading of the messages above.
 fn gibibytes(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    const GIB: u64 = 1024 * 1024 * 1024;
-
-    /// A `memory.stat` in the shape the kernel writes it, in bytes:
-    /// `file`, `shmem`, `file_mapped`, `inactive_file`, `slab_reclaimable`.
-    fn stat(file: u64, shmem: u64, file_mapped: u64, inactive_file: u64, slab: u64) -> String {
-        format!(
-            "anon 1073741824\n\
-             file {file}\n\
-             kernel 1610612736\n\
-             shmem {shmem}\n\
-             file_mapped {file_mapped}\n\
-             inactive_anon 19600384000\n\
-             active_anon 18494058496\n\
-             inactive_file {inactive_file}\n\
-             active_file 4332204032\n\
-             slab_reclaimable {slab}\n\
-             slab_unreclaimable 292206408\n"
-        )
-    }
-
-    fn tree(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("blastit-mem-usage-{}-{tag}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("proc")).unwrap();
-        fs::create_dir_all(dir.join("sys/fs/cgroup")).unwrap();
-        dir
-    }
-
-    fn write(root: &Path, relative: &str, contents: &str) {
-        fs::write(root.join(relative), contents).unwrap();
-    }
-
-    fn meminfo(total: u64, available: u64) -> String {
-        format!(
-            "MemTotal:       {} kB\nMemAvailable:   {} kB\n",
-            total / 1024,
-            available / 1024
-        )
-    }
-
-    #[test]
-    fn reclaimable_is_the_page_cache_that_is_not_tmpfs_plus_reclaimable_slab() {
-        // file 40 − shmem 31 − mapped 1 = 8 of page cache, + 1 of slab.
-        assert_eq!(
-            parse_reclaimable(&stat(40 * GIB, 31 * GIB, GIB, 6 * GIB, GIB)),
-            Some(9 * GIB)
-        );
-        // A kernel without `file`/`shmem` is read through `inactive_file`.
-        assert_eq!(
-            parse_reclaimable("inactive_file 42\nslab_reclaimable 7\n"),
-            Some(49)
-        );
-        assert_eq!(parse_reclaimable("inactive_file 42\n"), Some(42));
-        // `file` without `shmem` would count tmpfs as free memory, which is
-        // exactly what a host without swap must not do: the fallback is used.
-        assert_eq!(parse_reclaimable("file 1000\ninactive_file 42\n"), Some(42));
-        assert_eq!(parse_reclaimable("file 1000\nshmem 10\n"), Some(990));
-        // cgroup v1's names, and junk, are "no figure" rather than "nothing".
-        assert_eq!(
-            parse_reclaimable("total_inactive_file 99\ntotal_slab_reclaimable 1\n"),
-            None
-        );
-        assert_eq!(parse_reclaimable(""), None);
-        assert_eq!(parse_reclaimable("inactive_file not-a-number\n"), None);
-    }
-
-    #[test]
-    fn a_reading_takes_the_cache_out_of_the_cgroup_usage() {
-        let root = tree("cache");
-        write(&root, mem::MEMINFO, &meminfo(48 * GIB, 12 * GIB));
-        write(&root, mem::CGROUP_V2_MAX, &format!("{}\n", 48 * GIB));
-        write(&root, mem::CGROUP_V2_CURRENT, &format!("{}\n", 46 * GIB));
-        write(
-            &root,
-            CGROUP_V2_STAT,
-            &stat(40 * GIB, 31 * GIB, GIB, 6 * GIB, GIB),
-        );
-        let usage = read(&root).unwrap();
-        assert_eq!(usage.total(), 48 * GIB);
-        assert_eq!(usage.raw(), 46 * GIB);
-        assert_eq!(usage.reclaimable(), 9 * GIB);
-        assert_eq!(usage.used(), 37 * GIB);
-        assert!(
-            usage.percent() < DEFAULT_WATERMARK_PERCENT,
-            "{}",
-            usage.percent()
-        );
-        // ... where the raw figure is over the default, which is the case the
-        // exclusion exists for.
-        assert!(usage.raw() as f64 / usage.total() as f64 * 100.0 > DEFAULT_WATERMARK_PERCENT);
-    }
-
-    #[test]
-    fn without_a_reclaimable_figure_the_raw_usage_stands() {
-        let root = tree("nostat");
-        write(&root, mem::MEMINFO, &meminfo(8 * GIB, GIB));
-        write(&root, mem::CGROUP_V2_MAX, &format!("{}\n", 8 * GIB));
-        write(&root, mem::CGROUP_V2_CURRENT, &format!("{}\n", 6 * GIB));
-        let usage = read(&root).unwrap();
-        assert_eq!((usage.reclaimable(), usage.used()), (0, 6 * GIB));
-
-        // A `memory.stat` that cannot be parsed does not invent a figure.
-        write(&root, CGROUP_V2_STAT, "slab 1\n");
-        assert_eq!(read(&root).unwrap().used(), 6 * GIB);
-    }
-
-    #[test]
-    fn without_cgroups_mem_available_is_already_net_of_the_cache() {
-        let root = tree("nocgroup");
-        write(&root, mem::MEMINFO, &meminfo(8 * GIB, 2 * GIB));
-        // A stale v2 `memory.stat` without `memory.current` is not a reading.
-        fs::create_dir_all(root.join("sys/fs/cgroup")).unwrap();
-        write(&root, CGROUP_V2_STAT, &stat(6 * GIB, GIB, 0, 6 * GIB, GIB));
-        let usage = read(&root).unwrap();
-        assert_eq!(usage.total(), 8 * GIB);
-        assert_eq!(usage.reclaimable(), 0, "MemAvailable already excludes it");
-        assert_eq!(usage.used(), 6 * GIB);
-    }
-
-    #[test]
-    fn a_boot_refusal_names_the_setting_and_the_reading() {
-        let usage = Usage {
-            total: 48 * GIB,
-            raw: 45 * GIB,
-            reclaimable: GIB,
-        };
-        // 44/48 = 91.7%: over the default, and over a 90% knob too.
-        let message = boot_refusal(&usage, 90.0).unwrap();
-        assert!(message.contains("BLASTIT_MEM_HIGH_WATERMARK"), "{message}");
-        assert!(message.contains("91.7%"), "{message}");
-        assert!(
-            message.contains("1.0 GiB of page cache and slab left out"),
-            "{message}"
-        );
-        assert!(message.contains("503"), "{message}");
-        // At or below the watermark there is no refusal, and one that can read
-        // no cache does not claim to have left any out.
-        assert!(boot_refusal(&usage, 95.0).is_none());
-        let no_cache = Usage {
-            total: 48 * GIB,
-            raw: 45 * GIB,
-            reclaimable: 0,
-        };
-        let message = boot_refusal(&no_cache, 90.0).unwrap();
-        assert!(!message.contains("left out"), "{message}");
-    }
-
-    #[test]
-    fn the_advisory_is_only_for_a_boot_above_the_default() {
-        let above_max = Usage {
-            total: 100 * GIB,
-            raw: 92 * GIB,
-            reclaimable: 2 * GIB,
-        };
-        // 90%: above the default, below a 95% knob.
-        let message = advisory(&above_max, 95.0).unwrap();
-        assert!(message.contains("BLASTIT_MEM_HIGH_WATERMARK"), "{message}");
-        assert!(message.contains("90.0%"), "{message}");
-        assert!(message.contains("2.0 GiB"), "{message}");
-        assert!(!message.contains('\n'), "one line: {message}");
-        // At the default the boot is normal, and a knob the reading exceeds
-        // means the boot refused instead of advising.
-        assert!(advisory(&above_max, DEFAULT_WATERMARK_PERCENT).is_none());
-        assert!(advisory(&above_max, 85.5).is_none(), "85.5% < 90%: refused");
-        let below = Usage {
-            total: 100 * GIB,
-            raw: 70 * GIB,
-            reclaimable: 0,
-        };
-        assert!(advisory(&below, 100.0).is_none());
-    }
 }

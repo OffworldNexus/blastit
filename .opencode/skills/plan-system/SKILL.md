@@ -1,6 +1,6 @@
 ---
 name: Plan system
-description: How the Blastit Markdown plan tree works. Covers milestones (MA..MD), node kinds, statuses, the DX-first decomposition rules, gates, stuck detection, and every `uv run --no-project tools/plan.py` command. Load before reading or mutating `plan/`.
+description: How the Blastit Markdown plan tree works. Covers milestones (MA..ME), coarse 3-4 vertical slices, statuses, fast-check vs check gates, stuck detection, and every `uv run --no-project tools/plan.py` command. Load before reading or mutating `plan/`.
 ---
 
 # Plan system
@@ -9,27 +9,27 @@ description: How the Blastit Markdown plan tree works. Covers milestones (MA..MD
 
 1. **State on disk, never only in context.** Any session can be interrupted or compacted; the next agent resumes from `plan/` alone.
 2. **Deterministic mutations via `tools/plan.py`.** Never hand-edit managed YAML frontmatter fields (`status`, `attempts`, `updated`). Run `uv run --no-project tools/plan.py ...`.
-3. **DX-First ordering.** Every milestone or feature epic begins with lean user documentation (`local`, `CI/CD`, `deployments`) and a fresh-context `dx` + `ai-ergonomics` critic review **before** internal design or Rust/Python implementation.
-4. **Small leaves with executable acceptance.** A leaf task finishes in one session and proves completion by running verifiable commands.
-5. **Fresh eyes ("goldfish") for review.** `reviewer` and `critic` subagents start with zero conversation history and judge only what is on disk.
-6. **Cheap first, explicit escalation.** DeepSeek Flash handles almost everything; Gemini 4 Carbon (`strategist`, `architect`, `expert`) is called only via the escalation ladder and recorded with `plan.py escalate`.
+3. **DX-First coarse vertical slices.** Feature epics decompose into **3–4 coarse vertical slices** (NEVER 15–25 micro-tasks!): Slice 1 user DX docs (`writer`), Slice 2 core crate + `Blastfile` + critical tests (`implementer`), Slice 3 CLI/supervisor `--learn` & `check` + real lab E2E (`implementer`).
+4. **1 Sequential Cargo Writer & Gate Split.** At most 1 Rust/wheel/Docker writer runs at a time per worktree. Leaf slices verify with `make fast-check` (or `make docs-check`); full `make check` runs **once** at epic/milestone gates.
+5. **Parallel specialist review with noise filtering.** `review-arch` and `review-ux` run in parallel on `<base sha>`; `lead` filters out `RESULT.md` line-number nits, `scripts/check_*.py` regex-guard demands, and `MINOR` style churn.
+6. **Cheap first, explicit escalation.** DeepSeek Flash handles almost everything; Gemini 4 Carbon (`strategist`, `architect`, `expert`) is called via the escalation ladder and recorded with `plan.py escalate`.
 
 ## Node anatomy
 
-`plan/nodes/MA/MA.1/` holds:
+`plan/nodes/MB/MB.40/` holds:
 
-- `NODE.md`: managed YAML frontmatter + Markdown body (`# Goal`, `# Context`, `# Acceptance`, `# Notes`).
+- `NODE.md`: managed YAML frontmatter + Markdown body (`# Goal`, `# Context` / `# Exact Targets`, `# Acceptance`).
 - `LOG.md`: append-only work log (`plan.py log`).
-- `RESULT.md`: written by the task's owner upon completion.
+- `RESULT.md`: concise summary + command evidence written by the slice's owner before final verification.
 
 Frontmatter fields:
 
 ```yaml
-id: MA.1
-title: Rewrite lean Getting Started and local/CI/deploy DX spec
+id: MB.40.6
+title: Visual documentation hierarchy pass
 kind: task            # milestone | epic | task
 status: ready         # proposed|ready|active|review|done|blocked|failed|superseded
-owner: doc-writer     # doc-writer|designer|implementer|researcher|planner|test-curator|visual-checker|architect|strategist|expert|human
+owner: writer         # active owners: writer|implementer|researcher|planner|visual-checker|architect|strategist|expert|human
 priority: 1           # 1 (highest) .. 5
 depends_on: []        # node ids
 paths: ["docs/**", "README.md"]
@@ -38,76 +38,71 @@ max_attempts: 3
 escalation: none
 ```
 
-`RESULT.md` template:
+`RESULT.md` template (keep concise — never 2,000-word essays!):
 
 ```markdown
 # Result <id>
 
 ## Summary
-<3-6 lines: what was delivered and how it serves the DX/security goal>
+<3-6 lines: what was delivered and how it serves DX/security>
 
 ## Evidence
-<each # Acceptance item -> exact command run -> output tail>
+<each # Acceptance item -> exact command run -> exit status & output tail>
 
 ## Files
-<added/modified repo-relative paths>
+<added/modified/deleted repo-relative paths>
 
 ## Follow-ups
-<out-of-scope discoveries or proposed child/sibling nodes>
+<out-of-scope discoveries or "none">
 ```
 
 ## Statuses and transitions
 
 | Transition | Who | When |
 |---|---|---|
-| (new) -> `ready` / `proposed` | `planner`, `strategist` | Node created |
-| `ready` -> `active` | `lead` | Before dispatching owner (also run `bump`) |
+| (new) -> `ready` / `proposed` | `planner`, `strategist`, `conductor` | Node created |
+| `ready` -> `active` | `lead`, `conductor` | Before dispatching owner (also run `bump` and log `base <sha>`) |
 | `active` -> `review` | `lead` | Worker reported `STATUS: done` |
-| `review` -> `done` | `lead` | `reviewer` returned `VERDICT: PASS`, then `lead` committed |
-| `review` -> `ready` | `lead` | `reviewer` returned `FAIL`; findings logged in `LOG.md` |
+| `review` -> `done` | `lead` | Parallel `review-arch` + `review-ux` passed (after at most 1 consolidated fix pass for real `[BLOCKER]`/`[MAJOR]` bugs), `make fast-check` + guards passed, and `lead` committed |
 | `active` -> `blocked` | `lead` | Waiting on `HUMAN.md` answer or external dependency |
 | `*` -> `failed` | `lead` | Attempts exhausted including `expert` escalation |
 | `failed` / `blocked` -> `ready` | `strategist`, `conductor` | After replan or `HUMAN.md` answer |
-| `*` -> `superseded` | `strategist`, `planner` | Replaced during replanning |
-| container -> `done` | `lead` (epic) / `strategist` (milestone) | All children closed and gate checks passed |
+| `*` -> `superseded` | `strategist`, `planner`, `expert` | Consolidated or replaced during replanning |
+| container -> `done` | `lead` (epic) / `strategist` (milestone) | All children closed and `make check` gate passed |
 
 ## Decomposition rules (`planner`)
 
-- A container (`milestone` or `epic`) shows up as `decompose` in `plan.py next` when `ready`, unblocked, and childless.
-- Decompose into **3–8 children** (introduce epics if larger; never leave a 1-child container).
-- **Mandatory DX-First sequence inside every feature epic / milestone:**
-  1. **Research** (`researcher`) if any protocol, framework idiom, WASM codec license, or CVE detail is unverified.
-  2. **User-facing DX & Documentation** (`doc-writer` or `architect` for major UX shifts), covering Local machine, CI/CD, and Deployments, reviewed by `critic` (`dx` + `ai-ergonomics` lenses).
-  3. **Technical Design Doc** (`designer` or `architect`), derived from the accepted DX docs, reviewed by `critic` (`security`, `implementability`, `testability`, `consistency`).
-  4. **Implementation + Critical Tests** (`implementer`), broken into small crate/module leaves (≤ 5–8 files, ≤ 600 changed lines, acceptance runs in < 10 min). Tests live in the same task as the code they protect!
-  5. **Runnable-Docs, Visual & E2E/CVE Verification** (`implementer` / `doc-writer` / `visual-checker`), proving every documented command works verbatim and the Zensical site builds & renders cleanly.
-- Set disjoint `paths` on independent siblings so `lead` can run up to 3 tasks in parallel.
+- **New user-facing feature/runtime/proxy/workflow:** before slice 1, open the pure user-story `TESTING_PLAN.md` update as a blocked human item (never a slice of its own); slice 1 stays the DX doc: `uv run --no-project tools/plan.py --agent planner human add "Validate TESTING_PLAN.md update for <feature>" --node <id>` + `uv run --no-project tools/plan.py --agent planner set <id> blocked`. No tests or code slice starts before validation, and slices never silently edit it.
+- Decompose an epic into **3–4 coarse vertical slices** (never 15–25 fragmented micro-tasks, never separate "write tests later" tasks, and never `scripts/check_*.py` source-grep tasks):
+  1. **Slice 1 (`writer`):** Lean `<130`-line user DX doc with Mermaid diagram, admonitions, and Local + CI + Deploy commands.
+  2. **Slice 2 (`implementer`):** Core crate + workspace `Cargo.toml`/`Cargo.lock` + `Blastfile` parser/validator + allowed & adversarial critical tests.
+  3. **Slice 3 (`implementer`):** `BootMode` composition root + `--learn` + `blastit check` (`--json` & human `fix.to`) + real `UnixStream::pair()`/`UnixListener` E2E tests.
+  4. *(Optional Slice 4)*: Runnable-docs & CVE regression verification.
 
 ## Gates
 
 - **Epic gate (`lead`):**
-  1. Verify every item in the epic's `# Acceptance` by checking child `RESULT.md` files and running verification commands (`make check`, plus `make e2e` if process/proxy/container behaviour changed).
-  2. If the epic touched Rust/Python code, run a `test-curator` audit of the touched crates/modules. Open critical gaps become new child tasks before the epic closes.
-  3. If the epic touched `docs/`, verify `make docs-check` (`zensical build --strict`) and run `visual-checker` when layout, diagrams, navigation or brand changed.
+  1. Run **full `make check` once** (plus `make e2e` if `crates/blastit`, brokers, or `e2e/` changed, and `TMPDIR=$HOME/.cache/blastit-mutants cargo mutants -p <crate>` if security-critical policy crates changed).
+  2. If `docs/` layout/diagrams changed, verify `make docs-check` and run `visual-checker` when visual browser QA is needed.
+  3. Write `plan/nodes/.../<epic>/RESULT.md`, mark `<epic>` `done`, regenerate `state`, and commit `[<epic>] Gate passed: <title>`.
 - **Milestone gate (`strategist`, expensive tier):**
-  1. Verify every `plan/ROADMAP.md` exit criterion with evidence (`make check`, `make e2e`, CVE proof suite, runnable docs check).
-  2. Run a milestone `test-curator` audit (including `cargo-mutants` on critical security/policy crates).
-  3. Write `plan/nodes/<M>/RESULT.md`, verify `Cargo.toml` version and dated `CHANGELOG.md` entry (`## <version> (YYYY-MM-DD)`), refresh the next milestone's `NODE.md` body with concrete pointers, mark `<M>` `done`, and return `RELEASE_READY: <version>` so `conductor` pushes `release/<version>` and opens the Release PR into `develop` for human merge.
+  1. Verify every `plan/ROADMAP.md` exit criterion with evidence (`make check`, `make e2e`, CVE suite, `make docs-check`, `cargo mutants` on critical policy crates).
+  2. Write `plan/nodes/<M>/RESULT.md`, verify `Cargo.toml` version and dated `CHANGELOG.md` entry (`## <version> (YYYY-MM-DD)`), refresh the next milestone's `NODE.md`, mark `<M>` `done`, and return `RELEASE_READY: <version>` so `conductor` pushes `release/<version>` and opens the Release PR into `develop`.
 
 ## Command cheat sheet
 
-Always run with `--no-project` (fast stdlib execution, zero build/network) and `--agent <your-role>`:
+Always run with `--no-project` and `--agent <your-role>`:
 
 ```bash
 uv run --no-project tools/plan.py tree [--under ID] [--depth N] [--all]
 uv run --no-project tools/plan.py next [--under ID] [--limit N]
 uv run --no-project tools/plan.py show ID [--log] [--result]
 uv run --no-project tools/plan.py --agent planner new PARENT --kind task --owner implementer \
-  --title "Implement ..." --depends MA.1 --paths "crates/blastit-cli/**" --priority 2 --body-file /tmp/opencode/body.md
+  --title "Implement ..." --depends MB.4.1 --paths "crates/blastit-view-node/**" --priority 1 --body-file /tmp/opencode/body.md
 uv run --no-project tools/plan.py --agent lead set ID active
 uv run --no-project tools/plan.py --agent lead bump ID
 uv run --no-project tools/plan.py --agent implementer log ID "message"
-uv run --no-project tools/plan.py --agent planner edit ID [--kind epic --reset-attempts] [...]
+uv run --no-project tools/plan.py --agent planner edit ID [--owner writer --kind epic --reset-attempts]
 uv run --no-project tools/plan.py validate
 uv run --no-project tools/plan.py stuck [--stale-hours 6]
 uv run --no-project tools/plan.py state

@@ -1,0 +1,68 @@
+# The Django project's manifest: two views, one shared `connection` trait, and
+# outbound edges only to the one store.
+#
+# The trait is what a Django connection needs and no request owns: the session
+# time zone query Django sends when the server's spelling of UTC differs from
+# its own, and the `SELECT 1` it sends to test a connection after an error.
+app "shop"
+
+entrypoint python "shop.wsgi:application" {
+    preload "shop.urls"
+}
+
+postgres $DATABASE_URL
+
+trait connection {
+    postgres {
+        query "SELECT set_config('TimeZone', $1, false)"
+        query 'SELECT 1'
+    }
+}
+
+# The public catalogue: a plain read, and a parameterised price filter.
+view catalog GET "/products", "/products/*" {
+    use connection
+    postgres {
+        select products(id, name, price)
+    }
+}
+
+# The write: the insert and the read-back, each parameterised. `/orders/note`
+# is the same insert with the ungranted `note` column.
+view orders POST "/orders", "/orders/note" {
+    body form
+    use connection
+    postgres {
+        transactions
+        insert orders(customer_id, total)
+        select orders(customer_id, total)
+    }
+}
+
+# A view with a real grant that still must not run any statement below: the
+# cross-table read, the customers insert, and the orders insert (no insert
+# grant here at all).
+view peek GET "/customers/peek", "/customers/insert", "/orders/note-insert" {
+    use connection
+    postgres {
+        select products(id)
+    }
+}
+
+view purge POST "/orders/purge" {
+    body form
+    use connection
+    postgres {
+        select orders(customer_id)
+    }
+}
+
+# Reports the environment it was handed: the rendered socket URL, never a
+# credential, and the CPython that served it.
+view env GET "/env" {
+}
+
+static "/static" {
+    root "staticfiles"
+    immutable "/static/*"
+}

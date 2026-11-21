@@ -1,0 +1,59 @@
+==================
+a pg_catalog-qualified function parses inside a named grant
+==================
+view catalog GET "/products" {
+    postgres analytics {
+        functions pg_catalog.unaccent, st_distance
+        select products(id)
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (name)
+        (block
+          (directive
+            (keyword)
+            (dotted_name
+              (name)
+              (name))
+            (name))
+          (table_grant
+            (keyword)
+            (table)
+            (column)))))))
+
+==================
+a bare function name is one value
+==================
+view catalog GET "/products" {
+    postgres {
+        functions unaccent
+        select products(id)
+    }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (grant
+        (block
+          (directive
+            (keyword)
+            (name))
+          (table_grant
+            (keyword)
+            (table)
+            (column)))))))

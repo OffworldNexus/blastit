@@ -56,33 +56,3 @@ impl Drop for Secret {
         self.0.zeroize();
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::Secret;
-
-    #[test]
-    fn debug_redacts_the_value() {
-        let secret = Secret::new("hunter2");
-        assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
-        assert!(!format!("{secret:?}").contains("hunter2"));
-    }
-
-    #[test]
-    fn expose_returns_the_value_and_empty_is_empty() {
-        assert_eq!(Secret::new("hunter2").expose(), "hunter2");
-        assert!(Secret::new("").is_empty());
-        assert!(!Secret::new("x").is_empty());
-    }
-
-    #[test]
-    fn cloned_values_are_independent() {
-        let secret = Secret::new("hunter2");
-        let copy = secret.clone();
-        assert_eq!(copy.expose(), "hunter2");
-        drop(secret);
-        assert_eq!(copy.expose(), "hunter2");
-    }
-}

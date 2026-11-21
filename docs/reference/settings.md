@@ -1,23 +1,31 @@
 # Settings
 
-Everything is environment variables, plus the manifest. A set `BLASTIT_*`
-variable wins over the manifest and over a preset, even when empty, and `PORT`
-counts the same. `--preset` is a flag; `--port` belongs to `blastit dev`.
+Everything is environment variables, plus the `Blastfile`. A set `BLASTIT_*` variable wins over the
+`Blastfile` and over a preset, even when empty, and `PORT` counts the same. `--preset` is a flag;
+`--port` belongs to `blastit dev`. One binary reads them: the `blastit` on `PATH`, whether it came
+from a package, the release archive, or a `uv add --dev blastit` pin in the project.
 
-## The app and the manifest
+## The app and the file
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_APP` | the manifest's `app` | the WSGI callable, `module:attribute`; one of the two is required |
-| `BLASTIT_PRELOAD` | the manifest's `preload` | modules imported before the fork, comma-separated |
-| `BLASTIT_MANIFEST` | `./blastit.toml` | the manifest path |
+| `BLASTIT_APP` | the `Blastfile`'s `entrypoint python` | the WSGI callable, `module:attribute`; required for Python views when `entrypoint python` is omitted |
+| `BLASTIT_PRELOAD` | the `Blastfile`'s `preload` | modules imported before the fork, comma-separated |
+| `BLASTIT_MANIFEST` | `./Blastfile` | the file Blastit reads |
 | `BLASTIT_SCRIPT_NAME` | — | mount prefix stripped before routing; the app sees `SCRIPT_NAME` |
 | `BLASTIT_WARMUP` | — | an optional `module:callable` run before the fork, for an expensive first use |
 | `BLASTIT_ENV_STRIP` | — | extra variables hidden from the app, comma-separated |
 
 `app`, `preload`, `BLASTIT_APP`, `BLASTIT_WARMUP` and `BLASTIT_PRELOAD` must be
 importable in Blastit's own environment: the project's virtualenv. Blastit reads
-the process environment only; `uv run --env-file .env blastit dev` loads a file.
+the process environment only; `set -a; . ./.env; set +a` before `blastit dev` loads a file.
+
+## Backends
+
+| Setting | Default | What it does |
+|---|---|---|
+| `BLASTIT_LIBPHP` | the distro package's library | names the NTS `libphp` to embed for `entrypoint php` |
+| `BLASTIT_PYTHON` | the project `.venv`'s interpreter | the CPython 3.13/3.14 that serves WSGI views: an **absolute** path to an executable file. `dev` and `check` also accept the activated `$VIRTUAL_ENV` and `PATH`; `serve` reads only absolute overrides |
 
 ## Port and health
 
@@ -28,6 +36,8 @@ the process environment only; `uv run --env-file .env blastit dev` loads a file.
 | `BLASTIT_HEALTH_PATH` | `/_blastit/health` | answered by the scheduler itself, without a view process |
 | `BLASTIT_BACKLOG` | `1024` | the TCP listen backlog |
 | `BLASTIT_DEV_EXPOSE` | — | `1` is the second acknowledgement `blastit dev --host` needs before it binds a non-loopback address |
+| `BLASTIT_NO_LOCAL_HANDOFF` | — | any value but `0`/empty stops `dev`, `check`, `fmt` and `lsp` from handing off to the project's own `blastit` |
+| `BLASTIT_BIN` | — | the project `blastit` you name yourself: probed last, after `.venv`, `vendor` and `node_modules`, and unlike those a failure is a refusal (`1`), not a skip |
 
 The health path takes no worker slot: traffic cannot starve a health check.
 
@@ -59,8 +69,8 @@ needs none of them and says so in its banner.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_MAX_WORKERS` | `16` | live request threads across every view; keep it under the database connection limit |
-| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | request-thread cap of one view process; also sizes its `RLIMIT_NPROC` |
+| `BLASTIT_MAX_WORKERS` | `16` | live request slots across every view; keep it under the database connection limit |
+| `BLASTIT_VIEW_MAX_WORKERS` | `= MAX_WORKERS` | sizes one view process (and its `RLIMIT_NPROC`); adds no concurrent requests to a pooled route |
 | `BLASTIT_QUEUE_SIZE` | `256` | the bounded admission queue; beyond it the answer is `503` |
 | `BLASTIT_QUEUE_TIMEOUT` | `10s` | how long a request may wait in that queue before `503` |
 | `BLASTIT_REQUEST_TIMEOUT` | `30s` | how long before the client gets a `504` |
@@ -106,7 +116,7 @@ No TLS or HTTP/2: a load balancer terminates TLS. `Upgrade` gets `501`.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` or `eager`; `prefork = true` overrides it per route |
+| `BLASTIT_VIEW_SPAWN` | `lazy` | `lazy` or `eager`; `prefork` overrides it per route |
 | `BLASTIT_MAX_VIEW_PROCESSES` | derived from memory | the live view-process cap, with LRU retirement |
 | `BLASTIT_VIEW_MEM_ESTIMATE` | `32 MiB` | the expected cost of one view process; the cap's starting divisor |
 | `BLASTIT_MEM_HIGH_WATERMARK` | `85%` | of `total`, the smaller of `MemTotal` and the cgroup limit; the non-reclaimable reading (page cache and reclaimable slab left out) is compared against it. `blastit dev` refuses a boot above it and warns once above the `85%` default; one idle view process per check is retired |
@@ -144,8 +154,33 @@ client invented. That is why both presets use `*` and publish no port.
 |---|---|---|
 | `BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` | `= MAX_WORKERS` | upstream connection cap of proxy `<NAME>`, upper-cased: `BLASTIT_PROXY_DB_MAX_CONNECTIONS` |
 
-A proxy's protocol, inputs and outputs live in the
-[manifest](manifest.md#proxies).
+A store's URL, or its split slots, live in the
+[`Blastfile`](blastfile.md#stores).
+
+## Behind a connection pooler
+
+`BLASTIT_PROXY_<NAME>_MAX_CONNECTIONS` is **per instance**: keep it at the worker
+count and let the pool accept `workers × instances` clients (`MAX_CLIENT_CONN`,
+100 by default) while it keeps `DEFAULT_POOL_SIZE` (20) server connections. A
+managed pool's `size` is its *minimum*; its maximum follows the cluster's RAM
+(about 25 connections per GB, 3 reserved), so raise the plan when the pool's
+`size` approaches that.
+
+A transaction pool keeps no session state: `SET` and `set_config` do not survive
+it. Set the session zone on the role (`ALTER ROLE app SET timezone = 'UTC'`) and
+read it back on the **direct** port as the app's own role — a pool's open
+backends keep the zone they logged in with until they are recycled
+(`server_lifetime`, one hour by default), so restart the pooler after changing
+the role ([the rule](../deploy/index.md#pooler)).
+
+Django's PostgreSQL backend sends no prepared statements
+(`prepare_threshold=None`). A raw psycopg 3 client prepares after five
+executions: `max_prepared_statements` on PgBouncer ≥ 1.22 with libpq ≥ 17 rewrites
+them, or connect with `prepare_threshold=None`.
+
+`ca_cert` is a PEM bundle for the upstream TLS leg. It only matters when the URL
+asks for verification (`sslmode=verify-full`), and through a pooler it validates
+the pooler's certificate, not the origin.
 
 ## Presets
 

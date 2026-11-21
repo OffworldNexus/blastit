@@ -1,0 +1,23 @@
+{
+    "name": "offworldnexus/blastit",
+    "description": "Pins the blastit CLI in a PHP project: `vendor/bin/blastit` runs the release archive for this host, verified against a digest the package carries.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "homepage": "https://offworldnexus.github.io/blastit/",
+    "support": {
+        "issues": "https://github.com/OffworldNexus/blastit/issues",
+        "source": "https://github.com/OffworldNexus/blastit"
+    },
+    "keywords": ["composer", "php", "blastit", "sandbox", "cli"],
+    "bin": ["bin/blastit"],
+    "require": {
+        "php": ">=8.1"
+    },
+    "extra": {
+        "blastit": {
+            "comment": "composer require --dev offworldnexus/blastit is a per-project version pin, not an install method: it puts vendor/bin/blastit on PATH for local CLI handoff and composer update upgrades it.",
+            "version": "0.2.0",
+            "assets": "https://github.com/OffworldNexus/blastit/releases"
+        }
+    }
+}

@@ -1,149 +1,148 @@
 # Local development
 
-`blastit dev` runs your app the way production does, without root. Everything
-runs as you, so nothing needs `sudo`, and a misconfiguration fails on your machine
-— for an honest program — instead of in production.
+Blastit runs on **Linux**: `blastit dev` starts your app the way production does,
+without root, so a misconfiguration fails here instead of in production.
 
-One uid means it is **not a sandbox**. The credential barrier still keeps the
-database URL out of the app's `environ` and `argv`, but any process running as you
-can read `.env` and your `/proc` entries. Use a throwaway local database; never
-point `blastit dev` at production data.
+```console
+$ blastit dev        # your machine, no root
+$ blastit dev --learn
+```
+
+!!! warning "One uid, not a sandbox"
+
+    Every role shares your uid here. The credential barrier and the grants are real,
+    but any process running as you can read `.env` and your `/proc` entries, and no
+    uid boundary keeps a compromise inside its view. Use a throwaway database, never
+    production data; `--host` is refused unless `BLASTIT_DEV_EXPOSE=1` acknowledges it.
+
+??? note "Developing on macOS or Windows?"
+
+    The server is Linux-only: run `blastit dev` in Docker/Compose with the port
+    published, or in a Linux VM. The editor is not — `blastit-lsp` ships native
+    Linux, macOS and Windows binaries ([Editors](#editors)).
+
+    Not just packaging: serving is built on Linux kernel facilities. Production's
+    per-`view` isolation is a real uid split (`setresuid`, `CAP_SETUID`/`capset`);
+    static reads are confined by `openat2` (`RESOLVE_BENEATH`/`RESOLVE_NO_SYMLINKS`,
+    with an `O_NOFOLLOW` walk fallback on older kernels); a seccomp filter refuses a
+    view its own `AF_INET`/`AF_INET6` sockets unless its route declares `egress`;
+    roles identify each other with `SCM_CREDENTIALS` on Unix sockets. Porting means
+    replacing those mechanisms — a design project, not a recompile — so serving
+    stays Linux **for now**.
 
 ## Start
 
-```console
-$ uv run blastit dev
+=== "Python (WSGI)"
+    ```console
+    $ blastit dev
+      blastit dev · single-uid simulation · http://127.0.0.1:8080
+    ```
+
+=== "PHP"
+    ```console
+    $ blastit dev
+    ```
+
+=== "Static & SPA"
+    ```console
+    $ blastit dev             # the release archive: no language runtime, no store
+    ```
+
+It binds `127.0.0.1:8080` (`--port N`, `--host ADDR`), prints one components line and a
+row per view and per `static` mount, and reloads every view on save (`--no-reload`).
+A request that lands in the instant a reload swaps the image may wait for the next
+cycle; a request already in flight is never dropped.
+
+```mermaid
+flowchart LR
+    save["you save a file"] -- "fanotify" --> reload["every view reloaded<br/>port 8080 stays up"]
+    req(["curl a route"]) -- "not granted" --> denied["sql.denied · 42501"]
+    req -- "--learn" --> record["learn: 1 route, 1 query"]
 ```
 
-It reads `./blastit.toml` from the current directory (no parent search), binds
-`127.0.0.1:8080` only, and prints pretty logs. (The reference default is `json`;
-`dev` and `check` choose `pretty`, and the variable still wins.) The banner stays
-up for the whole run.
+## PostgreSQL and `DATABASE_URL`
 
-The manifest is read once. Restart after editing a route or a grant.
+`DATABASE_URL` is the app's normal libpq URL; a throwaway store is `docker run --rm -d
+-p 127.0.0.1:5432:5432 -e POSTGRES_USER=shop -e POSTGRES_PASSWORD=secret -e
+POSTGRES_DB=shop postgres:18`. Blastit reads the process environment only (`set -a; . ./.env;
+set +a` before it starts), hands the app a local URL, and connects upstream itself, so the
+password never enters the app.
 
-| Flag | What it does |
-|---|---|
-| `--port N` | listen on `N` instead of `8080` |
-| `--host ADDR` | expose the server on another address for a VM or phone; also set `BLASTIT_DEV_EXPOSE=1`, and the boot line then names the address and your uid |
-| `--learn` | record instead of denying; see [below](#fill-the-manifest-in-one-pass) |
+=== "Python (WSGI)"
+    ```console
+    $ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
+    $ blastit dev
+    ```
 
-`--host` on its own is refused; `BLASTIT_DEV_EXPOSE=1` is the second
-acknowledgement. Exposed, there is no authentication — anyone who reaches it
-drives every route as you — so use it only with the throwaway database above,
-never with production data or an `unrestricted` route.
+=== "PHP"
+    ```console
+    $ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
+    $ blastit dev
+    ```
 
-## Add PostgreSQL
+=== "Static & SPA"
+    ```console
+    $ blastit check         # a mount reads files: no store, no URL
+    ```
 
-Any PostgreSQL works. No server? One line starts one on loopback only, if you
-have Docker (skip it if you already have PostgreSQL):
+Your app keeps reading `DATABASE_URL`, and the `Blastfile` stays safe to commit.
 
-```console
-$ docker run --rm -d -p 127.0.0.1:5432:5432 \
-    -e POSTGRES_USER=shop -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=shop postgres:18
-```
+## Fill the grants in one pass
 
-```toml title="blastit.toml"
-version = 1
-app = "app:app"
+=== "Python (WSGI)"
+    ```console
+    $ blastit check --learn
+    learn: 1 route, 1 query added → /home/you/shop/Blastfile
+    ```
 
-[proxy.db]
-protocol = "postgresql"
-input = { url = "DATABASE_URL" }
+=== "PHP"
+    ```console
+    $ blastit dev --learn       # click through the routes, then Ctrl-C
+    $ blastit fmt
+    ```
 
-[[route]]
-name = "products"
-path = ['/products/.*']
+=== "Static & SPA"
+    ```console
+    $ blastit check            # roots audited; nothing to learn
+    ```
 
-[route.db]
-queries = []
-```
-
-```console
-$ export DATABASE_URL=postgresql://shop:secret@127.0.0.1:5432/shop
-$ uv run blastit dev
-```
-
-Blastit reads the process environment only. `uv run --env-file .env blastit dev`
-loads a file; keep it to the throwaway database above.
-
-Your app keeps reading `DATABASE_URL`. Blastit reads the real one, hands the app
-a local URL, and connects upstream itself. The password never enters the app's
-environment, and `blastit.toml` holds no credentials or inline literals, so it is
-safe to commit.
-
-A route with no `[route.db]` gets no listener at all. Here `queries = []` gives
-it a listener that denies every statement (`42501`) — what the next step fixes.
-
-## Fill the manifest in one pass
-
-With a test suite, one command records the whole app:
-
-```console
-$ uv run blastit check --learn
-learn: 2 routes, 38 queries added → /home/you/shop/blastit.toml
-$ git diff blastit.toml
-$ uv run blastit check
-blastit check: 412 requests, 977 statements, 3/3 routes, clean
-```
-
-Without a suite, click through the app instead. Stop it with ++ctrl+c++ when you
-are done:
-
-```console
-$ uv run blastit dev --learn
-…
-learn: 2 routes, 3 queries added → /home/you/shop/blastit.toml
-```
-
-Learn mode allows what the manifest does not cover and records it, so one pass
-sees every route and statement instead of stopping at the first denial. On exit
-it adds exact `queries` and the routes it saw to the manifest, and prints the
-resolved path. It names a route from the first path segment and turns numeric and
-UUID segments into `[0-9]+` and `[^/]+`; review the diff and tighten anything it
-guessed too widely. A statement that inlines a value is refused, not written:
-bind the value and learn again. Then run `blastit check` without `--learn`.
+Learn mode allows what the file does not cover and records it, so one pass sees every
+view and statement instead of stopping at the first denial.
 
 ## A denial
 
-Outside learn mode, a statement a route is not granted fails the request with
-PostgreSQL's permission error (`42501`); uncaught, that is a `500`. One line says
-why:
+A statement a view is not granted fails with PostgreSQL's `42501`, and the log names
+it normalised, each literal replaced by `…`. Swap every `…` for `$?` and it is what a
+grant must contain — add that `query '…'` to the view's `postgres` block; if it does
+not belong there, the view does more than you thought. The request itself is a `500`,
+and every other view is untouched:
 
 ```console
-15:41:02.118 WARN  sql.denied  products  db  parse  SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?
+15:41:02.118 WARN  sql.denied             products  db  parse  SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?
 ```
 
-`sql` is the statement as normalised, with quoted literals replaced by `…`:
-exactly what a grant has to contain, and safe to paste into a ticket. The JSON
-form of the same event adds `reason`, which separates a missing table or column
-from a statement nobody listed. Two answers:
+## Editors { #editors }
 
-* **It belongs there.** Replace the empty list in that route's `[route.db]`
-  block with the normalised statement:
+Zed ≥ 0.205: **Blastfile** is not in the registry yet, so `git clone
+https://github.com/OffworldNexus/blastit` and `zed: install dev extension` on
+`editors/zed`. The extension finds [`blastit-lsp`](reference/cli.md#blastit-lsp) by
+itself (settings → `PATH` → release binary) and offers Quick Fix **Parameterize SQL
+for Blastfile ($?)** on any `query` literal in your `Blastfile`: paste the denied
+statement from the log, replace its `…` with `$?`, and let the fix rewrite the
+remaining `$1`s.
 
-  ```toml
-  [[route]]
-  name = "products"
-  path = ['/products/.*']
+```json
+{
+  "languages": {
+    "Blastfile": {
+      "format_on_save": "on"
+    }
+  }
+}
+```
 
-  [route.db]
-  queries = ['SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?']
-  ```
+## Where next
 
-  An exact grant is trusted as written: paste only a statement you have read.
-  `pg_read_file`, `COPY … PROGRAM`, `dblink` and `lo_import` are file or network
-  capabilities, not ordinary queries.
-
-* **It does not.** You have found a route that does more than you thought. Give
-  the code path its own route, or narrow this route's `path` so it is
-  unreachable from here.
-
-Do not reach for `unrestricted = true` first: it gives away every statement on
-that proxy, including the ones reading password hashes.
-
-## Before you deploy
-
-Production refuses to start on one uid. To exercise the real uid and capability
-path locally, use the [rootless recipe](deploy/anything-else.md#root-or-rootless).
-Otherwise, [CI](ci.md) is the next gate.
+* [CI/CD](ci.md) — the same file, one command, in a runner.
+* [Deployments](deploy/index.md) — real uids and capabilities.
+* [Blastfile reference](reference/blastfile.md) — every directive.

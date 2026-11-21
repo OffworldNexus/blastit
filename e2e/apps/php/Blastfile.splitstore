@@ -1,0 +1,75 @@
+# The shop this fixture serves: a PHP front controller with per-view grants,
+# public static assets, and SQL no two views may share.
+#
+# The probe manifest beside it (`Blastfile.php2shell`) is the same front
+# controller with no store, so the `php2shell` matrix runs on a host without a
+# database.
+# The same shop on the split-store spelling: five `$DB_*` variables instead of
+# one URL. The `split store` leg starts `blastit dev` with `DB_HOST`, `DB_PORT`,
+# `DB_USERNAME`, `DB_PASSWORD` and `DB_DATABASE`, and asserts that the worker
+# sees no `DB_PASSWORD` and a socket host, as the reference documents.
+app "shop"
+
+entrypoint php "public/index.php"
+
+postgres {
+    host $DB_HOST
+    port $DB_PORT
+    user $DB_USERNAME
+    password $DB_PASSWORD
+    database $DB_DATABASE
+}
+
+static "/" {
+    root "public"
+    immutable "/assets/*"
+}
+
+# The public read: only these three columns of `products`.
+view catalog GET "/products", "/products/*" {
+    postgres {
+        select products(id, name, price)
+    }
+}
+
+view env GET "/env" {
+}
+
+# The write: an insert and the read-back that proves it, and nothing else.
+view orders POST "/orders", "/orders/note" {
+    body form
+    postgres {
+        transactions
+        insert orders(customer_id, total)
+        select orders(customer_id, total)
+    }
+}
+
+# This view has a grant (so it gets a socket) but not the `DELETE` it runs: the
+# proxy answers SQLSTATE 42501 and the app reports the denial.
+view purge POST "/orders/purge" {
+    body form
+    postgres {
+        select orders(customer_id)
+    }
+}
+
+# The cross-table read, the customers insert (no insert grant), and the orders
+# insert (no insert grant at all in this view): each is refused by the proxy.
+view peek GET "/customers/peek", "/customers/insert", "/orders/note-insert" {
+    postgres {
+        select products(id)
+    }
+}
+
+view crash GET "/crash/*" {
+}
+
+# The probe matrix's JSON view, above the front controller's catch-all.
+view api regex '/api/.*' {
+    body form
+}
+
+view app regex '.*' {
+    body form
+}

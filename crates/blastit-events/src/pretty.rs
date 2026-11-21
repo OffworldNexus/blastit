@@ -1,21 +1,29 @@
 //! The pretty line encoder (ARCHITECTURE.md §8.1: `BLASTIT_LOG_FORMAT=pretty`).
 
 use crate::{
-    Event, EventKind, ExitKind, Level, Lifecycle, MAX_EVENT_BYTES, Outcome, RequestInfo,
-    floor_boundary, format_clock_time,
+    DevReloadUnavailable, Event, EventKind, ExitKind, Level, Lifecycle, MAX_EVENT_BYTES, Outcome,
+    RequestInfo, Runtime, floor_boundary, format_clock_time,
 };
 
 const RESET: &str = "\u{1b}[0m";
-/// Column the event name starts at.
-const NAME_COLUMN: usize = 12;
+/// The width every event name is padded to.
+///
+/// Every event name is padded to this many columns, so the summary starts at
+/// the same place on every line — that is what makes a stream of events a
+/// table. It is the longest name this crate can emit
+/// (`dev.reload.unavailable`, 22 bytes) plus the one space that keeps the
+/// summary readable: a narrower column pushed *that* line's summary right and
+/// broke the alignment on every other line.
+const NAME_COLUMN: usize = 23;
 
 /// Encode one event as a single human-readable line, without a trailing
 /// newline.
 ///
 /// The shape is `HH:MM:SS.mmm LEVEL event  summary`, with the event name
-/// padded to twelve columns, as in the §8.1 example. `color` wraps the level
-/// word in ANSI colours (a handful of escape codes, no crate); the padding is
-/// applied to the text, so coloured and plain lines line up.
+/// padded to `NAME_COLUMN` columns, as in the §8.1 example. `color` wraps the
+/// level word — and a `request`'s HTTP status — in ANSI colours (a handful of
+/// escape codes, no crate); the padding is applied to the text, so coloured and
+/// plain lines line up.
 ///
 /// Control characters from the event are escaped, so the result is always
 /// exactly one line, and a line longer than [`MAX_EVENT_BYTES`] is cut and
@@ -28,23 +36,26 @@ pub fn encode_pretty(event: &Event, color: bool) -> String {
     out.push(' ');
     let name = event.kind.name();
     out.push_str(name);
-    // Twelve columns, and always at least one space before the summary so a
-    // long event name such as `manifest.warning` stays readable.
+    // NAME_COLUMN columns, and always at least one space before the summary
+    // so a name wider than the column stays readable.
     let width = NAME_COLUMN.max(name.chars().count() + 1);
     for _ in name.chars().count()..width {
         out.push(' ');
     }
-    out.push_str(&summary(event));
+    out.push_str(&summary(event, color));
     cap(&mut out);
     out
 }
 
 /// The level word, padded to five columns and coloured when asked.
+///
+/// DEBUG is `dim` (`ESC[2m`), the same code the logger's field-dump fallback
+/// uses: one palette for a build's output, not two (`A-4`).
 fn level_word(level: Level, color: bool) -> String {
     let mut word = format!("{:<5}", level.as_str().to_uppercase());
     if color {
         let code = match level {
-            Level::Debug => "36",
+            Level::Debug => "2",
             Level::Info => "32",
             Level::Warn => "33",
             Level::Error => "31",
@@ -54,13 +65,13 @@ fn level_word(level: Level, color: bool) -> String {
     word
 }
 
-fn summary(event: &Event) -> String {
+fn summary(event: &Event, color: bool) -> String {
     let route = || match event.route.as_deref() {
         Some(route) => escape_inline(route),
         None => "-".to_owned(),
     };
     match &event.kind {
-        EventKind::Request(info) => request_summary(event, info),
+        EventKind::Request(info) => request_summary(event, info, color),
         EventKind::SqlDenied(info) => format!(
             "{}  {}  {}  {}",
             route(),
@@ -117,10 +128,83 @@ fn summary(event: &Event) -> String {
         | EventKind::Ready(lifecycle)
         | EventKind::Shutdown(lifecycle) => lifecycle_summary(lifecycle),
         EventKind::ManifestWarning(info) => escape_inline(&info.message),
+        EventKind::Runtime(info) => runtime_summary(info),
+        // §4.9's frozen shape: the route column (no route, so `-`), then the
+        // counts and the reason word.
+        EventKind::DevReload(info) => format!(
+            "{}  routes={}  reason={}  files={}",
+            route(),
+            info.routes.len(),
+            info.reason.as_str(),
+            info.files.len()
+        ),
+        EventKind::DevReloadUnavailable(info) => reload_disabled_summary(info),
+        // §4.7's boot line: `1 directory` / `N directories`, in the summary
+        // column like every other event.
+        EventKind::Reload(info) => format!(
+            "{} {}",
+            info.directories(),
+            if info.directories() == 1 {
+                "directory"
+            } else {
+                "directories"
+            }
+        ),
     }
 }
 
-fn request_summary(event: &Event, info: &RequestInfo) -> String {
+/// §4.7's one sentence: `reload disabled: <cause> (<ERRNO> on <fs>); serving
+/// without live reload`.
+///
+/// The cause clause is chosen by the symbolic errno, so every row of the
+/// failure ladder has its own words; anything outside the ladder still says
+/// `reload disabled` and carries the errno it was given.
+fn reload_disabled_summary(info: &DevReloadUnavailable) -> String {
+    let cause = match info.errno() {
+        "ENOSYS" => "fanotify is not available here: this kernel has no fanotify",
+        "EPERM" => "fanotify is not permitted here: a container security profile",
+        "EINVAL" => {
+            "fanotify refused this boot's flags: this kernel does not accept the file-handle group"
+        }
+        "EOPNOTSUPP" => "this filesystem has no file handles: bind-mount the project from the host",
+        "ENOSPC" => "no marks left: the reloads already marked keep working",
+        "EMFILE" => "no fanotify group is left: close another one and restart",
+        _ => "fanotify refused to start",
+    };
+    format!(
+        "reload disabled: {cause} ({} on {}); serving without live reload",
+        escape_inline(info.errno()),
+        escape_inline(info.filesystem())
+    )
+}
+
+/// §8.1's `runtime` text form: the entrypoint and its version, then the
+/// labelled fields two spaces apart, exactly as `docs/local.md` shows them.
+///
+/// A `null` `php_ini` prints `php.ini none` — PHP's built-in defaults — and a
+/// static entrypoint is followed by its one sentence. Every value is escaped,
+/// so the path PHP opened cannot turn the line into two.
+fn runtime_summary(info: &Runtime) -> String {
+    match info {
+        Runtime::Php(php) => format!(
+            "php {}  libphp {}  php.ini {}",
+            escape_inline(php.version()),
+            escape_inline(php.libphp()),
+            match php.php_ini() {
+                Some(path) => escape_inline(path),
+                None => "none".to_owned(),
+            }
+        ),
+        Runtime::Python(py) => format!(
+            "python {}  environment {}",
+            escape_inline(py.version()),
+            escape_inline(py.environment())
+        ),
+        Runtime::Static => "static  serving static assets only".to_owned(),
+    }
+}
+
+fn request_summary(event: &Event, info: &RequestInfo, color: bool) -> String {
     let target = match event.route.as_deref() {
         Some(route) => escape_inline(route),
         None => "(unmatched)".to_owned(),
@@ -130,7 +214,7 @@ fn request_summary(event: &Event, info: &RequestInfo) -> String {
         escape_inline(&info.method),
         escape_inline(&info.path),
         target,
-        info.status
+        status_word(info.status, color)
     );
     if info.outcome != Outcome::Ok {
         out.push(' ');
@@ -138,6 +222,25 @@ fn request_summary(event: &Event, info: &RequestInfo) -> String {
     }
     out.push_str(&format!("  {:.1}ms", info.duration_ms));
     out
+}
+
+/// A `request`'s HTTP status, coloured by class when the stream is coloured.
+///
+/// 2xx green, 3xx cyan, 4xx yellow, 5xx red; anything outside those classes —
+/// and every line on an uncoloured stream — is the bare number, so a log an
+/// operator pipes into a file is exactly the bytes it always was.
+fn status_word(status: u16, color: bool) -> String {
+    if !color {
+        return status.to_string();
+    }
+    let code = match status / 100 {
+        2 => "32",
+        3 => "36",
+        4 => "33",
+        5 => "31",
+        _ => return status.to_string(),
+    };
+    format!("\u{1b}[{code}m{status}{RESET}")
 }
 
 fn lifecycle_summary(lifecycle: &Lifecycle) -> String {
@@ -273,300 +376,4 @@ fn cap(line: &mut String) {
     let keep = floor_boundary(line, MAX_EVENT_BYTES - '…'.len_utf8());
     line.truncate(keep);
     line.push('…');
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-    use crate::fixture;
-    use crate::{
-        AppOutput, ExitKind, Lifecycle, ManifestWarning, Outcome, ProcessCap, ProcessExited,
-        ProcessRetired, ProcessSpawned, RequestInfo, RetireReason, Stream,
-    };
-
-    fn plain(event: &Event) -> String {
-        encode_pretty(event, false)
-    }
-
-    #[test]
-    fn request_example_matches_the_text_form() {
-        let line = plain(&fixture::request_event());
-        assert_eq!(
-            line,
-            "14:02:11.384 INFO  request     GET /products/42/ → product-detail  200  18.4ms"
-        );
-    }
-
-    #[test]
-    fn sql_denied_example_matches_the_text_form() {
-        let line = plain(&fixture::sql_denied_event());
-        assert_eq!(
-            line,
-            concat!(
-                "14:02:12.007 WARN  sql.denied  product-detail  db  parse  ",
-                r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#
-            )
-        );
-    }
-
-    #[test]
-    fn every_kind_renders_one_line() {
-        let events = [
-            fixture::request_event(),
-            fixture::sql_denied_event(),
-            fixture::event(EventKind::HttpRejected(crate::HttpRejected::new(
-                "203.0.113.7",
-                400,
-                crate::RejectReason::MalformedRequest,
-            ))),
-            fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(
-                57, 20_001, 12.5,
-            ))),
-            fixture::event(EventKind::ProcessExited(ProcessExited::new(
-                57,
-                20_001,
-                ExitKind::Signal(9),
-            ))),
-            fixture::event(EventKind::ProcessExited(ProcessExited::new(
-                57,
-                20_001,
-                ExitKind::Status(0),
-            ))),
-            fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
-                57,
-                20_001,
-                RetireReason::Idle,
-            ))),
-            fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4))),
-            fixture::event(EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hi"))),
-            fixture::event(EventKind::AppOutput(
-                AppOutput::new(Stream::Stderr, "hi")
-                    .with_part(2, 3)
-                    .unwrap(),
-            )),
-            fixture::event(EventKind::Boot(
-                Lifecycle::default()
-                    .with_stage("preload")
-                    .with_routes(3)
-                    .with_workers(16)
-                    .with_duration_ms(12.5)
-                    .with_output("db", "DATABASE_URL"),
-            )),
-            fixture::event(EventKind::Ready(Lifecycle::default())),
-            fixture::event(EventKind::Shutdown(Lifecycle::default())),
-            fixture::event(EventKind::ManifestWarning(ManifestWarning::new("oops"))),
-        ];
-        for event in &events {
-            for color in [false, true] {
-                let line = encode_pretty(event, color);
-                assert!(!line.contains('\n'), "{} is multi-line", event.kind.name());
-                assert!(!line.is_empty());
-                assert!(line.len() <= MAX_EVENT_BYTES);
-                assert!(line.contains(event.kind.name()));
-            }
-        }
-    }
-
-    #[test]
-    fn unmatched_requests_say_so() {
-        let event = fixture::event(EventKind::Request(
-            RequestInfo::from_target("GET", "/nope")
-                .with_status(404)
-                .with_outcome(Outcome::Unmatched),
-        ));
-        let line = plain(&event);
-        assert!(
-            line.contains("GET /nope → (unmatched)  404 unmatched"),
-            "{line}"
-        );
-    }
-
-    #[test]
-    fn a_cap_event_reports_the_measurement_and_the_cap() {
-        let event = fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4)));
-        let line = plain(&event);
-        assert!(line.contains("process.cap"), "{line}");
-        assert!(line.contains("estimate_bytes=141557760"), "{line}");
-        assert!(line.contains("cap=4"), "{line}");
-    }
-
-    #[test]
-    fn control_characters_never_reach_the_terminal_raw() {
-        let event = fixture::event(EventKind::AppOutput(AppOutput::new(
-            Stream::Stderr,
-            "oops\nsecond line\rrest\ttab\u{1}\u{1b}[31mred",
-        )));
-        for color in [false, true] {
-            let line = encode_pretty(&event, color);
-            assert!(!line.contains('\n'));
-            assert!(!line.contains('\r'));
-            assert!(!line.contains('\t'));
-            assert!(line.contains("oops\\nsecond line\\rrest\\ttab\\u{1}"));
-            if !color {
-                assert!(!line.contains('\u{1b}'), "no escapes without colour");
-            }
-        }
-    }
-
-    #[test]
-    fn colour_wraps_only_the_level_word() {
-        let event = fixture::request_event();
-        let plain_line = plain(&event);
-        let coloured = encode_pretty(&event, true);
-        assert!(coloured.contains("\u{1b}[32mINFO \u{1b}[0m"));
-        assert!(!coloured.contains("\u{1b}[0m\u{1b}[0m"));
-        let stripped = coloured.replace("\u{1b}[32m", "").replace("\u{1b}[0m", "");
-        assert_eq!(stripped, plain_line);
-        assert_eq!(coloured.len(), plain_line.len() + 9);
-
-        assert!(encode_pretty(&event.clone().with_level(Level::Warn), true).contains("\u{1b}[33m"));
-        assert!(
-            encode_pretty(&event.clone().with_level(Level::Error), true).contains("\u{1b}[31m")
-        );
-        assert!(encode_pretty(&event.with_level(Level::Debug), true).contains("\u{1b}[36m"));
-    }
-
-    #[test]
-    fn long_lines_are_capped_with_an_ellipsis() {
-        let event = fixture::event(EventKind::AppOutput(AppOutput::new(
-            Stream::Stdout,
-            "x".repeat(9000),
-        )));
-        let line = plain(&event);
-        assert_eq!(line.len(), MAX_EVENT_BYTES);
-        assert!(line.ends_with('…'));
-
-        let unicode = fixture::event(EventKind::AppOutput(AppOutput::new(
-            Stream::Stdout,
-            "漢".repeat(4000),
-        )));
-        let line = plain(&unicode);
-        assert!(line.len() <= MAX_EVENT_BYTES);
-        assert!(line.ends_with('…'));
-    }
-
-    #[test]
-    fn name_padding_lines_up_short_names() {
-        let ready = plain(&fixture::event(EventKind::Ready(Lifecycle::default())));
-        assert!(
-            ready.starts_with("14:02:11.384 INFO  ready       "),
-            "{ready}"
-        );
-        let warning = plain(&fixture::event(EventKind::ManifestWarning(
-            ManifestWarning::new("x"),
-        )));
-        assert!(
-            warning.starts_with("14:02:11.384 WARN  manifest.warning x"),
-            "{warning}"
-        );
-    }
-
-    #[test]
-    fn lifecycle_shows_the_privilege_mode_and_its_capabilities() {
-        // D6: the pretty format says the same thing as the JSON one, next to
-        // `seccomp`, because a human reading a boot line is asking the same
-        // question.
-        let event = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("stage0")
-                .with_privilege("capabilities")
-                .with_capability("cap_chown")
-                .with_capability("cap_setuid"),
-        ));
-        let line = encode_pretty(&event, false);
-        assert!(line.contains("privilege=capabilities"), "{line}");
-        assert!(
-            line.contains("capabilities=[cap_chown cap_setuid]"),
-            "{line}"
-        );
-        let root = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("stage0")
-                .with_privilege("root"),
-        ));
-        let line = encode_pretty(&root, false);
-        assert!(line.contains("privilege=root"), "{line}");
-        assert!(!line.contains("capabilities="), "{line}");
-    }
-
-    #[test]
-    fn lifecycle_shows_variable_names_never_values() {
-        let event = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("preload")
-                .with_seccomp(true)
-                .with_output("db", "DATABASE_URL")
-                .with_output("db", "PGHOST"),
-        ));
-        let line = plain(&event);
-        assert!(line.contains("preload"), "{line}");
-        assert!(line.contains("seccomp=on"), "{line}");
-        assert!(
-            line.contains("outputs: db=[DATABASE_URL, PGHOST]"),
-            "{line}"
-        );
-    }
-
-    #[test]
-    fn immortalisation_shows_whether_it_ran_and_why_not() {
-        let skipped = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("preload")
-                .with_immortalize(false)
-                .with_immortalize_reason("CPython 3.14 is unsafe")
-                .with_immortalized(0),
-        ));
-        let line = plain(&skipped);
-        assert!(line.contains("immortalize=off"), "{line}");
-        assert!(line.contains("immortalized=0"), "{line}");
-        assert!(line.contains("CPython 3.14 is unsafe"), "{line}");
-        assert!(!line.contains("immortalize_ms"), "{line}");
-
-        let ran = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("preload")
-                .with_immortalize(true)
-                .with_immortalized(1_610_300)
-                .with_immortalize_ms(1785.4),
-        ));
-        let line = plain(&ran);
-        assert!(line.contains("immortalize=on"), "{line}");
-        assert!(line.contains("immortalized=1610300"), "{line}");
-        assert!(line.contains("immortalize_ms=1785.4ms"), "{line}");
-    }
-
-    #[test]
-    fn lifecycle_shows_the_preset_and_its_settings() {
-        // E1: the pretty line says the same as the JSON one, with the same
-        // `preset_*` names so a reader can move between the two.
-        let event = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("config")
-                .with_preset("compose-traefik")
-                .with_preset_setting("BLASTIT_CLIENT_IP_HEADER", "x-forwarded-for")
-                .with_preset_override("BLASTIT_LOG_FORMAT"),
-        ));
-        let line = encode_pretty(&event, false);
-        assert!(line.contains("preset=compose-traefik"), "{line}");
-        assert!(
-            line.contains("preset_settings: BLASTIT_CLIENT_IP_HEADER=x-forwarded-for"),
-            "{line}"
-        );
-        assert!(
-            line.contains("preset_overridden: BLASTIT_LOG_FORMAT"),
-            "{line}"
-        );
-
-        let plain = fixture::event(EventKind::Boot(Lifecycle::default().with_stage("stage0")));
-        let line = encode_pretty(&plain, false);
-        assert!(!line.contains("preset"), "{line}");
-    }
-
-    #[test]
-    fn escape_inline_leaves_printable_text_alone() {
-        assert_eq!(escape_inline("plain é 漢"), "plain é 漢");
-        assert_eq!(escape_inline(""), "");
-        assert_eq!(escape_inline("\u{7f}"), "\\u{7f}");
-    }
 }

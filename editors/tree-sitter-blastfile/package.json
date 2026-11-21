@@ -1,0 +1,27 @@
+{
+  "name": "tree-sitter-blastfile",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Blastfile, Blastit's routing table and permission model",
+  "license": "Apache-2.0",
+  "keywords": [
+    "tree-sitter",
+    "parser",
+    "blastfile"
+  ],
+  "files": [
+    "grammar.js",
+    "src/**"
+  ],
+  "devDependencies": {
+    "tree-sitter-cli": "0.25.10"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.blastfile",
+      "file-types": [
+        "Blastfile",
+        "blastfile"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+# The rootless half of `e2e/run_prod.py`: the fixture image plus a **dedicated**
+# copy of the binary carrying the file capabilities, at the path
+# `docs/deploy/compose-traefik.md` §4 ships (`/usr/share/blastit/lib`), beside
+# the shim `libblastit_php84-*.so` the runtime discovers exe-relative.
+#
+# Build context: a staging directory that holds the binary under the name
+# `blastit` (never the checkout, so a bind mount cannot carry the capability and
+# a stale `target/` cannot be linked in). `BASE` is the fixture image the same
+# run built from `e2e/apps/php/Dockerfile`, so this image inherits the distro's
+# NTS `libphp`, the shim and the two fixture trees.
+#
+#   * `/usr/share/blastit/lib/blastit` stays capability-free: every process of
+#     init's uid can run it (an operator's `php`, a second shell), so a
+#     capability there would turn any of them into init;
+#   * `blastit-init` beside it is mode `0500`, owned by uid `10000` and carries
+#     the seven capabilities; `BLASTIT_EXEC` names the capability-free copy for
+#     the child that empties its bounding set;
+#   * `chown` clears a file capability, so nothing re-owns the copy after
+#     `setcap` — the order below is load-bearing.
+ARG BASE
+FROM ${BASE}
+
+USER root
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libcap2-bin \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY blastit /usr/share/blastit/lib/blastit
+
+RUN chmod 0755 /usr/share/blastit/lib/blastit \
+ && cp /usr/share/blastit/lib/blastit /usr/share/blastit/lib/blastit-init \
+ && chown 10000:10000 /usr/share/blastit/lib/blastit-init \
+ && chmod 0500 /usr/share/blastit/lib/blastit-init \
+ && cp /opt/blastit/shims/libblastit_php84-*.so /usr/share/blastit/lib/ \
+ && setcap 'cap_chown,cap_dac_override,cap_fowner,cap_kill,cap_setgid,cap_setuid,cap_setpcap+ep' \
+      /usr/share/blastit/lib/blastit-init \
+ && getcap /usr/share/blastit/lib/blastit-init

@@ -1,0 +1,28 @@
+[package]
+name = "blastit-lsp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The suite is `tests/e2e_lsp.rs`: neither target holds a `#[cfg(test)]` module,
+# and `test = false` keeps `make coverage`'s object list free of two empty harness
+# artefacts whose relative paths would shadow the binary's coverage rows.
+[lib]
+name = "blastit_lsp"
+path = "src/lib.rs"
+test = false
+
+[[bin]]
+name = "blastit-lsp"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+serde_json = "1.0.154"

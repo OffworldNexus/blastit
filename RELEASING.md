@@ -69,7 +69,7 @@ TestPyPI — and only with `dry-run` unchecked.
 ## Release (PR merge → automatic publish)
 
 The version lives in `Cargo.toml` (`[workspace.package] version`), and each
-release corresponds to git tag `v<version>` (for example, `0.1.1` → `v0.1.1`).
+release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
 
 1. **Prepared automatically on `release/<version>`**:
    * `Cargo.toml` (`[workspace.package] version`) is set to `<version>`.
@@ -80,27 +80,57 @@ release corresponds to git tag `v<version>` (for example, `0.1.1` → `v0.1.1`).
      into `develop`.
 2. **Pre-merge rehearsal on the PR**:
    * `CI` (`.github/workflows/ci.yml`), `Docs` (`.github/workflows/docs.yml`),
-     and `Publish` (`.github/workflows/publish-pypi.yml`) all run on the PR.
-   * `Publish`'s `guard` job checks that the branch matches `release/<version>`,
-     the changelog entry is dated, and tag `v<version>` does not exist yet; then
-     `wheels` (CPython 3.13 & 3.14), `sdist`, and `verify` (`scripts/check-long-description.py`)
+     `PHP SAPI` (`.github/workflows/php-sapi.yml`), `Python SAPI`
+     (`.github/workflows/py-sapi.yml`), and `Publish`
+     (`.github/workflows/publish-pypi.yml`) run on the PR.
+   * `Publish`'s `guard` and `matrix` jobs check that the branch matches
+     `release/<version>`, the changelog entry is dated, tag `v<version>` does
+     not exist yet, and every leg comes from `scripts/platform_matrix.py`; then
+     `wheels_gnu` + `wheels_musl` (`4` universal
+     `py3-none-{manylinux_2_28,musllinux_1_2}_{x86_64,aarch64}` wheels,
+     `manylinux` wheels smoke-tested on CPython `3.12`/`3.13`/`3.14`,
+     `musllinux` on `3.13`, each carrying the four PHP shims of its own
+     `<arch>`/`<libc>` beside the CPython ones — a short shim leg fails its own
+     leg and skips the wheels rather than publishing a wheel without PHP — built
+     by `scripts/build-wheel.sh`
+     (`maturin build --bindings bin` + `scripts/repack_universal_wheel.py` — no
+     extension module compiled any more), `sdist`, `shims`
+     (`16` probed PHP `8.3`–`8.6` legs), `binaries_gnu` + `binaries_musl`
+     (`4` standalone Linux archives), `lsp` (`5` `blastit-lsp` archives across
+     Linux, macOS, and Windows), and `verify` (`scripts/check-long-description.py`)
      rehearse the full distribution build.
 3. **Human validation & merge**:
    * Review the PR on GitHub and click **Squash and merge** into `develop`.
    * Merging into `develop` automatically runs `CI`, `Docs` (deploying GitHub
      Pages), `Live (DigitalOcean)` (App Platform cloud e2e), and `Publish`.
    * On `develop`, `Publish` detects that `v<version>` is not yet tagged, builds
-     and verifies the wheels and sdist with README links pinned to `v<version>`,
-     waits in `validate` until `CI`, `Docs`, and `Live (DigitalOcean)` on that
-     exact `develop` commit are all green, uploads to **PyPI**, creates and
-     pushes the annotated `v<version>` git tag, and creates the **GitHub Release**
-     with artifacts and `CHANGELOG.md` notes attached.
+     and verifies the wheels, `sdist`, standalone archives, PHP shims, and
+     `blastit-lsp` archives with README links pinned to `v<version>`, waits in
+     `validate` until `CI`, `Docs`, and `Live (DigitalOcean)` on that exact
+     `develop` commit are all green, uploads the wheels and `sdist` to **PyPI**,
+     creates and pushes the annotated `v<version>` git tag, and creates the
+     **GitHub Release** with all archives, shims, `SHA256SUMS`, and
+     `CHANGELOG.md` notes attached.
+   * That tag push then runs **Packages** (`.github/workflows/packages.yml`) in
+     the same `release-${{ github.ref }}` concurrency group as `Publish`, so the
+     two can never overlap: it builds the `4` `.deb`/`.rpm` packages from the
+     §6.1 bundle, installs each package on the legs of its own format (`8` `deb`
+     + `4` `rpm`, from `scripts/platform_matrix.py --matrix install`; `6`
+     distributions × `2` architectures), publishes to the signed Cloudsmith
+     `main` component, mirrors to Forgejo
+     (skips with one `::notice::` when `FORGEJO_PACKAGES_TOKEN` is unset), waits
+     for that `Publish` run, then reseals one `SHA256SUMS` over archives +
+     packages + shims. A `workflow_dispatch` rehearses (`--dry-run`, printing
+     every command) unless `publish: true`.
+   * **Nightly** (`.github/workflows/nightly.yml`, `03:17 UTC`) stamps
+     `0.2.0~nightly20261120.r<run>+g<sha>` / `0.2.0-0.nightly.…`, publishes to
+     the `nightly` component and keeps the newest seven.
    * Ordinary non-release PRs merged into `develop` (where `v<version>` already
      exists) skip the release jobs in a few seconds.
 4. **Check the result**:
 
    ```console
-   $ uv venv /tmp/blastit-check && VIRTUAL_ENV=/tmp/blastit-check uv pip install blastit==0.1.1
+   $ uv venv /tmp/blastit-check && VIRTUAL_ENV=/tmp/blastit-check uv pip install blastit==0.2.0
    $ /tmp/blastit-check/bin/blastit --help
    ```
 
@@ -131,12 +161,16 @@ the same `Publish` workflow idempotently if ever needed.)*
 ## The development wheels are not this
 
 Every commit to `develop` builds the same wheels (`.github/workflows/wheels.yml`)
-and leaves them as artifacts of that run, with a `0.1.0.dev<run>` version so
-they can't be mistaken for the release of the same commit. Nothing publishes
+and leaves them as artifacts of that run, with a `<version>-dev<run>` version
+(for example, `0.2.0-dev<run>`) so they can't be mistaken for the release of the
+same commit. Nothing publishes
 them, and nothing outside the run can install from them — they exist to catch a
 broken wheel on the commit that broke it, and for whoever wants to try the
 current tree. The two workflows build with the same action,
-`.github/actions/build-wheel`.
+`.github/actions/build-wheel`. A `develop` wheel carries the two CPython shims
+only (`require-shims: py`) — that workflow has no shim legs — so PHP is a
+release-wheel capability: only `publish-pypi.yml`'s wheels carry the four PHP
+shims, and its `verify` job proves it on every libc before anything reaches PyPI.
 
 ## The description PyPI shows
 
@@ -155,21 +189,27 @@ nothing or an image PyPI cannot fetch. To run it by hand:
 $ uv run --no-project scripts/check-long-description.py dist/*
 ```
 
-## Only x86_64, for now
+## Multi-platform matrix and CI-only legs
 
-The release matrix is CPython 3.13 and 3.14 on x86_64. arm64 is not a matrix
-dimension waiting to be switched on, it is a step of its own:
+`scripts/platform_matrix.py` is the single source of truth for the release
+artifacts (`--matrix`/`--count`/`--leg` are what the workflows consume, and
+`--check` validates the matrix itself):
 
-* **it does not compile.** `blastit-sys` uses `libc::SYS_fchmodat2`, which libc
-  does not define for aarch64 (the log is run 40388835113 of `Publish`), so
-  there is no arm64 wheel *and* no arm64 source build.
-* **and that is not the whole of it.** §7.3's seccomp filters, and the arch
-  check they are built under, are written for x86_64 and have never run on arm64
-  at all.
-
-So arm64 means fixing the syscall numbers, reviewing the filters against the
-arm64 ABI, and adding a job on `ubuntu-24.04-arm` that builds *and* runs the
-tests there — a step with its own test run, not a one-line change.
+* **Linux serving artifacts** (the `4` universal `blastit` wheels, `4` standalone
+  archives, the `16` PHP `8.3`–`8.6` C SAPI shims, and the `8` CPython
+  `3.13`/`3.14` Python SAPI shims) target `{x86_64, aarch64} × {gnu
+  (manylinux_2_28), musl (musllinux_1_2 / Alpine)}`. Every `x86_64` wheel,
+  standalone archive, and shim is built and smoked locally on Linux `x86_64`;
+  the `aarch64` legs build and run natively in GitHub Actions on
+  `ubuntu-24.04-arm`.
+* **Portable `blastit-lsp` editor archives** target five native triples:
+  `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+  `aarch64-apple-darwin` (`macos-latest`), `x86_64-apple-darwin`
+  (`macos-15-intel`), and `x86_64-pc-windows-msvc` (`windows-latest`). Only
+  `x86_64-unknown-linux-gnu` is built and session-smoked on a Linux `x86_64`
+  workstation; the `aarch64` Linux, macOS, and Windows legs run on native GitHub
+  Actions runners (`ci.yml` and `publish-pypi.yml`) when the PR opens and
+  merges.
 
 ## What floats
 

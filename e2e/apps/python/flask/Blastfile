@@ -1,0 +1,61 @@
+# The Flask + SQLAlchemy manifest: the same shop through a framework that is
+# not Django, with SQLAlchemy's own connection statements in the shared trait.
+#
+# SQLAlchemy reads the rendered URL itself and does not percent-decode an
+# authority, so blastit puts the socket directory in the `host` query parameter;
+# a wrong host here is a 500, which is what this leg proves.
+app "shop"
+
+entrypoint python "app:app"
+
+postgres $DATABASE_URL
+
+trait connection {
+    postgres {
+        transactions
+        query 'select pg_catalog.version()'
+        query 'select current_schema()'
+        query 'show standard_conforming_strings'
+        query 'show transaction isolation level'
+        query 'SELECT typname AS name, oid, typarray AS array_oid, oid::regtype::text AS regtype, typdelim AS delimiter FROM pg_type t WHERE t.oid = to_regtype($1) ORDER BY t.oid'
+    }
+}
+
+view catalog GET "/products", "/products/*" {
+    use connection
+    postgres {
+        select products(id, name, price)
+    }
+}
+
+view orders POST "/orders", "/orders/note" {
+    body form
+    use connection
+    postgres {
+        insert orders(customer_id, total)
+        select orders(customer_id, total)
+    }
+}
+
+view peek GET "/customers/peek", "/customers/insert", "/orders/note-insert" {
+    use connection
+    postgres {
+        select products(id)
+    }
+}
+
+view purge POST "/orders/purge" {
+    body form
+    use connection
+    postgres {
+        select orders(customer_id)
+    }
+}
+
+view env GET "/env" {
+}
+
+static "/static" {
+    root "static"
+    immutable "/static/*"
+}

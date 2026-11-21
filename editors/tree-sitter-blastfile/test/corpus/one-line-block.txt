@@ -1,0 +1,46 @@
+==================
+a closing brace ends the statement, so a one-line block needs no semicolon
+==================
+static "/" { root "public" }
+
+---
+
+(source_file
+  (static_decl
+    (string)
+    (block
+      (directive
+        (keyword)
+        (string)))))
+
+==================
+a one-line endpoint block and a one-line grant block
+==================
+view cart {
+    GET "/cart"
+    POST "/cart/items" { body json }
+    postgres { select carts(id) }
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (block
+      (endpoint
+        (method)
+        (string))
+      (endpoint
+        (method)
+        (string)
+        (block
+          (directive
+            (keyword)
+            (codec))))
+      (grant
+        (block
+          (table_grant
+            (keyword)
+            (table)
+            (column)))))))

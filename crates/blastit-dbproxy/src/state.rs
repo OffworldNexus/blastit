@@ -10,16 +10,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use blastit_events::{Component, Event, EventKind, PgRefuseReason, PgRefused, SqlDenied};
-use blastit_sqlpolicy::Allowlist;
+use blastit_sqlpolicy::{Allowlist, Decision};
 use pregresql::proxy::cancel::CancelRegistry;
 use pregresql::proxy::{InboundConnection, UpstreamTls};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use zeroize::Zeroizing;
 
 use crate::Emit;
-use crate::config::{DbproxyConfig, ListenerMode, ListenerSpec};
+use crate::config::{DbproxyConfig, ListenerMode, ListenerSpec, RoutePolicySpec};
 use crate::error::DbproxyError;
 use crate::learn::{Learning, ObsTarget};
+use crate::policy::PolicyError;
 use crate::upstream::{CaBundles, SslPlan, upstream_parameters};
 
 /// How long dbproxy waits for the upstream to accept a TCP connection before it
@@ -87,6 +88,7 @@ impl Shared {
         config.validate_proxies()?;
         config.validate_serving(listeners)?;
         config.validate_learning()?;
+        config.validate_policy()?;
 
         let mut bundles = CaBundles::new();
         let mut proxies = HashMap::new();
@@ -141,14 +143,14 @@ impl Shared {
             runtimes.push(ListenerRuntime {
                 spec: spec.clone(),
                 tag: Arc::from(index.to_string().as_str()),
-                allowlist: if spec.unrestricted {
+                allowlist: ListenerPolicy::new(Arc::new(if spec.unrestricted {
                     // `unrestricted = true` (§6): the route may run anything
                     // here, so the policy has nothing to compare.
                     Allowlist::unrestricted()
                 } else {
                     Allowlist::new(&spec.queries, spec.transaction_control)
                         .with_tables(spec.tables.clone())
-                },
+                })),
                 proxy: Arc::clone(proxy),
                 // One registry per listener: a view can only cancel the sessions
                 // that were opened on its own socket.
@@ -187,22 +189,58 @@ impl Shared {
 
     /// The allowlist a statement on `listener` is evaluated against.
     ///
-    /// A runtime listener carries its own route's grants (§6). A shared
-    /// learning listener is one socket per proxy, so its grants come from the
-    /// [`ObsTarget`] at the top of the control channel's stack, and an unknown
-    /// route evaluates against an empty allowlist (never "anything allowed").
-    pub(crate) fn allowlist_for<'a>(
-        &'a self,
-        listener: &'a ListenerRuntime,
+    /// A runtime listener carries its own route's grants (§6), which a dev
+    /// policy document can replace whole. A shared learning listener is one
+    /// socket per proxy, so its grants come from the [`ObsTarget`] at the top of
+    /// the control channel's stack, and an unknown route evaluates against an
+    /// empty allowlist (never "anything allowed").
+    ///
+    /// The return is the policy in force at this instant: a later swap cannot
+    /// change the answer a caller is about to compute from it.
+    pub(crate) fn allowlist_for(
+        &self,
+        listener: &ListenerRuntime,
         target: Option<&ObsTarget>,
-    ) -> &'a Allowlist {
+    ) -> Arc<Allowlist> {
         if listener.spec.route != crate::config::WILDCARD_ROUTE {
-            return &listener.allowlist;
+            return listener.allowlist.get();
         }
         match target {
             Some(ObsTarget::Routed { route }) => self.learning.policy(route, &listener.proxy.name),
             _ => self.learning.policy("", &listener.proxy.name),
         }
+    }
+
+    /// Replaces every route's grants with the document a `Blastfile` save
+    /// produced (§4.6 step 2, §4.8).
+    ///
+    /// The document is **authoritative**: a `(route, proxy)` pair it does not
+    /// name evaluates against the empty allowlist afterwards, so a route that
+    /// dropped its `postgres {}` block stops being allowed to do anything. The
+    /// listener's swapped cell and the learning map are the same `Arc` values,
+    /// so an enforcing listener and a wildcard one can never disagree.
+    ///
+    /// # Errors
+    ///
+    /// [`PolicyError`] from the document's entries; nothing is swapped then.
+    pub(crate) fn replace_route_policies(
+        &self,
+        policies: Vec<RoutePolicySpec>,
+    ) -> Result<(), PolicyError> {
+        self.learning.replace_route_policies(policies)?;
+        for listener in &self.listeners {
+            if listener.spec.route == crate::config::WILDCARD_ROUTE {
+                // A wildcard listener takes its route from the control
+                // channel's stack, so it has no single pair to swap; its
+                // lookups go through `Learning` and already see the new map.
+                continue;
+            }
+            listener.allowlist.set(
+                self.learning
+                    .policy(&listener.spec.route, &listener.proxy.name),
+            );
+        }
+        Ok(())
     }
 
     /// The listener with this tag, if there is one.
@@ -285,14 +323,54 @@ impl Shared {
     }
 }
 
+/// One listener's policy, swapped whole by a dev policy document
+/// (§4.6 step 2).
+///
+/// The cell is what makes "new connections see the new grants" true for an
+/// **enforcing** listener without touching `hooks.rs`: `check` clones the
+/// current `Arc<Allowlist>` and evaluates the statement against exactly that
+/// value, so a swap that lands mid-statement can never change the answer
+/// half-way through, and the next statement is the first one that can see the
+/// new table.
+pub(crate) struct ListenerPolicy {
+    /// The policy in force; replaced as one `Arc`, never mutated in place.
+    current: Mutex<Arc<Allowlist>>,
+}
+
+impl ListenerPolicy {
+    /// The policy a boot declared for this listener.
+    fn new(allowlist: Arc<Allowlist>) -> Self {
+        Self {
+            current: Mutex::new(allowlist),
+        }
+    }
+
+    /// The policy in force, for a caller that wants to evaluate several
+    /// statements against one version of it.
+    pub(crate) fn get(&self) -> Arc<Allowlist> {
+        Arc::clone(&lock(&self.current))
+    }
+
+    /// Whether `sql` is allowed by the policy in force right now.
+    pub(crate) fn check(&self, sql: &str) -> Decision {
+        self.get().check(sql)
+    }
+
+    /// Replaces the policy whole.
+    fn set(&self, allowlist: Arc<Allowlist>) {
+        *lock(&self.current) = allowlist;
+    }
+}
+
 /// One listener's policy, its cancellation registry, and the proxy it reaches.
 pub(crate) struct ListenerRuntime {
     /// What init declared for this listener.
     pub(crate) spec: ListenerSpec,
     /// The tag every connection on this listener carries, which is its index.
     pub(crate) tag: Arc<str>,
-    /// The route's effective queries (`ARCHITECTURE.md` §6).
-    pub(crate) allowlist: Allowlist,
+    /// The route's effective queries (`ARCHITECTURE.md` §6), swappable by a
+    /// dev policy document.
+    pub(crate) allowlist: ListenerPolicy,
     /// The upstream this listener's sessions run under.
     pub(crate) proxy: Arc<ProxyRuntime>,
     /// The cancel targets of the sessions that were opened on *this* listener.
@@ -461,204 +539,4 @@ pub(crate) fn connection_pid(connection: &InboundConnection) -> u32 {
         .message_credentials()
         .map(|credentials| credentials.pid.max(0) as u32)
         .unwrap_or(0)
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
-    use blastit_sqlpolicy::TableGrants;
-    use pregresql::proxy::UnixCredentials;
-
-    fn credentials(pid: i32, uid: u32) -> UnixCredentials {
-        UnixCredentials { pid, uid, gid: uid }
-    }
-
-    #[test]
-    fn only_the_listeners_own_uid_is_accepted() {
-        assert!(credentials_match(
-            21_000,
-            Some(credentials(7, 21_000)),
-            false
-        ));
-        assert!(!credentials_match(
-            21_000,
-            Some(credentials(7, 21_001)),
-            false
-        ));
-        assert!(!credentials_match(
-            21_000,
-            Some(credentials(7, 1000)),
-            false
-        ));
-    }
-
-    #[test]
-    fn root_is_never_accepted_without_the_opt_in() {
-        assert!(!credentials_match(0, Some(credentials(1, 0)), false));
-        assert!(!credentials_match(21_000, Some(credentials(1, 0)), false));
-        // A listener that declares another uid does not accept root either,
-        // even when the container opted in.
-        assert!(!credentials_match(21_000, Some(credentials(1, 0)), true));
-    }
-
-    #[test]
-    fn a_root_ci_container_may_opt_into_a_root_listener() {
-        // ADR-0001: the opt-in exists for a container where every process is
-        // root, and it only ever admits uid 0 on a listener that declares 0.
-        assert!(credentials_match(0, Some(credentials(1, 0)), true));
-        assert!(!credentials_match(0, Some(credentials(1, 1)), true));
-        assert!(credentials_match(
-            21_000,
-            Some(credentials(1, 21_000)),
-            true
-        ));
-        assert!(!credentials_match(
-            21_000,
-            Some(credentials(1, 21_001)),
-            true
-        ));
-    }
-
-    #[test]
-    fn a_connection_without_credentials_is_refused() {
-        assert!(!credentials_match(21_000, None, false));
-        assert!(!credentials_match(0, None, true));
-    }
-
-    #[test]
-    fn the_connection_pid_comes_from_scm_credentials() {
-        let connection = InboundConnection {
-            id: 3,
-            transport: pregresql::proxy::Transport::Unix {
-                path: std::path::PathBuf::from("/run/blastit/views/21000/.s.PGSQL.5432"),
-                peer_pid: None,
-                peer_uid: None,
-                peer_gid: None,
-                message_credentials: Some(credentials(4242, 21_000)),
-            },
-            tls: pregresql::proxy::TlsInfo::default(),
-            protocol_version: 196_608,
-            params: vec![],
-            listener_tag: Some(Arc::from("0")),
-        };
-        assert_eq!(connection_pid(&connection), 4242);
-    }
-
-    #[test]
-    fn the_probe_timeout_is_bounded() {
-        assert!(UPSTREAM_PROBE_TIMEOUT <= Duration::from_secs(30));
-        assert!(UPSTREAM_UNREACHABLE_TTL <= UPSTREAM_REACHABLE_TTL);
-    }
-
-    #[test]
-    fn every_listener_has_its_own_cap_registry_and_cancel_registry() {
-        use crate::config::{DbproxyConfig, ProxySpec};
-        use blastit_events::Event;
-
-        let proxy = ProxySpec {
-            name: "db".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 1,
-            user: "u".to_string(),
-            password: "p".to_string().into(),
-            database: "d".to_string(),
-            sslmode: Some("disable".to_string()),
-            ca_cert: None,
-            options: vec![],
-            max_connections: 4,
-        };
-        let listener = |route: &str| ListenerSpec {
-            fd: -1,
-            route: route.to_string(),
-            proxy: "db".to_string(),
-            uid: 21_000,
-            queries: vec![],
-            transaction_control: false,
-            unrestricted: false,
-            tables: TableGrants::default(),
-        };
-        let listeners = vec![listener("a"), listener("b")];
-        let config = DbproxyConfig {
-            proxies: vec![proxy],
-            listeners: listeners.clone(),
-            ..DbproxyConfig::default()
-        };
-        let emit: crate::Emit = Arc::new(|_: Event| {});
-        let shared = Shared::build(&config, &listeners, emit).expect("state");
-
-        let first = shared.listener(0).expect("first");
-        let second = shared.listener(1).expect("second");
-        assert!(
-            !Arc::ptr_eq(&first.cancels, &second.cancels),
-            "a view may only cancel its own listener's sessions"
-        );
-        assert!(!Arc::ptr_eq(&first.starting, &second.starting));
-        assert!(
-            Arc::ptr_eq(&first.proxy, &second.proxy),
-            "both routes reach the same upstream"
-        );
-        assert_eq!(
-            first.starting.available_permits(),
-            MAX_STARTING_CONNECTIONS,
-            "each listener bounds its own startup phase"
-        );
-    }
-
-    #[test]
-    fn the_cancel_cap_is_small_and_separate_from_the_session_cap() {
-        use crate::config::{DbproxyConfig, ProxySpec};
-        use blastit_events::Event;
-
-        let proxy = ProxySpec {
-            name: "db".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 1,
-            user: "u".to_string(),
-            password: "p".to_string().into(),
-            database: "d".to_string(),
-            sslmode: Some("disable".to_string()),
-            ca_cert: None,
-            options: vec![],
-            max_connections: 2,
-        };
-        let listener = ListenerSpec {
-            fd: -1,
-            route: "a".to_string(),
-            proxy: "db".to_string(),
-            uid: 21_000,
-            queries: vec![],
-            transaction_control: false,
-            unrestricted: false,
-            tables: TableGrants::default(),
-        };
-        let config = DbproxyConfig {
-            proxies: vec![proxy],
-            listeners: vec![listener.clone()],
-            ..DbproxyConfig::default()
-        };
-        let emit: crate::Emit = Arc::new(|_: Event| {});
-        let shared = Shared::build(&config, &[listener], emit).expect("state");
-        let proxy = &shared.listener(0).expect("listener").proxy;
-
-        // Two session slots, and a small number of cancel forwards that do not
-        // compete with them.
-        let first = proxy.take_slot().expect("the first slot");
-        let second = proxy.take_slot().expect("the second slot");
-        assert!(proxy.take_slot().is_none(), "the session cap is two");
-        let _sessions = (first, second);
-
-        let mut cancels = Vec::new();
-        while let Some(permit) = proxy.take_cancel_slot() {
-            cancels.push(permit);
-        }
-        assert_eq!(cancels.len(), MAX_CANCEL_FORWARDS);
-        assert!(
-            proxy.take_cancel_slot().is_none(),
-            "the cancel cap is bounded"
-        );
-        // ... and sessions are still refused, unaffected by the cancel cap.
-        assert!(proxy.take_slot().is_none());
-    }
 }

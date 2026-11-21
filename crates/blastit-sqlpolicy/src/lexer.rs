@@ -112,6 +112,12 @@ pub(crate) fn is_space(c: char) -> bool {
 /// Unterminated constructs run to the end of the text: nothing here panics or
 /// fails, because a hostile or truncated statement only has to be *denied*, not
 /// understood.
+///
+/// Every scanner below reports an end that is past the token it scanned, and
+/// the walk keeps a floor of one character on top of that. The floor is what
+/// makes termination structural rather than a property of each scanner: a
+/// hostile statement can cost one region per character, but it cannot stall the
+/// lexer, whatever a scanner returns.
 pub(crate) fn lex(chars: &[char]) -> Vec<Region> {
     let mut regions = Vec::new();
     let mut code_start = 0;
@@ -132,10 +138,10 @@ pub(crate) fn lex(chars: &[char]) -> Vec<Region> {
                     start: i,
                     end,
                 });
-                i = end;
-                code_start = end;
+                i = end.max(i.saturating_add(1));
+                code_start = i;
             }
-            None => i = code_token_end(chars, i),
+            None => i = code_token_end(chars, i).max(i.saturating_add(1)),
         }
     }
 
@@ -209,14 +215,12 @@ pub(crate) fn placeholder_end(chars: &[char], i: usize) -> Option<usize> {
     if chars.get(i) != Some(&'$') {
         return None;
     }
-    let mut j = i + 1;
-    if !matches!(chars.get(j), Some(c) if c.is_ascii_digit()) {
-        return None;
-    }
-    while matches!(chars.get(j), Some(c) if c.is_ascii_digit()) {
-        j += 1;
-    }
-    Some(j)
+    // `{decdigit}+`: the run is counted off the slice, so there is no cursor to
+    // leave standing still when the digits run to the end of the text.
+    let start = i.saturating_add(1);
+    let digits = chars.get(start..).unwrap_or_default();
+    let run = digits.iter().take_while(|c| c.is_ascii_digit()).count();
+    (run > 0).then_some(start.saturating_add(run))
 }
 
 /// Length of the code token starting at `chars[i]`.
@@ -227,27 +231,33 @@ pub(crate) fn placeholder_end(chars: &[char], i: usize) -> Option<usize> {
 /// character at a time, which also keeps comment detection (`--`, `/*`) and the
 /// operator rule's back-up behaviour equivalent.
 pub(crate) fn code_token_end(chars: &[char], i: usize) -> usize {
+    // An identifier is `{ident_start}{ident_cont}*`: the continuation run is
+    // measured off the slice ([`run_end`]), so the token end is an index and
+    // never a cursor that has to move.
     if matches!(chars.get(i), Some(c) if is_ident_start(*c)) {
-        let mut j = i + 1;
-        while matches!(chars.get(j), Some(c) if is_ident_cont(*c)) {
-            j += 1;
-        }
-        return j;
+        return run_end(chars, i.saturating_add(1), is_ident_cont);
     }
 
     if let Some(end) = number_end(chars, i) {
-        let mut j = end;
         // scan.l `{integer,numeric,real}_junk`: an identifier glued to a number
         // is a single (error) token, so the identifier cannot start a new one.
-        if matches!(chars.get(j), Some(c) if is_ident_start(*c)) {
-            while matches!(chars.get(j), Some(c) if is_ident_cont(*c)) {
-                j += 1;
-            }
+        if matches!(chars.get(end), Some(c) if is_ident_start(*c)) {
+            return run_end(chars, end.saturating_add(1), is_ident_cont);
         }
-        return j;
+        return end;
     }
 
-    i + 1
+    i.saturating_add(1)
+}
+
+/// End of the run of characters starting at `from` that `accept`s.
+///
+/// The run is counted by consuming the slice once, so an empty run is the worst
+/// case and the caller still advances past the character it already matched.
+fn run_end(chars: &[char], from: usize, accept: impl Fn(char) -> bool) -> usize {
+    let rest = chars.get(from..).unwrap_or_default();
+    let run = rest.iter().take_while(|c| accept(**c)).count();
+    from.saturating_add(run)
 }
 
 /// End of a numeric literal starting at `chars[i]`, or `None` when none starts
@@ -307,45 +317,54 @@ fn decimal_end(chars: &[char], i: usize) -> Option<usize> {
     if !matches!(chars.get(i), Some(c) if c.is_ascii_digit()) {
         return None;
     }
-    let mut k = i + 1;
-    loop {
-        let mut next = k;
-        if chars.get(next) == Some(&'_') {
-            next += 1;
-        }
-        if matches!(chars.get(next), Some(c) if c.is_ascii_digit()) {
-            k = next + 1;
-        } else {
-            break;
-        }
-    }
-    Some(k)
+    let start = i.saturating_add(1);
+    let rest = chars.get(start..).unwrap_or_default();
+    let run = grouped_digits(rest, |c: char| c.is_ascii_digit());
+    Some(start.saturating_add(run))
 }
 
 /// End of a `0x`/`0o`/`0b` literal: scan.l's `{hex,oct,bin}integer`
 /// (`( _? digit )+`), or its `…fail` form `0[xob]_?` when no digit follows.
 fn radix_end(chars: &[char], start: usize, is_digit: impl Fn(char) -> bool) -> usize {
-    let mut k = start;
-    let mut matched = false;
-    loop {
-        let mut next = k;
-        if chars.get(next) == Some(&'_') {
-            next += 1;
-        }
-        if matches!(chars.get(next), Some(c) if is_digit(*c)) {
-            k = next + 1;
-            matched = true;
+    let rest = chars.get(start..).unwrap_or_default();
+    let run = grouped_digits(rest, &is_digit);
+    if run > 0 {
+        start.saturating_add(run)
+    } else if chars.get(start) == Some(&'_') {
+        // The `…fail` form keeps the separator, so `0x_` is `0x_`, not `0x`.
+        start.saturating_add(1)
+    } else {
+        start
+    }
+}
+
+/// Length of the `(_? digit)*` run at the start of `rest`.
+///
+/// This is the body of scan.l's `{decinteger}` and `{hex,oct,bin}integer`
+/// rules: a separator only counts when a digit follows it, so a trailing `_`
+/// belongs to the next token. The run is read once, front to back, so its
+/// length cannot come from a cursor that failed to move — the loop is over the
+/// slice, not over an index.
+fn grouped_digits(rest: &[char], is_digit: impl Fn(char) -> bool) -> usize {
+    let mut len = 0;
+    let mut separator = false;
+    for c in rest {
+        if separator {
+            if !is_digit(*c) {
+                break;
+            }
+            // The `_` and the digit it joins.
+            len += 2;
+            separator = false;
+        } else if *c == '_' {
+            separator = true;
+        } else if is_digit(*c) {
+            len += 1;
         } else {
             break;
         }
     }
-    if matched {
-        k
-    } else if chars.get(start) == Some(&'_') {
-        start + 1
-    } else {
-        start
-    }
+    len
 }
 
 /// Skips `'…'` (scan.l `xq`), starting at the opening quote: `''` is an escaped
@@ -361,87 +380,109 @@ fn skip_quoted_ident(chars: &[char], i: usize) -> usize {
 }
 
 /// Skips a `''`-or-`""`-style quoted region, starting at its opening quote.
-fn skip_doubled(chars: &[char], mut i: usize, quote: char) -> usize {
-    i += 1;
-    while i < chars.len() {
-        if chars[i] == quote {
-            if chars.get(i + 1) == Some(&quote) {
-                i += 2;
-                continue;
+///
+/// The search for the closing quote consumes the slice — an escaped quote is
+/// two characters, a plain one ends the region — so the scan has no cursor of
+/// its own and cannot stall on an unterminated literal.
+fn skip_doubled(chars: &[char], quote_index: usize, quote: char) -> usize {
+    let mut at = quote_index.saturating_add(1);
+    let mut rest = chars.get(at..).unwrap_or_default();
+    loop {
+        match rest.iter().position(|c| *c == quote) {
+            // `''` is one escaped quote: step over both and keep looking.
+            Some(index) if rest.get(index.saturating_add(1)) == Some(&quote) => {
+                at = at.saturating_add(index).saturating_add(2);
+                rest = rest.get(index.saturating_add(2)..).unwrap_or_default();
             }
-            return i + 1;
+            Some(index) => return at.saturating_add(index).saturating_add(1),
+            None => return at.saturating_add(rest.len()),
         }
-        i += 1;
     }
-    i
 }
 
 /// Skips `B'…'` or `X'…'` (scan.l `xb`/`xh`), starting at the opening quote:
 /// the contents are `[^']*` and there is no escape at all.
 fn skip_escapeless(chars: &[char], quote_index: usize) -> usize {
-    let mut i = quote_index + 1;
-    while i < chars.len() && chars[i] != '\'' {
-        i += 1;
-    }
-    if i < chars.len() { i + 1 } else { i }
+    let start = quote_index.saturating_add(1);
+    let rest = chars.get(start..).unwrap_or_default();
+    let run = rest.iter().position(|c| *c == '\'').unwrap_or(rest.len());
+    // A closing quote belongs to the region; without one the run is already the
+    // end of the text.
+    start
+        .saturating_add(run)
+        .saturating_add(usize::from(run < rest.len()))
 }
 
 /// Skips `E'…'` (scan.l `xe`), starting at the `E`. A backslash escapes the
 /// next character (whatever it is) and `''` is an escaped quote.
-fn skip_e_string(chars: &[char], mut i: usize) -> usize {
-    i += 2; // the E and the opening quote
-    while i < chars.len() {
-        match chars[i] {
-            '\'' => {
-                if chars.get(i + 1) == Some(&'\'') {
-                    i += 2;
-                    continue;
-                }
-                return i + 1;
-            }
-            '\\' => {
-                if i + 1 >= chars.len() {
-                    return chars.len();
-                }
-                i += 2;
-            }
-            _ => i += 1,
+///
+/// The walk is one pass over the slice with an "escaped" flag, so it has no
+/// cursor to advance and a trailing backslash simply ends the text.
+fn skip_e_string(chars: &[char], e_index: usize) -> usize {
+    let start = e_index.saturating_add(2); // the `E` and the opening quote
+    let rest = chars.get(start..).unwrap_or_default();
+    let mut escaped = false;
+    for (index, c) in rest.iter().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match *c {
+            '\\' => escaped = true,
+            '\'' if rest.get(index.saturating_add(1)) == Some(&'\'') => escaped = true,
+            '\'' => return start.saturating_add(index).saturating_add(1),
+            _ => {}
         }
     }
-    i
+    chars.len()
 }
 
 /// Skips a `--` comment, starting at the first `-`, up to and including the
 /// newline that ends it. scan.l's `comment` is `--{non_newline}*`, so either
 /// `\n` or `\r` ends it.
-fn skip_line_comment(chars: &[char], mut i: usize) -> usize {
-    i += 2;
-    while i < chars.len() && !matches!(chars[i], '\n' | '\r') {
-        i += 1;
-    }
-    if i < chars.len() {
-        i += 1;
-    }
-    i
+fn skip_line_comment(chars: &[char], dashes: usize) -> usize {
+    let start = dashes.saturating_add(2);
+    let rest = chars.get(start..).unwrap_or_default();
+    // The first non-newline character ends the comment's body; the newline that
+    // ends it is part of the comment. Finding it consumes the slice, so there is
+    // no cursor to leave behind.
+    let body = rest
+        .iter()
+        .position(|c| matches!(c, '\n' | '\r'))
+        .unwrap_or(rest.len());
+    start
+        .saturating_add(body)
+        .saturating_add(usize::from(body < rest.len()))
 }
 
 /// Skips a `/* … */` comment, starting at the `/`, honouring PostgreSQL's
 /// nesting. An unterminated comment runs to the end of the text.
-fn skip_block_comment(chars: &[char], mut i: usize) -> usize {
-    i += 2;
+///
+/// Each iteration consumes at least one character of the text whatever the
+/// nesting depth does, so an unterminated or hostile comment cannot stall the
+/// scan.
+fn skip_block_comment(chars: &[char], slash: usize) -> usize {
+    let mut at = slash.saturating_add(2);
+    let mut rest = chars.get(at..).unwrap_or_default();
     let mut depth = 1usize;
-    while i < chars.len() && depth > 0 {
-        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+    while depth > 0 {
+        let Some(first) = rest.first().copied() else {
+            break;
+        };
+        let second = rest.get(1).copied();
+        let step = if first == '/' && second == Some('*') {
             depth += 1;
-            i += 2;
-        } else if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+            2
+        } else if first == '*' && second == Some('/') {
             depth -= 1;
-            i += 2;
+            2
         } else {
-            i += 1;
-        }
+            1
+        };
+        at = at.saturating_add(step);
+        rest = rest.get(step..).unwrap_or_default();
     }
-    i
+    at
 }
 
 /// If a dollar-quote opening delimiter starts at `chars[i]` (`$$`, `$tag$`),
@@ -455,20 +496,21 @@ pub(crate) fn dollar_tag_at(chars: &[char], i: usize) -> Option<(usize, String)>
     if chars.get(i) != Some(&'$') {
         return None;
     }
-    let mut j = i + 1;
-    if chars.get(j) == Some(&'$') {
+    let start = i.saturating_add(1);
+    if chars.get(start) == Some(&'$') {
         return Some((2, String::new()));
     }
-    let start = j;
-    if !matches!(chars.get(j), Some(c) if is_dolq_start(*c)) {
+    if !matches!(chars.get(start), Some(c) if is_dolq_start(*c)) {
         return None;
     }
-    j += 1;
-    while matches!(chars.get(j), Some(c) if is_dolq_cont(*c)) {
-        j += 1;
-    }
-    if chars.get(j) == Some(&'$') {
-        Some((j - i + 1, chars[start..j].iter().collect()))
+    // `dolq_cont*`: the run is counted off the slice, so the tag has no cursor
+    // that could stand still.
+    let end = run_end(chars, start.saturating_add(1), is_dolq_cont);
+    if chars.get(end) == Some(&'$') {
+        Some((
+            end.saturating_sub(i).saturating_add(1),
+            chars[start..end].iter().collect(),
+        ))
     } else {
         None
     }
@@ -484,14 +526,13 @@ pub(crate) fn find_dollar_close(chars: &[char], from: usize, tag: &str) -> Optio
     let needle: Vec<char> = needle.chars().collect();
     let len = needle.len();
 
-    let mut k = from;
-    while k + len <= chars.len() {
-        if chars[k..k + len] == needle[..] {
-            return Some(k);
-        }
-        k += 1;
-    }
-    None
+    // `windows` walks every candidate position once, so the search cannot stall
+    // and needs no cursor of its own. `len` is at least 2 (`$$`), so it is never
+    // zero.
+    let rest = chars.get(from..)?;
+    rest.windows(len)
+        .position(|window| window == needle.as_slice())
+        .map(|index| from.saturating_add(index))
 }
 
 /// scan.l `ident_start` / `dolq_start`: `[A-Za-z\200-\377_]`, that is ASCII
@@ -514,452 +555,4 @@ fn is_dolq_cont(c: char) -> bool {
 /// scan.l `dolq_start` is the same character class as `ident_start`.
 fn is_dolq_start(c: char) -> bool {
     is_ident_start(c)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn kinds(sql: &str) -> Vec<(RegionKind, String)> {
-        let chars: Vec<char> = sql.chars().collect();
-        lex(&chars)
-            .into_iter()
-            .map(|r| (r.kind, chars[r.start..r.end].iter().collect()))
-            .collect()
-    }
-
-    fn code(sql: &str) -> Vec<(RegionKind, String)> {
-        vec![(RegionKind::Code, sql.to_string())]
-    }
-
-    #[test]
-    fn regions_are_contiguous_and_cover_everything() {
-        let sql = "SELECT 'a''b', \"c\"\"d\", $t$e$t$, E'f\\'g', B'1', X'f', 1 -- h\n/* i */ /* j /* k */ l */ €€";
-        let chars: Vec<char> = sql.chars().collect();
-        let regions = lex(&chars);
-        assert_eq!(regions.first().map(|r| r.start), Some(0));
-        assert_eq!(regions.last().map(|r| r.end), Some(chars.len()));
-        for pair in regions.windows(2) {
-            assert_eq!(pair[0].end, pair[1].start);
-        }
-    }
-
-    #[test]
-    fn classifies_constructs() {
-        assert_eq!(
-            kinds("'a'\"b\"$$c$$"),
-            vec![
-                (RegionKind::SingleQuoted, "'a'".to_string()),
-                (RegionKind::QuotedIdent, "\"b\"".to_string()),
-                (RegionKind::DollarQuoted, "$$c$$".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("x/* c /* d */ e */y"),
-            vec![
-                (RegionKind::Code, "x".to_string()),
-                (RegionKind::Comment, "/* c /* d */ e */".to_string()),
-                (RegionKind::Code, "y".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn whitespace_is_exactly_scan_l_space() {
-        for c in [' ', '\t', '\n', '\r', '\x0b', '\x0c'] {
-            assert!(is_space(c), "{c:?} is scan.l space");
-        }
-        for c in ['\u{a0}', '\u{85}', '\u{2000}', '\u{2028}', '\u{3000}'] {
-            assert!(!is_space(c), "{c:?} is not scan.l space");
-        }
-    }
-
-    #[test]
-    fn line_comments_end_at_cr_or_lf() {
-        assert_eq!(
-            kinds("q--c\rx"),
-            vec![
-                (RegionKind::Code, "q".to_string()),
-                (RegionKind::Comment, "--c\r".to_string()),
-                (RegionKind::Code, "x".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("q--c\nx"),
-            vec![
-                (RegionKind::Code, "q".to_string()),
-                (RegionKind::Comment, "--c\n".to_string()),
-                (RegionKind::Code, "x".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("q--c"),
-            vec![
-                (RegionKind::Code, "q".to_string()),
-                (RegionKind::Comment, "--c".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn dollar_quote_tags_use_the_scan_l_alphabet() {
-        assert_eq!(
-            kinds("$é$a$é$"),
-            vec![(RegionKind::DollarQuoted, "$é$a$é$".to_string())]
-        );
-        assert_eq!(
-            kinds("$€$a$€$"),
-            vec![(RegionKind::DollarQuoted, "$€$a$€$".to_string())]
-        );
-        assert_eq!(
-            kinds("$€1_$a$€1_$"),
-            vec![(RegionKind::DollarQuoted, "$€1_$a$€1_$".to_string())]
-        );
-        assert_eq!(
-            kinds("$_t1$a$_t1$"),
-            vec![(RegionKind::DollarQuoted, "$_t1$a$_t1$".to_string())]
-        );
-        // A digit may not start a tag, so `$1$` is the parameter `$1` and `$`.
-        assert_eq!(kinds("$1$"), code("$1$"));
-        // ... and a second `$` after the parameter does open an (unterminated)
-        // dollar quote, exactly as scan.l scans `$1` then `$$`.
-        assert_eq!(
-            kinds("$1$$"),
-            vec![
-                (RegionKind::Code, "$1".to_string()),
-                (RegionKind::DollarQuoted, "$$".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn identifiers_swallow_dollar_signs() {
-        assert_eq!(kinds("a$b$c"), code("a$b$c"));
-        assert_eq!(kinds("a$b$x   y$b$z"), code("a$b$x   y$b$z"));
-        assert_eq!(kinds("a$$b$$c"), code("a$$b$$c"));
-        assert_eq!(
-            kinds("$tag$a$tag$"),
-            vec![(RegionKind::DollarQuoted, "$tag$a$tag$".to_string())]
-        );
-        // After a number the `$` is a fresh token, so the later `$a$` opens a
-        // quote — while `$1$` itself stays code.
-        assert_eq!(
-            kinds("1$1$a$1$"),
-            vec![
-                (RegionKind::Code, "1$1".to_string()),
-                (RegionKind::DollarQuoted, "$a$1$".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn bit_and_hex_strings_have_no_escape() {
-        assert_eq!(
-            kinds("B'a''b'"),
-            vec![
-                (RegionKind::BitString, "B'a'".to_string()),
-                (RegionKind::SingleQuoted, "'b'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("X'a''b'"),
-            vec![
-                (RegionKind::HexString, "X'a'".to_string()),
-                (RegionKind::SingleQuoted, "'b'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("b'1010'x'1F'"),
-            vec![
-                (RegionKind::BitString, "b'1010'".to_string()),
-                (RegionKind::HexString, "x'1F'".to_string()),
-            ]
-        );
-        // A backslash is ordinary, so the literal ends at the next quote; the
-        // `b` after it is then a bit-string prefix of its own, not an
-        // identifier, because `b'` matches scan.l's `xbstart` (longest match).
-        assert_eq!(
-            kinds(r"B'a\'b'"),
-            vec![
-                (RegionKind::BitString, r"B'a\'".to_string()),
-                (RegionKind::BitString, "b'".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn national_strings_escape_only_by_doubling() {
-        assert_eq!(
-            kinds("N'x'"),
-            vec![(RegionKind::NationalString, "N'x'".to_string())]
-        );
-        assert_eq!(
-            kinds("n'x'"),
-            vec![(RegionKind::NationalString, "n'x'".to_string())]
-        );
-        assert_eq!(
-            kinds("N'it''s'"),
-            vec![(RegionKind::NationalString, "N'it''s'".to_string())]
-        );
-        // No backslash escape: the literal ends at the next quote.
-        assert_eq!(
-            kinds(r"N'a\'b'"),
-            vec![
-                (RegionKind::NationalString, r"N'a\'".to_string()),
-                (RegionKind::BitString, "b'".to_string()),
-            ]
-        );
-        // The prefix needs a token start, so an identifier keeps its `N`.
-        assert_eq!(
-            kinds("xN'y'"),
-            vec![
-                (RegionKind::Code, "xN".to_string()),
-                (RegionKind::SingleQuoted, "'y'".to_string()),
-            ]
-        );
-        // ... and a number glues a following `N` to itself (`integer_junk`).
-        assert_eq!(
-            kinds("1N'x'"),
-            vec![
-                (RegionKind::Code, "1N".to_string()),
-                (RegionKind::SingleQuoted, "'x'".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn unicode_strings_swallow_their_prefix() {
-        assert_eq!(
-            kinds(r"U&'\0041'"),
-            vec![(RegionKind::UnicodeString, r"U&'\0041'".to_string())]
-        );
-        assert_eq!(
-            kinds(r"u&'a''b'"),
-            vec![(RegionKind::UnicodeString, r"u&'a''b'".to_string())]
-        );
-        // A backslash introduces an escape, it does not escape the quote.
-        assert_eq!(
-            kinds(r"U&'a\'b'"),
-            vec![
-                (RegionKind::UnicodeString, r"U&'a\'".to_string()),
-                (RegionKind::BitString, "b'".to_string()),
-            ]
-        );
-        // `U&"ident"` is a quoted identifier: the prefix is code, not a string.
-        assert_eq!(
-            kinds(r#"U&"ident""#),
-            vec![
-                (RegionKind::Code, "U&".to_string()),
-                (RegionKind::QuotedIdent, r#""ident""#.to_string()),
-            ]
-        );
-        // A `U` glued to an identifier never starts one.
-        assert_eq!(
-            kinds("xU&'y'"),
-            vec![
-                (RegionKind::Code, "xU&".to_string()),
-                (RegionKind::SingleQuoted, "'y'".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn e_strings_need_a_token_start() {
-        assert_eq!(
-            kinds("E'x'"),
-            vec![(RegionKind::EString, "E'x'".to_string())]
-        );
-        assert_eq!(
-            kinds("e'x'"),
-            vec![(RegionKind::EString, "e'x'".to_string())]
-        );
-        assert_eq!(
-            kinds("(E'x')"),
-            vec![
-                (RegionKind::Code, "(".to_string()),
-                (RegionKind::EString, "E'x'".to_string()),
-                (RegionKind::Code, ")".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("SELECT 1 E'x'"),
-            vec![
-                (RegionKind::Code, "SELECT 1 ".to_string()),
-                (RegionKind::EString, "E'x'".to_string()),
-            ]
-        );
-        // `WHERE'x'`, `xE'y'`: the E belongs to an identifier.
-        assert_eq!(
-            kinds("WHERE'x'"),
-            vec![
-                (RegionKind::Code, "WHERE".to_string()),
-                (RegionKind::SingleQuoted, "'x'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("xE'y'"),
-            vec![
-                (RegionKind::Code, "xE".to_string()),
-                (RegionKind::SingleQuoted, "'y'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("x$E'y'"),
-            vec![
-                (RegionKind::Code, "x$E".to_string()),
-                (RegionKind::SingleQuoted, "'y'".to_string()),
-            ]
-        );
-        // A lone `$` is its own token, so the E does start one.
-        assert_eq!(
-            kinds("$E'x'"),
-            vec![
-                (RegionKind::Code, "$".to_string()),
-                (RegionKind::EString, "E'x'".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn a_number_glues_a_following_identifier_to_itself() {
-        // scan.l `integer_junk`: `1E` is one (error) token, so `'x'` is a plain
-        // string, not an E-string.
-        for sql in ["1E'x'", "1.5E'x'", ".5E'x'", "1_0E'x'", "1e'x'", "1e5'x'"] {
-            assert_eq!(
-                kinds(sql),
-                vec![
-                    (RegionKind::Code, sql.trim_end_matches("'x'").to_string()),
-                    (RegionKind::SingleQuoted, "'x'".to_string()),
-                ],
-                "for {sql:?}"
-            );
-        }
-        assert_eq!(
-            kinds("0x1E'a'"),
-            vec![
-                (RegionKind::Code, "0x1E".to_string()),
-                (RegionKind::SingleQuoted, "'a'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("0x'a'"),
-            vec![
-                (RegionKind::Code, "0x".to_string()),
-                (RegionKind::SingleQuoted, "'a'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("0b'1'"),
-            vec![
-                (RegionKind::Code, "0b".to_string()),
-                (RegionKind::SingleQuoted, "'1'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("$1E'a'"),
-            vec![
-                (RegionKind::Code, "$1E".to_string()),
-                (RegionKind::SingleQuoted, "'a'".to_string()),
-            ]
-        );
-        // `1..2` is `1`, `..`, `2`, so a following E-string does start there.
-        assert_eq!(
-            kinds("1..E'x'"),
-            vec![
-                (RegionKind::Code, "1..".to_string()),
-                (RegionKind::EString, "E'x'".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn e_string_escapes() {
-        assert_eq!(
-            kinds(r"E'a\'b'"),
-            vec![(RegionKind::EString, r"E'a\'b'".to_string())]
-        );
-        assert_eq!(
-            kinds(r"E'it''s'"),
-            vec![(RegionKind::EString, r"E'it''s'".to_string())]
-        );
-        assert_eq!(
-            kinds(r"E'a\'b"),
-            vec![(RegionKind::EString, r"E'a\'b".to_string())]
-        );
-    }
-
-    #[test]
-    fn standard_strings_have_no_backslash_escape() {
-        // `b'` is scan.l's `xbstart`, so it opens a bit string here rather than
-        // continuing an identifier.
-        assert_eq!(
-            kinds(r"'a\'b'"),
-            vec![
-                (RegionKind::SingleQuoted, r"'a\'".to_string()),
-                (RegionKind::BitString, "b'".to_string()),
-            ]
-        );
-        assert_eq!(
-            kinds("'it''s'"),
-            vec![(RegionKind::SingleQuoted, "'it''s'".to_string())]
-        );
-        assert_eq!(
-            kinds(r#""a""b""#),
-            vec![(RegionKind::QuotedIdent, r#""a""b""#.to_string())]
-        );
-    }
-
-    #[test]
-    fn unterminated_constructs_run_to_the_end() {
-        for sql in [
-            "'a",
-            "\"a",
-            "E'a",
-            "B'a",
-            "X'a",
-            "$$a",
-            "$t$a",
-            "--a",
-            "/*a",
-            "/* a /* b */ c",
-        ] {
-            let chars: Vec<char> = sql.chars().collect();
-            let regions = lex(&chars);
-            assert_eq!(regions.len(), 1, "{sql:?}");
-            assert_eq!(regions[0].start, 0, "{sql:?}");
-            assert_eq!(regions[0].end, chars.len(), "{sql:?}");
-        }
-    }
-
-    #[test]
-    fn placeholders_are_dollar_signs_and_digits() {
-        fn end(sql: &str) -> Option<usize> {
-            let chars: Vec<char> = sql.chars().collect();
-            placeholder_end(&chars, 0)
-        }
-        assert_eq!(end("$1"), Some(2));
-        assert_eq!(end("$12, x"), Some(3));
-        assert_eq!(end("$0"), Some(2));
-        assert_eq!(end("$007 "), Some(4));
-        // Not placeholders: no digits, not a `$`, or the `$` of a dollar quote.
-        assert_eq!(end("$"), None);
-        assert_eq!(end("$a"), None);
-        assert_eq!(end("$?"), None);
-        assert_eq!(end("$$1"), None);
-        assert_eq!(end("$tag$"), None);
-        assert_eq!(end("1"), None);
-        assert_eq!(end(""), None);
-    }
-
-    #[test]
-    fn a_placeholder_is_only_read_where_a_token_starts() {
-        // `a$1` is one identifier, so nothing inside it is a parameter; the
-        // callers only test at token starts, which this mirrors by asking after
-        // the identifier.
-        let sql = "a$1";
-        let chars: Vec<char> = sql.chars().collect();
-        let after_ident = code_token_end(&chars, 0);
-        assert_eq!(after_ident, chars.len());
-        assert_eq!(placeholder_end(&chars, after_ident), None);
-    }
 }

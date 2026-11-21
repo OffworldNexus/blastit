@@ -1,24 +1,36 @@
 name: Wheels
 
-# Every commit to `develop` builds the manylinux_2_28 wheels this project ships
-# — CPython 3.13 and 3.14 — and leaves them as artifacts of the run. That way
-# packaging breakage shows up on the commit that caused it, and anyone who wants
-# to try the current tree can download the wheel it built.
+# `TESTING_PLAN.md` §3, the wheel story: one universal `py3-none` wheel per
+# (arch, libc) that installs with `pip`/`uv` and serves a WSGI view through the
+# shim it carries.
 #
-# Nothing is published here: from 0.1 blastit is on PyPI, and a `v*` tag is what
-# publishes (`.github/workflows/publish-pypi.yml`, trusted publishing). The two
-# share `.github/actions/build-wheel`, so the released wheel is the one every
-# commit already built.
+# Every commit to `develop` builds the wheels this project ships and leaves them
+# as artifacts of the run. That way packaging breakage shows up on the commit
+# that caused it, and anyone who wants to try the current tree can download the
+# wheel it built.
+#
+# The legs are **not** listed here: `scripts/platform_matrix.py --matrix wheels`
+# is the one place a leg is declared (`MB.3.18`), so a wheel added there appears
+# in this workflow, in `.github/workflows/publish-pypi.yml` and in the install
+# documentation together, or in none of them. All four legs are enabled:
+# the `aarch64` ones run on `ubuntu-24.04-arm` (they are **CI-only** — no arm64
+# machine ran them when the matrix was authored), and the `musl` ones run in an
+# Alpine job container because a musllinux wheel has to be linked by musl.
+#
+# Every leg's smoke is `e2e/run_packaging.py --leg wheel`: the one place that
+# installs the artifact with `pip` and drives `--version`, `blastit fmt`,
+# `blastit check` and a served WSGI view. The images it installs into are the
+# leg's own `runtime_images` from the matrix (`python:3.12/3.13/3.14-slim` for
+# glibc, the `-alpine` images for musl), so no workflow keeps a second copy of
+# the install commands.
+#
+# Nothing is published here: a `v*` tag (or the release PR merge) is what
+# publishes — `.github/workflows/publish-pypi.yml`, trusted publishing. The two
+# share `.github/actions/build-wheel`.
 #
 # The wheels an artifact carries have a version of their own — `Cargo.toml`'s
 # plus `-dev<run number>` (`scripts/dev-version.sh`) — so a downloaded artifact
 # is never mistaken for the release at the same commit.
-#
-# x86_64 only, like the published ones: arm64 does not build (see
-# `.github/workflows/publish-pypi.yml` for what it would take).
-#
-# Nothing runs on a pull request: a PR that changes the packaging gets the same
-# build, and more, from `.github/workflows/publish-pypi.yml`.
 
 on:
   push:
@@ -33,17 +45,82 @@ permissions:
   contents: read
 
 jobs:
-  wheels:
-    name: wheel (CPython ${{ matrix.python }})
+  matrix:
+    name: the leg list (scripts/platform_matrix.py)
     runs-on: ubuntu-latest
+    outputs:
+      wheels_gnu: ${{ steps.legs.outputs.wheels_gnu }}
+      wheels_musl: ${{ steps.legs.outputs.wheels_musl }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # A broken matrix fails here, once, before any container is pulled.
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
+      - id: legs
+        run: |
+          set -euo pipefail
+          for libc in gnu musl; do
+              echo "wheels_$libc=$(uv run --no-project scripts/platform_matrix.py --matrix wheels --libc "$libc")" >> "$GITHUB_OUTPUT"
+          done
+
+  wheels_gnu:
+    name: '§3 pip install in python:3.12/3.13/3.14-slim (${{ matrix.name }})'
+    needs: matrix
     strategy:
-      matrix:
-        python: ["3.13", "3.14"]
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.wheels_gnu) }}
+    runs-on: ${{ matrix.runs_on }}
     steps:
       - uses: actions/checkout@v4
       - name: Development version
         run: scripts/dev-version.sh "$GITHUB_RUN_NUMBER"
+      # Builds in the leg's own manylinux container and installs the result in the
+      # matrix's images through `e2e/run_packaging.py --leg wheel`.
       - uses: ./.github/actions/build-wheel
         with:
-          python: ${{ matrix.python }}
-          artifact: wheel-${{ matrix.python }}
+          manylinux: ${{ matrix.manylinux }}
+          platform: manylinux_${{ matrix.manylinux }}
+          artifact: wheel-${{ matrix.name }}
+
+  wheels_musl:
+    name: '§3 pip install in python:3.12/3.13/3.14-alpine (${{ matrix.name }})'
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.wheels_musl) }}
+    runs-on: ${{ matrix.runs_on }}
+    # Same reason as `publish-pypi.yml`: build inside `docker run alpine:3.21`
+    # rather than job-level `container:`, so JS actions (`checkout`,
+    # `upload-artifact`) run natively on arm64 runners as well as x86_64.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: Development version
+        run: scripts/dev-version.sh "$GITHUB_RUN_NUMBER"
+      - name: Build the musllinux wheel in Alpine
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker run --rm \
+              -e HOST_UID="$(id -u)" \
+              -e HOST_GID="$(id -g)" \
+              -e PY_VER=3.13 \
+              -v "$PWD:/src" \
+              -w /src \
+              alpine:3.21 \
+              sh -eu -c '
+                  cleanup_owner() {
+                      chown -R "$HOST_UID:$HOST_GID" /src/dist /src/target /src/python/blastit/_bin 2>/dev/null || true
+                  }
+                  trap cleanup_owner EXIT
+                  apk add --no-cache bash >/dev/null
+                  bash scripts/build-musl-wheel.sh "$PY_VER"
+              '
+      - name: Install it in every image its leg names and drive it (e2e/run_packaging.py)
+        run: uv run --no-project e2e/run_packaging.py --require-legs --leg wheel --wheel "$(ls dist/blastit-*-py3-none-musllinux_*.whl | head -n 1)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error

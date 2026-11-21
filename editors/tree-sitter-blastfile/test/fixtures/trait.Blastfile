@@ -1,0 +1,13 @@
+trait connection {
+    postgres {
+        query "SET TIME ZONE 'UTC'"
+    }
+}
+
+trait session {
+    postgres {
+        transactions
+        functions pg_catalog.unaccent, st_distance
+        query 'SELECT count(*) FROM products WHERE price > $?'
+    }
+}

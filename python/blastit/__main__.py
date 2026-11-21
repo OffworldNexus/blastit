@@ -1,16 +1,9 @@
-"""`blastit` and `python -m blastit`: the console script.
+"""`blastit`, `blastit-lsp` and `python -m blastit`: the console scripts.
 
-The entry point runs the server on the interpreter the wheel was installed into
-(the project's virtualenv), so the application's dependencies are importable for
-the same reason they are for ``python app.py``. From there the stages of §4:
-
-* stage 0 re-executes *this* interpreter (``python -I -m blastit``) for stage 1,
-  carrying the interpreter's ``sys.path`` across the barrier;
-* it ``execve``s ``blastit/_bin/blastit-dbproxy`` — a binary with no interpreter
-  in it — for the role that holds the real credentials;
-* and the configuration comes from the environment, as §8.2 says: the usual
-  ``BLASTIT_*`` variables, plus an optional ``--preset NAME`` that supplies
-  defaults those variables still override.
+The package carries no server: every entry point ends in one ``os.execvpe`` of a
+binary it ships (``blastit/_bin/blastit``, and ``blastit/_bin/blastit-lsp``), so
+one ``py3-none-*`` wheel serves every CPython ``>=3.12`` and no interpreter hosts
+a stage. The command line and the exit status are the binary's own.
 """
 
 import os
@@ -24,9 +17,25 @@ def main() -> None:
     """
     from blastit import _blastit
 
-    here = os.path.dirname(os.path.abspath(__file__))
-    dbproxy = os.path.join(here, "_bin", "blastit-dbproxy")
-    raise SystemExit(_blastit.main(sys.argv[1:], sys.executable, dbproxy))
+    os.environ.setdefault("BLASTIT_WHEEL_PYTHON", sys.executable)
+    raise SystemExit(_blastit.main(sys.argv[1:], sys.executable, ""))
+
+
+def main_lsp() -> None:
+    """`blastit-lsp`: the language server a bundle ships beside the binary."""
+    from blastit import _blastit
+
+    try:
+        # Resolved before the environment is copied, and the guard is in the
+        # environment this process becomes: asked for a program while `_bin/`
+        # has none, the fallbacks would find this very console script and
+        # `exec` it again, one interpreter deep per turn.
+        program = _blastit.lsp_bin_path()
+        environment = dict(os.environ)
+        environment.setdefault(_blastit.EXEC_GUARD, "1")
+        os.execvpe(program, [program, *sys.argv[1:]], environment)
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"blastit-lsp: {error}") from error
 
 
 if __name__ == "__main__":

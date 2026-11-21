@@ -1,69 +1,53 @@
-# Any WSGI app
+# Frameworks
 
-Blastit loads one callable and calls it. `app` names it as
-`<module>:<callable>`. There is no package to import, no `manage.py` command and
-no framework integration: Django, Flask, SQLAlchemy, raw psycopg and a
-hand-written WSGI app all look the same from here.
+Blastit starts your app through one of three interfaces, and all three share the same `Blastfile`,
+the same trust boundary and the same CLI. Pick the interface, then read only what your framework
+changes.
 
-```toml title="Django"
-app = "myshop.wsgi:application"
+```mermaid
+flowchart LR
+    client(["client"]) --> ingress["ingress"]
+    ingress --> sched["scheduler"]
+    sched --> py["view · python<br/>WSGI callable"]
+    sched --> php["view · php<br/>public/index.php"]
+    sched --> mounts["static mount<br/>scheduler's uid"]
+    py -- "socket" --> dbproxy["dbproxy"]
+    php -- "socket" --> dbproxy
+    dbproxy --> db[("PostgreSQL")]
 ```
 
-```toml title="Flask"
-app = "app:app"
-```
+`entrypoint` is declared once, at the top level of the file, and every view below it is identical:
+its own process, its own uid, its own grants. Two things change per runtime — what the entrypoint
+names and which files it may read.
 
-```toml title="anything else"
-app = "wsgi:application"
-```
+## Pick your runtime
 
-Requests are routed by `blastit.toml`, not by your URLconf: `PATH_INFO` picks a
-route, and each route is a process and a uid with its own grants. `preload`
-imports modules once, before the fork, so every route shares one copy.
+| Interface | What the file says | Install | Pages |
+|---|---|---|---|
+| **Python (WSGI)** | `entrypoint python "module:attr"` | `blastit` + CPython 3.13 or 3.14 | [Connector](python/index.md) · [Django](python/django.md) · [Flask, SQLAlchemy and raw WSGI](python/flask.md) |
+| **PHP (PSR-7/PSR-15, front controller)** | `entrypoint php "public/index.php"`, on the host's NTS `libphp` (8.3, 8.4, 8.5 and 8.6) | `blastit` + `libphp` | [Connector](php/index.md) · [Symfony](php/symfony.md) · [Laravel](php/laravel.md) |
+| **Static & SPA** | `static "/"` with a `root`, and no `entrypoint` | `blastit` | [Static sites and SPAs](static-and-spa.md) |
 
-## What Blastit needs from the app
+## What each interface answers
 
-### Bind parameters server-side
+| Capability | Python (WSGI) | PHP (PSR-7/PSR-15) | Static & SPA |
+|---|---|---|---|
+| What Blastit starts | the WSGI callable `entrypoint python` names | the front controller, inside the host's embedded NTS `libphp` | nothing: the scheduler reads files |
+| Routing | your app's own WSGI routing | the front controller's router | exact file, a directory's `index`, then `fallback` |
+| Static assets | `static "/static"` with `root "staticfiles"`, beside the views | `static "/"` with `root "public"`; `.php` sources are `404` | the mount is the whole app |
+| PostgreSQL | `postgres $DATABASE_URL`, grants per view | the same store, or a split `DB_*` block | none — a mount reads no store |
+| A request body | `body json`, `form`, `none` or `raw unvalidated` on the view | the same directive on the view | a `GET` carrying a body is `413` |
+| Filling the grants | `blastit check --learn` | `blastit dev --learn`, then `blastit fmt` | nothing to learn |
+| The CI gate | `blastit check` runs `pytest` and the audit | `blastit fmt --check` plus an HTTP smoke run | `blastit check` audits every `root` |
+| Production | `blastit --preset …` under real uids | `blastit --preset …` | `blastit --preset …` |
 
-Statements are matched by text, so the text must be identical on every request.
-A client that inlines literals sends a different string every time.
+!!! note "`--learn` covers what the audit cannot"
 
-| Client | What to do |
-|---|---|
-| psycopg 3, directly | nothing: parameters travel as `$1` |
-| Django | `OPTIONS["server_side_binding"] = True` |
-| SQLAlchemy | use `postgresql+psycopg://` |
-| psycopg2 | not usable: it cannot bind server-side; install `psycopg[binary]` |
+    Python's `check` observes real requests and closes the gaps itself. For PHP it is one
+    `blastit dev --learn` pass that writes the views and their exact `query` lines: send every
+    route, stop with ++ctrl+c++, then read `git diff` ([the workflow](php/index.md#learn-the-grants)).
 
-### Open the connection per request
+## Where next
 
-Each request runs on a thread that is thrown away afterwards, so a connection
-that outlives the request is orphaned.
-
-| Client | What to do |
-|---|---|
-| psycopg 3, directly | close it in a teardown |
-| Django | `CONN_MAX_AGE = 0` |
-| SQLAlchemy | `poolclass=NullPool` |
-| Flask-SQLAlchemy | `SQLALCHEMY_ENGINE_OPTIONS = {"poolclass": NullPool}` |
-
-For pooling, put PgBouncer in front of the real database.
-
-## Routing rules
-
-* `path` is a list of [regexes](https://docs.rs/regex/latest/regex/) matched
-  against the **whole** of `PATH_INFO`, in manifest order; the first match wins,
-  so a catch-all goes last.
-* `methods = ["GET", "HEAD"]` is optional. `HEAD` is not implied by `GET`.
-* A query string is not part of `PATH_INFO`.
-* A catch-all at the end lets your app render its own `404`s.
-
-## Check it
-
-`blastit check` is framework-agnostic: it runs your pytest suite through
-Blastit's brokers and checks every request and statement against the manifest.
-
-## Next
-
-[Django](django.md) · [Flask, SQLAlchemy and raw WSGI](flask.md) ·
-[local development](../local.md) · [CI/CD](../ci.md).
+* [Python (WSGI)](python/index.md) · [PHP](php/index.md) · [Static & SPA](static-and-spa.md)
+* [Deployments](../deploy/index.md) · [CI/CD](../ci.md) · [The Blastfile](../blastfile.md)

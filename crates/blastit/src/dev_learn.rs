@@ -16,9 +16,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use blastit_dbproxy::{ObsTarget, WireSqlObs};
-use blastit_manifest::edit::{
-    ManifestEdits, ProposedGrant, ProposedRoute, apply_edits, write_atomic,
-};
+use blastit_manifest::blastfile::{BlastfileEdits, ProposedGrant, ProposedView, apply_edits};
+use blastit_manifest::edit::write_atomic;
 use blastit_manifest::{Grant, Manifest, ProxyName};
 
 /// The `privilege` value every `blastit dev` boot reports (`R22`).
@@ -63,24 +62,119 @@ pub fn expose_requested() -> bool {
     std::env::var_os(EXPOSE_VARIABLE).is_some_and(|value| value == "1")
 }
 
-/// The exact 3-line banner (§1.2).
+/// The startup banner (`docs/design/ma-lean-dx.md` §1.2).
 ///
-/// `routes` is the manifest's route count; `exposed` is whether a non-loopback
-/// host was accepted, which is the only case that names the uid.
-pub fn banner(host: &std::net::IpAddr, port: u16, routes: usize, exposed: bool) -> String {
-    let first = if exposed {
-        format!(
-            "  blastit dev · single-uid simulation · {host}:{port} · uid {} (EXPOSED, no auth)",
-            euid()
-        )
-    } else {
-        format!("  blastit dev · single-uid simulation · {host}:{port}")
-    };
-    let noun = if routes == 1 { "route" } else { "routes" };
-    format!(
-        "{first}\n  Not a sandbox. Production `blastit` refuses to run like this.\n  \
-         http · scheduler · dbproxy · {routes} {noun}\n"
-    )
+/// It is informational, printed once, before the server binds: never an event.
+/// Line 1 names the address as something a terminal can click
+/// (`http://127.0.0.1:8080`, `http://[::1]:8080` for IPv6 — a bare IPv6 address
+/// in a URL has to be bracketed), with `[LEARN MODE]` when `--learn` is on. An
+/// exposed non-loopback bind keeps the bare `host:port` form, because the point
+/// there is which address the whole network reaches, not a link.
+///
+/// Then the honesty line, the components that run, and one aligned row per
+/// served thing: `view  NAME  METHODS patterns` per declared route, plus a
+/// `static  PREFIX  GET, HEAD  ROOT` row per mount (§9.5). `routes` and the
+/// marks count are spelled in the singular when there is one (`1 route`,
+/// `1 directory`).
+pub fn banner(
+    host: &std::net::IpAddr,
+    port: u16,
+    manifest: &Manifest,
+    exposed: bool,
+    learn: bool,
+) -> String {
+    let mut out = String::with_capacity(256);
+    out.push_str("  blastit dev · single-uid simulation · ");
+    out.push_str(&address(host, port, exposed));
+    if exposed {
+        out.push_str(&format!(" · uid {} (EXPOSED, no auth)", euid()));
+    }
+    if learn {
+        out.push_str("  [LEARN MODE]");
+    }
+    out.push('\n');
+    out.push_str("  Not a sandbox. Production `blastit` refuses to run like this.\n");
+    let routes = manifest.routes().len();
+    out.push_str(&format!(
+        "  http · scheduler · dbproxy · {routes} {}\n",
+        crate::check::plural(routes, "route")
+    ));
+    out.push_str(&serving_table(manifest));
+    out
+}
+
+/// The banner's one row per served thing: a `view` per declared route and a
+/// `static` row per mount, in three aligned columns.
+///
+/// A route with no method list answers every method, and the table says `*` the
+/// same way the front end does. A `static` mount is not a route (§9.5) — it owns
+/// no uid and starts no process — but it answers requests, so a banner that
+/// listed only views named a tree it was not serving. The columns are as wide as
+/// their widest cell, so one route reads `  view  home  GET, HEAD  /` and a file
+/// with mounts lines up under it.
+fn serving_table(manifest: &Manifest) -> String {
+    // (kind, name, methods, target)
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+    for route in manifest.routes() {
+        let methods = match route.methods() {
+            Some(methods) => methods.join(", "),
+            // A view with no method list answers every method the front end
+            // lets through (§8.4), and the banner says so the same way.
+            None => "*".to_string(),
+        };
+        rows.push((
+            "view".to_string(),
+            route.name().to_string(),
+            methods,
+            route.path().join(", "),
+        ));
+    }
+    for mount in manifest.mounts() {
+        // A mount answers `GET`/`HEAD` and nothing else (design §4.4), so the
+        // row states the same two methods a `405` would.
+        rows.push((
+            "static".to_string(),
+            mount.prefix.clone(),
+            "GET, HEAD".to_string(),
+            mount.policy.root.clone(),
+        ));
+    }
+    // Column widths are counted in `char`s, not bytes: `format!` pads a `str` by
+    // its characters, so a non-ASCII mount prefix (or a view name) would shift
+    // every column after it if the width were `len()`.
+    let kind_width = rows
+        .iter()
+        .map(|row| row.0.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+    let name_width = rows
+        .iter()
+        .map(|row| row.1.chars().count())
+        .max()
+        .unwrap_or(0);
+    let method_width = rows
+        .iter()
+        .map(|row| row.2.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut out = String::new();
+    for (kind, name, methods, target) in rows {
+        out.push_str(&format!(
+            "  {kind:<kind_width$}  {name:<name_width$}  {methods:<method_width$}  {target}\n"
+        ));
+    }
+    out
+}
+
+/// The address line 1 names: a clickable loopback URL, or the bare bind.
+fn address(host: &std::net::IpAddr, port: u16, exposed: bool) -> String {
+    match (exposed, host.is_ipv6()) {
+        (false, false) => format!("http://{host}:{port}"),
+        (false, true) => format!("http://[{host}]:{port}"),
+        (true, true) => format!("[{host}]:{port}"),
+        (true, false) => format!("{host}:{port}"),
+    }
 }
 
 /// The ephemeral `0700` runtime root of one `blastit dev` run (`R20`).
@@ -183,6 +277,10 @@ impl Dev {
     }
 
     /// The route's private directory, `<root>/views/<index>`.
+    ///
+    /// Read by the view fork (`Supervisor::spawn_now`), which only a build with
+    /// an interpreter has.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     pub fn view_dir(&self, index: usize) -> PathBuf {
         self.root.join("views").join(index.to_string())
     }
@@ -274,11 +372,7 @@ fn runtime_base(uid: u32) -> PathBuf {
 /// Opens `path` with `O_NOFOLLOW | O_DIRECTORY` and checks it is a `0700`
 /// directory owned by `uid`.
 fn verify_private_dir(path: &Path, uid: u32) -> io::Result<()> {
-    let dir = rustix::fs::open(
-        path,
-        rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )?;
+    let dir = blastit_sys::open_dir_nofollow(path)?;
     let stat = rustix::fs::fstat(&dir)?;
     if stat.st_uid != uid {
         return Err(io::Error::new(
@@ -333,7 +427,7 @@ fn hex(bytes: &[u8]) -> String {
 /// The supervisor owns it: observations arrive on `obs_fd` as one JSON
 /// [`WireSqlObs`] per line, and the scheduler's own `request` events name the
 /// requests it could not route. [`LearnRun::finish`] turns both into
-/// [`ManifestEdits`] and one atomic write.
+/// [`BlastfileEdits`] and one atomic write.
 #[derive(Debug, Default)]
 pub struct LearnRun {
     /// Every statement dbproxy observed, in order.
@@ -367,7 +461,8 @@ impl LearnRun {
                 continue;
             }
             if let Ok(obs) = serde_json::from_str::<WireSqlObs>(text) {
-                if let blastit_dbproxy::ObsVerdict::Refused { redacted, reason } = &obs.verdict {
+                if let blastit_sqlpolicy::LearnVerdict::Refused { redacted, reason } = &obs.verdict
+                {
                     self.refusals.insert(format!("{redacted}: {reason}"));
                 }
                 self.observations.push(obs);
@@ -435,22 +530,31 @@ impl LearnRun {
             return 0;
         }
 
-        let source = match std::fs::read_to_string(manifest) {
+        // The boot read the file, but `--learn` runs for as long as the suite
+        // does and the path can have been swapped since: `config::read_manifest`
+        // is `blastfile::read`, which refuses a FIFO or a device from its
+        // metadata before opening it, so an observation can never block the
+        // write path. Its sentence escapes the path, so a newline-bearing
+        // `BLASTIT_MANIFEST` still prints one line.
+        let source = match crate::config::read_manifest(manifest) {
             Ok(source) => source,
             Err(err) => {
-                eprintln!("learn: {}: {err}", manifest.display());
+                eprintln!("learn: {}", err.sentence(manifest));
                 return 1;
             }
         };
-        let parsed = match Manifest::parse_and_validate(&source, uid_base) {
+        let parsed = match Manifest::parse_blastfile(&source, uid_base) {
             Ok((manifest, _warnings)) => manifest,
             Err(errors) => {
                 eprintln!("learn: {errors}");
                 return 1;
             }
         };
-        let edits = self.edits(&parsed);
-        let routes_added = edits.routes.len();
+        let (edits, note) = self.edits(&parsed);
+        if let Some(note) = note {
+            eprintln!("learn: {note}");
+        }
+        let routes_added = edits.views.len();
         let queries_added: usize = edits.grants.iter().map(|grant| grant.queries.len()).sum();
         let edited = match apply_edits(&source, &edits) {
             Ok(edited) => edited,
@@ -462,7 +566,7 @@ impl LearnRun {
         if edited != source
             && let Err(err) = write_atomic(manifest, &edited)
         {
-            eprintln!("learn: {}: {err}", manifest.display());
+            eprintln!("learn: {}: {err}", crate::config::display_path(manifest));
             return 1;
         }
 
@@ -471,20 +575,34 @@ impl LearnRun {
     }
 
     /// The edits this run proposes, filtered against the grants already there
-    /// (`R27`: `--learn` writes only routes and exact `queries`).
-    fn edits(&self, manifest: &Manifest) -> ManifestEdits {
-        let mut edits = ManifestEdits::default();
+    /// (`R27`: `--learn` writes only views and exact `queries`).
+    fn edits(&self, manifest: &Manifest) -> (BlastfileEdits, Option<String>) {
+        let mut edits = BlastfileEdits::default();
         let names: BTreeSet<String> = manifest
             .routes()
             .iter()
             .map(|route| route.name().to_string())
             .collect();
 
-        // Routes: one per name, paths collected from every unrouted request.
-        let mut proposed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // Views: one per name, the methods and patterns collected from every
+        // unrouted request. A path a literal pattern cannot carry (a brace the
+        // grammar reads as a placeholder, a quote, a control byte) is not
+        // proposed: the writer would refuse the whole file for it. Neither is a
+        // scanner probe or a path a `static` mount already answers: `--learn`
+        // never invents a view for an attacker's path or for files the
+        // responder serves (`R14`, `R28`).
+        let mounts = blastit_manifest::MountTable::new(manifest);
+        let mut proposed: BTreeMap<String, (BTreeSet<String>, Vec<String>)> = BTreeMap::new();
         let mut used = names.clone();
-        for (_, path) in &self.unrouted {
+        for (method, path) in &self.unrouted {
+            if !crate::check::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some()
+            {
+                continue;
+            }
             let (name, pattern) = name_and_pattern(path);
+            if !crate::check::pattern_is_writable(path) {
+                continue;
+            }
             let mut candidate = name.clone();
             let mut suffix = 2;
             while used.contains(&candidate) {
@@ -492,27 +610,45 @@ impl LearnRun {
                 suffix += 1;
             }
             let entry = proposed.entry(candidate).or_default();
-            entry.insert(pattern);
+            entry.0.insert(method.to_ascii_uppercase());
+            if !entry.1.contains(&pattern) {
+                entry.1.push(pattern);
+            }
         }
-        for (name, paths) in proposed {
+        for (name, (methods, patterns)) in proposed {
             used.insert(name.clone());
-            edits.routes.push(ProposedRoute {
+            edits.views.push(ProposedView {
                 name,
-                path: paths.into_iter().collect(),
+                methods: methods.into_iter().collect(),
+                patterns,
             });
         }
 
         // Statements that ran on the reserved fallback view belong to an
         // unrouted request, and a per-route socket cannot say which one. When
-        // this run proposes exactly one route, every unrouted request maps to
-        // it, so the attribution is exact; with more than one the statement
-        // cannot be placed, and guessing would hand one new route another's
-        // grants. This is what makes one `dev --learn` pass write the queries of
-        // the route it discovered (R26, R27, `docs/local.md`).
-        let fallback_owner = match edits.routes.as_slice() {
-            [only] => Some(only.name.clone()),
+        // this run proposes exactly one view, every unrouted request maps to it,
+        // so the attribution is exact; with more than one the statement cannot be
+        // placed, and guessing would hand one new view another's grants. This is
+        // what makes one `dev --learn` pass write the queries of the view it
+        // discovered (R26, R27, `docs/local.md`).
+        //
+        // The same reasoning forbids attributing them when *any* unrouted request
+        // was one `--learn` refuses to turn into a view: a probe's `/.env` or
+        // `/../etc/passwd` request has no path on its statement, so its SQL would
+        // land in the one legitimate view's `queries`.
+        let unattributable = self.unrouted.iter().any(|(_, path)| {
+            !crate::check::infer_routes::is_learnable_path(path) || mounts.lookup(path).is_some()
+        });
+        let fallback_owner = match edits.views.as_slice() {
+            [only] if !unattributable => Some(only.name.clone()),
             _ => None,
         };
+        let note = unattributable.then(|| {
+            "an unrouted request was a path --learn never turns into a view (a traversal, a \
+             dotfile, or a `static` mount), so this run's split-socket statements are not \
+             attributed to any view; grant what your application really ran by hand"
+                .to_string()
+        });
 
         // Grants: only grantable statements, only routes the manifest declares
         // or this run proposes. An existing route's own grants are filtered out;
@@ -559,15 +695,34 @@ impl LearnRun {
                 .or_default()
                 .push(normalized.to_string());
         }
-        for ((route, proxy), queries) in grants {
+        for ((view, proxy), queries) in grants {
             edits.grants.push(ProposedGrant {
-                route,
-                proxy,
+                view,
+                // The unnamed `postgres { … }` block is the store `db` (§7.4);
+                // a named store is written `postgres <name> { … }`.
+                store: (proxy != blastit_manifest::blastfile::DEFAULT_STORE).then_some(proxy),
                 queries,
+                tables: std::collections::BTreeMap::new(),
+                functions: std::collections::BTreeSet::new(),
             });
         }
-        edits
+        (edits, note)
     }
+}
+
+/// Builds the `learn:` summary line (`§1.3`), with the absolute manifest path.
+///
+/// Both counts are written in their own number — `1 route, 1 query added`,
+/// `2 routes, 38 queries added` — because this is a sentence a developer reads,
+/// and it is the one `docs/local.md` shows. `plural` is the same helper
+/// `check.rs`'s `learn_line` uses, so the two entry points cannot drift.
+fn summary_line(manifest: &Path, routes: usize, queries: usize) -> String {
+    let path = crate::config::display_path(
+        &std::path::absolute(manifest).unwrap_or_else(|_| manifest.to_path_buf()),
+    );
+    let route_noun = crate::check::plural(routes, "route");
+    let query_noun = crate::check::plural(queries, "query");
+    format!("learn: {routes} {route_noun}, {queries} {query_noun} added → {path}")
 }
 
 /// Prints the `learn:` summary line (`§1.3`).
@@ -575,11 +730,7 @@ impl LearnRun {
 /// It goes to stdout in `pretty` and to stderr under `BLASTIT_LOG_FORMAT=json`,
 /// where stdout is the event stream alone (`§1.1`).
 fn print_summary(manifest: &Path, pretty: bool, routes: usize, queries: usize) {
-    let path = std::path::absolute(manifest)
-        .unwrap_or_else(|_| manifest.to_path_buf())
-        .display()
-        .to_string();
-    let summary = format!("learn: {routes} routes, {queries} queries added → {path}");
+    let summary = summary_line(manifest, routes, queries);
     if pretty {
         println!("{summary}");
     } else {
@@ -587,13 +738,14 @@ fn print_summary(manifest: &Path, pretty: bool, routes: usize, queries: usize) {
     }
 }
 
-/// A `(name, path regex)` for one unrouted request (`R28`).
+/// A `(name, path pattern)` for one unrouted request (`R28`).
 ///
 /// The name is the first non-empty segment, lowercased, with runs outside
 /// `[a-z0-9_-]` collapsed to `-` and every leading or trailing character
 /// outside `[a-z0-9]` trimmed; `/` is `root`. Numeric and UUID segments become
-/// `[0-9]+` and `[^/]+`, and everything else is regex-escaped so `.` and `+` in a
-/// path stay literal.
+/// the pattern placeholders `{id:int}` and `{id:uuid}`; everything else is
+/// literal, because a quoted pattern in a `Blastfile` matches its bytes and
+/// escapes nothing (`.` is a dot, not a wildcard).
 fn name_and_pattern(path: &str) -> (String, String) {
     let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
     if segments.is_empty() {
@@ -610,37 +762,25 @@ fn name_and_pattern(path: &str) -> (String, String) {
     }
     let name = name.trim_matches(|character: char| !character.is_ascii_alphanumeric());
     let name = if name.is_empty() { "route" } else { name };
-    let pattern = if segments.is_empty() {
-        "/".to_string()
-    } else {
-        let mut out = String::from("/");
-        for (index, segment) in segments.iter().enumerate() {
-            if index > 0 {
-                out.push('/');
-            }
-            out.push_str(&segment_pattern(segment));
+    let mut pattern = String::from("/");
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            pattern.push('/');
         }
-        out
-    };
+        pattern.push_str(&segment_pattern(segment));
+    }
     (name.to_string(), pattern)
 }
 
-/// One path segment as a regex.
+/// One path segment as a `Blastfile` pattern piece.
 fn segment_pattern(segment: &str) -> String {
     if segment.chars().all(|character| character.is_ascii_digit()) {
-        return "[0-9]+".to_string();
+        return "{id:int}".to_string();
     }
     if is_uuid(segment) {
-        return "[^/]+".to_string();
+        return "{id:uuid}".to_string();
     }
-    let mut out = String::with_capacity(segment.len());
-    for character in segment.chars() {
-        if "\\^$.|?*+()[]{}".contains(character) {
-            out.push('\\');
-        }
-        out.push(character);
-    }
-    out
+    segment.to_string()
 }
 
 /// Whether `segment` is shaped like a UUID.
@@ -684,267 +824,5 @@ pub fn drain_until_closed(fd: &OwnedFd, run: &mut LearnRun) -> bool {
             Err(rustix::io::Errno::WOULDBLOCK) => return true,
             Err(_) => return false,
         }
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_banner_is_exactly_the_documented_three_lines() {
-        let host = "127.0.0.1".parse().unwrap();
-        assert_eq!(
-            banner(&host, 8080, 1, false),
-            "  blastit dev · single-uid simulation · 127.0.0.1:8080\n  \
-             Not a sandbox. Production `blastit` refuses to run like this.\n  \
-             http · scheduler · dbproxy · 1 route\n"
-        );
-        let two = banner(&host, 9000, 2, false);
-        assert!(
-            two.ends_with("http · scheduler · dbproxy · 2 routes\n"),
-            "{two}"
-        );
-
-        let exposed = banner(&host, 8080, 1, true);
-        let uid = euid();
-        assert_eq!(
-            exposed.lines().next().unwrap(),
-            format!(
-                "  blastit dev · single-uid simulation · 127.0.0.1:8080 · uid {uid} (EXPOSED, no auth)"
-            )
-        );
-        assert!(exposed.contains("1 route\n"), "{exposed}");
-    }
-
-    #[test]
-    fn a_non_loopback_host_is_named_with_the_variable_to_set() {
-        let host = "0.0.0.0".parse().unwrap();
-        assert!(!is_loopback(&host));
-        let message = exposure_error(&host);
-        assert!(message.contains("BLASTIT_DEV_EXPOSE"), "{message}");
-        assert!(message.contains("0.0.0.0"), "{message}");
-        assert!(message.contains(&euid().to_string()), "{message}");
-    }
-
-    #[test]
-    fn the_root_is_private_and_cleaned_up() {
-        // `/tmp` is what the test uses: the suite cannot rely on a runtime
-        // directory existing, and the fallback is the documented one.
-        let previous = std::env::var_os("XDG_RUNTIME_DIR");
-        // SAFETY: this unit test names its own unique variable state, and no
-        // other test in this binary reads it at the same time (`cargo test`
-        // runs modules' tests in parallel, so this is deliberately a *read* of
-        // the fallback only).
-        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
-        let root = DevRoot::create().unwrap();
-        let metadata = std::fs::symlink_metadata(root.path()).unwrap();
-        assert!(metadata.file_type().is_dir());
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
-        assert_eq!(metadata.uid(), euid());
-        root.create_view_dirs(2).unwrap();
-        assert!(root.view_dir(0).is_dir());
-        assert!(root.view_dir(1).is_dir());
-        let path = root.path().to_path_buf();
-        root.cleanup();
-        assert!(!path.exists(), "the root is removed");
-        if let Some(previous) = previous {
-            // SAFETY: see above; the test puts back what it found.
-            unsafe { std::env::set_var("XDG_RUNTIME_DIR", previous) };
-        }
-    }
-
-    #[test]
-    fn a_symlinked_root_is_refused() {
-        let dir = std::env::temp_dir().join(format!("blastit-dev-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("target");
-        std::fs::create_dir(&target).unwrap();
-        let link = dir.join("link");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let err = verify_private_dir(&link, euid()).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::NotADirectory);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn route_names_and_patterns_follow_the_documented_rules() {
-        assert_eq!(name_and_pattern("/"), ("root".to_string(), "/".to_string()));
-        assert_eq!(
-            name_and_pattern("/products/42/"),
-            ("products".to_string(), "/products/[0-9]+".to_string())
-        );
-        assert_eq!(
-            name_and_pattern("/orders/550e8400-e29b-41d4-a716-446655440000"),
-            ("orders".to_string(), "/orders/[^/]+".to_string())
-        );
-        assert_eq!(
-            name_and_pattern("/robots.txt"),
-            ("robots-txt".to_string(), "/robots\\.txt".to_string())
-        );
-        assert_eq!(
-            name_and_pattern("/api.v2/items+list/"),
-            ("api-v2".to_string(), "/api\\.v2/items\\+list".to_string())
-        );
-    }
-
-    #[test]
-    fn observations_are_parsed_one_per_line() {
-        let mut run = LearnRun::new();
-        let line = serde_json::json!({
-            "target": {"scope": "routed", "route": "home"},
-            "proxy": "db",
-            "kind": "query",
-            "sql": "SELECT 1",
-            "is_tx": false,
-            "allowed": false,
-            "verdict": {"kind": "query", "normalized": "SELECT 1"}
-        });
-        let text = format!("{line}\n{line}\n");
-        run.push_bytes(text.as_bytes());
-        assert_eq!(run.observations.len(), 2);
-        // A half line waits for the rest.
-        run.push_bytes(b"{\"target\"");
-        assert_eq!(run.observations.len(), 2);
-    }
-
-    #[test]
-    fn an_unrouted_request_proposes_a_route() {
-        let mut run = LearnRun::new();
-        run.note_event(r#"{"event":"request","method":"GET","path":"/orders/42/"}"#);
-        assert!(
-            run.unrouted
-                .contains(&("GET".to_string(), "/orders/42/".to_string()))
-        );
-        run.note_event(r#"{"event":"request","method":"GET","path":"/x","route":"home"}"#);
-        assert_eq!(run.unrouted.len(), 1, "a routed request proposes nothing");
-    }
-
-    #[test]
-    fn first_declared_route_and_matching_proxy_name_keep_grants_when_unrouted_exists() {
-        let source = "\
-version = 1
-app = \"app:application\"
-
-[proxy.home]
-protocol = \"postgresql\"
-input = { url = \"DATABASE_URL\" }
-
-[[route]]
-name = \"home\"
-path = ['/']
-
-[[route]]
-name = \"items\"
-path = ['/items']
-";
-        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
-        let mut run = LearnRun::new();
-        run.note_event(r#"{"event":"request","method":"GET","path":"/extra/1"}"#);
-        let home_obs = serde_json::json!({
-            "target": {"scope": "routed", "route": "home"},
-            "proxy": "home",
-            "kind": "query",
-            "sql": "SELECT 111",
-            "is_tx": false,
-            "allowed": false,
-            "verdict": {"kind": "query", "normalized": "SELECT 111"}
-        });
-        let items_obs = serde_json::json!({
-            "target": {"scope": "routed", "route": "items"},
-            "proxy": "home",
-            "kind": "query",
-            "sql": "SELECT 1",
-            "is_tx": false,
-            "allowed": false,
-            "verdict": {"kind": "query", "normalized": "SELECT 1"}
-        });
-        let fallback_obs = serde_json::json!({
-            "target": {"scope": "routed", "route": LEARN_FALLBACK_ROUTE},
-            "proxy": "home",
-            "kind": "query",
-            "sql": "SELECT 2",
-            "is_tx": false,
-            "allowed": false,
-            "verdict": {"kind": "query", "normalized": "SELECT 2"}
-        });
-        let lines = format!("{home_obs}\n{items_obs}\n{fallback_obs}\n");
-        run.push_bytes(lines.as_bytes());
-
-        let edits = run.edits(&manifest);
-        assert_eq!(edits.routes.len(), 1);
-        assert_eq!(edits.routes[0].name, "extra");
-        assert_eq!(
-            edits.grants,
-            vec![
-                ProposedGrant {
-                    route: "extra".to_string(),
-                    proxy: "home".to_string(),
-                    queries: vec!["SELECT 2".to_string()],
-                },
-                ProposedGrant {
-                    route: "home".to_string(),
-                    proxy: "home".to_string(),
-                    queries: vec!["SELECT 111".to_string()],
-                },
-                ProposedGrant {
-                    route: "items".to_string(),
-                    proxy: "home".to_string(),
-                    queries: vec!["SELECT 1".to_string()],
-                },
-            ],
-            "the one proposed route receives the statement its unrouted request ran, while \
-             each declared route keeps only its own"
-        );
-    }
-
-    #[test]
-    fn two_proposed_routes_do_not_borrow_each_others_fallback_statements() {
-        let source = "\
-version = 1
-app = \"app:application\"
-
-[proxy.db]
-protocol = \"postgresql\"
-input = { url = \"DATABASE_URL\" }
-
-[[route]]
-name = \"home\"
-path = ['/']
-[route.db]
-queries = [\"SELECT 1\"]
-";
-        let (manifest, _) = Manifest::parse_and_validate(source, 20_000).unwrap();
-        let mut run = LearnRun::new();
-        // Two unrouted requests propose two different routes, so a statement
-        // that ran on the single fallback view cannot be placed: granting it to
-        // either would hand one new route the other's access.
-        run.note_event(r#"{"event":"request","method":"GET","path":"/extra/1"}"#);
-        run.note_event(r#"{"event":"request","method":"GET","path":"/orders/2"}"#);
-        let fallback_obs = serde_json::json!({
-            "target": {"scope": "routed", "route": LEARN_FALLBACK_ROUTE},
-            "proxy": "db",
-            "kind": "query",
-            "sql": "SELECT 2",
-            "is_tx": false,
-            "allowed": false,
-            "verdict": {"kind": "query", "normalized": "SELECT 2"}
-        });
-        run.push_bytes(format!("{fallback_obs}\n").as_bytes());
-
-        let edits = run.edits(&manifest);
-        let names: Vec<&str> = edits
-            .routes
-            .iter()
-            .map(|route| route.name.as_str())
-            .collect();
-        assert_eq!(names, vec!["extra", "orders"]);
-        assert!(
-            edits.grants.is_empty(),
-            "an ambiguous fallback statement is not granted to a guess: {:?}",
-            edits.grants
-        );
     }
 }

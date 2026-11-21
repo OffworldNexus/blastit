@@ -16,7 +16,7 @@ use crate::sync::lock;
 /// best-effort basis. The I/O thread notices a dead channel on its own next
 /// read.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WriteError {
+pub enum WriteError {
     /// The frame does not fit the channel's frame limit, or a field could not
     /// be encoded. A `*_BODY` frame never fails this way, because bodies are
     /// split first; a `RESP_HEAD` with a very large header block can.
@@ -45,7 +45,7 @@ pub(crate) enum WriteError {
 ///
 /// Callers release the GIL around these calls, so a slow reader on the
 /// scheduler side blocks neither the interpreter nor the channel's I/O thread.
-pub(crate) struct Writer {
+pub struct Writer {
     inner: Mutex<Inner>,
 }
 
@@ -61,7 +61,7 @@ struct Inner {
 
 impl Writer {
     /// A writer that owns its end of `view.chan`.
-    pub(crate) fn new(stream: UnixStream, limits: Limits) -> Self {
+    pub fn new(stream: UnixStream, limits: Limits) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 stream,
@@ -72,7 +72,7 @@ impl Writer {
     }
 
     /// Send exactly one frame, under `id`.
-    pub(crate) fn write_frame(&self, frame: &Frame, id: u32) -> Result<(), WriteError> {
+    pub fn write_frame(&self, frame: &Frame, id: u32) -> Result<(), WriteError> {
         let mut inner = lock(&self.inner);
         let Inner {
             stream,
@@ -99,7 +99,7 @@ impl Writer {
     /// request was cancelled, or the channel's far end is gone): the caller
     /// gives up on the response instead of blocking for a grant that cannot
     /// come.
-    pub(crate) fn write_body(&self, id: u32, body: &[u8], flow: &Flow) -> Result<(), WriteError> {
+    pub fn write_body(&self, id: u32, body: &[u8], flow: &Flow) -> Result<(), WriteError> {
         let credit = flow.response();
         let mut sent = 0;
         while sent < body.len() {
@@ -117,186 +117,7 @@ impl Writer {
 
     /// The payload size a body frame may carry, so callers can size their
     /// reads.
-    pub(crate) fn max_payload(&self) -> usize {
+    pub fn max_payload(&self) -> usize {
         lock(&self.inner).limits.max_payload()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use blastit_frame::{Decoder, DoneOutcome, RespHead};
-    use std::io::{ErrorKind, Read};
-    use std::sync::Arc;
-
-    fn writer_pair(limits: Limits) -> (Writer, Arc<UnixStream>) {
-        let (ours, theirs) = UnixStream::pair().expect("socketpair");
-        (Writer::new(ours, limits), Arc::new(theirs))
-    }
-
-    /// Read whatever the writer has already put on the channel.
-    ///
-    /// The writer runs on this thread, so everything it wrote is in the peer's
-    /// buffer before this is called; a non-blocking read drains it without
-    /// risking a test that hangs.
-    fn drain(peer: &UnixStream, limits: Limits) -> Vec<(u32, Frame)> {
-        let mut reader = peer.try_clone().expect("clone");
-        reader.set_nonblocking(true).expect("non-blocking");
-        let mut decoder = Decoder::new(limits);
-        let mut buf = vec![0u8; 1 << 16];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => decoder.push(&buf[..n]),
-                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
-                Err(err) => panic!("read failed: {err}"),
-            }
-        }
-        let mut frames = Vec::new();
-        while let Some(frame) = decoder.next_frame().expect("decode") {
-            frames.push(frame);
-        }
-        assert_eq!(decoder.buffered(), 0, "a frame was cut in half");
-        frames
-    }
-
-    #[test]
-    fn frames_arrive_in_order_and_intact() {
-        let limits = Limits::default();
-        let (writer, peer) = writer_pair(limits);
-        writer.write_frame(&Frame::Ready, 0).expect("ready frame");
-        writer
-            .write_frame(
-                &Frame::RespHead(RespHead {
-                    status: 204,
-                    reason: b"No Content".to_vec(),
-                    headers: vec![(b"X-A".to_vec(), b"b".to_vec())],
-                }),
-                7,
-            )
-            .expect("head");
-        writer.write_frame(&Frame::RespEnd, 7).expect("end");
-        writer
-            .write_frame(
-                &Frame::Done {
-                    outcome: DoneOutcome::Completed,
-                },
-                7,
-            )
-            .expect("done");
-
-        let frames = drain(&peer, limits);
-        assert_eq!(frames.len(), 4);
-        assert_eq!(frames[0], (0, Frame::Ready));
-        assert_eq!(frames[3].0, 7);
-        assert_eq!(
-            frames[3].1,
-            Frame::Done {
-                outcome: DoneOutcome::Completed
-            }
-        );
-    }
-
-    #[test]
-    fn a_body_is_split_into_frames_that_fit_inside_the_window() {
-        let limits = Limits::new(64).expect("limits");
-        let (writer, peer) = writer_pair(limits);
-        let flow = Flow::new();
-        let body: Vec<u8> = (0..200u32).map(|i| (i % 251) as u8).collect();
-        writer.write_body(3, &body, &flow).expect("body");
-
-        let frames = drain(&peer, limits);
-        assert!(frames.len() > 1);
-        let mut rebuilt = Vec::new();
-        for (id, frame) in frames {
-            assert_eq!(id, 3);
-            match frame {
-                Frame::RespBody(chunk) => rebuilt.extend_from_slice(&chunk),
-                other => panic!("unexpected frame {other:?}"),
-            }
-        }
-        assert_eq!(rebuilt, body);
-    }
-
-    #[test]
-    fn an_empty_body_sends_nothing_and_spends_nothing() {
-        let limits = Limits::default();
-        let (writer, peer) = writer_pair(limits);
-        let flow = Flow::new();
-        writer.write_body(1, &[], &flow).expect("empty body");
-        assert_eq!(drain(&peer, limits), Vec::new());
-        assert_eq!(
-            flow.response().available(),
-            u64::from(blastit_frame::INITIAL_WINDOW),
-            "an empty body costs no credit"
-        );
-    }
-
-    #[test]
-    fn a_body_beyond_the_window_stops_at_the_credit_it_has() {
-        let limits = Limits::default();
-        let (writer, peer) = writer_pair(limits);
-        let flow = Flow::new();
-        // Spend all but ten bytes of the window, then close it: the write may
-        // use the ten it has, and must not wait for the rest.
-        let window = u64::from(blastit_frame::INITIAL_WINDOW);
-        assert_eq!(
-            flow.response().take(window as usize - 10),
-            window as usize - 10
-        );
-        flow.response().close();
-
-        let body = vec![0x5au8; 100];
-        let err = writer.write_body(1, &body, &flow).expect_err("no credit");
-        assert!(matches!(err, WriteError::WindowClosed));
-
-        let frames = drain(&peer, limits);
-        let sent: usize = frames
-            .iter()
-            .map(|(_, frame)| match frame {
-                Frame::RespBody(chunk) => chunk.len(),
-                _ => 0,
-            })
-            .sum();
-        assert_eq!(sent, 10, "exactly the credit that was left");
-    }
-
-    #[test]
-    fn an_oversized_frame_is_a_write_error() {
-        let limits = Limits::new(32).expect("limits");
-        let (writer, _peer) = writer_pair(limits);
-        let err = writer
-            .write_frame(
-                &Frame::RespHead(RespHead {
-                    status: 200,
-                    reason: Vec::new(),
-                    headers: vec![(b"X-Long".to_vec(), vec![b'v'; 64])],
-                }),
-                1,
-            )
-            .expect_err("must not fit");
-        assert!(matches!(err, WriteError::Frame(_)));
-        // The writer is still usable afterwards.
-        assert!(writer.write_frame(&Frame::RespEnd, 1).is_ok());
-    }
-
-    #[test]
-    fn a_dead_peer_is_an_io_error_and_not_a_panic() {
-        let limits = Limits::default();
-        let (writer, peer) = writer_pair(limits);
-        drop(peer);
-        // A first write may or may not fail depending on the socket; loop until
-        // it does, so the test does not depend on buffer sizes.
-        let mut failed = false;
-        for _ in 0..1024 {
-            match writer.write_frame(&Frame::Ready, 0) {
-                Ok(()) => {}
-                Err(err) => {
-                    failed = matches!(err, WriteError::Io(_));
-                    break;
-                }
-            }
-        }
-        assert!(failed, "writing to a closed socket never failed");
     }
 }

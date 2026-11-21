@@ -1,62 +1,53 @@
 ---
-name: Design docs & DX specs (elephant drafts, goldfish reviews)
-description: How Blastit writes, critiques and accepts both User-Facing DX Specifications and Technical Design Documents + ADRs. Uses lens-based fresh-context goldfish critics (`dx`, `ai-ergonomics`, `security`, `implementability`, `testability`, `consistency`).
+name: Design docs & DX specs (elephant drafts, parallel UX + arch reviews)
+description: How Blastit writes, reviews and accepts User-Facing DX Specifications and Technical Design Documents + ADRs using `writer`/`architect` and parallel `review-ux` + `review-arch` passes.
 ---
 
-# Design docs & DX specs: Elephant drafts, Goldfish reviews
+# Design docs & DX specs: Drafts and Parallel Specialist Reviews
 
-The **elephant** (`doc-writer`, `designer`, `architect`) holds context and writes the draft. **Goldfish** (`critic` subagents) review with *zero* conversation history, seeing only the document and the repo files it cites.
+The author (`writer` for user DX guides/specs, `architect` for major UX surfaces and security/runtime architectures) writes a crisp draft. Fresh-context specialist reviewers (`review-ux` and `review-arch`) review in parallel with zero conversation history.
 
-In Blastit, there are **two distinct artefacts**, always written in this order:
+In Blastit, there are **two distinct artefacts**, always ordered DX-first:
 
-1. **User-Facing DX Documentation (`docs/**` + `README.md` or `docs/design/dx-<slug>.md`)** — How it looks and feels on the **local machine**, in **CI/CD**, and across **deployment scenarios**.
-2. **Technical Design Document (`docs/design/<slug>.md` + `docs/decisions/ADR-NNNN-<slug>.md`)** — How the Rust crates, WASM sandboxes, wire brokers, and Python CLI implement that exact DX safely.
+1. **User-Facing DX Documentation (`docs/**` + `README.md` or `docs/design/dx-<slug>.md`)** — `<130` lines/page, immediate 3-step zero-`sudo` happy path before any caveats, Mermaid diagram + `!!!` admonition, showing **Local (`blastit dev` / `--learn`)**, **CI/CD (`blastit check` / `--json`)**, and **Deployments (`--preset` / fail-closed)**.
+2. **Technical Design Document (`docs/design/<slug>.md` + `docs/decisions/ADR-NNNN-<slug>.md`)** — Concrete Rust types, Constructor IoC from `BootMode`, cohesive `<500` LOC module boundaries, `blastit-view-*` protocol crates over `view.chan` frames, WASM memory/fuel budgets, CVE analysis, and **3–4 coarse vertical implementation slices**.
 
-## 1. Critic lenses (`critic` subagent)
+## 1. Parallel Specialist Review (`review-ux` + `review-arch`)
 
-Spawn **≥ 2** (and **≥ 3** for core designs: always include `dx`, `ai-ergonomics`, and `security`) `critic` subagents in parallel, giving each **only** the document path(s), its single lens name, and the review output path (`docs/design/<slug>.review-<lens>.md`):
+Spawn `review-ux` and `review-arch` in parallel against the draft:
 
-| Lens | What the goldfish asks |
+| Reviewer | What it checks |
 |---|---|
-| `dx` | **Human Developer Experience.** Count the steps on (a) local laptop, (b) CI/CD, (c) deployment! Does local dev work with **zero `sudo`** and zero `chmod`/`setcap` pain? Is the prose ultra-lean (no kernel lectures in user guides, ≤ 3 steps to hello world, clear tables)? Does it fit modern 12-factor idioms (Django/Flask, Symfony/Laravel PSR, Vite/Node, Tomcat) natively? Do errors tell the user the exact fix? |
-| `ai-ergonomics` | **AI Agent Experience.** Imagine an LLM coding agent asked to integrate Blastit or add a feature to an app. How does it populate `blastit.toml`? How does it verify in one pass (`--learn` / `blastit check --json`) that **zero** SQL queries, outgoing calls, routes, or input schemas were forgotten? Could any syntax or error message confuse an agent into reaching for `unrestricted = true`? |
-| `security` | **Zero-Trust & CVE Resistance.** Does every byte reaching the backend get decoded and re-encoded in memory-safe / budgeted WASM code (where applicable)? Are WASM memory and fuel strictly bounded (O(1 page/chunk), never O(N pages))? Are parser differentials impossible? Do real credentials stay strictly behind the stage-0 `execve` barrier? Would `php2shell`, `node2shell`, polyglot uploads, HTTP/FastCGI header smuggling, or SSRF be stopped cold even on an unpatched runtime? Does production `blastit` fail closed if mistakenly run without privileges? |
-| `implementability` | **Cheap-Model Buildability.** Are crate boundaries, Rust traits, wire frames, and CLI flags specified unambiguously so a cheap `implementer` can build each task in ≤ 600 lines without guessing? Are new dependencies justified and permissively licensed (Apache-2.0 / MIT / BSD)? |
-| `testability` | **Verification & Oracles.** Does every requirement `R1..Rn` map to a fast unprivileged test, a protected critical test, and (for security/CVE claims) an exploit-reproduction integration test? Can every code block in `docs/` be executed automatically? |
-| `consistency` | **Coherence.** Does the doc agree with `docs/VISION.md`, `ARCHITECTURE.md`, accepted ADRs, and `blastit.toml` conventions? Are there naming mismatches between CLI flags, env vars, presets, and TOML keys? |
+| `review-ux` | **Human + AI Developer Experience & Visual Hierarchy.** Immediate 3 zero-`sudo` commands before caveats (`!!! warning` / `??? note`), Mermaid `flowchart`/`sequenceDiagram`, `<130`-line leanness, valid `Blastfile` syntax (single top-level `entrypoint`, nested `view` grants, non-empty `postgres` blocks, clean `"/*"` / `regex '...'`), actionable CLI output (`NO_COLOR`, clickable `http://`, dead-grant `sql`/`proxy`/`fix.to`), zero diary headings or roadmap apologies. |
+| `review-arch` | **True Constructor IoC, Cohesion, Deduplication & Zero-Trust Security.** Single composition root (`BootMode`), zero `OnceLock`/`Mutex` globals or `env::var` leaks, zero single-impl mock traits, `<500` LOC modules, reuse of canonical workspace crates (`sqlpolicy`, `elf`, `blastit-frame`), WASM `O(1 page)` fuel/memory caps, stage-0 `execve` secret barrier, real socket/frame lab test plan (both allowed + denied/adversarial `php2shell`/`node2shell`/SQLi/polyglots, zero `Mock*Server`, zero `scripts/check_*.py` regex guards). |
 
-Each critic writes `docs/design/<slug>.review-<lens>.md` with findings graded:
-- `BLOCKER`: breaks DX simplicity, leaks secrets/sandbox, allows CVE bypass, or contradicts `VISION.md`.
-- `MAJOR`: significant UX friction, prose bloat, missing AI verification path, unbounded resource, or underspecified seam.
-- `MINOR`: polish item.
+Findings are graded `[BLOCKER]` or `[MAJOR]` (actionable defects with exact `file:line` and concrete fix).
 
 ## 2. Technical design doc template (`docs/design/<slug>.md`)
 
 ```markdown
 ---
 status: Draft            # Draft | In review | Accepted | Superseded by <slug>
-owner: <designer|architect>
+owner: architect
 node: <plan node id>
-reviewers: []
 ---
 # <Title>
 
 ## 1. Developer Experience Target (Local, CI/CD, Deploy)
-(Link to or summarize the exact user-facing commands, `blastit.toml` syntax, and error messages this design serves.)
+(Link to or summarize the exact user-facing commands, `Blastfile` syntax, and CLI output this design serves.)
 
 ## 2. Goals & Non-Goals
 ## 3. Requirements (R1..Rn, numbered and testable)
-## 4. Architecture & Data Flow (Mermaid diagrams, Rust traits, wire/WASM contracts, resource budgets)
-## 5. Security & CVE Analysis (threat boundaries, parser differential prevention, `php2shell`/`node2shell`/polyglot impact)
-## 6. Alternatives Considered (≥ 2, with why-not — especially why-not more config knobs!)
-## 7. Validation & Critical Tests Plan (mapping R1..Rn -> unit, critical, runnable-docs, e2e/CVE tests)
-## 8. Implementation Plan (ordered leaf tasks with paths and acceptance commands)
+## 4. Architecture & Constructor IoC (Mermaid diagrams, concrete types, `view.chan`/wire/WASM contracts, `<500` LOC module layout, resource budgets)
+## 5. Security & CVE Analysis (trust boundaries, parser differential prevention, `php2shell`/`node2shell`/polyglot/CGI-parameter smuggling neutralization)
+## 6. Alternatives Considered (>= 2, especially why-not extra config knobs or mock-trait seams)
+## 7. Lab-First Validation & Critical Tests Plan (real `UnixStream::pair()`/`UnixListener` allowed + adversarial tests; zero `Mock*Server`, zero source-grep scripts)
+## 8. Vertical Implementation Slices (3–4 coarse slices with explicit `paths`, `owner`, and `make fast-check` / `make docs-check` acceptance)
 ## 9. Review Resolution
 ```
 
 ## 3. Resolution & Acceptance
 
-1. For every critic finding, record `accepted -> updated §X`, `rejected -> reason`, or `deferred -> node` under `## Review Resolution`.
-2. If a `BLOCKER` or `MAJOR` change substantially altered the design or UX, re-run that lens once.
-3. Core DX shifts and `architect`-owned docs are accepted by `strategist` (recorded via `plan.py escalate`, gate-exempt). Scoped crate designs are accepted by `lead` once zero `BLOCKER`/`MAJOR` findings remain.
-4. Record lasting architectural or UX choices as 1-page ADRs in `docs/decisions/ADR-NNNN-<slug>.md` (`Proposed` -> `Accepted`).
+1. Resolve every genuine `[BLOCKER]` and `[MAJOR]` finding and record concise dispositions under `## Review Resolution`.
+2. Core DX shifts and `architect`-owned docs are accepted by `strategist` (`plan.py escalate`).
+3. Record lasting architectural or UX choices as 1-page ADRs in `docs/decisions/ADR-NNNN-<slug>.md` (`Proposed` -> `Accepted`).

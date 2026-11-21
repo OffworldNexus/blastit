@@ -6,20 +6,15 @@
 //! This module is the whole of that knowledge, and it is the only thing the
 //! packaging changes:
 //!
-//! * the **standalone binary** re-executes `/proc/self/exe`, exactly as §4
-//!   describes;
-//! * a **wheel install** is a Python program: `blastit` is the console script
-//!   of the interpreter the wheel was installed into, `blastit._blastit.main()`
-//!   runs inside it, and `/proc/self/exe` is that interpreter. Stage 1 is
-//!   therefore re-executed as `python -I -m blastit` — the *same* interpreter,
-//!   which is what makes the application's dependencies importable, because the
-//!   `site-packages` CPython finds next to its own executable are the venv's.
+//! * the **binary** re-executes `/proc/self/exe`, exactly as §4 describes;
+//! * a **wheel install** starts no interpreter at all: `blastit.__main__` hands
+//!   the command line to the universal binary the wheel ships at
+//!   `blastit/_bin/blastit`. One `py3-none-*` artifact serves
+//!   every CPython `>=3.12`, and the Python side never hosts stage 1.
 //!
-//! dbproxy is the exception either way. It holds the real credentials (§2.2),
-//! so it must not run an interpreter at all: a wheel ships it as a separate
-//! Python-free binary (`blastit/_bin/blastit-dbproxy`, mode `0755`) and stage 0
-//! `execve`s that instead of itself. The standalone binary keeps playing the
-//! role itself, with the `--role=dbproxy` it has always used.
+//! dbproxy holds the real credentials (§2.2), so it never runs an interpreter:
+//! stage 0 `execve`s this same binary again with `--role=dbproxy` and an empty
+//! environment.
 //!
 //! # D6: the file with the capabilities is never the file a child runs
 //!
@@ -46,14 +41,36 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use blastit_sys::elf::{Elf, ElfError};
 use blastit_sys::exe_path;
 
 /// The environment variable that names a standalone install's capability-free
 /// binary (D6/B2).
 ///
-/// Read by the standalone binary only; a wheel always `execve`s the
-/// `blastit-dbproxy` it ships.
+/// Read by the standalone binary only; a wheel `execve`s the same
+/// `blastit/_bin/blastit` image it was started from.
 pub const EXEC: &str = "BLASTIT_EXEC";
+
+/// `R7`/`B2-R5`: the **deployment** half of the `[route.php]` gate, for the
+/// protected suite.
+///
+/// `stage0` is a private module, so `tests/critical_php_embed.rs` cannot call
+/// `stage0::php_boot_in`; this re-export is the seam that runs the *same*
+/// function a deployment boot runs, with a `Deployment`. Without it a leg can
+/// only drive [`Provenance`] — the decision — so deleting the call *inside*
+/// `php_boot_in` would leave the protected tier green, which is the defect this
+/// seam closes.
+///
+/// Hidden because it is not part of the published API: a `dev`/`check` boot
+/// never passes a deployment, and an unprivileged process cannot reach a
+/// `Production` boot at all (`LESSONS.md`), so no other caller can
+/// exist. It lives in `host` because [`Provenance`] is the decision it applies.
+// A build without the `php` feature has no gate to expose: the deployable form
+// of it refuses an `entrypoint php` with one sentence instead
+// (`stage0::no_php_support`, `R13`).
+#[cfg(feature = "php")]
+#[doc(hidden)]
+pub use crate::stage0::deployment_boot_check;
 
 /// A program that plays one of blastit's roles, and how to ask it for one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,15 +102,11 @@ pub struct Host {
     stage1: Reexec,
     dbproxy: Reexec,
     /// The interpreter's `sys.path` as the console script found it, in bytes
-    /// (`os.fsencode`): empty for the standalone binary, whose stage 1 embeds
-    /// CPython.
+    /// (`os.fsencode`): empty for the binary, whose stage 1 `dlopen`s CPython.
     sys_path: Vec<Vec<u8>>,
-    /// D6: how this installation was made, which decides what a capability
-    /// mistake tells an operator to fix.
-    install: Install,
     /// D6: the capability-free counterpart of the file that may carry the
-    /// capabilities — the interpreter a wheel's `sys.prefix` names, or the
-    /// binary `BLASTIT_EXEC` names — **and every name it can be started by**.
+    /// capabilities — the binary `BLASTIT_EXEC` names — **and every name it can
+    /// be started by**.
     ///
     /// A list because a capability is a property of the *file*, not of the name:
     /// `python`, `python3`, `python3.13` and `sys._base_executable` can be one
@@ -106,37 +119,11 @@ pub struct Host {
     plain: Vec<PathBuf>,
 }
 
-/// Which install this is (D6).
+/// D6: the noun a capability refusal uses for the file to copy and `setcap`.
 ///
-/// It changes nothing about the roles, only about the sentence a capability
-/// mistake produces: the file to `setcap` is an interpreter under a wheel and a
-/// binary under a standalone install.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Install {
-    /// The standalone binary, started directly (§2.1).
-    Binary,
-    /// A wheel install: a console script on a project's interpreter (D2).
-    Wheel,
-}
-
-impl Install {
-    /// The noun an operator reads: what has to be copied and `setcap`ed.
-    pub const fn file(self) -> &'static str {
-        match self {
-            Self::Binary => "binary",
-            Self::Wheel => "interpreter",
-        }
-    }
-
-    /// The variable that names the capability-free file, for the standalone
-    /// install; a wheel finds its own.
-    pub const fn naming(self) -> &'static str {
-        match self {
-            Self::Binary => "BLASTIT_EXEC",
-            Self::Wheel => "sys.prefix/bin/python (the console script's own interpreter)",
-        }
-    }
-}
+/// The program is one binary: a wheel starts it through
+/// `blastit/_bin/blastit`, so no refusal anywhere names an interpreter.
+pub const FILE_NOUN: &str = "binary";
 
 /// What stage 0 execs, once the deployment has been checked (D6/B1, B2).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,47 +154,6 @@ impl Host {
             stage1: program.clone(),
             dbproxy: program,
             sys_path: Vec::new(),
-            install: Install::Binary,
-            plain,
-        }
-    }
-
-    /// A wheel install: the extension is running inside `executable`, and
-    /// dbproxy is the Python-free binary the wheel ships next to it.
-    ///
-    /// `sys_path` is the interpreter's import path at the moment the console
-    /// script started — `PYTHONPATH`, the working directory, the venv's
-    /// `site-packages` — as bytes (`os.fsencode`, so a path that is not valid
-    /// UTF-8 survives). Stage 1 is re-executed with `-I`, which drops the first
-    /// two, so stage 0 records them here and stage 1 puts them back (§4).
-    ///
-    /// `plain` is the interpreter a *child* must use — `sys.prefix/bin/python`,
-    /// which is what a project's own `python` is (D6/B1). It is the same file as
-    /// `executable` under an ambient-capability deployment, and a *different*
-    /// one when the deployment gave the capabilities to a dedicated copy.
-    pub fn wheel(
-        executable: PathBuf,
-        dbproxy: PathBuf,
-        plain: Vec<PathBuf>,
-        sys_path: Vec<Vec<u8>>,
-    ) -> Self {
-        Self {
-            stage1: Reexec {
-                program: executable,
-                // `-I`: stage 1 is `execve`'d with the application's
-                // environment, and the isolation keeps that environment from
-                // changing how the interpreter starts (§4). The venv is still
-                // found, because it is found next to the executable, and
-                // `sys_path` is restored explicitly.
-                prefix: vec![
-                    OsString::from("-I"),
-                    OsString::from("-m"),
-                    OsString::from("blastit"),
-                ],
-            },
-            dbproxy: Reexec::program(&dbproxy),
-            sys_path,
-            install: Install::Wheel,
             plain,
         }
     }
@@ -232,11 +178,6 @@ impl Host {
         &self.sys_path
     }
 
-    /// Which install this is (D6).
-    pub fn install(&self) -> Install {
-        self.install
-    }
-
     /// The capability-free program this installation can name, and every name
     /// it can be started by (D6).
     pub fn plain(&self) -> &[PathBuf] {
@@ -255,11 +196,8 @@ impl Host {
     /// install, the interpreter for a wheel. See [`placement`].
     pub fn placement(&self, drops_bounding: bool) -> Result<Placement, String> {
         // `BLASTIT_EXEC` is an operator's variable, so it is the one worth
-        // validating by name: a wheel's capability-free interpreter comes from
-        // the installation's own detection, which checks it is there.
-        if self.install == Install::Binary
-            && let Some(binary) = self.plain.first()
-        {
+        // validating by name.
+        if let Some(binary) = self.plain.first() {
             if !binary.is_file() {
                 return Err(format!(
                     "{EXEC}={} is not a file: a rootless standalone install names the \
@@ -272,20 +210,14 @@ impl Host {
             // write it or the directory it sits in.
             plain_is_protected(binary, rustix::process::geteuid().as_raw())?;
         }
-        let child = match self.install {
-            // A standalone install plays every role itself, and `BLASTIT_EXEC`
-            // is the capability-free copy of it (D6/B2).
-            Install::Binary => self
-                .plain
-                .first()
-                .cloned()
-                .unwrap_or_else(|| self.dbproxy.program.clone()),
-            // A wheel's dbproxy runs no interpreter and needs no capability, so
-            // the shipped binary is always a child program (D6/B1).
-            Install::Wheel => self.dbproxy.program.clone(),
-        };
+        // A standalone install plays every role itself, and `BLASTIT_EXEC` is
+        // the capability-free copy of it (D6/B2).
+        let child = self
+            .plain
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.dbproxy.program.clone());
         placement(
-            self.install,
             &self.stage1.program,
             &child,
             &self.plain,
@@ -486,10 +418,11 @@ pub fn protected(facts: &Facts, init_uid: u32) -> Result<(), String> {
 /// test:
 ///
 /// * a file that carries the capabilities must be a **dedicated copy**: it may
-///   not be the file the children use ([`Install::Wheel`]'s interpreter,
-///   [`Install::Binary`]'s binary), compared by device and inode rather than by
-///   name, so `python`, `python3` and a symlink chain all count (B1);
-/// * **no** name of the shared interpreter may carry a file capability: the
+///   not be the file the children use ([`Placement::init`] against
+///   [`Placement::dbproxy`]), compared by device and inode rather than by name,
+///   so `blastit` and `blastit-init` are two files even when one is a symlink
+///   (B1);
+/// * **no** name of the shared binary may carry a file capability: the
 ///   capability is granted per *file*, and every one of those names is a way to
 ///   run it;
 /// * a child may not `execve` a file with file capabilities **at all** when its
@@ -500,7 +433,6 @@ pub fn protected(facts: &Facts, init_uid: u32) -> Result<(), String> {
 ///
 /// The sentence an operator reads, naming the file and the `setcap` line.
 pub fn placement(
-    install: Install,
     init: &Path,
     child: &Path,
     plain: &[PathBuf],
@@ -517,44 +449,42 @@ pub fn placement(
             )
         })
     };
-    // Every name of the shared interpreter must be capability-free: whichever
-    // one a deployment starts, the capability belongs to init's file alone (B1).
-    // A name that *is* init's file (the dedicated copy the deployment starts, and
-    // `sys.executable` with it) is not a shared name, and may carry them.
+    // Every name of the shared binary must be capability-free: whichever one a
+    // deployment starts, the capability belongs to init's file alone (B1). A
+    // name that *is* init's file (the dedicated copy the deployment starts) is
+    // not a shared name, and may carry them.
     for name in plain {
         if same_file(name, init) {
             continue;
         }
         if caps(name)? {
-            return Err(capable_copy_advice_for(install, name, init));
+            return Err(capable_copy_advice_for(name, init));
         }
     }
     if caps(init)? {
         // The capable file must be init's alone. What it must *not* be is the
-        // file the shared interpreter is: that is the case where the boot cannot
-        // name a capability-free file other than init's own image, either because
-        // it cannot name one at all or because every name it has *is* that image.
+        // file the shared binary is: that is the case where the boot cannot name
+        // a capability-free file other than init's own image, either because it
+        // cannot name one at all or because every name it has *is* that image.
         let shared: Vec<&PathBuf> = plain.iter().filter(|name| !same_file(name, init)).collect();
         if shared.is_empty() {
             return Err(match plain.first() {
                 None => format!(
                     "{} carries file capabilities and this installation cannot name the \
-                     capability-free {} the children must use instead: {}",
+                     capability-free {} the children must use instead: {EXEC}",
                     init.display(),
-                    install.file(),
-                    install.naming()
+                    FILE_NOUN,
                 ),
-                Some(named) => capable_copy_advice_for(install, named, init),
+                Some(named) => capable_copy_advice_for(named, init),
             });
         }
     }
     if drops_bounding && caps(child)? {
         return Err(format!(
             "{} carries file capabilities, and the children of this boot cannot \
-             `execve` such a file at all (their bounding set is empty): point {} at \
+             `execve` such a file at all (their bounding set is empty): point {EXEC} at \
              the capability-free copy",
             child.display(),
-            install.naming()
         ));
     }
     Ok(Placement {
@@ -565,23 +495,22 @@ pub fn placement(
 
 /// The sentence an operator gets when a file that is *not* init's copy carries
 /// the capabilities (D6/B1).
-fn capable_copy_advice_for(install: Install, capable: &Path, init: &Path) -> String {
+fn capable_copy_advice_for(capable: &Path, init: &Path) -> String {
     format!(
         "{} carries file capabilities, and init runs from {} instead: every process of that \
          uid that can run it becomes init.\n{}",
         capable.display(),
         init.display(),
-        capable_copy_advice(install, capable)
+        capable_copy_advice(capable)
     )
 }
 
 /// The recipe that turns the shared file into init's private copy (D6/B1, B2).
 ///
-/// `shared` is the file that has the capabilities and must not: a wheel's
-/// interpreter, a standalone install's binary, or any of the names either can be
-/// started by — the file itself is what the kernel looks at, so a symlink chain
-/// makes them all one mistake.
-fn capable_copy_advice(install: Install, shared: &Path) -> String {
+/// `shared` is the file that has the capabilities and must not: the binary, or
+/// any of the names it can be started by — the file itself is what the kernel
+/// looks at, so a symlink chain makes them all one mistake.
+fn capable_copy_advice(shared: &Path) -> String {
     let resolved = std::fs::read_link(shared).unwrap_or_else(|_| shared.to_path_buf());
     // A symlink target may be relative (`python` → `python3.13`): a recipe that
     // reads `<dir>/python3.13-init` has to be about the *same* directory as the
@@ -598,20 +527,11 @@ fn capable_copy_advice(install: Install, shared: &Path) -> String {
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default()
     ));
-    let tail = match install {
-        Install::Wheel => format!(
-            "  then start that copy (`{} -m blastit`) and leave {} capability-free: a copied \
-             interpreter has to stay in the same directory, because CPython finds its stdlib \
-             and its venv from the executable's own path",
-            copy.display(),
-            shared.display()
-        ),
-        Install::Binary => format!(
-            "  then start the copy, and set {EXEC}={} so that `--role=dbproxy` runs the \
-             capability-free binary",
-            resolved.display()
-        ),
-    };
+    let tail = format!(
+        "  then start the copy, and set {EXEC}={} so that the database proxy runs the \
+         capability-free binary",
+        resolved.display()
+    );
     format!(
         "{} carries file capabilities: give them to a *dedicated copy* instead, because \
          every process of the uid init runs as could run that file otherwise — and init must \
@@ -626,646 +546,321 @@ fn capable_copy_advice(install: Install, shared: &Path) -> String {
     )
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use std::os::unix::fs::PermissionsExt;
+// ---------------------------------------------------------------------------
+// Production provenance (`ADR-0010` §3, design `R7` / `B2-R5`)
+// ---------------------------------------------------------------------------
+//
+// A deployment boot hands its workers two kinds of path: files a worker
+// `dlopen`s (`libphp`, the per-minor shim, an interpreter) and trees it reads
+// (`manifest_dir` — every PHP worker's `cwd` and `include_path` — plus a route's
+// `entry` and `static.root`). Every one of them is chosen by the route uids'
+// code at some point, so the boot authorises them once, in stage 0, before a
+// listener binds. `blastit dev` and `blastit check` deliberately do not: the
+// shim a developer just built lives in `target/php-sapi`, inside a checkout that
+// uid owns and writes, so the same rule would refuse every development boot
+// while protecting nothing (the uid that could replace the shim is the uid that
+// already runs the boot). A deployment has no such coincidence.
 
-    use super::*;
+/// `DT_RPATH`: the search path the legacy linker writes for the loader.
+const DT_RPATH: u64 = 15;
 
-    /// Serialises the tests that read or write `BLASTIT_EXEC`.
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// `DT_RUNPATH`: the same for the modern linker (`--enable-new-dtags`).
+const DT_RUNPATH: u64 = 29;
 
-    /// The lock described on [`ENV`]; a poisoned lock still runs the next test.
-    fn env() -> std::sync::MutexGuard<'static, ()> {
-        ENV.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// The largest dynamic string table this walk will read into memory. An object's
+/// `DT_STRTAB` is a few hundred bytes; this is the bound that keeps a hostile
+/// file from being an allocation.
+const MAX_DYNAMIC_STRTAB: u64 = 4 * 1024 * 1024;
+
+/// The directories an ELF object's `DT_RPATH`/`DT_RUNPATH` add to the dynamic
+/// loader's search path, read from the file itself.
+///
+/// This is the static half of design `R7`: an object whose search path names a
+/// directory a route uid can write is one that uid chooses the `DT_NEEDED`
+/// resolution of, so the boot refuses it. **Nothing is loaded** — no `dlopen`,
+/// no `mmap`: the header, the section header table and the `SHT_DYNAMIC` array
+/// are `seek`/`read` through [`blastit_sys::elf`], which bounds-checks every
+/// offset and length against the file's own length and refuses a truncated or
+/// hostile object instead of panicking.
+///
+/// # Errors
+///
+/// A sentence naming what could not be read: a file that is not a
+/// little-endian ELF, one with no section headers or no dynamic section, and one
+/// that is truncated. A search path that cannot be read must never be read as
+/// "no search path" — that is the difference between a check and an assumption.
+pub fn dynamic_search_paths(path: &Path) -> Result<Vec<String>, String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|err| format!("{}: it cannot be read ({err})", path.display()))?;
+    let mut elf = Elf::parse(&mut file).map_err(|err| object_error(path, &err))?;
+    let entries = match elf.dynamic_strings_any(&[DT_RPATH, DT_RUNPATH], MAX_DYNAMIC_STRTAB) {
+        Ok(entries) => entries,
+        // An object with no dynamic section has no search path at all; a
+        // dynamic entry that is not a string is a refusal, never "nothing".
+        Err(ElfError::NoDynamic) => return Ok(Vec::new()),
+        Err(err) => return Err(object_error(path, &err)),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        paths.extend(entry.split(':').map(ToOwned::to_owned));
     }
+    Ok(paths)
+}
 
-    /// A directory with a name of its own, under `$HOME`, removed when dropped.
+/// The sentence [`dynamic_search_paths`] prints for a failure in the shared
+/// reader.
+///
+/// The wording of a provenance refusal is this module's: an operator reads "its
+/// section header table is past the end of the file", and the shared layer's
+/// `Display` is only the generic spelling of the same fact.
+fn object_error(path: &Path, err: &ElfError) -> String {
+    let detail = match err {
+        ElfError::Io(err) => return format!("{}: it cannot be read ({err})", path.display()),
+        ElfError::NoMagic => "it is not an ELF object (no ELF magic)",
+        ElfError::IdentTooShort => "its ELF identification is truncated",
+        ElfError::UnknownClass(_) => "it is not an ELF object (unknown class)",
+        ElfError::BigEndian => {
+            "it is a big-endian ELF object, and only little-endian objects are embedded"
+        }
+        ElfError::HeaderTruncated => "its ELF header is truncated",
+        ElfError::NoSections => "it has no section headers, so its dynamic section cannot be read",
+        ElfError::SectionEntriesTooSmall => {
+            "its section header table's entries are too small to be section headers"
+        }
+        ElfError::SectionTableTooLarge => "its section header table is too large",
+        ElfError::SectionTablePastEnd => "its section header table is past the end of the file",
+        ElfError::DynamicString => {
+            "a DT_RPATH/DT_RUNPATH entry is not a string this build can read"
+        }
+        other => return format!("{}: {other}", path.display()),
+    };
+    format!("{}: {detail}", path.display())
+}
+
+/// One path a deployment boot authorises before a worker is given it
+/// (`ADR-0010` §3, design `R7`/`B2-R5`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Claim {
+    /// How a refusal names it: `the NTS libphp`, `route "app": [route.php]
+    /// entry "public/index.php"`, ….
+    pub what: String,
+    /// The path, resolved as the boot will open it.
+    pub path: PathBuf,
+}
+
+impl Claim {
+    /// A claim on `path`, named `what` in every refusal.
+    #[must_use]
+    pub fn new(what: impl Into<String>, path: impl Into<PathBuf>) -> Self {
+        Self {
+            what: what.into(),
+            path: path.into(),
+        }
+    }
+}
+
+/// The paths a deployment boot hands its workers, and the uid that must own them
+/// (design `R7`/`B2-R5`).
+///
+/// Two lists, because the two questions differ:
+///
+/// * [`objects`](Self::objects) are files a worker `dlopen`s or `execve`s
+///   (`libphp`, a shim, an interpreter). Besides "no other uid can replace it"
+///   they may carry no file capabilities a child's emptied bounding set cannot
+///   honour, and no `DT_RPATH`/`DT_RUNPATH` entry into a directory a route uid
+///   can write — the loader resolves their `DT_NEEDED` from there;
+/// * [`trees`](Self::trees) are read, never loaded (`manifest_dir`, a route's
+///   `entry`, a `static.root`): a PHP worker's `cwd` and `include_path` are that
+///   tree, so a route uid that can write a file into it chooses what the worker
+///   will `include`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Provenance {
+    /// The uid that owns the installation: root, or init's own uid in a
+    /// rootless deployment. Only root and this uid may own the paths.
+    pub init_uid: u32,
+    /// The files a worker loads.
+    pub objects: Vec<Claim>,
+    /// The trees a worker reads.
+    pub trees: Vec<Claim>,
+}
+
+impl Provenance {
+    /// Authorises [`Self::objects`]: ownership and permissions, no file
+    /// capabilities, and zero writable `DT_RPATH`/`DT_RUNPATH` entries.
     ///
-    /// Not `temp_dir()`: the checks in this module refuse a program any other uid
-    /// could replace, and `/tmp` is group- and other-writable — exactly what they
-    /// refuse.
-    struct TempDir {
-        path: PathBuf,
+    /// # Errors
+    ///
+    /// The first refusal, naming the claim, its path, what is wrong with it and
+    /// the command that fixes it.
+    pub fn check_objects(&self) -> Result<(), String> {
+        self.check_objects_with(has_file_caps)
     }
 
-    impl TempDir {
-        fn new(tag: &str) -> Self {
-            let root = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir);
-            let path = root.join(format!(".blastit-host-{}-{tag}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            Self { path }
-        }
-
-        /// Writes a file with `mode`, as this (test) process's uid.
-        fn file(&self, name: &str, mode: u32) -> PathBuf {
-            let path = self.path.join(name);
-            std::fs::write(&path, b"#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            path
-        }
-
-        /// A directory inside it, with `mode`.
-        fn dir(&self, name: &str, mode: u32) -> PathBuf {
-            let path = self.path.join(name);
-            std::fs::create_dir_all(&path).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
-    }
-
-    /// The uid init runs as in these tests: this process's.
-    fn init_uid() -> u32 {
-        rustix::process::geteuid().as_raw()
-    }
-
-    /// A [`TempDir`] whose paths no other uid can write, or `None` when this
-    /// environment has none (an odd `$HOME`, a shared build directory): the tests
-    /// that need one print and pass, the way a root-only test does.
-    fn safe_dir(tag: &str) -> Option<TempDir> {
-        let dir = TempDir::new(tag);
-        let probe = dir.file("probe", 0o755);
-        match plain_is_protected(&probe, init_uid()) {
-            Ok(()) => Some(dir),
-            Err(err) => {
-                println!(
-                    "skipped: no directory only its owner can write, in this environment ({err})"
-                );
-                None
+    /// [`check_objects`](Self::check_objects) with the capability predicate
+    /// **injected**, the way [`placement`] takes `caps_of`.
+    ///
+    /// `setxattr` on `security.capability` needs `CAP_SETFCAP`, so no
+    /// unprivileged test can put the attribute on a file it made — and a test
+    /// that early-returns when it is not root leaves the `!has_file_caps`
+    /// refusal with no witness in `make check`. Private on purpose:
+    /// the only caller besides [`check_objects`](Self::check_objects) is this
+    /// module's tests, and the boot always reads the real attribute.
+    fn check_objects_with(
+        &self,
+        caps_of: impl Fn(&Path) -> io::Result<bool>,
+    ) -> Result<(), String> {
+        for claim in &self.objects {
+            self.cannot_be_replaced(claim)?;
+            match caps_of(&claim.path) {
+                Ok(false) => {}
+                Ok(true) => {
+                    return Err(format!(
+                        "{} ({}) carries file capabilities (security.capability), and a child \
+                         whose bounding set is empty cannot honour them: strip them with \
+                         `setcap -r {}`, and give the capability to the file init runs instead \
+                         (D6/B1)",
+                        claim.what,
+                        claim.path.display(),
+                        claim.path.display()
+                    ));
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "{} ({}): its file capabilities cannot be read ({err}), so the boot \
+                         cannot tell whether a child would inherit a privilege it must not have",
+                        claim.what,
+                        claim.path.display()
+                    ));
+                }
             }
+            self.no_writable_search_path(claim)?;
         }
+        Ok(())
     }
 
-    /// `caps_of` for the pure `placement` tests: exactly these paths carry file
-    /// capabilities, and every other one does not.
-    fn caps_of<'a>(paths: &'a [&'a str]) -> impl Fn(&Path) -> io::Result<bool> + 'a {
-        move |path| Ok(paths.iter().any(|held| Path::new(held) == path))
+    /// Authorises [`Self::trees`]: ownership and permissions only, because the
+    /// tree is read rather than loaded.
+    ///
+    /// # Errors
+    ///
+    /// The first refusal, naming the claim, its path, what is wrong with it and
+    /// the command that fixes it.
+    pub fn check_trees(&self) -> Result<(), String> {
+        for claim in &self.trees {
+            self.cannot_be_replaced(claim)?;
+        }
+        Ok(())
     }
 
-    /// `caps_of` for an attribute that cannot be read: this path is an error.
-    fn caps_of_broken(path: &'static str) -> impl Fn(&Path) -> io::Result<bool> {
-        move |candidate| {
-            if candidate == Path::new(path) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "no xattr for you",
+    /// `B2`: one path another uid could replace, and the fix.
+    fn cannot_be_replaced(&self, claim: &Claim) -> Result<(), String> {
+        let facts = facts_of(&claim.path).map_err(|err| {
+            format!(
+                "{} ({}): it cannot be inspected ({err}), so the boot cannot tell whether \
+                 another uid could replace it",
+                claim.what,
+                claim.path.display()
+            )
+        })?;
+        protected(&facts, self.init_uid).map_err(|wrong| {
+            format!(
+                "{} ({}) could be replaced by another uid: {wrong}. chown it to root (or to \
+                 init's uid, {}), remove the group and other write bits (chmod 0644 for a file, \
+                 0755 for a directory), and do the same to every directory above it",
+                claim.what,
+                claim.path.display(),
+                self.init_uid
+            )
+        })
+    }
+
+    /// `R7`: zero `DT_RPATH`/`DT_RUNPATH` entries into a directory another uid
+    /// can write, decided from the file's dynamic section without loading it.
+    fn no_writable_search_path(&self, claim: &Claim) -> Result<(), String> {
+        let origin = std::fs::canonicalize(&claim.path)
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
+        for entry in dynamic_search_paths(&claim.path)? {
+            let Some(directory) = resolve_search_entry(&entry, origin.as_deref()) else {
+                return Err(format!(
+                    "{} ({}) has a DT_RPATH/DT_RUNPATH entry {entry:?} this boot cannot resolve \
+                     statically — a relative path, an empty element (the loader reads that as \
+                     the worker's own working directory), or a token other than `$ORIGIN` — so \
+                     the boot cannot tell where the loader would look: relink it with no \
+                     `-rpath` (a distro package does), or with an absolute directory only root \
+                     or init's uid can write",
+                    claim.what,
+                    claim.path.display()
+                ));
+            };
+            let facts = self.facts_of_nearest(&directory).map_err(|err| {
+                format!(
+                    "{} ({}) has a DT_RPATH/DT_RUNPATH entry {entry:?} naming {}: {err}",
+                    claim.what,
+                    claim.path.display(),
+                    directory.display()
+                )
+            })?;
+            if let Err(wrong) = protected(&facts, self.init_uid) {
+                return Err(format!(
+                    "{} ({}) has a DT_RPATH/DT_RUNPATH entry {entry:?} naming {}, which another \
+                     uid could write: {wrong}. The loader resolves the object's DT_NEEDED from \
+                     there, so that uid chooses code this worker loads: relink it with no \
+                     `-rpath` (a distro package does), or with a directory only root or init's \
+                     uid can write",
+                    claim.what,
+                    claim.path.display(),
+                    directory.display()
                 ));
             }
-            Ok(false)
         }
+        Ok(())
     }
 
-    /// `same_file` for the pure tests: exactly these pairs are one file.
-    fn same<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&Path, &Path) -> bool + 'a {
-        move |left, right| {
-            pairs.iter().any(|(one, other)| {
-                (Path::new(one) == left && Path::new(other) == right)
-                    || (Path::new(one) == right && Path::new(other) == left)
-            })
-        }
-    }
-
-    /// No two paths are the same file.
-    fn distinct(_left: &Path, _right: &Path) -> bool {
-        false
-    }
-
-    #[test]
-    fn the_binary_reexecutes_itself_for_every_role() {
-        let _env = env();
-        // SAFETY: `env()` is held, so no other test reads or writes the variable.
-        unsafe { std::env::remove_var(EXEC) };
-        let host = Host::binary();
-        assert_eq!(host.stage1().program, Path::new("/proc/self/exe"));
-        assert_eq!(host.dbproxy().program, Path::new("/proc/self/exe"));
-        assert!(host.stage1().prefix.is_empty());
-        assert!(host.dbproxy().prefix.is_empty());
-        assert!(host.sys_path().is_empty());
-        assert_eq!(host.install(), Install::Binary);
-        assert!(host.plain().is_empty());
-        // Nothing carries file capabilities, so there is nothing to keep apart.
-        assert_eq!(
-            host.placement(true).unwrap(),
-            Placement {
-                init: PathBuf::from("/proc/self/exe"),
-                dbproxy: PathBuf::from("/proc/self/exe"),
+    /// [`facts_of`] for a directory that need not be there.
+    ///
+    /// A search path naming a directory that does not exist is not a place
+    /// anything can be loaded from *today* — what decides is the nearest
+    /// existing directory above it, because a writable one means a route uid
+    /// could create the rest and drop a `DT_NEEDED` object in it.
+    fn facts_of_nearest(&self, directory: &Path) -> Result<Facts, String> {
+        let mut candidate = directory;
+        loop {
+            match facts_of(candidate) {
+                Ok(facts) => return Ok(facts),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    candidate = candidate.parent().ok_or_else(|| {
+                        format!("{} cannot be inspected ({err})", directory.display())
+                    })?;
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "{} cannot be inspected ({err})",
+                        directory.display()
+                    ));
+                }
             }
-        );
-    }
-
-    #[test]
-    fn a_rootless_binary_plays_dbproxy_as_the_capability_free_copy() {
-        let _env = env();
-        let Some(dir) = safe_dir("rootless-binary") else {
-            return;
-        };
-        let plain = dir.file("blastit", 0o755);
-        // SAFETY: `env()` is held, so no other test reads or writes the variable.
-        unsafe { std::env::set_var(EXEC, &plain) };
-        let host = Host::binary();
-        assert_eq!(host.install(), Install::Binary);
-        assert_eq!(host.plain(), std::slice::from_ref(&plain));
-        assert_eq!(host.placement(true).unwrap().dbproxy, plain);
-        // SAFETY: `env()` is still held.
-        unsafe { std::env::remove_var(EXEC) };
-    }
-
-    #[test]
-    fn a_binary_that_is_not_there_is_refused_by_name() {
-        let _env = env();
-        // SAFETY: `env()` is held, so no other test reads or writes the variable.
-        unsafe { std::env::set_var(EXEC, "/nonexistent/blastit") };
-        let err = Host::binary().placement(true).unwrap_err();
-        assert!(err.contains("BLASTIT_EXEC=/nonexistent/blastit"), "{err}");
-        assert!(err.contains("not a file"), "{err}");
-        // SAFETY: `env()` is still held.
-        unsafe { std::env::remove_var(EXEC) };
-    }
-
-    #[test]
-    fn a_capability_free_binary_another_uid_could_replace_is_refused() {
-        let _env = env();
-        let dir = TempDir::new("replaceable");
-        // A binary every uid may write: whoever replaces it decides what dbproxy
-        // runs next (B2).
-        let writable = dir.file("blastit", 0o777);
-        // SAFETY: `env()` is held, so no other test reads or writes the variable.
-        unsafe { std::env::set_var(EXEC, &writable) };
-        let err = Host::binary().placement(true).unwrap_err();
-        assert!(err.contains("could be replaced by another uid"), "{err}");
-        assert!(err.contains("group- or other-writable"), "{err}");
-        assert!(err.contains("init's uid"), "{err}");
-        // SAFETY: `env()` is still held.
-        unsafe { std::env::remove_var(EXEC) };
-    }
-
-    #[test]
-    fn a_wheel_reexecutes_the_interpreter_and_the_dbproxy_binary() {
-        let site_packages = "/app/.venv/lib/python3.14/site-packages/blastit";
-        let interpreter = PathBuf::from("/app/.venv/bin/python");
-        let host = Host::wheel(
-            interpreter.clone(),
-            PathBuf::from(format!("{site_packages}/_bin/blastit-dbproxy")),
-            vec![interpreter.clone()],
-            vec![b"/app".to_vec(), vec![b'/', b'a', 0xff, b'p']],
-        );
-        assert_eq!(
-            host.stage1().program,
-            Path::new("/app/.venv/bin/python"),
-            "stage 1 is the interpreter the wheel was installed into"
-        );
-        assert_eq!(
-            host.stage1().prefix,
-            vec![
-                OsString::from("-I"),
-                OsString::from("-m"),
-                OsString::from("blastit")
-            ]
-        );
-        assert_eq!(
-            host.dbproxy().program,
-            Path::new(&format!("{site_packages}/_bin/blastit-dbproxy")),
-            "dbproxy runs no interpreter"
-        );
-        assert!(host.dbproxy().prefix.is_empty());
-        assert_eq!(
-            host.sys_path(),
-            [b"/app".to_vec(), vec![b'/', b'a', 0xff, b'p']],
-            "the import path travels as bytes, invalid UTF-8 included"
-        );
-        assert_eq!(host.install(), Install::Wheel);
-        // Nothing carries file capabilities here, so the wheel's dbproxy binary
-        // is the child program, and the check passes (B1).
-        // `placement` itself is exercised on real paths and with the pure
-        // fnctions below: these paths are imaginary, and the check refuses what
-        // it cannot read rather than assuming it is capability-free.
-        assert!(host.placement(true).is_err());
-    }
-
-    /// The mistake B1 is about: `setcap` on the interpreter a project's `python`
-    /// is, started under any of its names.
-    #[test]
-    fn every_name_of_a_capable_interpreter_is_refused() {
-        let names = [
-            "/usr/local/bin/python",
-            "/usr/local/bin/python3",
-            "/usr/local/bin/python3.13",
-        ];
-        for capable in names {
-            // init runs from a *copy*, so the refusal can only come from the
-            // capability on the shared file.
-            let err = placement(
-                Install::Wheel,
-                Path::new("/usr/local/bin/python3.13-init"),
-                Path::new("/w/_bin/blastit-dbproxy"),
-                &names.iter().map(PathBuf::from).collect::<Vec<_>>(),
-                true,
-                distinct,
-                caps_of(&[capable]),
-            )
-            .unwrap_err();
-            assert!(
-                err.contains(capable),
-                "{capable} is named in the refusal: {err}"
-            );
-            assert!(err.contains("dedicated copy"), "{err}");
-            assert!(
-                err.contains(&format!("cp {capable} {capable}-init")),
-                "the recipe copies the file that has the capabilities: {err}"
-            );
-            assert!(err.contains("chmod 0500"), "{err}");
-            assert!(err.contains(blastit_sys::caps::Capability::SETCAP), "{err}");
-            assert!(err.contains("-m blastit"), "{err}");
         }
     }
+}
 
-    /// A real `security.capability` (root, as `setcap` would write it) on a real
-    /// file that `python`, `python3` and `python3.13` all resolve to: the check
-    /// runs with the real `same_file` and the real `has_file_caps`.
-    #[test]
-    fn a_real_capability_on_the_shared_interpreter_is_refused_under_every_name() {
-        if !rustix::process::geteuid().is_root() {
-            println!("skipped: setting security.capability needs CAP_SETFCAP");
-            return;
-        }
-        let Some(dir) = safe_dir("names") else {
-            return;
-        };
-        let real = dir.file("python3.13", 0o755);
-        // The two other names a project's interpreter is reached by: relative
-        // symlinks, which is what a distribution ships.
-        std::os::unix::fs::symlink("python3.13", dir.path.join("python3")).unwrap();
-        std::os::unix::fs::symlink("python3", dir.path.join("python")).unwrap();
-        let mut value = [0_u8; 20];
-        value[..4].copy_from_slice(&0x0200_0001_u32.to_le_bytes());
-        value[4..8].copy_from_slice(&1_u32.to_le_bytes());
-        let name = c"security.capability";
-        let path_c = CString::new(real.as_os_str().as_bytes()).unwrap();
-        // SAFETY: `setxattr` takes a NUL-terminated path and name, a buffer of
-        // the length given and a flags word.
-        let wrote = unsafe {
-            libc::setxattr(
-                path_c.as_ptr(),
-                name.as_ptr(),
-                value.as_ptr().cast(),
-                value.len(),
-                0,
-            )
-        };
-        assert_eq!(wrote, 0, "setxattr: {}", io::Error::last_os_error());
-
-        let init = dir.file("python3.13-init", 0o500);
-        let names: Vec<PathBuf> = ["python", "python3", "python3.13"]
-            .iter()
-            .map(|name| dir.path.join(name))
-            .collect();
-        for capable in &names {
-            let err = placement(
-                Install::Wheel,
-                &init,
-                Path::new("/w/_bin/blastit-dbproxy"),
-                &names,
-                true,
-                same_file,
-                has_file_caps,
-            )
-            .unwrap_err();
-            assert!(
-                err.contains(&capable.to_string_lossy().into_owned()),
-                "{} is named: {err}",
-                capable.display()
-            );
-            assert!(err.contains("dedicated copy"), "{err}");
-            // The recipe is about a file *in this directory* (the symlinks are
-            // relative, so this is what proves the target was joined to the
-            // link's own directory rather than to the current one).
-            assert!(
-                err.contains(&format!("cp {}", dir.path.display())),
-                "the copy is made from a file in the same directory: {err}"
-            );
-            assert!(err.contains("-init"), "{err}");
-        }
+/// Where one `DT_RPATH`/`DT_RUNPATH` element points, or `None` when the boot
+/// cannot resolve it without the loader.
+///
+/// `$ORIGIN` (and `${ORIGIN}`) is the one token that is decidable statically —
+/// it is the directory the object itself was loaded from — so it is expanded.
+/// Everything else is refused rather than guessed: `$LIB`, `$PLATFORM`, a bare
+/// relative path and the empty element are all resolved by the dynamic loader
+/// against state the stage-0 process does not share with the worker.
+fn resolve_search_entry(entry: &str, origin: Option<&Path>) -> Option<PathBuf> {
+    let mut text = entry.to_owned();
+    if let Some(origin) = origin {
+        let origin = origin.to_string_lossy();
+        text = text.replace("${ORIGIN}", &origin);
+        text = text.replace("$ORIGIN", &origin);
     }
-
-    #[test]
-    fn the_recipe_reads_a_relative_symlink_target_in_the_right_directory() {
-        // `read_link` on a relative symlink (`python` → `python3.13`) gives a
-        // relative path: the copy the recipe names has to be in the *link's*
-        // directory, not in the current one.
-        let dir = TempDir::new("relative");
-        let real = dir.file("python3.13", 0o755);
-        let link = dir.path.join("python");
-        std::os::unix::fs::symlink("python3.13", &link).unwrap();
-        // init is that file, and `python` is one of its names.
-        let capable_init = |path: &Path| Ok(path == real.as_path());
-        let err = placement(
-            Install::Wheel,
-            &real,
-            Path::new("/w/_bin/blastit-dbproxy"),
-            std::slice::from_ref(&link),
-            true,
-            same_file,
-            capable_init,
-        )
-        .unwrap_err();
-        assert!(
-            err.contains(&format!("cp {} {}-init", real.display(), real.display())),
-            "an absolute destination, in the symlink's directory: {err}"
-        );
+    if text.is_empty() || text.contains('$') || !Path::new(&text).is_absolute() {
+        return None;
     }
-
-    #[test]
-    fn a_shared_interpreter_that_is_init_itself_is_refused() {
-        // The same file under two names: `BLASTIT_EXEC` (or `sys.executable`)
-        // resolving to init's own file, by device and inode rather than by name.
-        let err = placement(
-            Install::Wheel,
-            Path::new("/usr/local/bin/python3.13"),
-            Path::new("/w/_bin/blastit-dbproxy"),
-            &[PathBuf::from("/usr/local/bin/python")],
-            true,
-            same(&[("/usr/local/bin/python", "/usr/local/bin/python3.13")]),
-            caps_of(&["/usr/local/bin/python3.13"]),
-        )
-        .unwrap_err();
-        assert!(err.contains("dedicated copy"), "{err}");
-        assert!(
-            err.contains("/usr/local/bin/python") && err.contains("-init"),
-            "the recipe is about the file the names reach: {err}"
-        );
-        assert!(err.contains("capabilities"), "{err}");
-    }
-
-    #[test]
-    fn a_capability_that_cannot_be_named_is_refused_by_name() {
-        let err = placement(
-            Install::Wheel,
-            Path::new("/opt/blastit/python-init"),
-            Path::new("/w/_bin/blastit-dbproxy"),
-            &[],
-            true,
-            distinct,
-            caps_of(&["/opt/blastit/python-init"]),
-        )
-        .unwrap_err();
-        assert!(err.contains("cannot name"), "{err}");
-        assert!(err.contains("sys.prefix/bin/python"), "{err}");
-    }
-
-    #[test]
-    fn a_capability_check_that_fails_is_a_refusal_not_an_assumption() {
-        // An xattr that cannot be read must not be read as "no capabilities": a
-        // sandbox that cannot prove something must not assume it.
-        let err = placement(
-            Install::Binary,
-            Path::new("/proc/self/exe"),
-            Path::new("/proc/self/exe"),
-            &[PathBuf::from("/not/readable/blastit")],
-            true,
-            distinct,
-            caps_of_broken("/not/readable/blastit"),
-        )
-        .unwrap_err();
-        assert!(err.contains("cannot read the file capabilities"), "{err}");
-        assert!(err.contains("/not/readable/blastit"), "{err}");
-    }
-
-    #[test]
-    fn a_child_may_not_be_pointed_at_a_file_with_capabilities() {
-        // B2's other half: with an empty bounding set the `execve` itself fails,
-        // so the boot refuses and says which variable to point elsewhere.
-        let err = placement(
-            Install::Binary,
-            Path::new("/proc/self/exe"),
-            Path::new("/usr/local/bin/blastit-init"),
-            &[PathBuf::from("/usr/local/bin/blastit")],
-            true,
-            distinct,
-            caps_of(&["/usr/local/bin/blastit-init"]),
-        )
-        .unwrap_err();
-        assert!(err.contains("bounding set is empty"), "{err}");
-        assert!(err.contains(EXEC), "{err}");
-
-        // M1: without `cap_setpcap` the bounding set survives, the `execve`
-        // works, and `no_new_privs` is what stops the grant — so the same
-        // deployment is allowed, and it was allowed before D6 too.
-        assert!(
-            placement(
-                Install::Binary,
-                Path::new("/proc/self/exe"),
-                Path::new("/usr/local/bin/blastit-init"),
-                &[PathBuf::from("/usr/local/bin/blastit")],
-                false,
-                distinct,
-                caps_of(&["/usr/local/bin/blastit-init"]),
-            )
-            .is_ok()
-        );
-    }
-
-    /// A deployment that starts the *copy* lists it among the names of its
-    /// interpreter (`sys.executable`): that name is init's own file, so the
-    /// capability on it is the point of the deployment, not a mistake.
-    #[test]
-    fn init_own_copy_among_the_names_is_not_a_refusal() {
-        let init = "/usr/local/bin/python3.13-init";
-        let placement = placement(
-            Install::Wheel,
-            Path::new(init),
-            Path::new("/w/_bin/blastit-dbproxy"),
-            &[
-                // What `sys.executable` and its resolved target are, under this
-                // deployment: init's own file.
-                PathBuf::from(init),
-                // The shared interpreter, capability-free.
-                PathBuf::from("/usr/local/bin/python3.13"),
-                PathBuf::from("/usr/local/bin/python"),
-            ],
-            true,
-            same(&[(init, init)]),
-            caps_of(&[init]),
-        )
-        .unwrap();
-        assert_eq!(placement.init, Path::new(init));
-    }
-
-    #[test]
-    fn a_rootless_layout_is_accepted_and_keeps_the_wheels_own_dbproxy() {
-        // init runs from the copy, which carries the capabilities; the shared
-        // interpreter and the shipped dbproxy binary have none: exactly the
-        // deployment this step ships (B1).
-        let placement = placement(
-            Install::Wheel,
-            Path::new("/usr/local/bin/python3.13-init"),
-            Path::new("/app/.venv/lib/python3.13/site-packages/blastit/_bin/blastit-dbproxy"),
-            &[
-                PathBuf::from("/usr/local/bin/python3.13"),
-                PathBuf::from("/usr/local/bin/python"),
-            ],
-            true,
-            same(&[]),
-            caps_of(&["/usr/local/bin/python3.13-init"]),
-        )
-        .unwrap();
-        assert_eq!(placement.init, Path::new("/usr/local/bin/python3.13-init"));
-        assert_eq!(
-            placement.dbproxy,
-            Path::new("/app/.venv/lib/python3.13/site-packages/blastit/_bin/blastit-dbproxy")
-        );
-    }
-
-    #[test]
-    fn same_file_follows_symlinks() {
-        let dir = TempDir::new("same-file");
-        let real = dir.file("python3.13", 0o755);
-        let link = dir.path.join("python3");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        assert!(same_file(&real, &link), "a symlink is its target");
-        assert!(same_file(&link, &real));
-        assert!(same_file(&real, &real));
-        let other = dir.file("other", 0o755);
-        assert!(!same_file(&real, &other));
-        assert!(!same_file(&real, Path::new("/nonexistent")));
-    }
-
-    #[test]
-    fn has_file_caps_tells_absence_from_ignorance() {
-        let dir = TempDir::new("caps-absence");
-        let plain = dir.file("plain", 0o755);
-        assert!(!has_file_caps(&plain).unwrap(), "no attribute is an answer");
-        let missing = has_file_caps(Path::new("/nonexistent/blastit")).unwrap_err();
-        assert!(
-            missing.to_string().contains("/nonexistent/blastit"),
-            "an unreadable attribute is an error, not a `false`: {missing}"
-        );
-        // The two errnos that are an *answer* rather than a failure: no
-        // attribute, or a filesystem with no extended attributes at all.
-        assert_eq!(caps_from_errno(Some(libc::ENODATA)), Some(false));
-        assert_eq!(caps_from_errno(Some(libc::ENOTSUP)), Some(false));
-        assert_eq!(caps_from_errno(Some(libc::EPERM)), None);
-        assert_eq!(caps_from_errno(Some(libc::ENOENT)), None);
-        assert_eq!(caps_from_errno(None), None);
-        // `/proc` answers one of the two (it has no `security.capability`).
-        assert!(
-            !has_file_caps(Path::new("/proc/self/status")).unwrap(),
-            "nothing in `/proc` carries file capabilities"
-        );
-    }
-
-    #[test]
-    fn has_file_caps_sees_one_that_is_there() {
-        if !rustix::process::geteuid().is_root() {
-            println!("skipped: setting security.capability needs CAP_SETFCAP");
-            return;
-        }
-        // Write the attribute the kernel reads at an `execve`: a `vfs_cap_data`
-        // with `VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE`.
-        let dir = TempDir::new("caps-there");
-        let path = dir.file("capable", 0o755);
-        let mut value = [0_u8; 20];
-        value[..4].copy_from_slice(&0x0200_0001_u32.to_le_bytes());
-        value[4..8].copy_from_slice(&1_u32.to_le_bytes());
-        let name = c"security.capability";
-        let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
-        // SAFETY: `setxattr` takes a NUL-terminated path, a NUL-terminated name,
-        // a buffer of the length given and a flags word.
-        let wrote = unsafe {
-            libc::setxattr(
-                path_c.as_ptr(),
-                name.as_ptr(),
-                value.as_ptr().cast(),
-                value.len(),
-                0,
-            )
-        };
-        assert_eq!(wrote, 0, "setxattr: {}", io::Error::last_os_error());
-        assert!(has_file_caps(&path).unwrap(), "an attribute that is there");
-        std::fs::remove_file(&path).unwrap();
-        assert!(
-            !has_file_caps(&path).unwrap_or(false),
-            "and gone when the file is"
-        );
-    }
-
-    #[test]
-    fn protected_accepts_root_or_the_service_uid_and_nothing_writable() {
-        let root_owned = Facts {
-            owner: 0,
-            writable_by_others: false,
-            directory_writable_by_others: false,
-        };
-        assert_eq!(protected(&root_owned, 1000), Ok(()));
-        let ours = Facts {
-            owner: 1000,
-            ..root_owned
-        };
-        assert_eq!(protected(&ours, 1000), Ok(()));
-        let someone_else = Facts {
-            owner: 1001,
-            ..root_owned
-        };
-        let err = protected(&someone_else, 1000).unwrap_err();
-        assert!(err.contains("owned by uid 1001"), "{err}");
-        let writable = Facts {
-            writable_by_others: true,
-            ..root_owned
-        };
-        let err = protected(&writable, 1000).unwrap_err();
-        assert!(err.contains("group- or other-writable"), "{err}");
-        let directory = Facts {
-            directory_writable_by_others: true,
-            ..root_owned
-        };
-        let err = protected(&directory, 1000).unwrap_err();
-        assert!(err.contains("/tmp"), "{err}");
-        let both = Facts {
-            writable_by_others: true,
-            directory_writable_by_others: true,
-            owner: 1001,
-        };
-        let err = protected(&both, 1000).unwrap_err();
-        assert!(err.contains("owned by"), "{err}");
-        assert!(err.contains("writable"), "{err}");
-    }
-
-    #[test]
-    fn the_facts_of_a_file_read_its_owner_and_walk_its_directories() {
-        let dir = TempDir::new("facts");
-        let file = dir.file("blastit", 0o755);
-        let facts = facts_of(&file).unwrap();
-        assert_eq!(facts.owner, init_uid());
-        assert!(!facts.writable_by_others);
-        let open = dir.file("open", 0o666);
-        assert!(facts_of(&open).unwrap().writable_by_others);
-        // A world-writable directory *above* the file: `/tmp` is the one the
-        // message names, and a copy of it here says the same thing.
-        let shared = dir.dir("shared", 0o777);
-        let inside = shared.join("blastit");
-        std::fs::write(&inside, b"#!/bin/sh\n").unwrap();
-        // The mode the umask would give it is not the point: 0644 is what the
-        // assertion below is about.
-        std::fs::set_permissions(&inside, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let facts = facts_of(&inside).unwrap();
-        assert!(!facts.writable_by_others, "the file itself is 0644");
-        assert!(
-            facts.directory_writable_by_others,
-            "its directory is writable by anyone"
-        );
-        assert!(
-            !plain_is_protected(&inside, init_uid()).is_ok(),
-            "and that is a refusal"
-        );
-    }
+    Some(PathBuf::from(text))
 }

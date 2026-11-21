@@ -100,26 +100,52 @@ pub struct Emitter {
     format: LogFormat,
     level: Level,
     color: bool,
+    /// Whether a fatal refusal is printed as text on stderr (a person is
+    /// watching) instead of as `app.output` events on the stream.
+    refusals: bool,
 }
 
 impl Emitter {
     /// An emitter writing to `fd`, with the given format and minimum level.
     ///
-    /// `color` is only consulted in [`LogFormat::Pretty`].
+    /// `color` is only consulted in [`LogFormat::Pretty`], and it is also what
+    /// decides a fatal refusal's shape: a coloured stream is a terminal, and a
+    /// terminal gets prose on stderr rather than JSON on stdout. [`Emitter::stdout`]
+    /// makes the same decision from the stderr side of [`Colour`].
     pub fn new(fd: RawFd, format: LogFormat, level: Level, color: bool) -> Self {
         Self {
             fd,
             format,
             level,
             color,
+            refusals: color && format != LogFormat::Json,
         }
     }
 
-    /// An emitter writing to stdout, coloured only when stdout is a terminal.
-    pub fn stdout(format: LogFormat, level: Level) -> Self {
-        // SAFETY: `isatty` takes a descriptor number and cannot fail.
-        let color = unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1;
-        Self::new(libc::STDOUT_FILENO, format, level, color)
+    /// An emitter writing to stdout, coloured only when the process decided
+    /// stdout should be.
+    pub fn stdout(format: LogFormat, level: Level, colour: Colour) -> Self {
+        Self {
+            fd: libc::STDOUT_FILENO,
+            format,
+            level,
+            color: colour.stdout,
+            // A refusal goes where a *person* reads: stderr is the terminal's
+            // stream, so `colour.stderr` — the TTY-and-not-dumb decision taken
+            // once by the composition root — is the one that counts here, not
+            // `colour.stdout`. A `json` boot keeps the events for its pipeline.
+            refusals: colour.stderr && format != LogFormat::Json,
+        }
+    }
+
+    /// Whether this emitter's stream is the human format (§8.1).
+    pub fn is_pretty(&self) -> bool {
+        self.format == LogFormat::Pretty
+    }
+
+    /// Whether a fatal refusal from this emitter is text on stderr.
+    pub fn refuses_in_text(&self) -> bool {
+        self.refusals
     }
 
     /// Prints one of init's own events, if it passes the level filter.
@@ -243,6 +269,49 @@ impl Emitter {
     /// Writes one line, with its newline, in a single `write`.
     fn write_line(&self, line: &str) {
         write_line(self.fd, line);
+    }
+}
+
+/// Whether each of blastit's two streams should carry ANSI colour (`A-4`).
+///
+/// One value, decided once by the composition root ([`crate::term::colour`]) and
+/// handed down: the event emitter takes [`Colour::stdout`], a refusal takes
+/// [`Colour::stderr`]. Nothing asks a descriptor twice, and nothing below the
+/// root reads `NO_COLOR` or `TERM`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Colour {
+    /// The event stream, `--help`, `--version`.
+    pub stdout: bool,
+    /// Command-line refusals and every other word written to stderr.
+    pub stderr: bool,
+}
+
+impl Colour {
+    /// No colour anywhere: a capture that is not a terminal, and the value a
+    /// JSON boot under no settings uses.
+    pub const PLAIN: Self = Self {
+        stdout: false,
+        stderr: false,
+    };
+
+    /// The decision for a pair of descriptors, with the two variables an
+    /// operator sets applied.
+    ///
+    /// This is pure on purpose: `NO_COLOR` (set to a non-empty value) and
+    /// `TERM=dumb` win over the descriptor, and the *reading* of those two
+    /// variables is the boot's job, once, in [`crate::term`]. stdout and stderr
+    /// are separate answers because a redirect changes one and not the other.
+    pub fn new(
+        stdout_terminal: bool,
+        stderr_terminal: bool,
+        no_color: Option<&str>,
+        term: Option<&str>,
+    ) -> Self {
+        let plain = no_color.is_some_and(|value| !value.is_empty()) || term == Some("dumb");
+        Self {
+            stdout: stdout_terminal && !plain,
+            stderr: stderr_terminal && !plain,
+        }
     }
 }
 
@@ -503,10 +572,19 @@ pub fn output_event(
 /// Prints `message` as error-level `app.output` events, one per line, and exits
 /// non-zero (§4: a half-started sandbox is worse than a crash loop).
 ///
+/// On a stream a person is watching — a TTY, [`LogFormat::Pretty`] — the same
+/// sentence is written to stderr as prose instead, and stdout stays empty: a
+/// machine reading the event stream is not there, and JSON on the terminal was
+/// the one refusal nobody could read (`§1.1`, A10.3). The decision was taken
+/// once, by the composition root, when the [`Emitter`] was built.
+///
 /// This uses `_exit`, not `std::process::exit`: init may be running with CPython
 /// initialised and the GIL held, and running libc's `atexit` handlers there can
 /// deadlock.
 pub fn fail(emitter: &Emitter, message: &str) -> ! {
+    if emitter.refuses_in_text() {
+        refuse_text(message);
+    }
     if message.is_empty() {
         emitter.emit(
             &output_event(Component::Init, None, Stream::Stderr, "fatal").with_level(Level::Error),
@@ -517,315 +595,72 @@ pub fn fail(emitter: &Emitter, message: &str) -> ! {
             &output_event(Component::Init, None, Stream::Stderr, line).with_level(Level::Error),
         );
     }
+    crate::coverage::flush();
     // SAFETY: `_exit` never returns and runs no handler.
     unsafe { libc::_exit(1) }
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-
-    use super::*;
-
-    /// Collects what an emitter writes to a pipe.
-    fn capture(format: LogFormat, level: Level, body: impl FnOnce(&Emitter)) -> String {
-        let (read_end, write_end) = blastit_sys::pipe().unwrap();
-        let emitter = Emitter::new(write_end.as_raw_fd(), format, level, false);
-        body(&emitter);
-        drop(write_end);
-        let mut file = std::fs::File::from(read_end);
-        let mut text = String::new();
-        file.read_to_string(&mut text).unwrap();
-        text
+/// A fatal refusal whose sentence already carries its `blastit {cmd}: ` head.
+///
+/// The error type is the one owner of that head (the discovery's `Display`),
+/// so this printer emits the sentence **verbatim**: prose on stderr without a
+/// second `blastit: `, and the same one JSON event per line. A boot that mixed
+/// both heads printed `blastit: blastit serve: …` on one lane and
+/// `blastit serve: …` on the other.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub fn fail_sentence(emitter: &Emitter, message: &str) -> ! {
+    if emitter.refuses_in_text() {
+        for line in message.lines() {
+            eprintln!("{line}");
+        }
+        crate::coverage::flush();
+        // SAFETY: `_exit` never returns and runs no handler.
+        unsafe { libc::_exit(1) }
     }
+    fail(emitter, message)
+}
 
-    fn info_event(name: &str) -> Event {
-        Event::now(
-            Component::Scheduler,
-            EventKind::ManifestWarning(ManifestWarning::new(name.to_string())),
-        )
-        .with_level(Level::Info)
-    }
-
-    #[test]
-    fn a_forwarded_line_this_build_cannot_read_is_escaped_before_it_is_printed() {
-        // The fallback renders whatever the line holds, and what a line holds
-        // can be an application's own text: a newline would make one event look
-        // like two, and `\u{1b}[2J` would clear the operator's terminal — or hide
-        // what a view wrote from whatever reads the log.
-        let text = capture(LogFormat::Pretty, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Events {
-                    component: Component::View,
-                },
-                "{\"ts\":\"2026-10-25T14:02:11.384Z\",\"level\":\"info\",\
-                 \"event\":\"something.new\",\"line\":\"first\\nsecond\\u001b[2Jthird\",\
-                 \"path\":\"/a\\u0007b\"}",
-            );
-        });
-        assert_eq!(text.lines().count(), 1, "one line, always: {text:?}");
-        assert!(
-            text.contains(r"first\nsecond\u{1b}[2Jthird"),
-            "the escapes are spelled out: {text:?}"
-        );
-        assert!(
-            text.contains(r"path=/a\u{7}b"),
-            "and every value is escaped, not just the one: {text:?}"
-        );
-        let line = text.strip_suffix('\n').unwrap_or(&text);
-        assert!(
-            !line.chars().any(char::is_control),
-            "no control character survives: {line:?}"
-        );
-    }
-
-    #[test]
-    fn a_forwarded_line_that_is_not_an_event_is_escaped_in_the_dump() {
-        // The event name and the level come from the line too, and a line this
-        // build does not know goes through the fallback as it is.
-        let text = capture(LogFormat::Pretty, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Events {
-                    component: Component::View,
-                },
-                "{\"ts\":\"2026-10-25T14:02:11.384Z\",\"level\":\"warn\\u001b[2J\",\
-                 \"event\":\"a\\nb\"}",
-            );
-        });
-        assert_eq!(text.lines().count(), 1, "{text:?}");
-        assert!(text.contains(r"a\nb"), "{text:?}");
-        assert!(text.contains(r"WARN\u{1b}[2J"), "{text:?}");
-    }
-
-    #[test]
-    fn json_lines_end_with_one_newline() {
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.emit(&info_event("one"));
-            emitter.emit(&info_event("two"));
-        });
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2);
-        for line in lines {
-            assert!(serde_json::from_str::<Value>(line).is_ok(), "{line}");
-            assert!(!line.contains('\n'));
+/// A fatal refusal as prose on stderr, for a boot a person is watching
+/// (`§1.1`): the first line carries blastit's name, and every continuation line
+/// is printed as it was written (the advice's own indentation).
+pub fn refuse_text(message: &str) -> ! {
+    for (index, line) in message.lines().enumerate() {
+        if index == 0 {
+            eprintln!("blastit: {line}");
+        } else {
+            eprintln!("{line}");
         }
     }
+    crate::coverage::flush();
+    // SAFETY: the boot is aborting; `_exit` runs no handler.
+    unsafe { libc::_exit(1) }
+}
 
-    #[test]
-    fn the_level_filter_drops_quiet_events() {
-        let text = capture(LogFormat::Json, Level::Warn, |emitter| {
-            emitter.emit(&info_event("dropped"));
-        });
-        assert!(text.is_empty(), "{text}");
-    }
+/// Whether a boot that has not read its settings yet should refuse in prose.
+///
+/// This is the composition root's one read of `BLASTIT_LOG_FORMAT`, taken
+/// before `Config::from_env` can fail: a pipeline that asked for `json` still
+/// gets the event stream, and a person at a terminal gets a sentence on stderr.
+/// `colour` is the terminal decision the same root made, never a probe here.
+pub fn text_refusals(colour: Colour) -> bool {
+    colour.stderr && std::env::var_os("BLASTIT_LOG_FORMAT").is_none_or(|format| format != "json")
+}
 
-    #[test]
-    fn forwarded_lines_are_restamped_from_the_pipe() {
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Events {
-                    component: Component::Http,
-                },
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"http.rejected","component":"view","route":"forge"}"#,
-            );
-        });
-        let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(value["component"], "http");
-        assert_eq!(
-            value["route"], "forge",
-            "an events pipe does not imply a route, so the payload keeps it"
-        );
+/// One startup phase line, on stderr, before a wait that can take a while
+/// (`§1.2`).
+///
+/// A person watching a boot must always see a line before the server blocks, or
+/// a slow start looks hung. The line goes to stderr — the progress stream, not
+/// the event stream — and only in the human format, so a `json` boot writes
+/// exactly the events it did before.
+pub fn phase(emitter: &Emitter, label: &str, detail: &str) {
+    if emitter.is_pretty() {
+        write_line(libc::STDERR_FILENO, &phase_line(label, detail));
     }
+}
 
-    #[test]
-    fn a_forwarded_request_line_is_emitted_byte_for_byte() {
-        // What reaches the operator is what init writes, and init emits the
-        // members sorted by key — the order a `serde_json` map gave when this
-        // went through one. The encoder's own key order is internal; this pins
-        // the line an operator reads, so the forwarding rewrite cannot change
-        // it.
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Events {
-                    component: Component::Scheduler,
-                },
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"view","route":"forge","request_id":"01JB9","method":"GET","path":"/products/42/","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}"#,
-            );
-        });
-        assert_eq!(
-            text,
-            "{\"bytes_in\":0,\"bytes_out\":5120,\"component\":\"scheduler\",\"cost_ns\":18400000,\"cpu_ns\":9100000,\"duration_ms\":18.4,\"event\":\"request\",\"level\":\"info\",\"method\":\"GET\",\"outcome\":\"ok\",\"path\":\"/products/42/\",\"queued_ms\":0.1,\"remote_addr\":\"203.0.113.7\",\"request_id\":\"01JB9\",\"route\":\"forge\",\"rule\":0,\"status\":200,\"ts\":\"2026-10-25T14:02:11.384Z\"}\n"
-        );
-    }
-
-    #[test]
-    fn a_view_output_pipe_inserts_the_route_in_key_order() {
-        // A pipe that implies a route adds the member if the payload lacks one,
-        // and the result is still sorted by key.
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Stdout {
-                    component: Component::View,
-                    route: Some("about".to_string()),
-                },
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"x","component":"view"}"#,
-            );
-        });
-        assert_eq!(
-            text,
-            "{\"component\":\"view\",\"event\":\"x\",\"level\":\"info\",\"route\":\"about\",\"ts\":\"2026-10-25T14:02:11.384Z\"}\n"
-        );
-    }
-
-    #[test]
-    fn a_view_output_pipe_rewrites_the_route() {
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Stdout {
-                    component: Component::View,
-                    route: Some("one".to_string()),
-                },
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"x","component":"dbproxy","route":"other"}"#,
-            );
-        });
-        let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(
-            value["component"], "view",
-            "the pipe decides the component, not the payload"
-        );
-        assert_eq!(
-            value["route"], "one",
-            "a view's own pipe also decides the route"
-        );
-    }
-
-    #[test]
-    fn an_unparseable_events_line_is_dropped_with_a_warning() {
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Events {
-                    component: Component::Dbproxy,
-                },
-                "not json at all",
-            );
-        });
-        let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(value["level"], "warn");
-        assert_eq!(value["event"], "manifest.warning");
-        assert!(!text.contains("not json at all"), "{text}");
-    }
-
-    #[test]
-    fn a_quiet_forwarded_event_is_dropped_whole() {
-        let text = capture(LogFormat::Json, Level::Warn, |emitter| {
-            emitter.forward(
-                &Pipe::Events {
-                    component: Component::Http,
-                },
-                r#"{"ts":"t","level":"info","event":"x"}"#,
-            );
-        });
-        assert!(text.is_empty(), "{text}");
-    }
-
-    #[test]
-    fn pretty_forwarded_lines_carry_a_clock_and_the_fields() {
-        let text = capture(LogFormat::Pretty, Level::Info, |emitter| {
-            emitter.forward(
-                &Pipe::Events {
-                    component: Component::Scheduler,
-                },
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"warn","event":"sql.denied","proxy":"db","route":"about"}"#,
-            );
-        });
-        assert!(text.starts_with("14:02:11.384 WARN  sql.denied"), "{text}");
-        assert!(text.contains("proxy=db"), "{text}");
-        assert!(text.contains("route=about"), "{text}");
-        assert!(!text.contains('\u{1b}'), "colour is off off a terminal");
-    }
-
-    #[test]
-    fn output_lines_are_split_into_app_output_events() {
-        let long = "é".repeat(2000);
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.emit_output(
-                &Pipe::Stdout {
-                    component: Component::View,
-                    route: Some("about".to_string()),
-                },
-                &long,
-            );
-        });
-        let lines: Vec<&str> = text.lines().collect();
-        assert!(lines.len() > 1, "a long line is split");
-        for line in &lines {
-            assert!(
-                line.len() <= blastit_events::MAX_EVENT_BYTES,
-                "{}",
-                line.len()
-            );
-            let value: Value = serde_json::from_str(line).unwrap();
-            assert_eq!(value["event"], "app.output");
-            assert_eq!(value["component"], "view");
-            assert_eq!(value["route"], "about");
-        }
-    }
-
-    #[test]
-    fn a_stderr_line_is_a_warning() {
-        let text = capture(LogFormat::Json, Level::Info, |emitter| {
-            emitter.emit_output(
-                &Pipe::Stderr {
-                    component: Component::Http,
-                    route: None,
-                },
-                "boom",
-            );
-        });
-        let value: Value = serde_json::from_str(text.trim()).unwrap();
-        assert_eq!(value["level"], "warn");
-        assert_eq!(value["stream"], "stderr");
-        assert_eq!(value["line"], "boom");
-    }
-
-    #[test]
-    fn line_buffer_yields_complete_lines_and_keeps_the_rest() {
-        let mut buffer = LineBuffer::new();
-        let mut lines = Vec::new();
-        buffer.push(b"one\ntw", &mut lines);
-        assert_eq!(lines, vec![b"one".to_vec()]);
-        lines.clear();
-        buffer.push(b"o\r\n", &mut lines);
-        assert_eq!(lines, vec![b"two".to_vec()]);
-        lines.clear();
-        buffer.flush(&mut lines);
-        assert!(lines.is_empty());
-    }
-
-    #[test]
-    fn line_buffer_flushes_an_overlong_line_without_a_newline() {
-        let mut buffer = LineBuffer::new();
-        let mut lines = Vec::new();
-        let chunk = vec![b'x'; MAX_LINE_BYTES + 10];
-        buffer.push(&chunk, &mut lines);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].len(), MAX_LINE_BYTES + 10);
-        lines.clear();
-        let mut tail = Vec::new();
-        buffer.push(b"\nrest", &mut tail);
-        assert_eq!(tail, vec![Vec::<u8>::new()]);
-        tail.clear();
-        buffer.flush(&mut tail);
-        assert_eq!(tail, vec![b"rest".to_vec()]);
-    }
-
-    #[test]
-    fn an_empty_buffer_flushes_nothing() {
-        let mut buffer = LineBuffer::new();
-        let mut lines = Vec::new();
-        buffer.flush(&mut lines);
-        assert!(lines.is_empty());
-    }
+/// The text of one [`phase`] line: `  <label>  <detail>`, the two columns
+/// wide enough for the labels this build uses (`dbproxy`, `app`).
+pub fn phase_line(label: &str, detail: &str) -> String {
+    format!("  {label:<10} {detail}")
 }

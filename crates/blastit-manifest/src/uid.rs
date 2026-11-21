@@ -3,8 +3,10 @@
 /// uids of blastit's components, derived from `BLASTIT_UID_BASE` (§2).
 ///
 /// Every process derives the same table from the same manifest, so a view's uid
-/// identifies its route. uids stay below [`UidLayout::MAX_UID_EXCLUSIVE`] for
-/// portability, which is what [`crate::Manifest::validate`] enforces.
+/// identifies its **sandbox**, not one endpoint of it: several routes of one
+/// `view` carry the same sandbox and therefore run under one uid (§2.3, §7.3).
+/// uids stay below [`UidLayout::MAX_UID_EXCLUSIVE`] for portability, which is
+/// what [`crate::Manifest::validate`] enforces.
 ///
 /// ```
 /// use blastit_manifest::UidLayout;
@@ -13,8 +15,11 @@
 /// assert_eq!(layout.http(), 20_001);
 /// assert_eq!(layout.scheduler(), 20_002);
 /// assert_eq!(layout.dbproxy(), 20_003);
-/// assert_eq!(layout.view(0), 21_000);
-/// assert_eq!(layout.view(3), 21_003);
+/// assert_eq!(layout.sandbox(0), 21_000);
+/// assert_eq!(layout.sandbox(3), 21_003);
+/// // The retired reader numbers one sandbox per route, so its routes number
+/// // exactly as they did before sandboxes existed.
+/// assert_eq!(layout.view(2), layout.sandbox(2));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UidLayout {
@@ -53,12 +58,30 @@ impl UidLayout {
         self.base.saturating_add(3)
     }
 
-    /// The uid of the view process of the route at `index` (§6: routes are
-    /// numbered in manifest order).
+    /// The uid of the sandbox numbered `sandbox` (§2.3, §7.3).
+    ///
+    /// Every route of one `view` carries that view's [`crate::Route::sandbox`],
+    /// so the whole view — its socket directory and its worker included — runs
+    /// under one uid. A static mount owns no uid: it spawns no process.
+    pub const fn sandbox(&self, sandbox: u32) -> u32 {
+        self.uid_at(sandbox as u64)
+    }
+
+    /// The uid of the sandbox at `index`.
+    ///
+    /// The retired TOML reader numbers one sandbox per route, so this is its
+    /// numbering: `view(route_index)` is the uid that route runs under. A
+    /// Blastfile numbers by [`crate::Route::sandbox`] instead, through
+    /// [`UidLayout::sandbox`].
     pub const fn view(&self, index: usize) -> u32 {
+        self.uid_at(index as u64)
+    }
+
+    /// The uid `offset` places above [`UidLayout::VIEW_OFFSET`], saturating.
+    const fn uid_at(&self, offset: u64) -> u32 {
         let uid = (self.base as u64)
             .saturating_add(Self::VIEW_OFFSET as u64)
-            .saturating_add(index as u64);
+            .saturating_add(offset);
         if uid > u32::MAX as u64 {
             u32::MAX
         } else {

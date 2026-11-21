@@ -1,0 +1,4 @@
+# The same mount without a `fallback`: a deep path that is no file is a 404.
+static "/" {
+    root "public"
+}

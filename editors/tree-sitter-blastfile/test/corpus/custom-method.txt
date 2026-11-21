@@ -1,0 +1,39 @@
+==================
+a custom method is one token, hyphen included
+==================
+view v M-SEARCH "/*" {
+    body none
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (string)
+    (block
+      (directive
+        (keyword)
+        (codec)))))
+
+==================
+a method list takes several custom and standard methods
+==================
+view v GET, M-SEARCH, PROPFIND "/*" {
+    body none
+}
+
+---
+
+(source_file
+  (view_decl
+    (name)
+    (method)
+    (method)
+    (method)
+    (string)
+    (block
+      (directive
+        (keyword)
+        (codec)))))

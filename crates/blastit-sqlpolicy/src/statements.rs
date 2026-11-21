@@ -93,11 +93,20 @@ impl Parser {
         }
     }
 
+    /// The characters from the cursor on.
+    fn rest(&self) -> &[char] {
+        &self.chars[self.pos..]
+    }
+
     /// Skips scan.l whitespace.
+    ///
+    /// The count comes from `take_while`, not from a hand-stepped index: there
+    /// is no loop here whose only exit is the cursor moving, so a step that a
+    /// later edit (or a mutation testing exactly that step) turns into a no-op
+    /// can only make the count wrong, never make the parser spin.
     fn skip_ws(&mut self) {
-        while matches!(self.chars.get(self.pos), Some(c) if is_space(*c)) {
-            self.pos += 1;
-        }
+        let skipped = self.rest().iter().take_while(|c| is_space(**c)).count();
+        self.pos += skipped;
     }
 
     /// Skips whitespace and reports whether the cursor reached the end.
@@ -107,18 +116,22 @@ impl Parser {
     }
 
     /// Consumes a bare identifier (`[A-Za-z_][A-Za-z0-9_]*`) and returns it.
+    ///
+    /// The run is collected by `take_while` and its length taken from the
+    /// result, so no cursor step has to terminate a loop.
     fn eat_word(&mut self) -> Option<String> {
         self.skip_ws();
-        if !matches!(self.chars.get(self.pos), Some(c) if c.is_ascii_alphabetic() || *c == '_') {
+        let first = *self.rest().first()?;
+        if !(first.is_ascii_alphabetic() || first == '_') {
             return None;
         }
-        let start = self.pos;
-        self.pos += 1;
-        while matches!(self.chars.get(self.pos), Some(c) if c.is_ascii_alphanumeric() || *c == '_')
-        {
-            self.pos += 1;
-        }
-        Some(self.chars[start..self.pos].iter().collect())
+        let word: String = self
+            .rest()
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || **c == '_')
+            .collect();
+        self.pos += word.chars().count();
+        Some(word)
     }
 
     /// Consumes `keyword` (case-insensitively) if it comes next.
@@ -138,26 +151,13 @@ impl Parser {
     fn eat_ident(&mut self) -> bool {
         self.skip_ws();
         if self.chars.get(self.pos) == Some(&'"') {
-            let mut i = self.pos + 1;
-            let mut len = 0usize;
-            while i < self.chars.len() {
-                if self.chars[i] == '"' {
-                    if self.chars.get(i + 1) == Some(&'"') {
-                        len += 1;
-                        i += 2;
-                        continue;
-                    }
-                    if len == 0 {
-                        // `""` is not a valid identifier.
-                        return false;
-                    }
-                    self.pos = i + 1;
-                    return true;
+            return match quoted_ident_end(&self.chars, self.pos) {
+                Some(end) => {
+                    self.pos = end;
+                    true
                 }
-                len += 1;
-                i += 1;
-            }
-            return false;
+                None => false,
+            };
         }
         self.eat_word().is_some()
     }
@@ -213,7 +213,15 @@ impl Parser {
             if self.at_end() {
                 return true;
             }
+            let before = self.pos;
             if !self.parse_mode() {
+                return false;
+            }
+            // Every mode starts with a keyword, so a successful `parse_mode`
+            // always moves the cursor. A mode that reports success without
+            // consuming anything would make this loop spin forever; refusing it
+            // makes that a denial instead of a hang.
+            if self.pos == before {
                 return false;
             }
             self.skip_ws();
@@ -247,229 +255,33 @@ impl Parser {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::normalize::normalize;
-
-    /// The grammar consumes normalised text, which is what `Allowlist::check`
-    /// passes it.
-    fn tc(sql: &str) -> bool {
-        is_transaction_control(&normalize(sql))
-    }
-
-    fn count(input: &str, expected: usize) {
-        assert_eq!(statement_count_hint(input), expected, "input: {input:?}");
-    }
-
-    #[test]
-    fn counts_one_statement() {
-        count("SELECT 1", 1);
-        count("SELECT 1 FROM t", 1);
-        count("SELECT ';'", 1);
-        count("SELECT $$a;b$$", 1);
-        count("SELECT $tag$a;b$tag$", 1);
-        count("SELECT $1", 1);
-        count("SELECT 1 -- ;\n", 1);
-        count("SELECT 1 /* ; */", 1);
-        count("SELECT E'a\\';b'", 1);
-        count("SELECT B'a;b'", 1);
-        count("SELECT X'a;b'", 1);
-        count("SELECT a$b;c", 2);
-    }
-
-    #[test]
-    fn counts_separators() {
-        count("SELECT 1; SELECT 2", 2);
-        count("SELECT 1;SELECT 2;SELECT 3", 3);
-        count("SELECT 1; SELECT 2;", 2);
-        count("BEGIN; COMMIT", 2);
-        count("BEGIN; BEGIN", 2);
-    }
-
-    #[test]
-    fn ignores_empty_and_comment_only_segments() {
-        count("", 0);
-        count("   \t\n", 0);
-        count(";", 0);
-        count(";;", 0);
-        count(" ; ; ", 0);
-        count("-- only a comment", 0);
-        count("-- only a comment\r", 0);
-        count("/* only a comment */", 0);
-        count("/* a /* nested */ still */", 0);
-        count("/* unterminated", 0);
-        count("BEGIN; -- trailing comment", 1);
-        count("/* lead */ SELECT 1 /* tail */", 1);
-        count("Q --\r; DROP TABLE t", 2);
-    }
-
-    #[test]
-    fn separators_inside_quotes_and_comments_do_not_split() {
-        count("SELECT 'a;b'", 1);
-        count("\"a;b\"", 1);
-        count("SELECT E'a\\';b'", 1);
-        count("SELECT B'a;b'", 1);
-        count("SELECT $tag$a; b$tag$", 1);
-        count("SELECT 1 -- ;\nDROP TABLE t", 1);
-        count("SELECT 1 /* ; */ DROP TABLE t", 1);
-        // ... while a separator after a terminated comment does split.
-        count("SELECT 1; -- trailing\nSELECT 2", 2);
-        count("SELECT 1; -- trailing\rSELECT 2", 2);
-        count("SELECT 1 /* c */ ; SELECT 2", 2);
-    }
-
-    #[test]
-    fn unterminated_quotes_swallow_separators() {
-        count("SELECT 'a; b", 1);
-        count("SELECT \"a; b", 1);
-        count("SELECT E'a; b", 1);
-        count("SELECT B'a; b", 1);
-        count("SELECT X'a; b", 1);
-        count("SELECT $tag$a; b", 1);
-    }
-
-    #[test]
-    fn accepts_plain_transaction_statements() {
-        for sql in [
-            "BEGIN",
-            "begin",
-            "BeGiN",
-            "BEGIN WORK",
-            "BEGIN TRANSACTION",
-            "COMMIT",
-            "COMMIT WORK",
-            "COMMIT TRANSACTION",
-            "END",
-            "END WORK",
-            "END TRANSACTION",
-            "ROLLBACK",
-            "ROLLBACK WORK",
-            "ROLLBACK TRANSACTION",
-        ] {
-            assert!(tc(sql), "should accept {sql:?}");
+/// The index just past the closing quote of the double-quoted identifier whose
+/// opening quote is at `start`, or `None` when the text ends inside it or the
+/// identifier is empty (`""` is not a valid identifier).
+///
+/// The body is walked with an iterator, so the scan ends when the characters
+/// do — never because a hand-stepped index happens to move. `""` is one escaped
+/// quote, and an identifier of nothing but escaped quotes is a non-empty one.
+fn quoted_ident_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut body = chars[start + 1..].iter();
+    let mut width = 0usize;
+    let mut consumed = 0usize;
+    while let Some(c) = body.next() {
+        consumed += 1;
+        if *c != '"' {
+            width += 1;
+            continue;
         }
-    }
-
-    #[test]
-    fn accepts_savepoint_statements() {
-        for sql in [
-            "SAVEPOINT s1",
-            "SAVEPOINT s123_x1",
-            "savepoint \"s1_x\"",
-            "SAVEPOINT _x",
-            "RELEASE s1",
-            "RELEASE SAVEPOINT s1",
-            "release savepoint \"s1_x\"",
-            "ROLLBACK TO s1",
-            "ROLLBACK TO SAVEPOINT s1",
-            "ROLLBACK WORK TO SAVEPOINT s1",
-            "ROLLBACK TRANSACTION TO s1",
-        ] {
-            assert!(tc(sql), "should accept {sql:?}");
+        if body.as_slice().first() == Some(&'"') {
+            let _ = body.next();
+            consumed += 1;
+            width += 1;
+            continue;
         }
-    }
-
-    #[test]
-    fn accepts_transaction_modes() {
-        for sql in [
-            "START TRANSACTION",
-            "start transaction read write",
-            "BEGIN READ ONLY",
-            "BEGIN READ WRITE",
-            "BEGIN ISOLATION LEVEL SERIALIZABLE",
-            "BEGIN ISOLATION LEVEL REPEATABLE READ",
-            "BEGIN ISOLATION LEVEL READ COMMITTED",
-            "BEGIN ISOLATION LEVEL READ UNCOMMITTED",
-            "BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY",
-            "START TRANSACTION ISOLATION LEVEL READ COMMITTED, READ WRITE",
-            "BEGIN READ ONLY, ISOLATION LEVEL SERIALIZABLE",
-            "\tBEGIN\tREAD\tONLY\t",
-            "BEGIN\rREAD\rONLY",
-            "BEGIN\x0bREAD\x0cONLY",
-        ] {
-            assert!(tc(sql), "should accept {sql:?}");
+        if width == 0 {
+            return None;
         }
+        return Some(start + 1 + consumed);
     }
-
-    #[test]
-    fn ignores_comments_and_a_trailing_separator() {
-        for sql in [
-            "BEGIN -- go",
-            "BEGIN /* go */",
-            "BEGIN; -- go",
-            "BEGIN;",
-            "BEGIN; -- go\r",
-            "COMMIT /* go */;",
-            "END -- go",
-            "ROLLBACK WORK; -- go",
-            "SAVEPOINT s1 -- go",
-            "START TRANSACTION /* iso */ READ WRITE -- go",
-        ] {
-            assert!(tc(sql), "should accept {sql:?}");
-        }
-    }
-
-    #[test]
-    fn rejects_other_statements() {
-        for sql in [
-            "SELECT 1",
-            "SET TIME ZONE 'UTC'",
-            "BEGIN; SELECT 1",
-            "BEGIN; COMMIT",
-            "COMMIT; SELECT 1",
-            "START",
-            "START WORK",
-            "COMMIT WORK EXTRA",
-            "END WORK EXTRA",
-            "BEGIN READ",
-            "BEGIN READ SOMETHING",
-            "BEGIN ISOLATION",
-            "BEGIN ISOLATION LEVEL",
-            "BEGIN ISOLATION LEVEL BOGUS",
-            "BEGIN DEFERRABLE",
-            "BEGIN NOT DEFERRABLE",
-            "SAVEPOINT",
-            "SAVEPOINT 1",
-            "SAVEPOINT s1 extra",
-            "SAVEPOINT \"\"",
-            "SAVEPOINT \"unterminated",
-            "RELEASE",
-            "RELEASE SAVEPOINT",
-            "RELEASE s1 s2",
-            "ROLLBACK TO",
-            "ROLLBACK TO SAVEPOINT",
-            "ROLLBACK SAVEPOINT s1",
-            "ROLLBACK TO 1",
-            "DROP TABLE t",
-            "VACUUM",
-            "",
-            ";",
-            "  ",
-            "'BEGIN'",
-            // Not scan.l whitespace, so PostgreSQL does not read it as BEGIN.
-            "BEGIN\u{a0}",
-            "\u{a0}BEGIN",
-            "BEGIN\u{2028}",
-            "BEGIN E'x'",
-        ] {
-            assert!(!tc(sql), "should reject {sql:?}");
-        }
-    }
-
-    #[test]
-    fn rejects_a_transaction_followed_by_a_second_statement() {
-        for sql in [
-            "BEGIN; DROP TABLE t",
-            "COMMIT; BEGIN",
-            "SAVEPOINT s1; SELECT 1",
-            "BEGIN;; COMMIT",
-            "BEGIN; -- c\nDROP TABLE t",
-            "BEGIN -- c\r; DROP TABLE t",
-            "Q --\r; DROP TABLE t",
-            "BEGIN; SELECT 'a; b'",
-        ] {
-            assert!(!tc(sql), "should reject {sql:?}");
-        }
-    }
+    None
 }

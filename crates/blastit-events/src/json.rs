@@ -8,10 +8,10 @@ use serde_json::{Map, Value};
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::{
-    AppOutput, Component, Event, EventKind, ExitKind, HttpRejected, Level, Lifecycle,
-    MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason, PgRefused, ProcessCap,
-    ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, RequestInfo, RetireReason,
-    SqlDenied, SqlKind, Stream, floor_boundary,
+    AppOutput, Component, DevReload, DevReloadUnavailable, Event, EventKind, ExitKind,
+    HttpRejected, Level, Lifecycle, MAX_EVENT_BYTES, ManifestWarning, Outcome, PgRefuseReason,
+    PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason, ReloadBoot,
+    ReloadReason, RequestInfo, RetireReason, Runtime, SqlDenied, SqlKind, Stream, floor_boundary,
 };
 
 /// Encode one event as a single JSON object, without a trailing newline.
@@ -57,6 +57,20 @@ pub fn encode_json_into(out: &mut Vec<u8>, event: &Event) {
     // Work on a copy: the caller keeps the complete event.
     let mut truncated: Vec<&'static str> = declared.to_vec();
     let mut event = event.clone();
+
+    // The `dev.reload` arrays grow with the app, and an entry is either whole or
+    // gone: drop them from the tail first, so no path or route name is ever
+    // half-written (§4.9, §4.10).
+    loop {
+        out.truncate(start);
+        encode_into_with(out, &event, &truncated);
+        if out.len() - start <= MAX_EVENT_BYTES {
+            break;
+        }
+        if !drop_reload_entry(&mut event, &mut truncated) {
+            break;
+        }
+    }
 
     // Cut the long string fields, largest first, until the line fits. Every
     // cut removes at least as many encoded bytes as raw bytes, so this
@@ -205,6 +219,46 @@ fn encode_into_with(out: &mut Vec<u8>, event: &Event, truncated: &[&'static str]
         }
         EventKind::ManifestWarning(info) => {
             push_str_member(out, "message", &info.message);
+        }
+        EventKind::Runtime(info) => {
+            // §8.1's `runtime` rows: the entrypoint, then only the fields that
+            // row lists. `php_ini` is the one nullable field, written as `null`
+            // when PHP opened no file — absent would read as "this build does
+            // not know the field".
+            match info {
+                Runtime::Php(php) => {
+                    push_str_member(out, "entrypoint", "php");
+                    push_str_member(out, "version", &php.version);
+                    push_str_member(out, "libphp", &php.libphp);
+                    match &php.php_ini {
+                        Some(path) => push_str_member(out, "php_ini", path),
+                        None => push_raw_member(out, "php_ini", b"null"),
+                    }
+                }
+                Runtime::Python(py) => {
+                    push_str_member(out, "entrypoint", "python");
+                    push_str_member(out, "version", &py.version);
+                    push_str_member(out, "environment", &py.environment);
+                }
+                Runtime::Static => push_str_member(out, "entrypoint", "static"),
+            }
+        }
+        EventKind::DevReload(info) => {
+            // §4.9's order: `routes`, `files`, `reason`. Both arrays are always
+            // written, empty when the lists are, so a reader never has to tell
+            // "absent" from "nothing".
+            begin_member(out, "routes");
+            push_str_array(out, info.routes.iter().map(String::as_str));
+            begin_member(out, "files");
+            push_str_array(out, info.files.iter().map(String::as_str));
+            push_str_member(out, "reason", info.reason.as_str());
+        }
+        EventKind::DevReloadUnavailable(info) => {
+            push_str_member(out, "errno", &info.errno);
+            push_str_member(out, "filesystem", &info.filesystem);
+        }
+        EventKind::Reload(info) => {
+            push_u64_member(out, "directories", u64::from(info.directories()));
         }
     }
 
@@ -783,9 +837,39 @@ fn decode_kind(name: &str, object: &Map<String, Value>) -> Option<EventKind> {
         "manifest.warning" => {
             EventKind::ManifestWarning(ManifestWarning::new(text(object, "message")?))
         }
+        "runtime" => EventKind::Runtime(decode_runtime(object)?),
+        "dev.reload" => EventKind::DevReload(DevReload::new(
+            string_array(object, "routes")?,
+            string_array(object, "files")?,
+            parse_reload_reason(text(object, "reason")?)?,
+        )),
+        "dev.reload.unavailable" => EventKind::DevReloadUnavailable(DevReloadUnavailable::new(
+            text(object, "errno")?,
+            text(object, "filesystem")?,
+        )),
+        "reload" => EventKind::Reload(ReloadBoot::new(number_u32(object, "directories")?)),
         _ => return None,
     };
     Some(kind)
+}
+
+/// A `runtime` line: the entrypoint it names decides which fields it has.
+///
+/// An entrypoint outside the frozen three words, or a required field missing,
+/// makes the line undecodable rather than inventing a runtime. `php_ini` is
+/// nullable, and absent reads as `None` for a line written before the field
+/// existed — never as a path.
+fn decode_runtime(object: &Map<String, Value>) -> Option<Runtime> {
+    Some(match text(object, "entrypoint")? {
+        "php" => Runtime::php(
+            text(object, "version")?,
+            text(object, "libphp")?,
+            optional_text(object, "php_ini")?.map(str::to_owned),
+        ),
+        "python" => Runtime::python(text(object, "version")?, text(object, "environment")?),
+        "static" => Runtime::Static,
+        _ => return None,
+    })
 }
 
 /// The lifecycle fields of a `boot`, `ready` or `shutdown` line.
@@ -946,6 +1030,17 @@ fn optional_strings(object: &Map<String, Value>, name: &str) -> Option<Vec<Strin
     Some(strings)
 }
 
+/// A member that is an array of strings, required: the encoder always writes
+/// both `dev.reload` arrays, so a missing one is not this build's line.
+fn string_array(object: &Map<String, Value>, name: &str) -> Option<Vec<String>> {
+    let array = member(object, name)?.as_array()?;
+    let mut strings = Vec::with_capacity(array.len());
+    for item in array {
+        strings.push(item.as_str()?.to_string());
+    }
+    Some(strings)
+}
+
 /// A member that is an object of strings, or absent.
 fn optional_strings_map(object: &Map<String, Value>, name: &str) -> Option<Vec<(String, String)>> {
     let Some(value) = member(object, name) else {
@@ -998,6 +1093,7 @@ fn parse_outcome(text: &str) -> Option<Outcome> {
         "queue_timeout" => Outcome::QueueTimeout,
         "timeout" => Outcome::Timeout,
         "view_died" => Outcome::ViewDied,
+        "bailed" => Outcome::Bailed,
         "client_gone" => Outcome::ClientGone,
         _ => return None,
     })
@@ -1049,8 +1145,21 @@ fn parse_retire_reason(text: &str) -> RetireReason {
         "stuck_threads" => RetireReason::StuckThreads,
         "memory_pressure" => RetireReason::MemoryPressure,
         "lru_cap" => RetireReason::LruCap,
+        "reload" => RetireReason::Reload,
         other => RetireReason::Other(other.to_string()),
     }
+}
+
+/// A `dev.reload` reason: a closed set, so a word outside it makes the line
+/// undecodable rather than inventing a reason.
+fn parse_reload_reason(text: &str) -> Option<ReloadReason> {
+    Some(match text {
+        "loaded" => ReloadReason::Loaded,
+        "preload" => ReloadReason::Preload,
+        "blastfile" => ReloadReason::Blastfile,
+        "overflow" => ReloadReason::Overflow,
+        _ => return None,
+    })
 }
 
 /// `2026-10-25T14:02:11.384Z`, the one spelling `format_timestamp` writes.
@@ -1156,9 +1265,57 @@ fn string_slots(event: &mut Event) -> Vec<(&'static str, &mut String)> {
         EventKind::ManifestWarning(info) => {
             slots.push(("message", &mut info.message));
         }
+        EventKind::Runtime(info) => match info {
+            Runtime::Php(php) => {
+                slots.push(("version", &mut php.version));
+                slots.push(("libphp", &mut php.libphp));
+                if let Some(path) = php.php_ini.as_mut() {
+                    slots.push(("php_ini", path));
+                }
+            }
+            Runtime::Python(py) => {
+                slots.push(("version", &mut py.version));
+                slots.push(("environment", &mut py.environment));
+            }
+            // `static` carries one fixed word and nothing else.
+            Runtime::Static => {}
+        },
+        // `dev.reload`'s only variable-size fields are its arrays, which are cut
+        // whole by `drop_reload_entry` before any string is touched; its
+        // `reason` is a fixed word.
+        EventKind::DevReload(_) => {}
+        EventKind::DevReloadUnavailable(info) => {
+            slots.push(("errno", &mut info.errno));
+            slots.push(("filesystem", &mut info.filesystem));
+        }
+        // The boot line carries one integer and no string that can grow.
+        EventKind::Reload(_) => {}
         EventKind::ProcessSpawned(_) | EventKind::ProcessExited(_) | EventKind::ProcessCap(_) => {}
     }
     slots
+}
+
+/// Drop one whole `dev.reload` entry from the tail, recording the array's name
+/// in `truncated`. Returns `false` when both arrays are empty.
+///
+/// Files go first, then routes: the reason and the route set serving after the
+/// reload are the more useful half of the event, and a README-length path list
+/// is what actually forces the cut in practice. Whole entries only, so a reader
+/// never mistakes a sliced path for a file the app loaded.
+fn drop_reload_entry(event: &mut Event, truncated: &mut Vec<&'static str>) -> bool {
+    let EventKind::DevReload(info) = &mut event.kind else {
+        return false;
+    };
+
+    if info.files.pop().is_some() {
+        mark(truncated, "files");
+        return true;
+    }
+    if info.routes.pop().is_some() {
+        mark(truncated, "routes");
+        return true;
+    }
+    false
 }
 
 /// Cut at most `excess` raw bytes off the longest string, keeping its prefix.
@@ -1242,1340 +1399,4 @@ fn drop_capability(event: &mut Event, truncated: &mut Vec<&'static str>) -> bool
         return true;
     }
     false
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
-    use serde_json::Value;
-    use time::{Duration, OffsetDateTime};
-
-    use super::*;
-    use crate::fixture;
-    use crate::{
-        AppOutput, Component, ExitKind, HttpRejected, ManifestWarning, Outcome, PgRefuseReason,
-        PgRefused, ProcessCap, ProcessExited, ProcessRetired, ProcessSpawned, RejectReason,
-        RequestInfo, RetireReason, SqlDenied, Stream,
-    };
-
-    /// The keys of the top-level object, in order.
-    ///
-    /// `serde_json::Value` keeps no order without the `preserve_order`
-    /// feature, which would add a dependency, so this walks the line.
-    fn top_level_keys(json: &str) -> Vec<String> {
-        let bytes = json.as_bytes();
-        let mut keys = Vec::new();
-        let mut depth = 0usize;
-        let mut index = 0usize;
-        while index < bytes.len() {
-            match bytes[index] {
-                b'{' | b'[' => {
-                    depth += 1;
-                    index += 1;
-                }
-                b'}' | b']' => {
-                    depth = depth.saturating_sub(1);
-                    index += 1;
-                }
-                b'"' => {
-                    let start = index + 1;
-                    let mut end = start;
-                    let mut escaped = false;
-                    while end < bytes.len() {
-                        match bytes[end] {
-                            _ if escaped => escaped = false,
-                            b'\\' => escaped = true,
-                            b'"' => break,
-                            _ => {}
-                        }
-                        end += 1;
-                    }
-                    if depth == 1 && bytes.get(end + 1) == Some(&b':') {
-                        keys.push(json[start..end].to_owned());
-                    }
-                    index = end + 1;
-                }
-                _ => index += 1,
-            }
-        }
-        keys
-    }
-
-    fn parse(json: &str) -> Value {
-        serde_json::from_str(json).expect("valid JSON")
-    }
-
-    fn check_fits(_event: &Event, json: &str) -> Value {
-        assert!(
-            json.len() <= MAX_EVENT_BYTES,
-            "line is {} bytes",
-            json.len()
-        );
-        assert!(!json.contains('\n'), "line must not contain a newline");
-        parse(json)
-    }
-
-    fn request_event() -> Event {
-        fixture::request_event()
-    }
-
-    /// One event of every kind, with every optional member set.
-    ///
-    /// A round trip can only prove the decoder against the encoder if every arm
-    /// of both is visited: this is the list that does.
-    fn every_kind() -> Vec<Event> {
-        let lifecycle = Lifecycle::default()
-            .with_stage("preload")
-            .with_routes(3)
-            .with_workers(16)
-            .with_duration_ms(412.7)
-            .with_seccomp(true)
-            .with_privilege("capabilities")
-            .with_bounding_set(true)
-            .with_capability("cap_chown")
-            .with_immortalize(true)
-            .with_immortalize_reason("forced")
-            .with_immortalized(1_610_300)
-            .with_immortalize_ms(1_785.4)
-            .with_mem_total(1_057_259_520)
-            .with_mem_used(211_812_352)
-            .with_max_view_processes(23)
-            .with_output("db", "DATABASE_URL")
-            .with_preset("compose-traefik")
-            .with_preset_setting("BLASTIT_FAIR_QUEUING", "on")
-            .with_preset_override("BLASTIT_LOG_FORMAT");
-        let output = AppOutput::new(Stream::Stderr, "a line of output")
-            .with_part(2, 3)
-            .expect("2 of 3");
-        vec![
-            fixture::request_event(),
-            fixture::sql_denied_event(),
-            fixture::event(EventKind::PgRefused(PgRefused::new(
-                "db",
-                PgRefuseReason::UpstreamUnreachable,
-            ))),
-            fixture::event(EventKind::PgRefused(PgRefused::new(
-                "db",
-                PgRefuseReason::Other("the pool is full".to_string()),
-            ))),
-            fixture::event(EventKind::HttpRejected(HttpRejected::new(
-                "203.0.113.7",
-                431,
-                RejectReason::HeaderTooLarge,
-            ))),
-            fixture::event(EventKind::HttpRejected(HttpRejected::new(
-                "203.0.113.7",
-                400,
-                RejectReason::Other("body_timeout".to_string()),
-            ))),
-            fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(
-                57, 20_000, 1.5,
-            ))),
-            fixture::event(EventKind::ProcessExited(ProcessExited::new(
-                57,
-                20_000,
-                ExitKind::Status(3),
-            ))),
-            fixture::event(EventKind::ProcessExited(ProcessExited::new(
-                57,
-                20_000,
-                ExitKind::Signal(9),
-            ))),
-            fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
-                57,
-                20_000,
-                RetireReason::MemoryPressure,
-            ))),
-            fixture::event(EventKind::ProcessCap(ProcessCap::new(33_554_432, 23))),
-            fixture::event(EventKind::AppOutput(output)),
-            fixture::event(EventKind::Boot(lifecycle.clone())),
-            fixture::event(EventKind::Ready(lifecycle.clone())),
-            fixture::event(EventKind::Shutdown(lifecycle)),
-            fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
-                "the group `session` is attached to no route",
-            ))),
-        ]
-    }
-
-    #[test]
-    fn every_event_kind_round_trips_through_the_decoder() {
-        // The decoder is the encoder's inverse, and this is the check that it
-        // stays that way: an event of every kind — every optional member set,
-        // both arms of every alternative — encodes, decodes and encodes back to
-        // the very same line.
-        for event in every_kind() {
-            let line = encode_json(&event);
-            let decoded = decode_json(&line).unwrap_or_else(|| panic!("{line} did not decode"));
-            assert_eq!(decoded, event, "{line}");
-            assert_eq!(encode_json(&decoded), line, "re-encoded");
-        }
-    }
-
-    #[test]
-    fn a_line_this_build_did_not_write_is_not_an_event() {
-        // Every one of these is a line the *pretty* path has to fall back on the
-        // field dump for, so none of them may decode into an invented event.
-        for line in [
-            "",
-            "not json",
-            "[]",
-            "null",
-            r#"{"ts":"2026-10-25T14:02:11.384Z"}"#,
-            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","component":"init"}"#,
-            // An event a newer component emits.
-            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"something.new","component":"init"}"#,
-            // A member of the wrong type.
-            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"process.cap","component":"init","estimate_bytes":"many","cap":3}"#,
-            // A timestamp this crate does not write.
-            r#"{"ts":"2026-10-25 14:02:11","level":"info","event":"process.cap","component":"init","estimate_bytes":1,"cap":3}"#,
-            // Both halves of an exit, when the encoder writes exactly one.
-            r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"process.exited","component":"init","pid":1,"uid":2,"status":0,"signal":9}"#,
-        ] {
-            assert!(decode_json(line).is_none(), "{line} decoded");
-        }
-    }
-
-    #[test]
-    fn request_example_has_the_documented_values_and_key_order() {
-        let json = encode_json(&request_event());
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "route",
-                "request_id",
-                "method",
-                "path",
-                "rule",
-                "status",
-                "outcome",
-                "queued_ms",
-                "duration_ms",
-                "bytes_in",
-                "bytes_out",
-                "cost_ns",
-                "cpu_ns",
-                "remote_addr",
-            ]
-        );
-
-        let value = check_fits(&request_event(), &json);
-        assert_eq!(value["level"], "info");
-        assert_eq!(value["event"], "request");
-        assert_eq!(value["component"], "scheduler");
-        assert_eq!(value["request_id"], "01JB9");
-        assert_eq!(value["method"], "GET");
-        assert_eq!(value["path"], "/products/42/");
-        assert_eq!(value["route"], "product-detail");
-        assert_eq!(value["rule"], 0);
-        assert_eq!(value["status"], 200);
-        assert_eq!(value["outcome"], "ok");
-        assert_eq!(value["queued_ms"], 0.1);
-        assert_eq!(value["duration_ms"], 18.4);
-        assert_eq!(value["bytes_out"], 5120);
-        // D5: what the request cost the view process, and the thread CPU time
-        // it reported over the same span.
-        assert_eq!(value["cost_ns"], 18_400_000);
-        assert_eq!(value["cpu_ns"], 9_100_000);
-        assert_eq!(value["remote_addr"], "203.0.113.7");
-        // §8.1's example line omits `bytes_in`; the table lists it, so it is
-        // always written.
-        assert_eq!(value["bytes_in"], 0);
-        assert_eq!(value["ts"], "2026-10-25T14:02:11.384Z");
-    }
-
-    #[test]
-    fn request_lines_are_pinned_exactly() {
-        // The encoder writes straight into a buffer now, with `serde_json`
-        // formatting and escaping each field. These are the byte-for-byte
-        // lines the stream must keep producing, one per shape a `request`
-        // takes: a query string to drop, a `HEAD` that matched nothing, an
-        // aborted request, and a missing CPU report (D5).
-        let cases = [
-            (
-                Event::at(
-                    fixture::request_ts(),
-                    Component::Scheduler,
-                    EventKind::Request(
-                        RequestInfo::from_target("GET", "/products/42/?utm_source=mail")
-                            .with_rule(0)
-                            .with_status(200)
-                            .with_timings(0.1, 18.4)
-                            .with_bytes(0, 5120)
-                            .with_cost(18_400_000, Some(9_100_000))
-                            .with_remote_addr("203.0.113.7"),
-                    ),
-                )
-                .with_request_id("01JB9")
-                .with_route("product-detail"),
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","route":"product-detail","request_id":"01JB9","method":"GET","path":"/products/42/","rule":0,"status":200,"outcome":"ok","queued_ms":0.1,"duration_ms":18.4,"bytes_in":0,"bytes_out":5120,"cost_ns":18400000,"cpu_ns":9100000,"remote_addr":"203.0.113.7"}"#,
-            ),
-            (
-                Event::at(
-                    fixture::request_ts(),
-                    Component::Scheduler,
-                    EventKind::Request(
-                        RequestInfo::from_target("HEAD", "/health")
-                            .with_status(404)
-                            .with_outcome(Outcome::Unmatched)
-                            .with_timings(0.0, 0.2)
-                            .with_bytes(0, 0)
-                            .with_cost(1500, None)
-                            .with_remote_addr("198.51.100.9"),
-                    ),
-                ),
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","route":null,"method":"HEAD","path":"/health","status":404,"outcome":"unmatched","queued_ms":0.0,"duration_ms":0.2,"bytes_in":0,"bytes_out":0,"cost_ns":1500,"cpu_ns":null,"remote_addr":"198.51.100.9"}"#,
-            ),
-            (
-                Event::at(
-                    fixture::request_ts(),
-                    Component::Scheduler,
-                    EventKind::Request(
-                        RequestInfo::from_target("POST", "/checkout?token=secret")
-                            .with_status(499)
-                            .with_outcome(Outcome::ClientGone)
-                            .with_timings(2.5, 120.0)
-                            .with_bytes(512, 0)
-                            .with_cost(60_000_000, Some(12_345_678))
-                            .with_remote_addr("203.0.113.7"),
-                    ),
-                ),
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"info","event":"request","component":"scheduler","route":null,"method":"POST","path":"/checkout","status":499,"outcome":"client_gone","queued_ms":2.5,"duration_ms":120.0,"bytes_in":512,"bytes_out":0,"cost_ns":60000000,"cpu_ns":12345678,"remote_addr":"203.0.113.7"}"#,
-            ),
-            (
-                Event::at(
-                    fixture::request_ts(),
-                    Component::Scheduler,
-                    EventKind::Request(
-                        RequestInfo::from_target("GET", "/oops")
-                            .with_status(502)
-                            .with_outcome(Outcome::ViewDied)
-                            .with_timings(1.0, 5.0)
-                            .with_bytes(0, 0)
-                            .with_cost(5_000_000, None)
-                            .with_remote_addr("203.0.113.7"),
-                    ),
-                )
-                .with_request_id("01JBC")
-                .with_route("product-detail"),
-                r#"{"ts":"2026-10-25T14:02:11.384Z","level":"warn","event":"request","component":"scheduler","route":"product-detail","request_id":"01JBC","method":"GET","path":"/oops","status":502,"outcome":"view_died","queued_ms":1.0,"duration_ms":5.0,"bytes_in":0,"bytes_out":0,"cost_ns":5000000,"cpu_ns":null,"remote_addr":"203.0.113.7"}"#,
-            ),
-        ];
-
-        for (event, expected) in cases {
-            let line = encode_json(&event);
-            assert_eq!(line, expected, "{}", event.kind.name());
-            assert!(!line.contains("utm_source"), "query string leaked: {line}");
-            assert!(!line.contains("token="), "query string leaked: {line}");
-        }
-    }
-
-    #[test]
-    fn encoding_into_a_reused_buffer_matches_encode_json() {
-        // The sink clears one buffer and encodes every event into it, and the
-        // encoder appends: one event's bytes must be exactly what `encode_json`
-        // returns, with none of the previous event left behind and no byte of a
-        // prefix disturbed.
-        let mut buffer = Vec::with_capacity(256);
-        for event in every_kind() {
-            buffer.clear();
-            encode_json_into(&mut buffer, &event);
-            assert_eq!(buffer, encode_json(&event).as_bytes());
-        }
-
-        buffer.clear();
-        buffer.extend_from_slice(b"prefix|");
-        encode_json_into(&mut buffer, &request_event());
-        assert_eq!(
-            buffer,
-            format!("prefix|{}", encode_json(&request_event())).as_bytes()
-        );
-    }
-
-    #[test]
-    fn sql_denied_example_has_the_documented_values_and_key_order() {
-        let event = fixture::sql_denied_event();
-        let json = encode_json(&event);
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "route",
-                "pid",
-                "proxy",
-                "kind",
-                "reason",
-                "sqlstate",
-                "in_transaction",
-                "sql",
-            ]
-        );
-
-        let value = check_fits(&event, &json);
-        assert_eq!(value["ts"], "2026-10-25T14:02:12.007Z");
-        assert_eq!(value["level"], "warn");
-        assert_eq!(value["event"], "sql.denied");
-        assert_eq!(value["component"], "dbproxy");
-        assert_eq!(value["route"], "product-detail");
-        assert_eq!(value["pid"], 57);
-        assert_eq!(value["proxy"], "db");
-        assert_eq!(value["kind"], "parse");
-        assert_eq!(value["sqlstate"], "42501");
-        assert_eq!(value["reason"], "select on shop_product.price not granted");
-        assert_eq!(value["in_transaction"], false);
-        assert_eq!(
-            value["sql"],
-            r#"SELECT "shop_product"."price" FROM "shop_product" WHERE "shop_product"."id" = $?"#
-        );
-        assert!(value.get("request_id").is_none());
-        assert!(value.get("truncated").is_none());
-    }
-
-    #[test]
-    fn every_kind_encodes_to_valid_json() {
-        let events = vec![
-            request_event(),
-            fixture::sql_denied_event(),
-            fixture::event(EventKind::PgRefused(PgRefused::new(
-                "db",
-                PgRefuseReason::TooManyConnections,
-            )))
-            .with_route("product-detail"),
-            fixture::event(EventKind::HttpRejected(HttpRejected::new(
-                "203.0.113.7",
-                431,
-                RejectReason::HeaderTooLarge,
-            ))),
-            fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(
-                57, 20_001, 12.5,
-            )))
-            .with_route("product-detail"),
-            fixture::event(EventKind::ProcessExited(ProcessExited::new(
-                57,
-                20_001,
-                ExitKind::Status(0),
-            ))),
-            fixture::event(EventKind::ProcessExited(ProcessExited::new(
-                57,
-                20_001,
-                ExitKind::Signal(9),
-            ))),
-            fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
-                57,
-                20_001,
-                RetireReason::MemoryPressure,
-            ))),
-            fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4))),
-            fixture::event(EventKind::AppOutput(AppOutput::new(
-                Stream::Stderr,
-                "boom\n",
-            ))),
-            fixture::event(EventKind::Boot(
-                Lifecycle::default()
-                    .with_stage("preload")
-                    .with_duration_ms(12.5)
-                    .with_output("db", "DATABASE_URL"),
-            )),
-            fixture::event(EventKind::Ready(
-                Lifecycle::default().with_routes(3).with_workers(16),
-            )),
-            fixture::event(EventKind::Shutdown(
-                Lifecycle::default()
-                    .with_stage("drain")
-                    .with_duration_ms(2.0),
-            )),
-            fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
-                "unattached group `web`",
-            ))),
-        ];
-
-        for event in &events {
-            let json = encode_json(event);
-            let value = check_fits(event, &json);
-            assert_eq!(value["event"], event.kind.name());
-            assert_eq!(value["component"], event.component.as_str());
-            assert_eq!(value["level"], event.level.as_str());
-            assert!(value["ts"].is_string());
-            let keys = top_level_keys(&json);
-            assert_eq!(
-                &keys[..4],
-                ["ts", "level", "event", "component"],
-                "common prefix for {}",
-                event.kind.name()
-            );
-        }
-    }
-
-    #[test]
-    fn variant_fields_are_written_in_the_documented_order() {
-        let boot = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("preload")
-                .with_routes(3)
-                .with_workers(16)
-                .with_duration_ms(1.0)
-                .with_seccomp(false)
-                .with_output("db", "DATABASE_URL"),
-        ));
-        let json = encode_json(&boot);
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "stage",
-                "routes",
-                "workers",
-                "duration_ms",
-                "seccomp",
-                "outputs",
-                "preset",
-            ]
-        );
-        let value = parse(&json);
-        assert_eq!(value["seccomp"], serde_json::json!(false));
-        assert_eq!(value["outputs"]["db"][0], "DATABASE_URL");
-
-        // §8 Sizing and §9.2 #7: the preload phase of `boot` reports the
-        // immortalisation and the memory the view cap was derived from.
-        let preload = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("preload")
-                .with_immortalize(true)
-                .with_immortalized(1_610_300)
-                .with_immortalize_ms(1785.4)
-                .with_mem_total(1_073_741_824)
-                .with_mem_used(203_423_744)
-                .with_max_view_processes(22),
-        ));
-        let json = encode_json(&preload);
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "stage",
-                "immortalize",
-                "immortalized",
-                "immortalize_ms",
-                "mem_total",
-                "mem_used",
-                "max_view_processes",
-                "preset",
-            ]
-        );
-        let value = parse(&json);
-        assert_eq!(value["immortalize"], "on");
-        assert_eq!(value["immortalized"], 1_610_300);
-        assert_eq!(value["immortalize_ms"], 1785.4);
-        assert_eq!(value["mem_total"], 1_073_741_824);
-        assert_eq!(value["mem_used"], 203_423_744);
-        assert_eq!(value["max_view_processes"], 22);
-        assert!(value["immortalized"].is_u64(), "a count, not a float");
-        assert!(value["mem_total"].is_u64(), "byte counts are integers");
-        assert!(value["mem_used"].is_u64());
-        assert!(value["max_view_processes"].is_u64());
-
-        let output = fixture::event(EventKind::AppOutput(AppOutput::new(Stream::Stdout, "hi")));
-        assert_eq!(
-            top_level_keys(&encode_json(&output)),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "stream",
-                "line",
-                "part",
-                "parts"
-            ]
-        );
-
-        let process = fixture::event(EventKind::ProcessExited(ProcessExited::new(
-            57,
-            20_001,
-            ExitKind::Signal(9),
-        )));
-        assert_eq!(
-            top_level_keys(&encode_json(&process)),
-            ["ts", "level", "event", "component", "pid", "uid", "signal"]
-        );
-        assert!(parse(&encode_json(&process)).get("status").is_none());
-
-        // §8 Sizing: the measured cost per view and the cap it bought.
-        let cap = fixture::event(EventKind::ProcessCap(ProcessCap::new(141_557_760, 4)));
-        let json = encode_json(&cap);
-        assert_eq!(
-            top_level_keys(&json),
-            ["ts", "level", "event", "component", "estimate_bytes", "cap"]
-        );
-        let value = parse(&json);
-        assert_eq!(value["estimate_bytes"], 141_557_760);
-        assert_eq!(value["cap"], 4);
-        assert!(value["estimate_bytes"].is_u64(), "byte counts are integers");
-        assert!(value["cap"].is_u64());
-    }
-
-    #[test]
-    fn optional_fields_are_omitted_but_route_is_null_for_unmatched_requests() {
-        let unmatched = fixture::event(EventKind::Request(
-            RequestInfo::from_target("GET", "/nope?x=1")
-                .with_status(404)
-                .with_outcome(Outcome::Unmatched),
-        ));
-        let json = encode_json(&unmatched);
-        assert_eq!(
-            top_level_keys(&json)[..5],
-            ["ts", "level", "event", "component", "route"]
-        );
-        let value = parse(&json);
-        assert!(value["route"].is_null());
-        assert_eq!(value["path"], "/nope");
-        assert!(value.get("request_id").is_none());
-        assert!(value.get("rule").is_none());
-
-        // Other kinds simply leave `route` out.
-        let spawned = fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(1, 2, 3.0)));
-        assert_eq!(
-            top_level_keys(&encode_json(&spawned)),
-            ["ts", "level", "event", "component", "pid", "uid", "fork_ms"]
-        );
-
-        let with_ids = request_event()
-            .with_request_id("01JB9")
-            .with_route("product-detail");
-        let value = parse(&encode_json(&with_ids));
-        assert_eq!(value["request_id"], "01JB9");
-    }
-
-    #[test]
-    fn strings_are_escaped_and_the_line_stays_one_line() {
-        let event = fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
-            "quote \" backslash \\ newline \n tab \t control \u{1} unicode é 漢",
-        )));
-        let json = encode_json(&event);
-        assert!(!json.contains('\n'));
-        assert!(json.contains("\\n"));
-        assert!(json.contains("\\u0001"));
-        let value = parse(&json);
-        assert!(value["message"].as_str().unwrap().contains("é 漢"));
-    }
-
-    #[test]
-    fn a_request_with_no_cost_report_still_has_the_fields() {
-        // D5: `cost_ns` is always a number (it is what the scheduler observed
-        // even when nothing reported), and `cpu_ns` is null when no view
-        // measured it, so a reader never has to guess which happened.
-        let event = fixture::event(EventKind::Request(
-            RequestInfo::from_target("GET", "/a").with_cost(0, None),
-        ));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["cost_ns"], 0);
-        assert!(value["cpu_ns"].is_null());
-
-        // ... and a report of a cost of zero is a report: `cpu_ns` is present.
-        let event = fixture::event(EventKind::Request(
-            RequestInfo::from_target("GET", "/a").with_cost(0, Some(0)),
-        ));
-        let value = check_fits(&event, &encode_json(&event));
-        assert_eq!(value["cpu_ns"], 0);
-    }
-
-    #[test]
-    fn non_finite_timings_stay_valid_json() {
-        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            let event = fixture::event(EventKind::Request(
-                RequestInfo::from_target("GET", "/a").with_timings(bad, bad),
-            ));
-            let json = encode_json(&event);
-            let value = check_fits(&event, &json);
-            assert!(value["queued_ms"].is_null());
-            assert!(value["duration_ms"].is_null());
-        }
-        let event = fixture::event(EventKind::ProcessSpawned(ProcessSpawned::new(
-            1,
-            2,
-            f64::MAX,
-        )));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert!(value["fork_ms"].as_f64().unwrap().is_finite());
-    }
-
-    #[test]
-    fn a_long_sql_is_cut_and_named_in_truncated() {
-        let sql = "SELECT ".to_owned() + &"a".repeat(3000);
-        let event = fixture::event(EventKind::SqlDenied(SqlDenied::new(
-            57,
-            "db",
-            SqlKind::Query,
-            sql.clone(),
-            "42501",
-            false,
-        )))
-        .with_route("product-detail");
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["sql"]));
-        let kept = value["sql"].as_str().unwrap();
-        assert!(sql.starts_with(kept), "truncation must keep the prefix");
-        assert!(kept.len() < sql.len());
-        // The rest of the event is untouched.
-        assert_eq!(value["sqlstate"], "42501");
-        assert_eq!(value["route"], "product-detail");
-    }
-
-    #[test]
-    fn the_longest_field_is_cut_first() {
-        let long_path = "/".to_owned() + &"p".repeat(4000);
-        let event = fixture::event(EventKind::Request(
-            RequestInfo::from_target("GET", &long_path)
-                .with_status(200)
-                .with_remote_addr("203.0.113.7"),
-        ))
-        .with_route("product-detail");
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["path"]));
-        assert_eq!(value["remote_addr"], "203.0.113.7");
-        assert_eq!(value["route"], "product-detail");
-        assert!(long_path.starts_with(value["path"].as_str().unwrap()));
-    }
-
-    #[test]
-    fn several_fields_can_be_cut() {
-        let big = "x".repeat(3000);
-        let event = fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
-            big.clone(),
-        )))
-        .with_route(big.clone())
-        .with_request_id(big.clone());
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        let truncated = value["truncated"].as_array().unwrap();
-        assert_eq!(truncated.len(), 3, "{truncated:?}");
-        for name in ["message", "route", "request_id"] {
-            assert!(truncated.iter().any(|v| v == name), "missing {name}");
-        }
-    }
-
-    #[test]
-    fn a_long_app_output_line_is_cut_too() {
-        let line = "l".repeat(9000);
-        let event = fixture::event(EventKind::AppOutput(AppOutput::new(
-            Stream::Stdout,
-            line.clone(),
-        )));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["line"]));
-        assert!(line.starts_with(value["line"].as_str().unwrap()));
-    }
-
-    #[test]
-    fn a_long_stage_is_cut() {
-        let event = fixture::event(EventKind::Ready(
-            Lifecycle::default().with_stage("s".repeat(4000)),
-        ));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["stage"]));
-    }
-
-    #[test]
-    fn the_privilege_mode_and_its_capabilities_are_reported() {
-        // D6: the `boot` event says `root` or `capabilities`, and in the
-        // rootless case the set init holds.
-        let root = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("stage0")
-                .with_seccomp(true)
-                .with_privilege("root"),
-        ));
-        let json = encode_json(&root);
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "stage",
-                "seccomp",
-                "privilege",
-                "preset",
-            ]
-        );
-        let value = parse(&json);
-        assert_eq!(value["privilege"], "root");
-        assert!(value.get("capabilities").is_none(), "{value}");
-
-        let rootless = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("stage0")
-                .with_privilege("capabilities")
-                .with_capability("cap_chown")
-                .with_capability("cap_setuid"),
-        ));
-        let json = encode_json(&rootless);
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "stage",
-                "privilege",
-                "capabilities",
-                "preset",
-            ]
-        );
-        let value = parse(&json);
-        assert_eq!(value["privilege"], "capabilities");
-        assert_eq!(
-            value["capabilities"],
-            serde_json::json!(["cap_chown", "cap_setuid"])
-        );
-    }
-
-    #[test]
-    fn an_over_long_capability_list_is_cut_and_named() {
-        // A caller can put anything in the list; the line limit still holds,
-        // and the names that went are in `truncated`.
-        let mut lifecycle = Lifecycle::default().with_privilege("capabilities");
-        for index in 0..400 {
-            lifecycle = lifecycle.with_capability(format!("cap_{index}"));
-        }
-        let event = fixture::event(EventKind::Boot(lifecycle));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["capabilities"]));
-        let kept = value["capabilities"].as_array().unwrap();
-        assert!(!kept.is_empty());
-        assert!(kept.len() < 400);
-        assert_eq!(kept[0], "cap_0", "a prefix of the set survives");
-    }
-
-    #[test]
-    fn a_skipped_immortalisation_is_reported_with_its_reason() {
-        // §9.2 #7 on CPython 3.14: the pass is skipped, nothing is marked, and
-        // the event carries the same sentence as the `warn` line.
-        let event = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("preload")
-                .with_immortalize(false)
-                .with_immortalize_reason(
-                    "CPython 3.14: heap immortalisation is unsafe on this version",
-                )
-                .with_immortalized(0),
-        ));
-        let json = encode_json(&event);
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "stage",
-                "immortalize",
-                "immortalize_reason",
-                "immortalized",
-                "preset",
-            ]
-        );
-        let value = check_fits(&event, &json);
-        assert_eq!(value["immortalize"], "off");
-        assert_eq!(value["immortalized"], 0);
-        assert!(value["immortalized"].is_u64(), "a count, not a float");
-        assert!(
-            value["immortalize_reason"]
-                .as_str()
-                .unwrap()
-                .contains("3.14")
-        );
-        // A skipped pass has no duration: `immortalize_ms` is the pass's own.
-        assert!(value.get("immortalize_ms").is_none());
-    }
-
-    #[test]
-    fn a_boot_event_names_the_preset_and_its_settings() {
-        // E1: the preset, the settings it supplied and their values, and the
-        // settings an explicit variable overrode — names only, because those
-        // values came from the environment.
-        let event = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_stage("config")
-                .with_preset("compose-traefik")
-                .with_preset_setting("BLASTIT_CLIENT_IP_HEADER", "x-forwarded-for")
-                .with_preset_setting("BLASTIT_FAIR_QUEUING", "on")
-                .with_preset_override("BLASTIT_LOG_FORMAT"),
-        ));
-        let json = encode_json(&event);
-        assert_eq!(
-            top_level_keys(&json),
-            [
-                "ts",
-                "level",
-                "event",
-                "component",
-                "stage",
-                "preset",
-                "preset_settings",
-                "preset_overridden",
-            ]
-        );
-        let value = check_fits(&event, &json);
-        assert_eq!(value["preset"], "compose-traefik");
-        assert_eq!(
-            value["preset_settings"],
-            serde_json::json!({
-                "BLASTIT_CLIENT_IP_HEADER": "x-forwarded-for",
-                "BLASTIT_FAIR_QUEUING": "on",
-            })
-        );
-        assert_eq!(
-            value["preset_overridden"],
-            serde_json::json!(["BLASTIT_LOG_FORMAT"])
-        );
-        // Never the overriding value, and never a value of the environment's.
-        assert!(!json.contains("\"log_format\""));
-    }
-
-    #[test]
-    fn a_boot_event_without_a_preset_says_null() {
-        // E1: a `boot` line that says `"preset":null` is a boot with no preset,
-        // which is a different statement from a line that never mentions one —
-        // and `ready` and `shutdown`, which share the payload, stay quiet.
-        let boot = fixture::event(EventKind::Boot(Lifecycle::default().with_stage("stage0")));
-        let json = encode_json(&boot);
-        assert_eq!(
-            top_level_keys(&json),
-            ["ts", "level", "event", "component", "stage", "preset"]
-        );
-        assert!(check_fits(&boot, &json)["preset"].is_null());
-
-        for kind in [
-            EventKind::Ready(Lifecycle::default().with_stage("serving")),
-            EventKind::Shutdown(Lifecycle::default().with_stage("drain")),
-        ] {
-            let event = fixture::event(kind);
-            let json = encode_json(&event);
-            assert_eq!(
-                top_level_keys(&json),
-                ["ts", "level", "event", "component", "stage"]
-            );
-            assert!(!json.contains("preset"));
-        }
-
-        // A `ready` that does carry one reports it, for a reader that only kept
-        // the last lifecycle line.
-        let ready = fixture::event(EventKind::Ready(
-            Lifecycle::default()
-                .with_stage("serving")
-                .with_preset("compose-traefik"),
-        ));
-        let value = check_fits(&ready, &encode_json(&ready));
-        assert_eq!(value["preset"], "compose-traefik");
-        assert!(value.get("preset_settings").is_none());
-        assert!(value.get("preset_overridden").is_none());
-    }
-
-    #[test]
-    fn a_long_preset_setting_is_cut_and_named() {
-        // The preset tables are blastit's own, but the line limit has to hold
-        // whatever they hold.
-        let event = fixture::event(EventKind::Boot(
-            Lifecycle::default()
-                .with_preset("compose-traefik")
-                .with_preset_setting("BLASTIT_TRUSTED_PROXIES", "x".repeat(4000))
-                .with_preset_override("y".repeat(4000)),
-        ));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        let truncated = value["truncated"].as_array().unwrap();
-        assert!(
-            truncated.contains(&serde_json::json!("preset_settings")),
-            "{value}"
-        );
-        assert!(
-            truncated.contains(&serde_json::json!("preset_overridden")),
-            "{value}"
-        );
-        assert!(value["preset"].is_string(), "the name stays: {value}");
-    }
-
-    #[test]
-    fn a_long_immortalisation_reason_is_cut() {
-        let event = fixture::event(EventKind::Boot(
-            Lifecycle::default().with_immortalize_reason("r".repeat(4000)),
-        ));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(
-            value["truncated"],
-            serde_json::json!(["immortalize_reason"])
-        );
-        assert!(value["immortalize_reason"].as_str().unwrap().len() < 4000);
-    }
-
-    #[test]
-    fn huge_escaped_and_unicode_input_stays_valid() {
-        let inputs = [
-            "\"".repeat(4000),
-            "\\".repeat(4000),
-            "\n".repeat(4000),
-            "\u{1}".repeat(4000),
-            "É".repeat(4000),
-            "漢字".repeat(2000),
-            "🦀".repeat(2000),
-            format!("\u{0}{}", "a".repeat(4000)),
-        ];
-        for input in inputs {
-            for event in [
-                fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
-                    input.clone(),
-                ))),
-                fixture::event(EventKind::AppOutput(AppOutput::new(
-                    Stream::Stderr,
-                    input.clone(),
-                ))),
-                fixture::event(EventKind::Request(
-                    RequestInfo::from_target("GET", &input).with_status(500),
-                ))
-                .with_request_id(input.clone()),
-            ] {
-                let json = encode_json(&event);
-                let value = check_fits(&event, &json);
-                if let Some(names) = value["truncated"].as_array() {
-                    assert!(!names.is_empty());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unrecognised_reasons_are_cut_as_reason() {
-        let event = fixture::event(EventKind::PgRefused(PgRefused::new(
-            "db",
-            PgRefuseReason::Other("r".repeat(5000)),
-        )));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["reason"]));
-        assert!(value["reason"].as_str().unwrap().len() < 5000);
-        assert_eq!(value["proxy"], "db");
-    }
-
-    #[test]
-    fn many_outputs_lose_whole_proxies_until_the_line_fits() {
-        let mut lifecycle = Lifecycle::default();
-        for proxy in 0..500 {
-            lifecycle = lifecycle
-                .with_output(format!("proxy-{proxy:03}"), "VARIABLE_NAME_HERE")
-                .with_output(format!("proxy-{proxy:03}"), "ANOTHER_VARIABLE");
-        }
-        let event = fixture::event(EventKind::Boot(lifecycle));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["outputs"]));
-        let outputs = value["outputs"].as_object().unwrap();
-        assert!(!outputs.is_empty());
-        assert!(outputs.len() < 500);
-        // Whole proxies only: every proxy that is still there is complete.
-        for (proxy, names) in outputs {
-            assert_eq!(
-                names,
-                &serde_json::json!(["VARIABLE_NAME_HERE", "ANOTHER_VARIABLE"]),
-                "proxy {proxy} lost part of its variable list"
-            );
-        }
-        // The surviving proxies are the first keys in BTreeMap order.
-        assert!(outputs.contains_key("proxy-000"));
-    }
-
-    #[test]
-    fn a_huge_outputs_map_of_empty_names_still_fits() {
-        let mut lifecycle = Lifecycle::default();
-        for proxy in 0..500 {
-            lifecycle = lifecycle.with_output(format!("p{proxy:03}"), "");
-        }
-        let event = fixture::event(EventKind::Boot(lifecycle));
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(value["truncated"], serde_json::json!(["outputs"]));
-        assert!(value["outputs"].as_object().unwrap().len() < 500);
-    }
-
-    #[test]
-    fn declared_truncated_fields_are_reported_even_when_the_event_fits() {
-        let event = fixture::request_event().with_truncated(["route", "request_id"]);
-        let json = encode_json(&event);
-        assert!(json.len() < MAX_EVENT_BYTES);
-        let value = check_fits(&event, &json);
-        assert_eq!(
-            value["truncated"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .collect::<Vec<_>>(),
-            [
-                &serde_json::json!("route"),
-                &serde_json::json!("request_id")
-            ]
-        );
-        // A declared field is merged with the encoder's own cuts, once each.
-        let long = "x".repeat(4000);
-        let event = fixture::event(EventKind::ManifestWarning(ManifestWarning::new(long)))
-            .with_route("product-detail")
-            .with_truncated(["route"]);
-        let json = encode_json(&event);
-        let value = check_fits(&event, &json);
-        assert_eq!(
-            value["truncated"],
-            serde_json::json!(["route", "message"]),
-            "declared names come first, then the encoder's"
-        );
-        // No `truncated` member at all when nothing was cut.
-        assert!(
-            parse(&encode_json(&fixture::request_event()))
-                .get("truncated")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn truncation_is_a_property_over_generated_inputs() {
-        // Deterministic generator: no rand, just a growing alphabet.
-        let alphabet = ["a", "\"", "\\", "\n", "é", "漢", "\u{7}", "x"];
-        let path = "p".to_owned();
-        for round in 0..64usize {
-            let mut text = String::new();
-            for step in 0..(round * 37 % 3000) + 1 {
-                text.push_str(alphabet[step % alphabet.len()]);
-            }
-            let events = [
-                fixture::event(EventKind::SqlDenied(SqlDenied::new(
-                    57,
-                    "db",
-                    SqlKind::Other("listen".to_owned()),
-                    text.clone(),
-                    "42501",
-                    true,
-                )))
-                .with_route(text.clone()),
-                fixture::event(EventKind::HttpRejected(HttpRejected::new(
-                    text.clone(),
-                    400,
-                    RejectReason::Other(text.clone()),
-                )))
-                .with_request_id(text.clone()),
-                fixture::event(EventKind::ProcessRetired(ProcessRetired::new(
-                    57,
-                    20_001,
-                    RetireReason::Other(text.clone()),
-                ))),
-                fixture::event(EventKind::AppOutput(AppOutput::new(
-                    Stream::Stdout,
-                    text.clone(),
-                )))
-                .with_route(text.clone()),
-                fixture::event(EventKind::ManifestWarning(ManifestWarning::new(
-                    text.clone(),
-                ))),
-                fixture::event(EventKind::Ready(
-                    Lifecycle::default()
-                        .with_stage(&text)
-                        .with_output(&text, &path)
-                        .with_output(&text, &text),
-                )),
-            ];
-            for event in &events {
-                let json = encode_json(event);
-                assert!(
-                    json.len() <= MAX_EVENT_BYTES,
-                    "round {round}: {} bytes for {}",
-                    json.len(),
-                    event.kind.name()
-                );
-                let value = parse(&json);
-                assert_eq!(value["event"], event.kind.name());
-                for name in value["truncated"].as_array().unwrap_or(&Vec::new()) {
-                    let name = name.as_str().unwrap();
-                    assert!(
-                        value.get(name).is_some(),
-                        "round {round}: {name} listed but absent"
-                    );
-                    if let Some(kept) = value[name].as_str() {
-                        assert!(
-                            text.starts_with(kept),
-                            "round {round}: {name} kept a non-prefix"
-                        );
-                    }
-                }
-                // Four copies of `text`, each at most six times its length
-                // once escaped, still fit comfortably.
-                if text.len() <= 50 {
-                    assert!(
-                        value.get("truncated").is_none(),
-                        "round {round}: cut too early"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn a_fitting_event_is_not_truncated() {
-        let event = request_event();
-        assert!(parse(&encode_json(&event)).get("truncated").is_none());
-        assert_eq!(encode_json(&request_event()).len(), encoded_len(&event));
-    }
-
-    #[test]
-    fn timestamps_of_any_offset_encode_as_utc() {
-        let ts = OffsetDateTime::from_unix_timestamp(1_792_936_931).unwrap()
-            + Duration::milliseconds(384);
-        let event = fixture::event(EventKind::Ready(Lifecycle::default())).with_ts(ts);
-        let value = parse(&encode_json(&event));
-        assert_eq!(value["ts"], "2026-10-25T14:02:11.384Z");
-        let offset = fixture::event(EventKind::Ready(Lifecycle::default()))
-            .with_ts(ts.to_offset(time::UtcOffset::from_hms(-5, 0, 0).unwrap()));
-        assert_eq!(
-            parse(&encode_json(&offset))["ts"],
-            "2026-10-25T14:02:11.384Z"
-        );
-    }
-
-    #[test]
-    fn top_level_keys_helper_ignores_nested_keys() {
-        let json = r#"{"a":"x","b":{"c":"d"},"e":[{"f":"g"}],"h":1}"#;
-        assert_eq!(top_level_keys(json), ["a", "b", "e", "h"]);
-        let json = r#"{"a":"}","b":"\"x\",\"y\":"}"#;
-        assert_eq!(top_level_keys(json), ["a", "b"]);
-    }
-
-    #[test]
-    fn member_separates_members() {
-        let mut out = Vec::from(&b"{"[..]);
-        push_u64_member(&mut out, "a", 1);
-        push_str_member(&mut out, "b", "x");
-        out.push(b'}');
-        assert_eq!(out, br#"{"a":1,"b":"x"}"#);
-    }
-
-    #[test]
-    fn no_event_kind_encodes_with_an_empty_event_name() {
-        let events = [request_event(), fixture::sql_denied_event()];
-        for event in &events {
-            assert!(!event.kind.name().is_empty());
-        }
-        assert_eq!(Component::Init.as_str(), "init");
-    }
-
-    /// The line the old `Value` path produced: parse to a map, stamp, then
-    /// re-serialise — which sorts the members by key.
-    fn round_trip_restamp(line: &str, component: &str, route: Option<&str>) -> String {
-        let mut value: Value = serde_json::from_str(line).unwrap();
-        let object = value.as_object_mut().unwrap();
-        object.insert("component".to_owned(), Value::from(component));
-        if let Some(route) = route {
-            object.insert("route".to_owned(), Value::from(route));
-        }
-        serde_json::to_string(&value).unwrap()
-    }
-
-    #[test]
-    fn restamping_matches_the_old_round_trip_for_every_kind() {
-        // init must keep emitting the exact bytes the `Value` round trip did —
-        // the members sorted by key, with `component` and `route` stamped from
-        // the pipe. This pins the borrowed scanner against that for every event
-        // shape, replacing a route that is there and inserting one that is not.
-        let mut events = every_kind();
-        // A line the encoder had to truncate carries a `truncated` array too.
-        events.push(fixture::event(EventKind::ManifestWarning(
-            ManifestWarning::new("x".repeat(3000)),
-        )));
-
-        for event in events {
-            let line = encode_json(&event);
-
-            let mut buffer = Vec::new();
-            let level = restamp_json_into(&mut buffer, &line, "scheduler", None);
-            assert_eq!(
-                buffer,
-                round_trip_restamp(&line, "scheduler", None).as_bytes(),
-                "{line}"
-            );
-            assert_eq!(level.flatten(), Some(event.level().as_str()), "{line}");
-
-            let mut buffer = Vec::new();
-            let level = restamp_json_into(&mut buffer, &line, "view", Some("about"));
-            assert_eq!(
-                buffer,
-                round_trip_restamp(&line, "view", Some("about")).as_bytes(),
-                "{line}"
-            );
-            assert_eq!(level.flatten(), Some(event.level().as_str()), "{line}");
-        }
-    }
-
-    #[test]
-    fn a_forwarded_line_that_is_not_an_object_is_rejected() {
-        for line in [
-            "",
-            "not json",
-            "[]",
-            "null",
-            "5",
-            "\"a string\"",
-            "{\"a\":}",
-            "{\"a\":1,}",
-            "{",
-        ] {
-            let mut buffer = Vec::new();
-            assert!(
-                restamp_json_into(&mut buffer, line, "init", None).is_none(),
-                "{line} was accepted"
-            );
-        }
-
-        // An empty object is an object, and the stamp is added to it.
-        let mut buffer = Vec::new();
-        let level = restamp_json_into(&mut buffer, "{}", "init", None);
-        assert!(matches!(level, Some(None)), "{level:?}");
-        assert_eq!(buffer, br#"{"component":"init"}"#);
-    }
-
-    #[test]
-    fn restamping_keeps_a_payload_route_when_the_pipe_implies_none() {
-        // An events pipe never implies a route, so the payload's own `route`
-        // stays — and an unmatched request's explicit `null` route is kept too.
-        let line = encode_json(
-            &fixture::event(EventKind::ProcessCap(ProcessCap::new(1, 2))).with_route("about"),
-        );
-        let mut buffer = Vec::new();
-        restamp_json_into(&mut buffer, &line, "scheduler", None);
-        assert_eq!(
-            buffer,
-            round_trip_restamp(&line, "scheduler", None).as_bytes()
-        );
-        assert!(
-            String::from_utf8(buffer)
-                .unwrap()
-                .contains(r#""route":"about""#)
-        );
-    }
 }

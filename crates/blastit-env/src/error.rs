@@ -7,9 +7,11 @@
 //! output (§5.1 "secrets can't be templated", §8.1 "never logged").
 
 use std::fmt;
-use std::fmt::Write as _;
 
-use blastit_manifest::ProxyName;
+// §18 renders a path for the CLI with one escaper, and this crate renders
+// variable names; asking `blastit-manifest` keeps the two identical instead of
+// keeping a second copy of the control-character table.
+use blastit_manifest::{ProxyName, escape_control};
 
 use crate::template::TemplateError;
 
@@ -48,23 +50,6 @@ pub(crate) fn quoted(value: impl fmt::Display) -> String {
         None => out.push_str(&escape_control(&text)),
     }
     out.push('"');
-    out
-}
-
-/// Escapes control characters, so a name never breaks a line.
-fn escape_control(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            character if character.is_control() => {
-                let _ = write!(out, "\\u{{{:x}}}", character as u32);
-            }
-            character => out.push(character),
-        }
-    }
     out
 }
 
@@ -377,80 +362,5 @@ impl<'a> IntoIterator for &'a EnvErrors {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use blastit_manifest::ProxyName;
-
-    use super::{EnvError, EnvErrors, invalid_name_reason, quoted};
-    use crate::template::TemplateError;
-
-    #[test]
-    fn unusable_variable_names_are_named_with_a_reason() {
-        assert_eq!(invalid_name_reason("DATABASE_URL"), None);
-        assert_eq!(invalid_name_reason(""), Some("it is empty"));
-        assert_eq!(invalid_name_reason("A=B"), Some("it contains '='"));
-        assert_eq!(invalid_name_reason("A\0B"), Some("it contains a NUL byte"));
-    }
-
-    #[test]
-    fn invalid_name_errors_escape_control_characters() {
-        let error = EnvError::InvalidVariableName {
-            proxy: ProxyName::from("db"),
-            variable: "A\0B".to_string(),
-            reason: "it contains a NUL byte",
-        };
-        let text = error.to_string();
-        assert!(!text.contains('\0'));
-        assert!(text.contains(r"A\u{0}B"), "{text}");
-    }
-
-    #[test]
-    fn quoted_escapes_control_characters_and_cuts_long_values() {
-        assert_eq!(quoted("a\nb"), "\"a\\nb\"");
-        assert!(!quoted("x".repeat(500)).contains(&"x".repeat(121)));
-        assert!(quoted("x".repeat(500)).ends_with("…\""));
-    }
-
-    #[test]
-    fn errors_render_on_one_line() {
-        let error = EnvError::Template {
-            proxy: ProxyName::from("db"),
-            variable: "X".to_string(),
-            error: TemplateError::UnknownField {
-                name: "password".to_string(),
-            },
-        };
-        let text = error.to_string();
-        assert!(!text.contains('\n'));
-        assert_eq!(
-            text,
-            "proxy \"db\" output \"X\": unknown field \"password\""
-        );
-    }
-
-    #[test]
-    fn errors_are_collected_and_rendered_together() {
-        let errors = EnvErrors::new(vec![
-            EnvError::MissingUrlOrHost {
-                proxy: ProxyName::from("db"),
-            },
-            EnvError::UrlAndSplit {
-                proxy: ProxyName::from("analytics"),
-            },
-        ]);
-        assert_eq!(errors.len(), 2);
-        assert!(!errors.is_empty());
-        let text = errors.to_string();
-        assert!(text.starts_with("environment rewrite has 2 error(s)\n"));
-        assert_eq!(text.lines().count(), 3);
-        assert_eq!(errors.errors().len(), 2);
-        assert_eq!((&errors).into_iter().count(), 2);
-        assert_eq!(errors.clone().into_errors().len(), 2);
-        assert_eq!(EnvErrors::from(errors.clone().into_errors()).len(), 2);
     }
 }

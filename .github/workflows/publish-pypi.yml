@@ -15,8 +15,7 @@ name: Publish
 #      `develop` whose version is already tagged exits cleanly in seconds);
 #   2. `wheels`, `sdist`, and `verify` build and verify the exact release artifacts
 #      with README links pinned to `v<version>`, while `validate` waits in parallel
-#      for `CI`, `Docs`, and `Live (DigitalOcean)` on that merged `develop` commit
-#      to pass green;
+#      for `CI` and `Docs` on that merged `develop` commit to pass green;
 #   3. `pypi` publishes the wheels and sdist to PyPI via OIDC trusted publishing
 #      from the `pypi` GitHub environment;
 #   4. `release` creates and pushes the annotated `v<version>` git tag on the
@@ -47,14 +46,17 @@ on:
       - "pyproject.toml"
       - "Cargo.toml"
       - "CHANGELOG.md"
-      - "blastit_build.py"
       - "scripts/**"
       - "README.md"
       - ".github/actions/**"
       - ".github/workflows/publish-pypi.yml"
 
 concurrency:
-  group: publish-${{ github.ref }}
+  # One group with `.github/workflows/packages.yml`: both run from the same tag
+  # push and both reseal the GitHub release's `SHA256SUMS`, so they must never
+  # overlap — a group each is how the packages job resealed a checksum file that
+  # this workflow then overwrote with one that has no `.deb`/`.rpm` in it.
+  group: release-${{ github.ref }}
   # Never cancel a run on `develop` or a `v*` tag — either can be halfway through
   # an upload, and queuing serialises back-to-back pushes to `develop` so the
   # second sees the tag the first just created. Rehearsals (PR, dispatch) cancel.
@@ -157,24 +159,385 @@ jobs:
               } >> "$GITHUB_OUTPUT"
           fi
 
-  wheels:
-    name: wheel (CPython ${{ matrix.python }})
-    needs: guard
-    if: needs.guard.outputs.should_build == 'true'
+  matrix:
+    name: the legs (scripts/platform_matrix.py)
     runs-on: ubuntu-latest
+    outputs:
+      wheels_gnu: ${{ steps.legs.outputs.wheels_gnu }}
+      wheels_musl: ${{ steps.legs.outputs.wheels_musl }}
+      shims: ${{ steps.legs.outputs.shims }}
+      binaries_gnu: ${{ steps.legs.outputs.binaries_gnu }}
+      binaries_musl: ${{ steps.legs.outputs.binaries_musl }}
+      lsp: ${{ steps.legs.outputs.lsp }}
+      hosts: ${{ steps.legs.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # `MB.3.18`: one place declares every leg. A release that publishes a
+      # wheel/archive/shim for a target the matrix does not build — or a page
+      # that claims one — is refused here, before anything is uploaded.
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
+      - id: legs
+        run: |
+          set -euo pipefail
+          # One subset per libc, because a musl artifact is built in an Alpine
+          # job container and a glibc one on the runner: two jobs cannot share a
+          # `container:` and still be one matrix. `lsp` has no libc split: its
+          # legs are three operating systems, and each is built natively.
+          for pair in wheels:gnu wheels:musl shims: binaries:gnu binaries:musl lsp:; do
+              family=${pair%%:*}
+              libc=${pair##*:}
+              key=$family${libc:+_$libc}
+              echo "$key=$(uv run --no-project scripts/platform_matrix.py --matrix "$family" ${libc:+--libc "$libc"})" >> "$GITHUB_OUTPUT"
+          done
+          # The host stories (`§3`: install.sh --user, the Alpine musl install)
+          # run on each architecture's native runner, from the same matrix.
+          echo "hosts=$(uv run --no-project scripts/platform_matrix.py --matrix hosts)" >> "$GITHUB_OUTPUT"
+
+  shims:
+    name: shim (${{ matrix.shim }})
+    needs: [guard, matrix]
+    if: needs.guard.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    # Cold: a distro image, its PHP dev/embed packages, a Rust toolchain for the
+    # probe, the shim, then three probe runs. The 8.4 leg is the slowest.
+    timeout-minutes: 45
     strategy:
-      # x86_64 only. arm64 is a step of its own, not a matrix dimension:
-      # `blastit-sys` does not compile for aarch64 (`libc::SYS_fchmodat2` is not
-      # defined there — run 40388835113 has the log), and §7.3's seccomp filters
-      # and the arch check they run under are written for x86_64 and have never
-      # run on arm64 at all. That needs an arm64 runner and a test run on it.
-      matrix:
-        python: ["3.13", "3.14"]
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.shims) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # Built **natively** in this leg's own distro image: `php_config.h` encodes
+      # platform type widths and `ZEND_MM_ALIGNMENT`, so a cross-compiled shim
+      # fails at `dlopen` rather than at compile (`ADR-0010` §4.2). No distro
+      # ships 8.3, 8.4, 8.5 and 8.6, and Alpine and Debian name the packages
+      # differently, hence one leg per (minor, libc).
+      - name: build the shim and run the real-load probe
+        run: >-
+          make php-sapi-e2e PHP_MINOR=${{ matrix.minor }} PHP_SAPI_LIBC=${{ matrix.libc }}
+          PHP_SAPI_KEEP=1 PHP_SAPI_IMAGE=blastit-php-sapi-e2e:${{ matrix.name }}
+      # Only a shim that loaded and served is taken: the probe above is what
+      # separates "it compiled" from "it works", and the release ships the
+      # latter (`MB.3.18`, the proven-count rule).
+      - name: take the probed shim out of its image
+        run: >-
+          scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
+          dist/shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }} --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-${{ matrix.name }}
+          path: dist/shims/*.so
+          if-no-files-found: error
+
+  binaries_gnu:
+    name: standalone (${{ matrix.name }})
+    needs: [guard, matrix, shims]
+    if: needs.guard.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.binaries_gnu) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # The Rust toolchain is the **host** one, mounted read-only into the
+      # builder image by `scripts/build-standalone-in-image.sh`: no second
+      # toolchain download per leg, and the C compiler is the image's, on native
+      # hardware (an emulated compiler would make the floor evidence about qemu).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.name }}-*
+          path: dist/shims
+          merge-multiple: true
+      # The archive is the *universal* binary (`ADR-0017` decision 1):
+      # `blastit`'s default features (`python`, `php`, `static`) link no
+      # `libpython` and no `libphp` — `python` is a `dlopen` loader — so one
+      # artifact serves a WSGI app, embedded PHP through `dlopen`, and `static`
+      # mounts. It stages both shim families (`MB.47.2`): the four PHP shims from
+      # the `shim-*` artifacts, and the two CPython shims
+      # `scripts/build-standalone-in-image.sh` builds inside the image, so a WSGI
+      # view boots out of the box. `scripts/build-standalone.sh` is the one place
+      # that spelling lives; this leg only chooses the builder image.
+      #
+      # `MB.3.60`: the archive is built **inside `matrix.builder_image`**, whose
+      # glibc *is* `matrix.glibc_floor`, and `--max-glibc` refuses the build if
+      # the binary outgrew it. Building on the runner is what made a "portable"
+      # archive need the runner's glibc 2.39 and refuse to start on Debian 12.
+      - name: Build the archive inside the image whose glibc it claims
+        run: |
+          set -euo pipefail
+          owed=$(uv run --no-project scripts/platform_matrix.py --count shims \
+              --libc gnu --arch "${{ matrix.arch }}")
+          echo "this tuple owes $owed shim(s)"
+          scripts/build-standalone-in-image.sh \
+              --image "${{ matrix.builder_image }}" \
+              --target "${{ matrix.target }}" \
+              --max-glibc "${{ matrix.glibc_floor }}" \
+              --shim-dir dist/shims --require-shims "$owed"
+      # The version relation for the builder and every image the docs claim
+      # (`check-exec-env.sh` pulls each image before reading its glibc, so a tag
+      # that does not exist is a refusal, never a version), then the execution
+      # proof in each smoke image: a static route, its own 404, and a WSGI
+      # manifest refused at exit 1, in a distro with no CPython on PATH.
+      #
+      # The builder is checked but not *executed* here: a manylinux image ships
+      # `/usr/bin/python3` for wheel builds, so `--require-no-python` would be a
+      # statement about the image rather than about the artifact.
+      - name: Prove the shipped archive in every image it claims
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/artifact
+          tar -C /tmp/artifact -xzf "dist/${{ matrix.archive }}"
+          binary="/tmp/artifact/blastit-${{ matrix.target }}/blastit"
+          IFS=, read -ra smoke <<< "${{ matrix.smoke_images }}"
+          images=("${{ matrix.builder_image }}" "${smoke[@]}")
+          args=()
+          for image in "${images[@]}"; do
+              args+=(--image "$image")
+          done
+          scripts/check-exec-env.sh "${args[@]}" --binary "$binary"
+          for image in "${smoke[@]}"; do
+              echo "::group::$image"
+              docker run --rm \
+                  -v /tmp/artifact:/art:ro -v "$PWD:/src:ro" \
+                  "$image" \
+                  bash /src/scripts/standalone-runtime-check.sh --require-no-python \
+                  "/art/blastit-${{ matrix.target }}/blastit"
+              echo "::endgroup::"
+          done
+      # Per target: `release` downloads every artifact with `merge-multiple`, so
+      # four files all called `SHA256SUMS` would leave one of them.
+      - name: Name the checksum file after its target
+        run: mv dist/SHA256SUMS "dist/SHA256SUMS.${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-${{ matrix.name }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/SHA256SUMS.${{ matrix.target }}
+          if-no-files-found: error
+
+  binaries_musl:
+    name: standalone (${{ matrix.name }})
+    needs: [guard, matrix, shims]
+    if: needs.guard.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    # Run on the native-arch Ubuntu runner and invoke `docker run alpine:3.21`
+    # rather than a job-level `container: alpine:3.21`: GitHub's arm64 runner
+    # lacks `externals/node20_alpine`, so JS actions (`checkout`, `upload-artifact`)
+    # fail to start inside an Alpine job container on `ubuntu-24.04-arm`, whereas
+    # `docker run` executes both the build and the clean-image runtime proof
+    # natively on both architectures.
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.binaries_musl) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.name }}-*
+          path: dist/shims
+          merge-multiple: true
+      # `clang19-libclang` is what carries `libclang.so` on Alpine; `pg_query`'s
+      # bindgen needs the C API by name, and `llvm-dev` alone ships only the C++
+      # one. Without it the archive build dies in bindgen, not in the linker.
+      - name: Build and package the musl archive natively in Alpine
+        run: |
+          set -euo pipefail
+          owed=$(uv run --no-project scripts/platform_matrix.py --count shims \
+              --libc musl --arch "${{ matrix.arch }}")
+          echo "this tuple owes $owed shim(s)"
+          mkdir -p dist
+          docker run --rm \
+              -e HOST_UID="$(id -u)" \
+              -e HOST_GID="$(id -g)" \
+              -e TARGET="${{ matrix.target }}" \
+              -e OWED="$owed" \
+              -e BUILDER_IMAGE="${{ matrix.builder_image }}" \
+              -v "$PWD:/src" \
+              -w /src \
+              "${{ matrix.builder_image }}" \
+              sh -eu -c '
+                  cleanup_owner() {
+                      chown -R "$HOST_UID:$HOST_GID" /src/dist /src/target 2>/dev/null || true
+                  }
+                  trap cleanup_owner EXIT
+                  apk add --no-cache build-base musl-dev pkgconf clang llvm-dev clang19-libclang \
+                      binutils ca-certificates curl bash tar xz git >/dev/null
+                  export LIBCLANG_PATH=/usr/lib/llvm19/lib
+                  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                      | bash -s -- -y --profile minimal --default-toolchain stable >/dev/null
+                  export PATH="$HOME/.cargo/bin:$PATH"
+                  if ! command -v uv >/dev/null 2>&1; then
+                      curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+                  fi
+                  export PATH="$HOME/.local/bin:$PATH"
+                  # The archive stages the per-minor CPython shims (`MB.47.2`), and a
+                  # musl shim must be linked by musl: both minors are built here,
+                  # against the musl CPython that `uv` installs, before the archive
+                  # is packaged. No apostrophe anywhere in this block: it is one
+                  # single-quoted `sh -c` word, so an apostrophe in a comment ends
+                  # the word there and the rest of the script runs on the runner
+                  # with `TARGET` unbound (`MB.49`).
+                  uv python install 3.13 3.14 >/dev/null
+                  arch=${TARGET%%-*}
+                  make py-sapi PY_MINORS="3.14 3.13" \
+                      PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC=musl
+                  bash scripts/build-standalone.sh --target "$TARGET" \
+                      --shim-dir dist/shims --require-shims "$OWED" \
+                      --builder-image "$BUILDER_IMAGE"
+              '
+      - name: Prove the shipped musl archive in a bare Alpine (no CPython)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/artifact
+          tar -C /tmp/artifact -xzf "dist/${{ matrix.archive }}"
+          binary="/tmp/artifact/blastit-${{ matrix.target }}/blastit"
+          # `MB.3.63`: the verdict below is only worth what its reading is worth, and
+          # on this leg it once read a musl artifact as a glibc ELF needing 2.0 —
+          # a floor no aarch64 glibc has. Print the ELF's own answer first, so a
+          # future failure names its reason instead of a bare sentence.
+          echo "::group::ELF evidence for $binary"
+          readelf -h "$binary"
+          readelf -l "$binary" | sed -n '/INTERP/,+2p'
+          readelf -d "$binary" | grep -E 'NEEDED|SONAME|RPATH|RUNPATH' || true
+          readelf --version-info "$binary" | sed -n '/^Version needs section/,$p'
+          echo "::endgroup::"
+          # `MB.3.58`: the archive was built *in* this image above and this is
+          # the same image, so the rule holds by construction; the check says so
+          # out loud (a musl binary carries no glibc symbol versions, and musl is
+          # ABI-stable within 1.x, so no version floor can refuse it).
+          scripts/check-exec-env.sh --image "${{ matrix.builder_image }}" \
+              --binary "$binary"
+          # `libgcc` is the one runtime package a dynamically linked musl Rust
+          # binary needs (`libgcc_s.so.1`) and the base Alpine image does not
+          # carry it. Run in a fresh image because `clang`'s tooling in the build
+          # container drags CPython in, which `--require-no-python` refuses.
+          docker run --rm -v /tmp/artifact:/art:ro -v "$PWD:/src:ro" \
+              "${{ matrix.builder_image }}" \
+              sh -eu -c 'apk add --no-cache bash libgcc >/dev/null 2>&1
+                         bash /src/scripts/standalone-runtime-check.sh --require-no-python \
+                           "/art/blastit-${{ matrix.target }}/blastit"'
+      - name: Name the checksum file after its target
+        run: mv dist/SHA256SUMS "dist/SHA256SUMS.${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-${{ matrix.name }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/SHA256SUMS.${{ matrix.target }}
+          if-no-files-found: error
+
+  lsp:
+    name: blastit-lsp (${{ matrix.target }})
+    needs: [guard, matrix]
+    if: needs.guard.outputs.should_build == 'true'
+    # The native runner per leg comes from the matrix; a Linux leg is built
+    # inside the image whose glibc is its floor, exactly like the standalone
+    # archive but with no shims and no PHP.
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.lsp) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Per target: one leg's `target/<triple>` must never be linked into
+          # another OS's archive.
+          key: lsp-${{ matrix.target }}
+      # `clang-sys` 1.9.1 has no registry fallback and `windows-latest` leaves
+      # `LIBCLANG_PATH` unset, so the directory holding `libclang.dll` is pinned
+      # (`docs/research/2026-11-17-cross-platform-blastit-lsp.md` §Q1).
+      - name: Pin LIBCLANG_PATH (research §Q1)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+      - name: Build the archive (native, or inside the matrix builder image)
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--target "${{ matrix.target }}" --out dist
+                --archive "${{ matrix.archive }}"
+                --executable "${{ matrix.executable }}"
+                --dir "${{ matrix.dir }}")
+          if [ -n "${{ matrix.builder_image }}" ]; then
+              args+=(--image "${{ matrix.builder_image }}" --max-glibc "${{ matrix.glibc_floor }}")
+          fi
+          bash scripts/build-lsp.sh "${args[@]}"
+      # §14.4.1: the published archive is unpacked, its three entries are
+      # asserted, and **the extracted file** is what the smoke drives. The
+      # directory and the executable are the matrix's, so the unpack cannot
+      # disagree with what the build staged.
+      - name: Unpack the archive and smoke the extracted file
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="dist/smoke-${{ matrix.target }}"
+          rm -rf "$tmp"
+          mkdir -p "$tmp"
+          case "${{ matrix.archive }}" in
+              *.zip) "${{ matrix.python }}" -m zipfile -e "dist/${{ matrix.archive }}" "$tmp" ;;
+              *) tar -xzf "dist/${{ matrix.archive }}" -C "$tmp" ;;
+          esac
+          ( cd "$tmp/${{ matrix.dir }}" && ls | sort | tr '\n' ',' && echo )
+          # The archive's own list, verified with the tool this OS has:
+          # `sha256sum -c` on Linux/Windows, `shasum -a 256 -c` on macOS (which
+          # ships no coreutils; `-a 256` matters because `shasum -c` means SHA-1).
+          ( cd "$tmp/${{ matrix.dir }}" && ${{ matrix.sha_verify }} )
+          "${{ matrix.python }}" scripts/lsp_smoke.py \
+              --binary "$tmp/${{ matrix.dir }}/${{ matrix.executable }}"
+      # `release` downloads every artifact family with `merge-multiple`, where
+      # five files all called `SHA256SUMS` would leave one of them — and the
+      # standalone job already writes `SHA256SUMS.<target>`, so this family
+      # prefixes its own (`lsp-`) rather than overwriting another family's.
+      - name: Name the checksum file after its target and family
+        run: mv dist/SHA256SUMS "dist/SHA256SUMS.lsp-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lsp-${{ matrix.target }}
+          # Explicit: the archive is the asset the extension downloads, and the
+          # per-leg checksum is what `release` verifies before it tags.
+          path: |
+            dist/${{ matrix.archive }}
+            dist/SHA256SUMS.lsp-${{ matrix.target }}
+          if-no-files-found: error
+
+  wheels_gnu:
+    name: wheel (${{ matrix.name }})
+    # `MB.45`: the four PHP shims are built by the `shims` legs (only a distro
+    # ships `php_config.h`, and no manylinux image does), so the wheel leg stages
+    # its own `(arch, libc)` shim set — and `scripts/build-wheel.sh` fails closed
+    # (`--require-shims all`) when the archive it built does not carry them.
+    needs: [guard, matrix, shims]
+    if: needs.guard.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.wheels_gnu) }}
     steps:
       - uses: actions/checkout@v4
       # `uvx` for the README rewrite. Pinned to a release tag rather than to a
       # major one: `astral-sh/setup-uv` stopped publishing major tags after `v7`.
       - uses: astral-sh/setup-uv@v10.3.2
+      # The same shape `binaries_gnu` uses: every `shim-*` of this leg's
+      # `(arch, libc)`, which `--require-shims all` then insists on finding in
+      # the wheel (`ADR-0017` decision 4: `4` PHP shims, `83`-`86`).
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.name }}-*
+          path: dist/shims
+          merge-multiple: true
       # Before the build: the README is the wheel's long description, and PyPI
       # renders it with no repository around it.
       - name: README links, as PyPI needs them
@@ -183,24 +546,131 @@ jobs:
         run: uv run --no-project scripts/readme-absolute-links.py --ref "$LINK_REF"
       - uses: ./.github/actions/build-wheel
         with:
-          python: ${{ matrix.python }}
-          artifact: wheel-${{ matrix.python }}
+          manylinux: ${{ matrix.manylinux }}
+          platform: manylinux_${{ matrix.manylinux }}
+          artifact: wheel-${{ matrix.name }}
+          require-shims: all
+          shims-from: dist/shims
+
+  wheels_musl:
+    name: wheel (${{ matrix.name }})
+    # `MB.45`: as for `wheels_gnu`, the four PHP shims are a `shims` leg's, and
+    # this job stages its own `(arch, libc)`'s artifacts beside the wheel.
+    needs: [guard, matrix, shims]
+    if: needs.guard.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    # musllinux has no manylinux container to borrow: the wheel must be linked by
+    # musl against a musl CPython inside Alpine (`docker run alpine:3.21` rather
+    # than job-level `container:`, so JS actions still run natively on arm64
+    # runners), and the smoke test installs into the same interpreter it built
+    # against (`scripts/wheel-smoke.sh --python`).
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.wheels_musl) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # `dist/shims` is relative to `$PWD`, which the build below mounts as
+      # `/src`, so the same path resolves inside Alpine.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.name }}-*
+          path: dist/shims
+          merge-multiple: true
+      - name: README links, as PyPI needs them
+        env:
+          LINK_REF: ${{ needs.guard.outputs.ref_for_links }}
+        run: uv run --no-project scripts/readme-absolute-links.py --ref "$LINK_REF"
+      - name: Build and smoke-test the musllinux wheel in Alpine
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          docker run --rm \
+              -e HOST_UID="$(id -u)" \
+              -e HOST_GID="$(id -g)" \
+              -e PY_VER=3.13 \
+              -v "$PWD:/src" \
+              -w /src \
+              alpine:3.21 \
+              sh -eu -c '
+                  cleanup_owner() {
+                      chown -R "$HOST_UID:$HOST_GID" /src/dist /src/target /src/python/blastit/_bin 2>/dev/null || true
+                  }
+                  trap cleanup_owner EXIT
+                  apk add --no-cache bash >/dev/null
+                  bash scripts/build-musl-wheel.sh "$PY_VER" \
+                      --require-shims all --shims-from dist/shims
+              '
+      - name: Install it in every image its leg names and drive it (e2e/run_packaging.py)
+        run: uv run --no-project e2e/run_packaging.py --leg wheel --wheel "$(ls dist/blastit-*-py3-none-musllinux_*.whl | head -n 1)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  # `TESTING_PLAN.md` §3's two user-space stories at release time, against the
+  # archives this run just built: `docs/install.sh --user` (glibc, zero `sudo`,
+  # tampered archive refused) and the same installer in `alpine:3.21` as a
+  # non-root uid against the musl archive. Both are `e2e/run_packaging.py` legs,
+  # and the two archive names are the matrix's, so no target is spelled here.
+  install-stories:
+    name: '§3 install.sh --user (gnu) + Alpine musl install (${{ matrix.arch }})'
+    needs: [guard, matrix, binaries_gnu, binaries_musl]
+    if: needs.guard.outputs.should_build == 'true'
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: standalone-*
+      - name: The two archive names this architecture ships
+        id: archives
+        run: |
+          set -euo pipefail
+          for libc in gnu musl; do
+            name=$(uv run --no-project scripts/platform_matrix.py --matrix binaries \
+                --arch "${{ matrix.arch }}" --libc "$libc" |
+                uv run --no-project python -c 'import json, sys; print(json.load(sys.stdin)["include"][0]["archive"])')
+            echo "$libc=$name" >> "$GITHUB_OUTPUT"
+          done
+      - name: Unpack the gnu archive
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/release-gnu
+          tar -C /tmp/release-gnu -xzf "dist/${{ steps.archives.outputs.gnu }}"
+      - name: install.sh --user, zero sudo (e2e/run_packaging.py --leg install)
+        run: >-
+          uv run --no-project e2e/run_packaging.py --require-legs --leg install
+          --binary "/tmp/release-gnu/blastit-${{ matrix.arch }}-unknown-linux-gnu/blastit"
+      - name: the same installer in alpine:3.21 (e2e/run_packaging.py --leg alpine)
+        run: >-
+          uv run --no-project e2e/run_packaging.py --require-legs --leg alpine
+          --musl-archive "dist/${{ steps.archives.outputs.musl }}"
 
   sdist:
     name: sdist
     needs: guard
     if: needs.guard.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
+      - uses: dtolnay/rust-toolchain@stable
       - name: README links, as PyPI needs them
         env:
           LINK_REF: ${{ needs.guard.outputs.ref_for_links }}
         run: uv run --no-project scripts/readme-absolute-links.py --ref "$LINK_REF"
       # The sdist is what a platform without a wheel installs, so it has to build
-      # a working wheel on its own — including the dbproxy binary, which the
-      # build backend builds from the workspace in it (`blastit_build.py`).
+      # a working wheel on its own. The backend is maturin's own: one program
+      # runs every role, so nothing has to be built in front of it.
       - name: Build the sdist
         run: uvx maturin sdist --out dist
       - name: Install from the sdist, in a fresh environment
@@ -210,45 +680,73 @@ jobs:
           # `--no-cache`: this must build the sdist here and now, not reuse a
           # wheel some earlier run put in the cache.
           VIRTUAL_ENV=/tmp/from-sdist uv pip install --no-cache dist/blastit-*.tar.gz
-      - name: The installed blastit runs, with dbproxy in it
+      - name: The installed blastit runs, as one program
         run: |
           set -euo pipefail
           # `--help` prints the usage and exits 0 (`cli::SUCCESS`); the words come
-          # from `blastit._blastit`, so a wheel built from this sdist that doesn't
-          # load fails here.
+          # from the binary the sdist built, so a wheel built from this sdist that
+          # doesn't run fails here.
           usage=$(/tmp/from-sdist/bin/blastit --help)
           printf '%s\n' "$usage" | grep -q "stage 0"
-          dbproxy=$(ls /tmp/from-sdist/lib/python3*/site-packages/blastit/_bin/blastit-dbproxy)
-          test -x "$dbproxy"
-          ls -l "$dbproxy"
+          # One ELF per install: the credentials-holding role is that same program
+          # as `--role=dbproxy`, so a source install ships no second binary.
+          retired=$(find /tmp/from-sdist -name 'blastit-dbproxy' -print -quit)
+          test -z "$retired"
+          ls -l /tmp/from-sdist/bin/blastit
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
           path: dist/*.tar.gz
+          if-no-files-found: error
 
   verify:
     name: description, as PyPI renders it
-    needs: [guard, wheels, sdist]
+    needs: [guard, wheels_gnu, wheels_musl, sdist]
     if: needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Only the two artifact families PyPI accepts. The standalone archives and
+      # the shims are GitHub Release files (`MB.3.18`), and a `.tar.gz` in this
+      # directory would make `check-long-description.py` read it as a
+      # distribution.
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+          pattern: wheel-*
+      # `uv` before the step that runs it: every `uv run` in this job comes after
+      # this setup step, and a runner's preinstalled `uv` is nobody's promise.
       - uses: astral-sh/setup-uv@v10.3.2
-      # Every file that will be uploaded: the wheels and the sdist, nothing else.
-      # The script renders the description with PyPI's own renderer, which
-      # `twine check` does not do for Markdown (see RELEASING.md).
+      # `MB.45`: the one place all four wheels are seen at once, so the release
+      # artifact — not each leg's staging directory — is what the description
+      # check reads. No extra download: the shims are *inside* the wheels.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: sdist
+      # Every file that will be uploaded: the exact wheel count from the matrix
+      # and the one sdist, nothing missing and nothing extra.
       - name: Every file that goes to PyPI
         run: |
           set -euo pipefail
           ls -l dist
+          expected_wheels=$(uv run --no-project scripts/platform_matrix.py --count wheels)
+          wheels=(dist/*.whl)
+          sdists=(dist/blastit-*.tar.gz)
+          if [[ ${#wheels[@]} -ne $expected_wheels ]]; then
+              echo "::error::expected $expected_wheels wheel(s) in dist/, found ${#wheels[@]}"
+              exit 1
+          fi
+          if [[ ${#sdists[@]} -ne 1 ]]; then
+              echo "::error::expected 1 sdist in dist/, found ${#sdists[@]}"
+              exit 1
+          fi
           uv run --no-project scripts/check-long-description.py dist/*
 
   validate:
-    name: CI, Docs & Live green on develop
+    name: CI & Docs green on develop
     needs: guard
     if: needs.guard.outputs.release == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
@@ -257,7 +755,7 @@ jobs:
       actions: read
       contents: read
     steps:
-      - name: Wait for CI, Docs, and Live (DigitalOcean) on ${{ github.sha }}
+      - name: Wait for CI and Docs on ${{ github.sha }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -275,7 +773,6 @@ jobs:
           required = {
               ".github/workflows/ci.yml": "CI",
               ".github/workflows/docs.yml": "Docs",
-              ".github/workflows/live.yml": "Live (DigitalOcean)",
           }
 
           # Give GitHub Actions a moment to register all sibling `push` workflows.
@@ -340,9 +837,18 @@ jobs:
 
   testpypi:
     name: TestPyPI
-    needs: [guard, verify]
+    # The same two families `pypi` publishes: a rehearsal that uploaded a
+    # `shim-*.so` or the standalone `.tar.gz` would be testing an upload TestPyPI
+    # does not accept, and would race the jobs that build them.
+    needs: [guard, verify, shims, binaries_gnu, binaries_musl]
     # A dispatch, and only with `dry-run` unchecked; a release never goes here.
-    if: github.event_name == 'workflow_dispatch' && !inputs.dry-run && needs.verify.result == 'success'
+    if: >-
+      github.event_name == 'workflow_dispatch' && !inputs['dry-run'] &&
+      needs.guard.result == 'success' &&
+      needs.verify.result == 'success' &&
+      needs.shims.result == 'success' &&
+      needs.binaries_gnu.result == 'success' &&
+      needs.binaries_musl.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -355,6 +861,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          pattern: wheel-*
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: sdist
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
@@ -364,7 +876,7 @@ jobs:
 
   pypi:
     name: PyPI
-    needs: [guard, verify, validate]
+    needs: [guard, verify, validate, shims, binaries_gnu, binaries_musl]
     # `event_name == 'push'` is mandatory: `workflow_dispatch` can target `develop`
     # or a tag ref, and must never reach real PyPI. On `develop`, `validate` must
     # have succeeded; on a manual `v*` tag push, `validate` is skipped.
@@ -373,6 +885,9 @@ jobs:
       needs.guard.result == 'success' &&
       needs.guard.outputs.release == 'true' &&
       needs.verify.result == 'success' &&
+      needs.shims.result == 'success' &&
+      needs.binaries_gnu.result == 'success' &&
+      needs.binaries_musl.result == 'success' &&
       github.event_name == 'push' &&
       (
         (github.ref == 'refs/heads/develop' && needs.validate.result == 'success') ||
@@ -385,10 +900,18 @@ jobs:
     permissions:
       id-token: write
     steps:
+      # Wheels and sdist only: PyPI refuses anything else, and the archives go to
+      # the GitHub Release in `release` (`MB.3.18`).
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+          pattern: wheel-*
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: sdist
       # Attestations are on by default in this action: PyPI records, for every
       # file, that these workflows built it from this commit.
       - uses: pypa/gh-action-pypi-publish@release/v1
@@ -400,12 +923,19 @@ jobs:
 
   release:
     name: tag & GitHub release
-    needs: [guard, pypi]
+    # The archives, the shims and the editor binaries must exist before a tag
+    # ships: a release that publishes PyPI but no binary is exactly the
+    # half-landed matrix `MB.3.18` forbids.
+    needs: [guard, pypi, shims, binaries_gnu, binaries_musl, lsp]
     if: >-
       !cancelled() &&
       needs.guard.result == 'success' &&
       needs.guard.outputs.release == 'true' &&
       needs.pypi.result == 'success' &&
+      needs.shims.result == 'success' &&
+      needs.binaries_gnu.result == 'success' &&
+      needs.binaries_musl.result == 'success' &&
+      needs.lsp.result == 'success' &&
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/develop' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
@@ -415,10 +945,88 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.3.2
+      # Explicitly download the three GitHub Release families (`standalone-*`,
+      # `shim-*` and `lsp-*`); PyPI owns `wheel-*` and `sdist`.
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+          pattern: standalone-*
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: shim-*
+      # The editor binaries are their own family (`MB.35`): five assets whose
+      # names start `blastit-lsp-`, counted by `--count lsp` and never by the
+      # standalone family's count.
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+          pattern: lsp-*
+      # The Composer wrapper's digest table (`MB.42.3.3` review): the four rows
+      # were all `pending`, so the only origin a real `composer require` takes
+      # always refused. Stamped here from the archives this job just verified, and
+      # refused while any row is still `pending` — a package that cannot run is
+      # not a release asset.
+      - name: The Composer wrapper's digest table is complete
+        run: |
+          set -euo pipefail
+          # Exactly the `binaries` family, taken from the matrix: `dist/` also
+          # holds the `blastit-lsp-*` assets, whose names match a looser glob.
+          mapfile -t archives < <(
+              uv run --no-project scripts/platform_matrix.py --matrix binaries |
+                  uv run --no-project python -c 'import json,sys; [print("dist/" + item["archive"]) for item in json.load(sys.stdin)["include"]]'
+          )
+          printf 'composer table: %s\n' "${archives[@]}"
+          uv run --no-project scripts/composer_sha256.py \
+              --version "${{ needs.guard.outputs.version }}" \
+              --archives "${archives[@]}" --require-complete
+      # Verify every per-target archive checksum, check that the exact matrix
+      # counts of archives, shims and lsp assets arrived, and write one sorted
+      # `SHA256SUMS` covering every release asset.
+      - name: Verify matrix counts and write one checksum file for the whole release
+        run: |
+          set -euo pipefail
+          expected_bins=$(uv run --no-project scripts/platform_matrix.py --count binaries)
+          expected_shims=$(uv run --no-project scripts/platform_matrix.py --count shims)
+          expected_lsp=$(uv run --no-project scripts/platform_matrix.py --count lsp)
+          (
+              cd dist
+              # An unmatched glob must vanish, not survive as its own literal: a
+              # leg dropped from the matrix would otherwise read as one artifact
+              # and fail a count `platform_matrix.py --count` gets right.
+              shopt -s nullglob
+              for sum_file in SHA256SUMS.*; do
+                  sha256sum -c "$sum_file"
+              done
+              rm -f SHA256SUMS.*
+              # Two families, one `blastit-` prefix. The standalone list is every
+              # `.tar.gz` whose name is not the editor family's, so no target is
+              # spelled here and a new leg needs no edit in this file. `^$` is
+              # not a filename: with `nullglob` and no match, `printf` still emits
+              # one empty line, and an empty entry would read as one archive.
+              mapfile -t archives < <(printf '%s\n' blastit-*.tar.gz | grep -v -e '^blastit-lsp-' -e '^$')
+              lsp=(blastit-lsp-*)
+              shims=(libblastit_php*.so)
+              if [[ ${#archives[@]} -ne $expected_bins ]]; then
+                  echo "::error::expected $expected_bins standalone archive(s), found ${#archives[@]}: ${archives[*]}"
+                  exit 1
+              fi
+              if [[ ${#lsp[@]} -ne $expected_lsp ]]; then
+                  echo "::error::expected $expected_lsp blastit-lsp asset(s), found ${#lsp[@]}: ${lsp[*]}"
+                  exit 1
+              fi
+              if [[ ${#shims[@]} -ne $expected_shims ]]; then
+                  echo "::error::expected $expected_shims PHP shim(s), found ${#shims[@]}"
+                  exit 1
+              fi
+              sha256sum "${archives[@]}" "${lsp[@]}" "${shims[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
+              sha256sum -c SHA256SUMS
+          )
+          cat dist/SHA256SUMS
       - name: Create git tag (if needed) and publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

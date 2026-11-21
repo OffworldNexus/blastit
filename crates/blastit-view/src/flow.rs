@@ -37,11 +37,11 @@ use crate::sync::lock;
 /// Granting one `WINDOW` per byte would be a frame per byte; waiting for more
 /// than this delays the next read of a streaming upload. 64 KiB is a few
 /// frames' worth at the default frame size and small next to the window.
-pub(crate) const WINDOW_BATCH: usize = 64 * 1024;
+pub const WINDOW_BATCH: usize = 64 * 1024;
 
 /// The flow-control state of one request.
 #[derive(Debug)]
-pub(crate) struct Flow {
+pub struct Flow {
     /// Request-body bytes the scheduler may still send us.
     ///
     /// It starts at [`INITIAL_WINDOW`] and grows as the application consumes
@@ -53,7 +53,7 @@ pub(crate) struct Flow {
 
 impl Flow {
     /// A fresh window in both directions.
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self {
             body_left: Mutex::new(i64::from(INITIAL_WINDOW)),
             response: Credit::new(INITIAL_WINDOW),
@@ -64,7 +64,7 @@ impl Flow {
     ///
     /// Returns `false` when the scheduler sent more than its credit, which
     /// §3.1 calls a broken protocol: the caller decides what to do with it.
-    pub(crate) fn body_received(&self, bytes: usize) -> bool {
+    pub fn body_received(&self, bytes: usize) -> bool {
         let mut left = lock(&self.body_left);
         if i64::try_from(bytes).unwrap_or(i64::MAX) > *left {
             return false;
@@ -78,26 +78,28 @@ impl Flow {
     /// The caller must send the matching `WINDOW` frame: the local count is
     /// raised first so that frames already in flight from the scheduler are
     /// never refused, and a lost `WINDOW` frame only ever stalls the sender.
-    pub(crate) fn body_granted(&self, bytes: usize) {
+    pub fn body_granted(&self, bytes: usize) {
         let mut left = lock(&self.body_left);
         *left = left.saturating_add(i64::try_from(bytes).unwrap_or(i64::MAX));
     }
 
     /// Request-body bytes the scheduler may still send us.
-    #[cfg(test)]
-    pub(crate) fn body_left(&self) -> i64 {
+    ///
+    /// `pub` because a sibling view crate reads it from outside this crate,
+    /// where a crate-private item would not reach.
+    pub fn body_left(&self) -> i64 {
         *lock(&self.body_left)
     }
 
     /// The response-body credit of this request.
-    pub(crate) fn response(&self) -> &Credit {
+    pub fn response(&self) -> &Credit {
         &self.response
     }
 }
 
 /// A one-directional credit window: how much body the peer still accepts.
 #[derive(Debug)]
-pub(crate) struct Credit {
+pub struct Credit {
     available: Mutex<u64>,
     wake: Condvar,
     closed: AtomicBool,
@@ -122,7 +124,7 @@ impl Credit {
     /// Blocks on a condvar, so the caller must have released the GIL: nothing
     /// here touches the interpreter, but a request thread that waited while
     /// holding it would stop every other request in the process.
-    pub(crate) fn take(&self, want: usize) -> usize {
+    pub fn take(&self, want: usize) -> usize {
         let mut available = lock(&self.available);
         loop {
             if *available > 0 {
@@ -140,8 +142,28 @@ impl Credit {
         }
     }
 
+    /// Take up to `want` bytes of credit without blocking.
+    ///
+    /// `Some(0)` means the window is closed and empty (the stream is over);
+    /// `None` means it is open but holds no credit yet, so a caller that can
+    /// only make progress by reading more frames (a single-threaded worker
+    /// transport, which is `blastit-view-php`'s loop) can go and read them
+    /// instead of parking here.
+    ///
+    /// This crate has no features: the PHP worker that needs it
+    /// is a sibling crate, so the method is always compiled.
+    pub fn try_take(&self, want: usize) -> Option<usize> {
+        let mut available = lock(&self.available);
+        if *available > 0 {
+            let taken = (want as u64).min(*available);
+            *available -= taken;
+            return Some(taken as usize);
+        }
+        self.closed.load(Ordering::SeqCst).then_some(0)
+    }
+
     /// Grant `bytes` more credit.
-    pub(crate) fn grant(&self, bytes: u32) {
+    pub fn grant(&self, bytes: u32) {
         {
             let mut available = lock(&self.available);
             *available = available.saturating_add(u64::from(bytes));
@@ -154,127 +176,8 @@ impl Credit {
     /// A taker with credit left still spends it — the frames may yet be
     /// deliverable on a drained channel — but one that would have to wait
     /// stops instead.
-    pub(crate) fn close(&self) {
+    pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.wake.notify_all();
-    }
-
-    /// Credit left, for tests.
-    #[cfg(test)]
-    pub(crate) fn available(&self) -> u64 {
-        *lock(&self.available)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::mpsc::channel;
-    use std::thread;
-    use std::time::Duration;
-
-    #[test]
-    fn a_new_flow_starts_with_a_full_window_in_both_directions() {
-        let flow = Flow::new();
-        assert_eq!(flow.body_left(), i64::from(INITIAL_WINDOW));
-        assert_eq!(flow.response().available(), u64::from(INITIAL_WINDOW));
-    }
-
-    #[test]
-    fn request_body_credit_is_spent_and_granted_back() {
-        let flow = Flow::new();
-        assert!(flow.body_received(1000));
-        assert_eq!(flow.body_left(), i64::from(INITIAL_WINDOW) - 1000);
-        flow.body_granted(1000);
-        assert_eq!(flow.body_left(), i64::from(INITIAL_WINDOW));
-
-        // Exactly the window is fine, one byte more is not.
-        assert!(flow.body_received(INITIAL_WINDOW as usize));
-        assert_eq!(flow.body_left(), 0);
-        assert!(!flow.body_received(1), "one byte past the credit");
-        assert_eq!(flow.body_left(), 0, "a refused frame does not spend");
-    }
-
-    #[test]
-    fn response_credit_is_spent_in_pieces() {
-        let credit = Credit::new(10);
-        assert_eq!(credit.take(4), 4);
-        assert_eq!(credit.available(), 6);
-        assert_eq!(credit.take(100), 6, "never more than what is available");
-        // Nothing is available and the window is open: this would block, so
-        // only the closed case can be tested inline.
-        credit.close();
-        assert_eq!(credit.take(1), 0, "a closed empty window ends the write");
-    }
-
-    #[test]
-    fn a_closed_window_with_credit_still_spends_it() {
-        let credit = Credit::new(5);
-        credit.close();
-        assert_eq!(credit.take(3), 3, "the last credit is usable");
-        assert_eq!(credit.take(3), 2);
-        assert_eq!(credit.take(3), 0);
-    }
-
-    #[test]
-    fn a_taker_blocks_until_credit_arrives() {
-        let credit = Arc::new(Credit::new(0));
-        let (tx, rx) = channel();
-        let taker = {
-            let credit = Arc::clone(&credit);
-            thread::spawn(move || {
-                let taken = credit.take(8);
-                tx.send(taken).expect("send");
-            })
-        };
-        // Nothing yet: the taker is parked.
-        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
-        credit.grant(4);
-        assert_eq!(
-            rx.recv_timeout(Duration::from_secs(5)).expect("credit"),
-            4,
-            "a partial grant is handed over rather than waited out"
-        );
-        taker.join().expect("taker");
-    }
-
-    #[test]
-    fn closing_the_window_wakes_a_blocked_taker() {
-        let credit = Arc::new(Credit::new(0));
-        let (tx, rx) = channel();
-        let taker = {
-            let credit = Arc::clone(&credit);
-            thread::spawn(move || {
-                tx.send(credit.take(64)).expect("send");
-            })
-        };
-        thread::sleep(Duration::from_millis(50));
-        credit.close();
-        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).expect("wake"), 0);
-        taker.join().expect("taker");
-    }
-
-    #[test]
-    fn a_grant_wakes_every_taker_that_fits() {
-        let credit = Arc::new(Credit::new(0));
-        let mut takers = Vec::new();
-        let mut wakes = Vec::new();
-        for _ in 0..3 {
-            let (tx, rx) = channel();
-            let credit = Arc::clone(&credit);
-            takers.push(thread::spawn(move || {
-                tx.send(credit.take(2)).expect("send");
-            }));
-            wakes.push(rx);
-        }
-        thread::sleep(Duration::from_millis(50));
-        credit.grant(6);
-        for wake in wakes {
-            assert_eq!(wake.recv_timeout(Duration::from_secs(5)).expect("wake"), 2);
-        }
-        for taker in takers {
-            taker.join().expect("taker");
-        }
-        assert_eq!(credit.available(), 0);
     }
 }

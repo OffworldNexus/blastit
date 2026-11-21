@@ -1,0 +1,467 @@
+name: Packages
+
+# The signed APT/RPM repositories (design §6.1, `MB.42.3.4`).
+#
+# A `v*` tag builds the four native packages from the §6.1 bundle, installs each
+# one in **every** distribution the repositories advertise, and only then pushes
+# it to Cloudsmith (`main`) and mirrors it to Forgejo. A `workflow_dispatch` runs
+# the same graph and prints every publish command instead of uploading, which is
+# how the publish path is exercised without a repository to publish to.
+#
+# **A dispatch never publishes by accident.** `gh workflow run packages.yml
+# --ref v0.2.0` reports `ref_type=tag`, so a `ref_type`-only test would take the
+# release path and `--republish` an already shipped tag; the plan step therefore
+# requires `event_name == push` *or* the explicit `publish: true` input, which is
+# the documented way to replace a tag's packages deliberately.
+#
+# Everything that names a leg comes from `scripts/platform_matrix.py`:
+# `--matrix install` (the six distributions × two architectures) and
+# `--matrix packages` (the four `.deb`/`.rpm` legs). A literal `debian:...` or a
+# hand-written leg list is the copy that goes stale; `nightly.yml` is this file's
+# sibling — same graph (rule 21 keeps the five shared jobs identical), stamped
+# versions, the `nightly` component and retention.
+#
+# Secrets: `CLOUDSMITH_API_KEY` is required to publish and never printed;
+# `FORGEJO_PACKAGES_TOKEN` is optional, and the mirror skips with one
+# `::notice::` when it is unset. The release assets (`.tar.gz`, `blastit-lsp`,
+# the shims) are `Publish`'s: this workflow waits for that run to complete, adds
+# its packages beside them and reseals one `SHA256SUMS` over the whole release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: >-
+          Publish (or replace) this ref's packages in the signed repositories.
+          A rehearsal prints every command and uploads nothing.
+        type: boolean
+        default: false
+
+concurrency:
+  # One group with `publish-pypi.yml`: both workflows run from the same tag push
+  # and both reseal the GitHub release's `SHA256SUMS`, so they must not overlap.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  plan:
+    name: version, tag and whether this run publishes
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      deb_version: ${{ steps.plan.outputs.deb_version }}
+      deb_release: ${{ steps.plan.outputs.deb_release }}
+      rpm_version: ${{ steps.plan.outputs.rpm_version }}
+      rpm_release: ${{ steps.plan.outputs.rpm_release }}
+      should_publish: ${{ steps.plan.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: The version, and whether this run may publish
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          PUBLISH_INPUT: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          version=$(uv run --no-project scripts/publish_packages.py base-version)
+          publish=false
+          if [ "$REF_TYPE" = tag ]; then
+              # The tag and the manifest may not disagree: a `v0.2.0` tag on a
+              # 0.2.1 tree is a release nobody can identify afterwards.
+              scripts/check-release-tag.sh "$REF_NAME"
+              tag=$REF_NAME
+              # A **tag push** publishes. A dispatch on a tag rehearses, unless it
+              # asked for the replacement explicitly: `gh workflow run … --ref
+              # v0.2.0` also reports `ref_type=tag`, and publishing off that alone
+              # would `--republish` an already shipped tag by accident.
+              if [ "$EVENT_NAME" = push ] || [ "$PUBLISH_INPUT" = true ]; then
+                  publish=true
+              fi
+          else
+              # A dispatch on a branch rehearses: versions come from the manifest
+              # and every publish command is printed instead of run.
+              tag="v$version"
+          fi
+          # All four version fields, from the one place that owns both formats.
+          stamps=$(uv run --no-project scripts/publish_packages.py release-stamp)
+          printf '%s\n' "$stamps" | tee -a "$GITHUB_OUTPUT"
+          {
+              echo "tag=$tag"
+              echo "should_publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "packages: tag $tag, event $EVENT_NAME/$REF_TYPE, publishes: $publish"
+
+  matrix:
+    name: the leg list (scripts/platform_matrix.py)
+    runs-on: ubuntu-24.04
+    outputs:
+      install: ${{ steps.legs.outputs.install }}
+      packages: ${{ steps.legs.outputs.packages }}
+      shims_gnu: ${{ steps.legs.outputs.shims_gnu }}
+      py_shims_gnu: ${{ steps.legs.outputs.py_shims_gnu }}
+      hosts: ${{ steps.legs.outputs.hosts }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - name: The matrix and the published counts agree
+        run: uv run --no-project scripts/platform_matrix.py --check
+      - id: legs
+        run: |
+          set -euo pipefail
+          # A package is built from a `gnu` bundle (§6.1), so the shim legs this
+          # workflow needs are that libc's — and they are still the matrix's list.
+          echo "install=$(uv run --no-project scripts/platform_matrix.py --matrix install)" >> "$GITHUB_OUTPUT"
+          echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages)" >> "$GITHUB_OUTPUT"
+          echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu)" >> "$GITHUB_OUTPUT"
+          echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu)" >> "$GITHUB_OUTPUT"
+          # The host stories (install.sh --user, the Composer wrapper) run on a
+          # native runner per architecture, from the same matrix.
+          echo "hosts=$(uv run --no-project scripts/platform_matrix.py --matrix hosts)" >> "$GITHUB_OUTPUT"
+
+  shims:
+    name: '§2 PHP ${{ matrix.minor }} shim, built and probed (${{ matrix.arch }}-${{ matrix.libc }})'
+    needs: [matrix]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.shims_gnu) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # Built natively in the leg's own distro image and `dlopen`ed beside that
+      # distro's signed NTS `libphp`, exactly as `php-sapi.yml` proves it: a shim
+      # that compiled is not a shim that loaded, and only the probed one ships.
+      - name: build the shim and run the real-load probe
+        run: >-
+          make php-sapi-e2e PHP_MINOR=${{ matrix.minor }} PHP_SAPI_LIBC=${{ matrix.libc }}
+          PHP_SAPI_KEEP=1 PHP_SAPI_IMAGE=blastit-php-sapi-e2e:${{ matrix.name }}
+      - name: take the probed shim out of its image
+        run: >-
+          scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
+          target/proven-shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }}
+          --arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-${{ matrix.name }}
+          path: target/proven-shims/*.so
+          if-no-files-found: error
+
+  py_shims:
+    name: '§2 CPython ${{ matrix.minor }} shim, ELF contract (${{ matrix.arch }}-${{ matrix.libc }})'
+    needs: [matrix]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.py_shims_gnu) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      # The shim is bound to one minor: `make py-sapi` resolves that interpreter,
+      # builds with its headers and `dlopen`s the result against its libpython.
+      - name: the interpreter this shim binds to
+        run: uv python install ${{ matrix.python }}
+      - name: build the shim and assert its ELF contract
+        run: make py-sapi PY_SAPI_REQUIRE_ALL=1 PY_MINORS="${{ matrix.minor }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: py-shim-${{ matrix.name }}
+          path: target/py-sapi/${{ matrix.shim }}
+          if-no-files-found: error
+
+  packages:
+    name: '§3 build the ${{ matrix.format }} package for ${{ matrix.arch }}'
+    needs: [plan, matrix, shims, py_shims]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: shim-${{ matrix.arch }}-gnu-*
+          path: target/proven-shims
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: py-shim-${{ matrix.arch }}-gnu-*
+          path: target/py-sapi
+          merge-multiple: true
+      # The bundle, not a host `make install`: `blastit`/`blastit-lsp` are
+      # compiled inside `manylinux_2_28` and the whole tree is measured against
+      # the matrix's shim floor, so the package's `Depends:`/`Requires:` is a
+      # measured number and not the runner's glibc.
+      - name: Assemble the §6.1 bundle from its floor images
+        run: |
+          set -euo pipefail
+          uv run --no-project scripts/build-package-bundle.sh \
+              --out "$RUNNER_TEMP/bundle" \
+              --arch "${{ matrix.arch }}" \
+              --shim-dir target/proven-shims \
+              --py-shim-dir target/py-sapi \
+              --bundle-floor "$(uv run --no-project scripts/platform_matrix.py --shim-floor)"
+      - name: ${{ matrix.format }} from that bundle
+        env:
+          DEB_VERSION: ${{ needs.plan.outputs.deb_version }}
+          DEB_RELEASE: ${{ needs.plan.outputs.deb_release }}
+          RPM_VERSION: ${{ needs.plan.outputs.rpm_version }}
+          RPM_RELEASE: ${{ needs.plan.outputs.rpm_release }}
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/bundle"
+          floor=$(uv run --no-project scripts/platform_matrix.py --shim-floor)
+          case "${{ matrix.format }}" in
+              deb)
+                  # A release `.deb` carries no Debian revision; a nightly's
+                  # `~nightly…` stamp is part of the version, not of a revision.
+                  args=(--version "$DEB_VERSION" --bundle "$bundle" --out dist --max-glibc "$floor")
+                  [ -z "$DEB_RELEASE" ] || args+=(--release "$DEB_RELEASE")
+                  scripts/build-deb.sh "${args[@]}"
+                  ;;
+              rpm)
+                  scripts/build-rpm.sh --version "$RPM_VERSION" --release "$RPM_RELEASE" \
+                      --bundle "$bundle" --out dist --max-glibc "$floor"
+                  ;;
+              *)
+                  echo "::error::${{ matrix.format }} is not a package format this workflow builds"
+                  exit 1
+                  ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.name }}
+          path: dist/blastit*
+          if-no-files-found: error
+
+  install:
+    name: '§3 ${{ matrix.image }} installs the ${{ matrix.format }} package and runs it (${{ matrix.arch }})'
+    needs: [matrix, packages]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.install) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      # One leg per (distribution, architecture): the image, the package format
+      # and the phases are the matrix's, and `e2e/run_packaging.py --leg deb|rpm`
+      # installs the file and drives `--version`, `fmt`, `check`,
+      # `blastit-lsp --version` and a served page inside it.
+      - name: install in ${{ matrix.image }} and drive it
+        run: scripts/install_matrix.sh --leg "${{ matrix.name }}" --dir dist
+
+  # `TESTING_PLAN.md` §3's user-space stories, on the host rather than in a
+  # distribution image: `docs/install.sh --user` (zero `sudo`, from a release
+  # archive served over `file://`, with a tampered archive refused) and the
+  # Composer wrapper (`vendor/bin/blastit`, digests verified). Both legs are
+  # `e2e/run_packaging.py`'s, so no step here repeats an install command, and both
+  # architectures' native runners are the matrix's `hosts` list.
+  user-space:
+    name: '§3 install.sh --user + composer wrapper in user space (${{ matrix.arch }})'
+    needs: [matrix]
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.matrix.outputs.hosts) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the release binary
+        run: cargo build --release --locked -p blastit
+      # A host release build, not the release archive: this workflow runs from a
+      # tag and has no `standalone-*` artifact of its own. The archive-fed twin of
+      # this story is `publish-pypi.yml`'s `§3 install.sh --user (gnu) + Alpine
+      # musl install` job, which downloads the archives it just built.
+      - name: install.sh --user on a host release build (e2e/run_packaging.py --leg install)
+        run: >-
+          uv run --no-project e2e/run_packaging.py --require-legs --leg install
+          --binary target/release/blastit
+      - name: Composer wrapper, vendor/bin/blastit (e2e/run_packaging.py --leg composer)
+        run: uv run --no-project e2e/run_packaging.py --require-legs --leg composer
+
+  publish:
+    name: signed repositories
+    needs: [plan, packages, install, user-space]
+    # The repositories belong to offworld-nexus: a fork that pushes a tag has no
+    # secret and must not be asked for one.
+    if: >-
+      !cancelled() &&
+      github.repository == 'offworld-nexus/blastit' &&
+      needs.plan.result == 'success' &&
+      needs.packages.result == 'success' &&
+      needs.install.result == 'success' &&
+      needs.user-space.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      # No third-party binary runs beside the credential: the upload is one
+      # `POST https://upload.cloudsmith.io/<owner>/<repo>/{deb,rpm}/` from
+      # `scripts/publish_packages.py` itself (multipart `package_file` + the
+      # format's `distribution`/`release`/`component`). The request each file
+      # gets is printed by `--dry-run`, so a rehearsal shows exactly what a tag
+      # would send; the `cloudsmith push` equivalent is printed beside it and is
+      # `CLOUDSMITH_CLI`-opt-in only (a pinned CLI with a minimal environment).
+      # The Forgejo mirror is best effort and skips with a `::notice::` when its
+      # token is unset, so a fork or a rehearsal stays green.
+      - name: Publish to Cloudsmith and mirror to Forgejo (or print every command)
+        env:
+          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
+          FORGEJO_PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_TOKEN }}
+          FORGEJO_URL: ${{ vars.FORGEJO_URL }}
+          PUBLISH: ${{ needs.plan.outputs.should_publish }}
+          COMPONENT: main
+        run: |
+          set -euo pipefail
+          dry=()
+          if [ "$PUBLISH" != "true" ]; then
+              dry=(--dry-run)
+              echo "::notice::this run rehearses the publish path: every command is printed and nothing is uploaded"
+          fi
+          shopt -s nullglob
+          for file in dist/*.deb; do
+              uv run --no-project scripts/publish_packages.py push \
+                  --format deb --file "$file" --component "$COMPONENT" "${dry[@]}"
+          done
+          for file in dist/*.rpm; do
+              uv run --no-project scripts/publish_packages.py push \
+                  --format rpm --file "$file" --component "$COMPONENT" "${dry[@]}"
+          done
+          for file in dist/*.deb; do
+              uv run --no-project scripts/publish_packages.py forgejo \
+                  --format deb --file "$file" --component "$COMPONENT" "${dry[@]}"
+          done
+          for file in dist/*.rpm; do
+              uv run --no-project scripts/publish_packages.py forgejo \
+                  --format rpm --file "$file" --component "$COMPONENT" "${dry[@]}"
+          done
+
+  release:
+    name: attach the packages to the release
+    needs: [plan, packages, install, publish]
+    if: >-
+      !cancelled() &&
+      needs.publish.result == 'success' &&
+      needs.plan.outputs.should_publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      # `Publish` tags the same commit and uploads the four archives, the five
+      # editor assets and the PHP shims from the same tag push. Waiting for
+      # `gh release view` to succeed would only prove a release exists — it does
+      # halfway through the upload, and `Publish` re-uploads its own `SHA256SUMS`.
+      # So this waits for that **run** to complete successfully, asserts the
+      # archive set, and only then reseals one checksum file over everything.
+      - name: Wait for Publish to finish on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ready=0
+          for attempt in $(seq 1 120); do
+              # The newest `push` run of the publishing workflow on this commit
+              # whose ref is our tag: a PR run shares the commit hash and must
+              # not be mistaken for the release.
+              found=$(gh api \
+                  "repos/$REPO/actions/runs?head_sha=$SHA&event=push&per_page=50" \
+                  --jq "[.workflow_runs[]
+                        | select(.path == \".github/workflows/publish-pypi.yml\"
+                                 and .head_branch == \"$TAG\")]
+                        | sort_by(.id) | last
+                        | \"\\(.status) \\(.conclusion) \\(.html_url)\"")
+              status=${found%% *}
+              rest=${found#* }
+              conclusion=${rest%% *}
+              url=${rest#* }
+              echo "release: Publish on $TAG: ${status:-not-started-yet} ${conclusion:-} ($attempt/120)"
+              if [ "$status" = completed ]; then
+                  if [ "$conclusion" != success ]; then
+                      echo "::error::Publish failed on $TAG ($conclusion): $url"
+                      exit 1
+                  fi
+                  ready=1
+                  break
+              fi
+              sleep 30
+          done
+          if [ "$ready" -ne 1 ]; then
+              echo "::error::Publish on $TAG did not complete within 60 min: run this workflow again once it has"
+              exit 1
+          fi
+
+      - name: Add the packages, assert the archive set, reseal one SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" --dir dist --clobber
+          # Every archive the matrix declares must be here before anything is
+          # resealed: a `SHA256SUMS` covering three of four archives is a release
+          # nobody can verify, and the missing one is not obvious in a file list.
+          missing=0
+          while IFS= read -r archive; do
+              if [ ! -f "dist/$archive" ]; then
+                  echo "::error::the release is missing $archive, which --matrix binaries declares"
+                  missing=1
+              fi
+          done < <(
+              uv run --no-project scripts/platform_matrix.py --matrix binaries |
+                  uv run --no-project python -c 'import json, sys; [print(item["archive"]) for item in json.load(sys.stdin)["include"]]'
+          )
+          if [ "$missing" -ne 0 ]; then
+              exit 1
+          fi
+          (
+              cd dist
+              rm -f SHA256SUMS
+              shopt -s nullglob
+              files=(*)
+              sha256sum "${files[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
+              sha256sum -c SHA256SUMS
+          )
+          gh release upload "$TAG" dist/* --clobber

@@ -118,11 +118,22 @@ pub fn normalize(sql: &str) -> String {
                 pending_space = true;
             }
             RegionKind::Code => {
-                let mut i = 0;
-                while i < text.len() {
-                    if is_space(text[i]) {
+                // The scan visits every character of the region in order, so
+                // the *step* is the position the iterator reports and never a
+                // counter this loop adds to: a step that fails to advance is
+                // the one way the pass could stop terminating, and a counter
+                // increment is exactly the arithmetic a mutation can leave
+                // standing. `resume` only says how many of the
+                // characters the iterator is about to reach are already in
+                // `out`, because one token can be several characters long
+                // (`a$1`, `f(`, `::`).
+                let mut resume = 0;
+                for (i, &c) in text.iter().enumerate() {
+                    if i < resume {
+                        continue;
+                    }
+                    if is_space(c) {
                         pending_space = true;
-                        i += 1;
                         continue;
                     }
                     out.flush_space(&mut pending_space);
@@ -131,7 +142,7 @@ pub fn normalize(sql: &str) -> String {
                         // the result again changes nothing.
                         out.push('$', true);
                         out.push('?', true);
-                        i = end;
+                        resume = end;
                         continue;
                     }
                     // One whole code token, copied verbatim: `a$1` is a single
@@ -140,7 +151,7 @@ pub fn normalize(sql: &str) -> String {
                     for c in &text[i..end] {
                         out.push(*c, true);
                     }
-                    i = end;
+                    resume = end;
                 }
             }
             RegionKind::SingleQuoted
@@ -161,6 +172,159 @@ pub fn normalize(sql: &str) -> String {
     }
 
     reshape(&out.finish())
+}
+
+/// Rewrites the *observation* spelling of a statement back into one PostgreSQL
+/// parses, of the same shape.
+///
+/// [`normalize`] writes every bind placeholder as `$?` and
+/// [`crate::redact_literals`] replaces every quoted literal by `…`. Both keep a
+/// statement safe to log and to paste into a manifest, and neither is valid SQL:
+/// the table-grant analysis ([`crate::analyze`]) parses the text it is handed.
+/// This function gives back a statement of the same shape that a parser accepts,
+/// so an observed statement can be analysed against a grant:
+///
+/// * every `$?` in code becomes `$1` — a parameter's number says nothing about
+///   which tables, columns and functions a statement touches, so the analysis
+///   needs the placeholder token, not its ordinal;
+/// * every `…` in code becomes `''` — the empty literal that stands where the
+///   redacted one was, which keeps the access set identical without ever
+///   copying a value;
+/// * a shape tail — normalize's `, ...` after a placeholder list (`IN ($?, ...)`)
+///   or after a row of `VALUES` — becomes one more element or one more row, so
+///   the text still parses and the analysis sees the same tables and columns;
+/// * comments and quoted regions are copied verbatim, through the one
+///   `crate::lexer`, so a `$?` inside a comment, a string, a quoted identifier
+///   or a dollar quote is data and is never rewritten.
+///
+/// The result is only for analysis: it is never compared with a grant (an exact
+/// match runs on [`normalize`]'s spelling), never logged and never written to a
+/// manifest.
+///
+/// ```
+/// # use blastit_sqlpolicy::restore_parameters;
+/// assert_eq!(
+///     restore_parameters(r#"SELECT "t"."id" FROM "t" WHERE "t"."id" = $?"#),
+///     r#"SELECT "t"."id" FROM "t" WHERE "t"."id" = $1"#
+/// );
+/// assert_eq!(restore_parameters("SELECT $?, … FROM t"), "SELECT $1, '' FROM t");
+/// assert_eq!(
+///     restore_parameters("WHERE id IN ($?, ...)"),
+///     "WHERE id IN ($1, $1)"
+/// );
+/// assert_eq!(
+///     restore_parameters("INSERT INTO t (a) VALUES ($?), ..."),
+///     "INSERT INTO t (a) VALUES ($1), ($1)"
+/// );
+/// assert_eq!(
+///     restore_parameters(r#"SELECT "a$?" FROM "t" -- $?"#),
+///     r#"SELECT "a$?" FROM "t" -- $?"#
+/// );
+/// ```
+pub fn restore_parameters(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    for region in lex(&chars) {
+        let text = &chars[region.start..region.end];
+        if region.kind != RegionKind::Code {
+            out.extend(text);
+            continue;
+        }
+        let mut code: Vec<char> = Vec::with_capacity(text.len());
+        let mut at = 0;
+        while let Some(&character) = text.get(at) {
+            if character == '$' && text.get(at + 1) == Some(&'?') {
+                code.push('$');
+                code.push('1');
+                at += 2;
+                continue;
+            }
+            if character == '\u{2026}' {
+                code.push('\'');
+                code.push('\'');
+                at += 1;
+                continue;
+            }
+            code.push(character);
+            at += 1;
+        }
+        out.extend(expand_tails(&code));
+    }
+    out
+}
+
+/// Expands normalize's shape tails into one more element or row.
+///
+/// `normalize` writes a varying `IN` list as `IN ($?, ...)` and a varying run of
+/// identical `VALUES` rows as `($?, $?), ...`. Neither parses, and both are what
+/// a Django `__in`, `prefetch_related` or `bulk_create` sends every request, so
+/// a table grant would otherwise deny them. The tail is `, ...` in
+/// code: after a placeholder it gains one more placeholder, and after a `)` it
+/// repeats the group that closes there. Any other `...` is left as it was.
+fn expand_tails(code: &[char]) -> Vec<char> {
+    let mut out: Vec<char> = Vec::with_capacity(code.len() + 8);
+    let mut at = 0;
+    while at < code.len() {
+        if code[at] == '.'
+            && code.get(at + 1) == Some(&'.')
+            && code.get(at + 2) == Some(&'.')
+            && let Some(repetition) = tail_repetition(&mut out)
+        {
+            out.push(' ');
+            out.extend(repetition);
+            at += 3;
+            continue;
+        }
+        out.push(code[at]);
+        at += 1;
+    }
+    out
+}
+
+/// The element a `, ...` tail repeats, trimming the tail off `out` first.
+///
+/// `None` when what precedes the ellipsis is not a shape tail; `out` is then
+/// left exactly as it was, whitespace included.
+fn tail_repetition(out: &mut Vec<char>) -> Option<Vec<char>> {
+    let mut length = out.len();
+    while length > 0 && matches!(out[length - 1], ' ' | '\t' | '\n' | '\r' | '\x0b' | '\x0c') {
+        length -= 1;
+    }
+    let comma = length.checked_sub(1)?;
+    if out.get(comma) != Some(&',') {
+        return None;
+    }
+    let last = comma.checked_sub(1)?;
+    let repetition = match out.get(last) {
+        // `VALUES ($?, $?), ...`: one more row, so the list still parses.
+        Some(&')') => {
+            let start = matching_open(&out[..=last])?;
+            out[start..=last].to_vec()
+        }
+        // `IN ($?, ...)`: one more placeholder; a parameter names no column.
+        Some(&'1') if out.get(last.checked_sub(1)?) == Some(&'$') => vec!['$', '1'],
+        _ => return None,
+    };
+    out.truncate(length);
+    Some(repetition)
+}
+
+/// The `(` matching the `)` that ends `text`.
+fn matching_open(text: &[char]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, character) in text.iter().enumerate().rev() {
+        match character {
+            ')' => depth += 1,
+            '(' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The shape rules, applied to the already-normalised text: `IN` lists of
@@ -307,16 +471,22 @@ fn tokenize(chars: &[char]) -> Vec<Token> {
         match region.kind {
             RegionKind::Comment => pending_space = true,
             RegionKind::Code => {
-                let mut i = 0;
-                while i < text.len() {
-                    if is_space(text[i]) {
+                // The same shape as the scan in `normalize`: the iterator is
+                // the step, `resume` is only the end of the token just taken,
+                // so a token that spans several characters cannot keep the
+                // loop on one position.
+                let mut resume = 0;
+                for (i, &c) in text.iter().enumerate() {
+                    if i < resume {
+                        continue;
+                    }
+                    if is_space(c) {
                         pending_space = true;
-                        i += 1;
                         continue;
                     }
                     let (kind, end) = code_token(text, i);
                     tokens.push(Token::new(kind, &text[i..end], &mut pending_space));
-                    i = end;
+                    resume = end;
                 }
             }
             RegionKind::SingleQuoted
@@ -749,825 +919,5 @@ impl Output {
             }
         }
         self.text
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::{Duration, Instant};
-
-    use super::*;
-
-    fn case(input: &str, expected: &str) {
-        assert_eq!(normalize(input), expected, "input: {input:?}");
-    }
-
-    #[test]
-    fn collapses_whitespace_and_trims() {
-        case("SELECT  1", "SELECT 1");
-        case("SELECT\t1", "SELECT 1");
-        case("SELECT\n1", "SELECT 1");
-        case("SELECT\r1", "SELECT 1");
-        case("SELECT \t\n 1", "SELECT 1");
-        case("  SELECT\n\n  1  ", "SELECT 1");
-        case("", "");
-        case("   \t\n ", "");
-    }
-
-    #[test]
-    fn collapses_exactly_scan_l_whitespace() {
-        // scan.l `space` = [ \t\n\r\f\v]
-        case("SELECT\x0b1", "SELECT 1");
-        case("SELECT\x0c1", "SELECT 1");
-        case("SELECT\r\n1", "SELECT 1");
-        case("SELECT \x0b\x0c\r\n 1", "SELECT 1");
-        // Everything else is ordinary text and must not be touched.
-        case("SELECT\u{a0}1", "SELECT\u{a0}1");
-        case("SELECT\u{85}1", "SELECT\u{85}1");
-        case("SELECT\u{2000}1", "SELECT\u{2000}1");
-        case("SELECT\u{2028}1", "SELECT\u{2028}1");
-        case("SELECT\u{3000}1", "SELECT\u{3000}1");
-    }
-
-    #[test]
-    fn replaces_comments_with_one_space() {
-        case("SELECT 1 --  a   b", "SELECT 1");
-        case("SELECT 1 --  a   b\n", "SELECT 1");
-        case("SELECT 1 -- a\nFROM t", "SELECT 1 FROM t");
-        case("SELECT 1 /*  a\n b */", "SELECT 1");
-        case("SELECT 1/*  a  */2", "SELECT 1 2");
-        case("/* lead */SELECT 1", "SELECT 1");
-        case("/* unterminated", "");
-        case("SELECT 1 /* unterminated", "SELECT 1");
-        case("SELECT 1 /* a /* b */ c */", "SELECT 1");
-        case("-- only a comment", "");
-        case("SELECT 1 --", "SELECT 1");
-        case("SELECT 1 ;-- x", "SELECT 1");
-        case("SELECT /* x */'a  b'", "SELECT 'a  b'");
-    }
-
-    #[test]
-    fn a_carriage_return_ends_a_line_comment() {
-        case("Q --\r; DROP TABLE t", "Q ; DROP TABLE t");
-        case("Q -- c\r; DROP TABLE t", "Q ; DROP TABLE t");
-        case("BEGIN -- x\r; DROP TABLE t", "BEGIN ; DROP TABLE t");
-        case("SELECT 1 -- c\r\nFROM t", "SELECT 1 FROM t");
-        case("SELECT 1 --\r", "SELECT 1");
-        // Without a newline of either kind, the comment runs to the end.
-        case("Q --\n; DROP TABLE t", "Q ; DROP TABLE t");
-        case("Q --; DROP TABLE t", "Q");
-    }
-
-    #[test]
-    fn comment_markers_inside_quotes_are_not_comments() {
-        case("SELECT '-- not a comment'", "SELECT '-- not a comment'");
-        case(
-            "SELECT '/* not a comment */'",
-            "SELECT '/* not a comment */'",
-        );
-        case("SELECT \"-- not a comment\"", "SELECT \"-- not a comment\"");
-        case("SELECT E'-- not a comment'", "SELECT E'-- not a comment'");
-        case("SELECT B'-- not a comment'", "SELECT B'-- not a comment'");
-        case("SELECT X'-- not a comment'", "SELECT X'-- not a comment'");
-        case(
-            "SELECT $$--  not  a  comment$$",
-            "SELECT $$--  not  a  comment$$",
-        );
-    }
-
-    #[test]
-    fn strips_trailing_separators() {
-        case("SELECT 1;", "SELECT 1");
-        case("SELECT 1 ;", "SELECT 1");
-        case("SELECT 1  ;  ", "SELECT 1");
-        case("SELECT 1;;", "SELECT 1");
-        case("SELECT 1; ; ;", "SELECT 1");
-        case("SELECT 1 ; ;  \n", "SELECT 1");
-        case(";", "");
-        case(";;", "");
-        case("SELECT 1; SELECT 2", "SELECT 1; SELECT 2");
-        case("SELECT 1;'x'", "SELECT 1;'x'");
-    }
-
-    #[test]
-    fn keeps_whitespace_inside_single_quoted_strings() {
-        case("SELECT 'a  b'", "SELECT 'a  b'");
-        case("SELECT   'a  b'   ", "SELECT 'a  b'");
-        case("SELECT 'it''s  ok'", "SELECT 'it''s  ok'");
-        case("SELECT ';'", "SELECT ';'");
-        case("SELECT ';' ;", "SELECT ';'");
-        case("SELECT ''", "SELECT ''");
-        case("SET TIME ZONE 'UTC'", "SET TIME ZONE 'UTC'");
-    }
-
-    #[test]
-    fn keeps_whitespace_inside_quoted_identifiers() {
-        case(r#"SELECT "a  b""#, r#"SELECT "a  b""#);
-        case(r#"SELECT  "a  b"  FROM  "t""#, r#"SELECT "a  b" FROM "t""#);
-        case(r#"SELECT "a""b""#, r#"SELECT "a""b""#);
-        case(r#"SELECT ";" "#, r#"SELECT ";""#);
-    }
-
-    #[test]
-    fn keeps_dollar_quotes_verbatim() {
-        case("SELECT $$a  b$$", "SELECT $$a  b$$");
-        case("SELECT  $$ a  b $$  ", "SELECT $$ a  b $$");
-        case("SELECT $tag$a  b$tag$", "SELECT $tag$a  b$tag$");
-        case("SELECT $tag$; $other$ $tag$", "SELECT $tag$; $other$ $tag$");
-        case("SELECT $$;$$", "SELECT $$;$$");
-        case("SELECT $$", "SELECT $$");
-        case("SELECT $$a  b", "SELECT $$a  b");
-        case("SELECT $tag$a", "SELECT $tag$a");
-        case("SELECT $é$a  b$é$", "SELECT $é$a  b$é$");
-        case("SELECT $€$a  b$€$", "SELECT $€$a  b$€$");
-        case("SELECT $€1_$a  b$€1_$", "SELECT $€1_$a  b$€1_$");
-        case("SELECT $_t1$a  b$_t1$", "SELECT $_t1$a  b$_t1$");
-    }
-
-    #[test]
-    fn identifiers_keep_their_dollar_signs() {
-        // `a$b$c` is one identifier (scan.l `ident_cont` includes `$`), so the
-        // spaces around it collapse instead of opening a dollar quote.
-        case("SELECT a$b$c", "SELECT a$b$c");
-        case("SELECT a$b$x   y$b$z", "SELECT a$b$x y$b$z");
-        case("SELECT a$$b$$c", "SELECT a$$b$$c");
-        case("SELECT  a$tag$x   y$tag$z  ", "SELECT a$tag$x y$tag$z");
-    }
-
-    #[test]
-    fn keeps_e_strings_verbatim() {
-        case(r"SELECT E'a\'b  c'", r"SELECT E'a\'b  c'");
-        case(r"SELECT e'a\'b  c'", r"SELECT e'a\'b  c'");
-        case(r"SELECT E'it''s  ok'", r"SELECT E'it''s  ok'");
-        case(r"E'a\'b", r"E'a\'b");
-        case(r"SELECT (E'a  b'), 'c  d'", r"SELECT (E'a  b'), 'c  d'");
-    }
-
-    #[test]
-    fn e_strings_after_an_identifier_are_not_e_strings() {
-        case(r"WHERE'x  y'", r"WHERE'x  y'");
-        case(r"SELECT xE'y  z'", r"SELECT xE'y  z'");
-        case(r"SELECT name  E'y  z'", r"SELECT name E'y  z'");
-    }
-
-    #[test]
-    fn e_strings_keep_their_own_whitespace() {
-        let escaped = normalize(r"SELECT E'a\'b  c'");
-        assert_eq!(escaped, r"SELECT E'a\'b  c'");
-        assert_ne!(escaped, normalize(r"SELECT E'a\'b c'"));
-        assert_ne!(escaped, r"SELECT E'a'b c'");
-    }
-
-    #[test]
-    fn a_number_before_the_e_is_not_a_string_prefix() {
-        // scan.l `integer_junk`: `1E` is one (error) token, so the quote after
-        // it starts a plain string, where a backslash is not an escape.
-        case(r"1E'a\'b  c'", r"1E'a\'b c'");
-        case(r".5E'a\'b  c'", r".5E'a\'b c'");
-        case(r"0x1E'a\'b  c'", r"0x1E'a\'b c'");
-        case("SELECT 1, E'a  b'", "SELECT 1, E'a  b'");
-    }
-
-    #[test]
-    fn bit_and_hex_strings_have_no_escape() {
-        // xb/xh are `[^']*`: no `''`, no backslash.
-        case(r"B'a\'b  c'", r"B'a\'b c'");
-        case(r"X'a\'b  c'", r"X'a\'b c'");
-        case("B'a''b  c'", "B'a''b  c'");
-        case("SELECT B'1010 1010'", "SELECT B'1010 1010'");
-        case("SELECT X'1F 2A'", "SELECT X'1F 2A'");
-    }
-
-    #[test]
-    fn unterminated_quotes_are_kept_verbatim() {
-        case("SELECT 'a  b", "SELECT 'a  b");
-        case("SELECT 'a  b  ", "SELECT 'a  b");
-        case(r#"SELECT "a  b"#, r#"SELECT "a  b"#);
-        case("SELECT '", "SELECT '");
-        case(r#"SELECT """#, r#"SELECT """#);
-        case("SELECT 'a' 'b  c", "SELECT 'a' 'b  c");
-        case("SELECT 'a  b;", "SELECT 'a  b;");
-        case("SELECT 'a  b';", "SELECT 'a  b'");
-        case(r"SELECT B'a  b", r"SELECT B'a  b");
-    }
-
-    #[test]
-    fn strings_separated_by_a_newline_are_not_continued() {
-        // scan.l would scan `'a'\n'b'` as one literal; see the lexer's module
-        // documentation for why that difference is harmless.
-        case("SELECT 'a'\n'b'", "SELECT 'a' 'b'");
-        case("SELECT 'a'  'b'", "SELECT 'a' 'b'");
-    }
-
-    #[test]
-    fn unicode_is_preserved() {
-        case("SELECT  'héllo  wörld'", "SELECT 'héllo  wörld'");
-        case("SELECT 'héllo'  ,  'wörld'", "SELECT 'héllo' , 'wörld'");
-        case("SELECT '日本語  テスト'", "SELECT '日本語  テスト'");
-        case("SELECT €€", "SELECT €€");
-    }
-
-    #[test]
-    fn normalisation_is_idempotent_on_examples() {
-        for input in [
-            "SELECT 1 ;",
-            "SELECT 'a  b'",
-            "SELECT $tag$a  b$tag$ ;",
-            "SELECT 'a  b",
-            "BEGIN; SELECT 1",
-            "; ;",
-            "SELECT 1 -- don't  collapse",
-            r"SELECT E'a\'b  c'",
-            "SELECT 1/* c */2",
-            "Q --\r; DROP TABLE t",
-            "SELECT B'a\\'b  c'",
-            "SELECT\u{a0}1",
-        ] {
-            let once = normalize(input);
-            assert_eq!(normalize(&once), once, "input: {input:?}");
-        }
-    }
-
-    //
-    // Placeholders.
-    //
-
-    #[test]
-    fn every_placeholder_becomes_the_same_shape() {
-        case("WHERE a = $1", "WHERE a = $?");
-        case("WHERE a = $1  AND b = $2", "WHERE a = $? AND b = $?");
-        case("WHERE a = $12", "WHERE a = $?");
-        case("SELECT $0", "SELECT $?");
-        case("SELECT $007", "SELECT $?");
-        case("SELECT $1 ;", "SELECT $?");
-        case("SELECT $1$", "SELECT $?$");
-        case("SELECT $1$1", "SELECT $?$?");
-        // A `$` that opens a dollar quote is not a placeholder, and neither is
-        // a `$` inside an identifier.
-        case("SELECT $$1", "SELECT $$1");
-        case("SELECT $tag$ $1 $tag$", "SELECT $tag$ $1 $tag$");
-        case("SELECT a$1", "SELECT a$1");
-        case("SELECT a$b$c", "SELECT a$b$c");
-        case("SELECT 1$1", "SELECT 1$?"); // scan.l reads `1` then the parameter
-        case("SELECT $", "SELECT $");
-        case("SELECT $foo", "SELECT $foo");
-        case("SELECT $?", "SELECT $?");
-    }
-
-    #[test]
-    fn placeholders_inside_quoted_regions_are_data() {
-        for (input, expected) in [
-            ("SELECT '$1'", "SELECT '$1'"),
-            ("SELECT \"$1\"", "SELECT \"$1\""),
-            ("SELECT E'$1'", "SELECT E'$1'"),
-            ("SELECT B'$1'", "SELECT B'$1'"),
-            ("SELECT X'$1'", "SELECT X'$1'"),
-            ("SELECT $$ $1 $$", "SELECT $$ $1 $$"),
-            ("SELECT $tag$ $1 $tag$", "SELECT $tag$ $1 $tag$"),
-            ("SELECT 1 -- $1", "SELECT 1"),
-            ("SELECT 1 /* $1 */", "SELECT 1"),
-        ] {
-            case(input, expected);
-        }
-    }
-
-    #[test]
-    fn a_placeholder_matches_whatever_its_number_was() {
-        // The whole point: a grant written from one run of the app matches the
-        // same statement in another run, where the numbering has shifted.
-        let grant = r#"SELECT "n"."id" FROM "n" WHERE "n"."id" = $1 AND "n"."owner_id" = $2"#;
-        let statement = r#"SELECT "n"."id" FROM "n" WHERE "n"."id" = $3 AND "n"."owner_id" = $4"#;
-        assert_eq!(normalize(grant), normalize(statement));
-    }
-
-    //
-    // `IN` lists.
-    //
-
-    #[test]
-    fn an_in_list_of_placeholders_collapses_whatever_its_length() {
-        case("WHERE id IN ($1)", "WHERE id IN ($?, ...)");
-        case("WHERE id IN ($1, $2)", "WHERE id IN ($?, ...)");
-        case("WHERE id IN ($1, $2, $3, $4, $5)", "WHERE id IN ($?, ...)");
-        case("WHERE id in ($1, $2)", "WHERE id in ($?, ...)");
-        case("WHERE id NOT IN ($1, $2)", "WHERE id NOT IN ($?, ...)");
-        case("WHERE id not in ($1, $2)", "WHERE id not in ($?, ...)");
-        // Spacing inside and around the list does not matter.
-        case("WHERE id IN($1,$2)", "WHERE id IN ($?, ...)");
-        case("WHERE id IN  ( $1 , $2 )", "WHERE id IN ($?, ...)");
-        // ... and every length matches every other.
-        for list in [
-            "($1)",
-            "($1, $2)",
-            "($3, $4, $5)",
-            "($1, $2, $3, $4, $5, $6, $7)",
-        ] {
-            assert_eq!(
-                normalize(&format!("WHERE id IN {list}")),
-                "WHERE id IN ($?, ...)",
-                "{list}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_django_prefetch_statement_keeps_matching_its_grant() {
-        // What `prefetch_related` sends: the `IN` list grows with the page.
-        let grant =
-            r#"SELECT "n"."id", "n"."owner_id", "n"."text" FROM "n" WHERE "n"."owner_id" IN ($1)"#;
-        for n in 1..=6 {
-            let placeholders: Vec<String> = (1..=n).map(|i| format!("${i}")).collect();
-            let statement = format!(
-                r#"SELECT "n"."id", "n"."owner_id", "n"."text" FROM "n" WHERE "n"."owner_id" IN ({})"#,
-                placeholders.join(", ")
-            );
-            assert_eq!(normalize(grant), normalize(&statement), "n = {n}");
-        }
-    }
-
-    #[test]
-    fn an_in_list_that_is_not_only_placeholders_is_left_alone() {
-        // Mixed contents, a subquery, a nested tuple, a string, an empty list.
-        case("WHERE id IN ($1, 'x')", "WHERE id IN ($?, 'x')");
-        case("WHERE id IN ('x', $1)", "WHERE id IN ('x', $?)");
-        case(
-            "WHERE id IN (SELECT id FROM t WHERE x = $1)",
-            "WHERE id IN (SELECT id FROM t WHERE x = $?)",
-        );
-        case("WHERE id IN ()", "WHERE id IN ()");
-        case("WHERE id IN (($1), ($2))", "WHERE id IN (($?), ($?))");
-        case("WHERE id IN ($1::int)", "WHERE id IN ($?::int)");
-        case("WHERE id IN (DEFAULT)", "WHERE id IN (DEFAULT)");
-        // A trailing comma is not a list of placeholders.
-        case("WHERE id IN ($1,)", "WHERE id IN ($?,)");
-        // `IN` used as anything but the keyword in front of the list.
-        case("SELECT within ($1, $2)", "SELECT within ($?, $?)");
-        case("SELECT \"in\" ($1, $2)", "SELECT \"in\" ($?, $?)");
-        case("SELECT int_in ($1, $2)", "SELECT int_in ($?, $?)");
-    }
-
-    #[test]
-    fn a_nested_in_list_inside_a_subquery_collapses_too() {
-        let grant =
-            "SELECT * FROM a WHERE a.id IN ($1) AND a.x IN (SELECT x FROM b WHERE b.y = $2)";
-        let statement = "SELECT * FROM a WHERE a.id IN ($1, $2, $3) AND a.x IN (SELECT x FROM b WHERE b.y = $4)";
-        assert_eq!(normalize(grant), normalize(statement));
-        assert_eq!(
-            normalize(statement),
-            "SELECT * FROM a WHERE a.id IN ($?, ...) AND a.x IN (SELECT x FROM b WHERE b.y = $?)"
-        );
-        // ... and the inner one collapses on its own.
-        case(
-            "SELECT * FROM b WHERE b.y IN ($1, $2)",
-            "SELECT * FROM b WHERE b.y IN ($?, ...)",
-        );
-        // Two `IN` lists in one statement, each collapsed once.
-        case(
-            "WHERE a IN ($1, $2) OR b IN ($3)",
-            "WHERE a IN ($?, ...) OR b IN ($?, ...)",
-        );
-    }
-
-    #[test]
-    fn an_in_list_that_holds_a_function_call_is_not_collapsed() {
-        // The arity of a call picks the overload, so argument lists are never
-        // touched — not even inside an `IN` list.
-        case("SELECT f($1, $2)", "SELECT f($?, $?)");
-        case("WHERE id IN (f($1, $2))", "WHERE id IN (f($?, $?))");
-        case(
-            "WHERE id IN (lower($1), lower($2))",
-            "WHERE id IN (lower($?), lower($?))",
-        );
-    }
-
-    //
-    // `VALUES` runs.
-    //
-
-    #[test]
-    fn a_single_values_row_is_left_as_it_is() {
-        case("VALUES ($1, $2)", "VALUES ($?, $?)");
-        case(
-            "INSERT INTO t (a, b) VALUES ($1, $2)",
-            "INSERT INTO t (a, b) VALUES ($?, $?)",
-        );
-        case("VALUES (1)", "VALUES (1)");
-        case("INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (1)");
-    }
-
-    #[test]
-    fn a_run_of_identical_values_rows_becomes_one_row_and_an_ellipsis() {
-        case(
-            "INSERT INTO t (a, b) VALUES ($1, $2), ($3, $4)",
-            "INSERT INTO t (a, b) VALUES ($?, $?), ...",
-        );
-        case(
-            "INSERT INTO t (a, b) VALUES ($1, $2), ($3, $4), ($5, $6)",
-            "INSERT INTO t (a, b) VALUES ($?, $?), ...",
-        );
-        case(
-            "INSERT INTO t (a, b) VALUES ($1, $2), ($3, $4), ($5, $6), ($7, $8)",
-            "INSERT INTO t (a, b) VALUES ($?, $?), ...",
-        );
-        // The separator keeps the spacing it was written with, like every other
-        // part of the text.
-        case(
-            "INSERT INTO t VALUES (1),(1),(1)",
-            "INSERT INTO t VALUES (1),...",
-        );
-        // Identical literal rows collapse too: they are the same row.
-        case("VALUES (1), (1)", "VALUES (1), ...");
-        case("VALUES ((1)), ((1))", "VALUES ((1)), ...");
-        // A single run of two rows in a `SELECT … VALUES` form.
-        case(
-            "INSERT INTO t SELECT * FROM (VALUES ($1, $2), ($3, $4)) AS v",
-            "INSERT INTO t SELECT * FROM (VALUES ($?, $?), ...) AS v",
-        );
-    }
-
-    #[test]
-    fn a_django_bulk_create_statement_keeps_matching_its_grant() {
-        // `bulk_create` sends one row per object; the count varies per request.
-        let grant = "INSERT INTO \"n\" (\"owner_id\", \"text\") VALUES ($1, $2), ($3, $4) RETURNING \"n\".\"id\"";
-        for rows in [2, 3, 4, 17] {
-            let mut placeholders = 1;
-            let mut tuples = Vec::new();
-            for _ in 0..rows {
-                tuples.push(format!("(${placeholders}, ${})", placeholders + 1));
-                placeholders += 2;
-            }
-            let statement = format!(
-                "INSERT INTO \"n\" (\"owner_id\", \"text\") VALUES {} RETURNING \"n\".\"id\"",
-                tuples.join(", ")
-            );
-            assert_eq!(normalize(grant), normalize(&statement), "rows = {rows}");
-        }
-    }
-
-    #[test]
-    fn values_rows_that_differ_are_not_collapsed() {
-        case(
-            "VALUES ($1, $2), ($3, $4, $5)",
-            "VALUES ($?, $?), ($?, $?, $?)",
-        );
-        case("VALUES (1, 2), (3, 4)", "VALUES (1, 2), (3, 4)");
-        case("VALUES (1), (2)", "VALUES (1), (2)");
-        // The same number of columns is not enough: the text has to match.
-        case("VALUES (1, 2), (1, 3)", "VALUES (1, 2), (1, 3)");
-        // A run that ends and a different row after it.
-        case("VALUES (1), (1), (2)", "VALUES (1), ..., (2)");
-        case("VALUES (1), (2), (2)", "VALUES (1), (2), ...");
-    }
-
-    #[test]
-    fn on_conflict_after_a_collapsed_values_keeps_matching() {
-        let grant = "INSERT INTO t (a) VALUES ($1), ($2) ON CONFLICT (a) DO NOTHING";
-        let statement =
-            "INSERT INTO t (a) VALUES ($1), ($2), ($3), ($4) ON CONFLICT (a) DO NOTHING";
-        assert_eq!(normalize(grant), normalize(statement));
-        assert_eq!(
-            normalize(statement),
-            "INSERT INTO t (a) VALUES ($?), ... ON CONFLICT (a) DO NOTHING"
-        );
-        case(
-            "INSERT INTO t (a) VALUES ($1) ON CONFLICT (a) DO NOTHING",
-            "INSERT INTO t (a) VALUES ($?) ON CONFLICT (a) DO NOTHING",
-        );
-        // ... and `RETURNING` after it, as Django writes it.
-        case(
-            "INSERT INTO \"t\" (\"a\") VALUES ($1, $2), ($3, $4) RETURNING \"t\".\"id\"",
-            "INSERT INTO \"t\" (\"a\") VALUES ($?, $?), ... RETURNING \"t\".\"id\"",
-        );
-    }
-
-    #[test]
-    fn a_columns_list_is_not_a_row_and_a_call_is_not_a_row() {
-        // The parenthesised list a statement starts with is not after `VALUES`.
-        case(
-            "INSERT INTO t (a, b) VALUES ($1)",
-            "INSERT INTO t (a, b) VALUES ($?)",
-        );
-        case("SELECT f(1), f(1)", "SELECT f(1), f(1)");
-        case("SELECT f(1), f(1) FROM t", "SELECT f(1), f(1) FROM t");
-        // `VALUES` as a column or an alias name does not start a run.
-        case("SELECT values FROM t", "SELECT values FROM t");
-        case("SELECT values (1), (2)", "SELECT values (1), (2)");
-    }
-
-    #[test]
-    fn a_values_run_never_drops_a_statement_separator() {
-        // Normalisation may not change how many statements a text has: the
-        // transaction-control grammar counts them.
-        for input in [
-            "VALUES (1;2), (1;2)",
-            "VALUES (1; SELECT 2), (1; SELECT 2)",
-            "; VALUES (1), (1)",
-        ] {
-            let once = normalize(input);
-            assert_eq!(
-                crate::statements::statement_count_hint(&once),
-                crate::statements::statement_count_hint(input),
-                "input: {input:?} → {once:?}"
-            );
-        }
-        case("VALUES (1;2), (1;2)", "VALUES (1;2), (1;2)");
-    }
-
-    #[test]
-    fn a_collapsed_shape_stays_put_when_it_is_normalised_again() {
-        for input in [
-            "WHERE id IN ($1, $2, $3)",
-            "WHERE id IN ($1)",
-            "WHERE id IN($1,$2)",
-            "WHERE id IN (SELECT x FROM t WHERE y IN ($1))",
-            "INSERT INTO t VALUES ($1, $2), ($3, $4)",
-            "INSERT INTO t VALUES ($1, $2), ($3, $4), ($5, $6)",
-            "INSERT INTO t VALUES (1), (1), (2)",
-            "INSERT INTO t VALUES ($1) ON CONFLICT (a) DO NOTHING",
-            "SELECT f($1, $2), g($1)",
-            "VALUES ($1, $2",
-            "WHERE id IN ($1",
-            "WHERE id IN (",
-            "((((",
-            "SELECT ((",
-        ] {
-            let once = normalize(input);
-            assert_eq!(normalize(&once), once, "input: {input:?}");
-        }
-    }
-
-    #[test]
-    fn unterminated_groups_are_left_as_ordinary_text() {
-        case("SELECT (1", "SELECT (1");
-        case("SELECT (1, 1", "SELECT (1, 1");
-        case("VALUES (1), (1", "VALUES (1), (1");
-        case("WHERE id IN ($1", "WHERE id IN ($?");
-        case("SELECT )", "SELECT )");
-        case("SELECT ) )", "SELECT ) )");
-        case("SELECT (,", "SELECT (,");
-        case("SELECT (,((", "SELECT (,((");
-    }
-
-    #[test]
-    fn a_qualified_name_is_not_the_in_keyword() {
-        // `in` is reserved in PostgreSQL, so a bare `in` in front of a
-        // parenthesised list is the keyword. After a `.` it is not a keyword
-        // but a member of a qualified name: `s.in(…)` is the function `in` of
-        // schema `s`, and its argument list is not a list of values. A grant
-        // for one call must not cover a call with more arguments — the arity
-        // picks the overload.
-        case("SELECT probe_s.in($1)", "SELECT probe_s.in($?)");
-        case("SELECT probe_s.in($1, $2)", "SELECT probe_s.in($?, $?)");
-        case(r#"SELECT "s".in($1, $2)"#, r#"SELECT "s".in($?, $?)"#);
-        case(r#"SELECT "s"."in"($1, $2)"#, r#"SELECT "s"."in"($?, $?)"#);
-        case("SELECT s.in ($1, $2)", "SELECT s.in ($?, $?)");
-        case("SELECT s . in($1, $2)", "SELECT s . in($?, $?)");
-        case("SELECT s.IN($1, $2)", "SELECT s.IN($?, $?)");
-        assert_ne!(
-            normalize("SELECT s.in($1)"),
-            normalize("SELECT s.in($1, $2)"),
-            "two calls of different arity stay two statements"
-        );
-        // The guard only rejects a `.`: a group, a quoted identifier or
-        // anything else in front of `IN` is the expression the keyword applies
-        // to, and its list still collapses.
-        case(
-            "SELECT id FROM t WHERE (a, b) IN ($1, $2)",
-            "SELECT id FROM t WHERE (a, b) IN ($?, ...)",
-        );
-        case(
-            r#"SELECT id FROM t WHERE t."x" IN ($1, $2)"#,
-            r#"SELECT id FROM t WHERE t."x" IN ($?, ...)"#,
-        );
-        case(
-            "SELECT id FROM t WHERE (a) IN (SELECT b FROM u WHERE u.c IN ($1))",
-            "SELECT id FROM t WHERE (a) IN (SELECT b FROM u WHERE u.c IN ($?, ...))",
-        );
-        // ... while a real `IN` list still collapses, a qualified column or not,
-        // and so does `NOT IN`.
-        case(
-            "SELECT id FROM s.t WHERE s.t.id IN ($1, $2)",
-            "SELECT id FROM s.t WHERE s.t.id IN ($?, ...)",
-        );
-        case("WHERE id NOT IN ($1, $2)", "WHERE id NOT IN ($?, ...)");
-        assert_eq!(
-            normalize("SELECT id FROM t WHERE t.x IN ($1)"),
-            normalize("SELECT id FROM t WHERE t.x IN ($1, $2, $3)"),
-        );
-    }
-
-    #[test]
-    fn a_qualified_name_is_not_the_values_keyword() {
-        // `values` cannot be a function name on its own (PostgreSQL rejects
-        // `select values(1)`), but a schema-qualified call parses: its argument
-        // list is an argument list, not a row list.
-        case("SELECT s.values(1), (2)", "SELECT s.values(1), (2)");
-        case(
-            "SELECT s.values($1), ($2), ($2), ($2)",
-            "SELECT s.values($?), ($?), ($?), ($?)",
-        );
-        assert_ne!(
-            normalize("SELECT s.values($1), ($1)"),
-            normalize("SELECT s.values($1), ($1), ($1)"),
-        );
-        // A real row list still collapses, in front of a qualified table too.
-        case(
-            "INSERT INTO s.values (a) VALUES (1), (1)",
-            "INSERT INTO s.values (a) VALUES (1), ...",
-        );
-        case(
-            "INSERT INTO s.t VALUES ($1), ($2), ($3)",
-            "INSERT INTO s.t VALUES ($?), ...",
-        );
-        // A column named `values` in front of the keyword is not the keyword.
-        case(
-            "INSERT INTO t (values) VALUES (1), (1)",
-            "INSERT INTO t (values) VALUES (1), ...",
-        );
-        case(
-            "INSERT INTO t (values, x) VALUES ($1, $2), ($3, $4)",
-            "INSERT INTO t (values, x) VALUES ($?, $?), ...",
-        );
-    }
-
-    #[test]
-    fn a_group_keeps_the_whitespace_in_front_of_its_parentheses() {
-        // The shape rules add and remove tokens; they never re-space a text
-        // they leave alone, so a space before a `)` survives exactly as the
-        // text rules leave it.
-        case("SELECT ( 1 )", "SELECT ( 1 )");
-        case("SELECT f( 1 )", "SELECT f( 1 )");
-        case("SELECT f(1 )", "SELECT f(1 )");
-        case("SELECT f( 1)", "SELECT f( 1)");
-        case("SELECT f( 1 , 2 )", "SELECT f( 1 , 2 )");
-        case("SELECT ( ( 1 ) )", "SELECT ( ( 1 ) )");
-        case("SELECT f( 1 ", "SELECT f( 1");
-        case("VALUES ($1, $2 )", "VALUES ($?, $? )");
-        // Two rows are the same row whether or not the whitespace that
-        // separates the first one from the keyword is there: that whitespace is
-        // not part of the row, and it is kept where it was written.
-        case("VALUES (1), (1)", "VALUES (1), ...");
-        case("VALUES (1 ), (1 )", "VALUES (1 ), ...");
-        // ... but whitespace *inside* a row is part of it, so two rows that
-        // differ in it are two different rows.
-        case("VALUES (1), (1 )", "VALUES (1), (1 )");
-        case("VALUES (1), ( 1)", "VALUES (1), ( 1)");
-        // An `IN` list that collapses *is* canonicalised: the marker stands for
-        // a list of any length, so the spacing inside it is not part of the
-        // shape. Its whitespace is the one thing the pass rewrites.
-        case("WHERE id IN ( $1 )", "WHERE id IN ($?, ...)");
-        case("WHERE id IN($1)", "WHERE id IN ($?, ...)");
-        case("WHERE id IN  ($1 , $2 )", "WHERE id IN ($?, ...)");
-    }
-
-    #[test]
-    fn a_values_run_is_only_collapsed_after_the_keyword() {
-        // A tuple list somewhere else is left alone.
-        case("SELECT (1), (1)", "SELECT (1), (1)");
-        case(
-            "SELECT x FROM t WHERE (a, b) IN ((1, 1), (1, 1))",
-            "SELECT x FROM t WHERE (a, b) IN ((1, 1), (1, 1))",
-        );
-        // `values` spelled in another case is the same keyword.
-        case(
-            "INSERT INTO t values ($1), ($2)",
-            "INSERT INTO t values ($?), ...",
-        );
-        case(
-            "INSERT INTO t Values ($1), ($2)",
-            "INSERT INTO t Values ($?), ...",
-        );
-    }
-
-    #[test]
-    fn a_deeply_nested_text_does_not_exhaust_the_stack() {
-        let deep = format!("SELECT {}1{}", "(".repeat(200_000), ")".repeat(200_000));
-        let once = normalize(&deep);
-        assert_eq!(normalize(&once), once);
-        assert!(once.starts_with("SELECT ("));
-        // Unbalanced, and still no panic.
-        let open = format!("SELECT {}1", "(".repeat(200_000));
-        assert_eq!(normalize(&normalize(&open)), normalize(&open));
-        let close = format!("SELECT 1{}", ")".repeat(200_000));
-        assert_eq!(normalize(&normalize(&close)), normalize(&close));
-        let closed = format!("{}1{}", "(".repeat(200_000), ")".repeat(100_000));
-        assert_eq!(normalize(&normalize(&closed)), normalize(&closed));
-    }
-
-    #[test]
-    fn a_deeply_nested_text_is_normalised_in_linear_time() {
-        // Rebuilding the text inside a group every time it closed made this
-        // quadratic: a statement like the one below took minutes, and a view
-        // that sent it would have stalled the shared dbproxy for every other
-        // view. Each size is bounded on its own, so a quadratic pass fails on
-        // the smallest one within seconds instead of hanging the suite.
-        const BOUND: Duration = Duration::from_secs(2);
-        for depth in [50_000, 100_000, 200_000] {
-            let sql = format!("SELECT {}1{};", "(".repeat(depth), ")".repeat(depth));
-            let start = Instant::now();
-            let once = normalize(&sql);
-            let elapsed = start.elapsed();
-            assert!(
-                elapsed < BOUND,
-                "{depth} nested parentheses took {elapsed:?}, more than {BOUND:?}"
-            );
-            assert!(
-                once.starts_with("SELECT (") && once.ends_with(')'),
-                "{depth}"
-            );
-            assert_eq!(normalize(&once), once, "{depth}");
-        }
-    }
-
-    #[test]
-    fn a_shape_rule_never_creates_or_hides_a_second_statement() {
-        for input in [
-            "WHERE id IN ($1, $2); DROP TABLE t",
-            "SELECT 1; WHERE id IN ($1, $2)",
-            "INSERT INTO t VALUES ($1), ($2); DROP TABLE t",
-            "SELECT 'a; b'; WHERE id IN ($1)",
-        ] {
-            let once = normalize(input);
-            assert_eq!(
-                crate::statements::statement_count_hint(&once),
-                crate::statements::statement_count_hint(input),
-                "input: {input:?} → {once:?}"
-            );
-        }
-    }
-
-    //
-    // The whole function, over hostile input.
-    //
-
-    #[test]
-    fn every_normalised_text_is_stable() {
-        // A corpus that exercises the two shape rules together with the
-        // quoting rules.
-        for input in [
-            "SELECT 1",
-            "SELECT $1",
-            "SELECT $1$2",
-            "SELECT $$ $1 $$",
-            "SELECT a$1",
-            "SELECT a$b$c",
-            "WHERE a IN ($1)",
-            "WHERE a IN ($1, $2)",
-            "WHERE a IN($1,$2)",
-            "WHERE a IN (SELECT 1)",
-            "WHERE a IN ($1, 'x')",
-            "WHERE a NOT IN ($1, $2)",
-            "WHERE a IN ($1) AND b IN ($2, $3)",
-            "VALUES ($1, $2)",
-            "VALUES ($1, $2), ($3, $4)",
-            "VALUES ($1, $2), ($3, $4), ($5, $6)",
-            "INSERT INTO t (a) VALUES (1), (1) ON CONFLICT DO NOTHING",
-            "VALUES (1), (1), (2)",
-            "VALUES ('a;b'), ('a;b')",
-            "CREATE TABLE x (a int)",
-            "SELECT (((((1)))))",
-            "SELECT (( ))) ",
-            "SELECT (((((",
-            "SELECT 'a''b', $1 IN ($2, $3)",
-            "SELECT $tag$ $1 $tag$ IN ($1)",
-            ");",
-            "(",
-            ")",
-            ",",
-            "((((",
-            "SELECT ) )",
-            "VALUES",
-            "IN",
-            "IN ()",
-            "IN ($1,",
-            "SELECT 1E$1",
-            "SELECT $1E",
-        ] {
-            let once = normalize(input);
-            assert_eq!(normalize(&once), once, "input: {input:?}");
-            // Normalisation never changes how many statements a text has.
-            assert_eq!(
-                crate::statements::statement_count_hint(&once),
-                crate::statements::statement_count_hint(input),
-                "input: {input:?} → {once:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_shape_rules_do_not_change_unrelated_text() {
-        // A statement without a placeholder, an `IN` list or a `VALUES` run is
-        // exactly what the text rules alone make of it.
-        for input in [
-            "SELECT 1",
-            "SET TIME ZONE 'UTC'",
-            "SELECT count(*) FROM notes_note",
-            "CREATE TABLE x (a int, b text)",
-            "SELECT f(1, 2), g(3)",
-            "BEGIN",
-        ] {
-            let normalize_case = normalize(input);
-            assert_eq!(normalize_case, input, "input: {input:?}");
-        }
     }
 }

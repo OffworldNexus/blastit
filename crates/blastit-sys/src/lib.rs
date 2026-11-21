@@ -7,6 +7,13 @@
 //! `execve`, signals and reaping — each wrapped in one safe, documented and
 //! tested function, so the `C1b` binary is mostly wiring.
 //!
+//! [`elf`] is the one module here that is not a syscall wrapper: a pure,
+//! `unsafe`-free reader for the ELF header, section header table and section
+//! bytes of an object a boot inspects **without loading it**. It lives in this
+//! crate because its two callers — the boot's `DT_RPATH`/`DT_RUNPATH` scan and
+//! the PHP discovery gate's `.dynsym` walk — must refuse the same malformed
+//! object the same way, with one typed error and no panic.
+//!
 //! # Rules this crate implements
 //!
 //! * **Linux only.** Every function is a thin, documented wrapper around a
@@ -104,6 +111,12 @@
 //! [`kill`] and [`reap`] drive supervision, and [`SignalFd`] turns `SIGCHLD`,
 //! `SIGTERM`, `SIGINT` and `SIGHUP` into readable events.
 //!
+//! A **view** child does not spell that list out: [`child::enter`] runs it from
+//! a [`child::ChildPlan`] (`setpgid` between `prepare` and the privilege drop,
+//! when the plan asks for it), so the WSGI fork and the PHP probe fork cannot
+//! drift from each other or from this order. Init's own role children keep
+//! using the steps directly.
+//!
 //! # Example
 //!
 //! Passing the scheduler's end of a view channel back over `ctl.chan` (§3):
@@ -136,25 +149,29 @@ mod signal;
 mod sock;
 
 pub mod caps;
+pub mod child;
+pub mod elf;
+pub mod fanotify;
 pub mod mem;
-
-#[cfg(test)]
-mod testutil;
+pub mod pin;
 
 pub use crate::caps::{CapSet, Capabilities, Capability, Held, PrivilegeMode};
+pub use crate::child::set_env;
 pub use crate::error::Error;
 pub use crate::exec::{exe_path, exec};
+pub use crate::fanotify::{Event, Readout, Watcher, WatcherError};
 pub use crate::fd::{
-    close_fds_except, close_fds_except_scan, dup_onto, fd_is_cloexec, set_cloexec,
+    close_fds_except, close_fds_except_scan, dup_onto, fd_is_cloexec, open_dir_nofollow,
+    set_cloexec,
 };
 pub use crate::pid::{ExitStatus, Pid};
 pub use crate::privs::{
     Rlimits, drop_privileges, dumpable, harden_child, set_dumpable, set_rlimits, set_umask,
 };
 pub use crate::proc::{Fork, chdir, fork, fork_unchecked, thread_count};
-pub use crate::seccomp::{SeccompRole, install};
+pub use crate::seccomp::{InstallFailure, PreparedFilter, SeccompRole, install};
 pub use crate::signal::{
-    SignalFd, SignalMask, current_signal_mask, kill, reap, restore_signal_mask_in_child,
+    Reaped, SignalFd, SignalMask, current_signal_mask, kill, reap, restore_signal_mask_in_child,
 };
 pub use crate::sock::{
     UNIX_BACKLOG, bind_tcp, bind_unix_listener, make_private_dir, pipe, recv_with_fd, send_with_fd,

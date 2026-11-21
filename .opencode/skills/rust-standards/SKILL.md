@@ -1,45 +1,33 @@
 ---
 name: Rust standards
-description: Mandatory before writing or reviewing any Rust in Blastit (`crates/*`). Covers crate layering, traits/DI, zero globals, unsafe/error rules, MSRV 1.88, and workspace checks.
+description: Mandatory standards for Rust in Blastit (`crates/*`). Covers True Constructor IoC, <500 LOC cohesion, protocol crate boundaries, zero globals/mock-traits, unsafe/error rules, MSRV 1.88, and `make fast-check` vs `make check`.
 ---
 
 # Rust standards (Blastit)
 
-Rust powers Blastit's supervisor, HTTP ingress, WASM validation gate, fair scheduler, view runners, and capability proxies (`crates/*`).
+Rust powers Blastit's supervisor, HTTP ingress, WASM validation gate, fair scheduler, language view workers, LSP, and capability proxies (`crates/*`).
 
 ## 1. Design & architecture rules
 
-1. **Pure library crates first, thin process/binary wiring last.**
-   - Parsing, policy evaluation, wire codecs, WASM transcoding, and scheduling logic belong in pure, unprivileged library crates (`blastit-manifest`, `blastit-events`, `blastit-frame`, `blastit-sqlpolicy`, `blastit-env`, and future `blastit-ingress`, `blastit-wasm`, `blastit-fastcgi`, `blastit-proxy-*`) testable in milliseconds without root or Docker.
-   - OS privilege operations (`fork`, `execve`, `setresuid`, `capset`, `seccomp`, `SCM_RIGHTS`, `SCM_CREDENTIALS`) stay isolated in `blastit-sys` and `blastit` (binary).
-2. **Traits & dependency injection at seams.**
-   - Inject clocks, random seeds, upstream connectors, WASM engines, and event sinks via constructors or generic trait bounds.
-   - No `static mut`, no mutable `OnceLock` singletons hiding configuration, and no reading `std::env` outside the stage-0 / CLI configuration composition root.
-3. **Parameter clumps -> config/context structs.** When functions share ≥ 3 parameters or exceed 5 arguments, group cohesive parameters into a typed struct.
+1. **Pure library & protocol crates first, thin composition root last.**
+   - Parsing, policy evaluation, wire codecs, LSP, and scheduling belong in pure unprivileged crates (`blastit-manifest`, `blastit-lsp`, `blastit-events`, `blastit-frame`, `blastit-sqlpolicy`, `blastit-env`, and upcoming `blastit-ingress`, `blastit-wasm`, `blastit-proxy-*`) testable in milliseconds without root or Docker.
+   - Isolate language runtimes in dedicated `blastit-view-*` crates (`blastit-view`, `blastit-view-php`, `blastit-view-static`, `blastit-php-sapi`) speaking length-prefixed `view.chan` wire frames with per-flow CPU time reporting — never cross-language `WorkerRuntime` mega-traits.
+   - OS privilege operations (`fork`, `execve`, `setresuid`, `capset`, `seccomp`, `fanotify`, `SCM_RIGHTS`, `SCM_CREDENTIALS`) stay isolated in `blastit-sys` and `blastit`.
+2. **True Constructor IoC & Zero Globals.**
+   - Read `std::env` **only** at the top-level CLI / stage-0 composition root (`BootMode::{Production, Dev, Check}`), then pass typed dependencies through constructors.
+   - **Zero** `static mut`, **zero** `OnceLock<Mutex<...>>` singletons, **zero** `#[cfg(any(test, debug_assertions))]` env-var hooks in new code, and **zero** single-implementation mock-ceremony traits (`Acceptor`, `RequestIo`, `Clock`, `Editor`). Inject concrete collaborators, channels, or closures.
+3. **Cohesion & Workspace Reuse.**
+   - Keep production files `<500` LOC, functions `<=6` args, and configs structured via nested `#[derive(Deserialize)]` structs (never 30+-field flat `Config` bags or hand-rolled `json_*` accessors).
+   - Search sibling crates before writing helpers: extend the canonical owner (`blastit-sqlpolicy`, `elf`, `blastit-frame`) rather than duplicating enums (`ObsVerdict`), SQL lexers, or `ProxySpec` builders.
 4. **Error handling & zero panics on untrusted data.**
-   - Library crates define typed `thiserror` error enums; binaries/glue map them cleanly with actionable user-facing messages (never exposing secret values!).
-   - **Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or unchecked `[i]` indexing** on any code path reachable from HTTP bytes, FastCGI/WSGI frames, WASM memory, manifest files, or wire-protocol peers. (`unwrap`/`expect` are permitted inside `#[cfg(test)]` only.)
+   - Library crates define typed `thiserror` error enums; CLI/glue maps them to actionable user-facing diagnostics without ever interpolating secret values (`DATABASE_URL`, passwords, tokens).
+   - **Zero `unwrap()`, `expect()`, `panic!()`, `todo!()`, or unchecked `[i]` indexing** on any code path reachable from HTTP bytes, `view.chan` frames, WASM memory, `Blastfile` text, or wire-protocol peers (`unwrap`/`expect` allowed inside `#[cfg(test)]` only).
    - `unsafe` requires an explicit `// SAFETY:` comment proving every precondition; `unsafe_op_in_unsafe_fn = "deny"` is enforced workspace-wide.
-5. **Dependencies & licensing.**
-   - Blastit is Apache-2.0 licensed. Every Rust crate and embedded WASM library must be permissively compatible (`Apache-2.0`, `MIT`, `BSD-*`, `ISC`, `Zlib`, `Unicode-3.0`; never GPL/AGPL).
-   - Never add a dependency to `Cargo.toml` unless the node owns `Cargo.toml` / `Cargo.lock` (see `dispatch` parallelism rules).
+5. **Dependencies, Standalone Purity & Licensing.**
+   - Apache-2.0 compatible licenses only (`Apache-2.0`, `MIT`, `BSD-*`, `ISC`, `Zlib`, `Unicode-3.0`; never GPL/AGPL).
+   - Standalone `blastit` (`cargo build -p blastit --locked`) and `blastit-lsp` must never link `libpython` or carry a build-host `RUNPATH` (`make rs-no-python` checks ELF portability).
 
-## 2. Mandatory checks before reporting a Rust task done
+## 2. Verification
 
-Run all of these (or `make check`):
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
-cargo test --workspace --all-targets --locked
-cargo test --workspace --doc --locked
-```
-
-If rustup toolchain `1.88.0` is installed locally, also run MSRV check:
-
-```bash
-cargo +1.88.0 check --workspace --all-targets --locked
-```
-
-Public structs, traits, enums, and functions must carry concise rustdoc comments (`///`) that compile cleanly under `RUSTDOCFLAGS="-D warnings"`.
+- **Leaf slice verification (single combined run):** `cargo fmt --all && make fast-check` (runs `guard`, `rs-fmt`, `rs-lint`, `rs-doc`, `rs-test`, `py-lint`, `plan-validate` and `universal-smoke` with `PYO3_PYTHON` and `PYTHONHOME` configured automatically).
+- **Epic / release gate verification:** `make check` (adds `test-critical`, `docs-check`, `docs-unit`, `rs-no-python`, `rs-no-default`, `e2e-universal` and `zed-check`).

@@ -24,7 +24,8 @@ below is the one PyPI itself uses — `readme_renderer` with `comrak` for GFM an
 For each file it checks:
 
 * the metadata fields a release needs (and the values that are not free to
-  change: the license, the Python requirement, the project URLs);
+  change: the license, the Python requirement — read from `pyproject.toml`, so
+  the two cannot drift — and the project URLs);
 * `Description-Content-Type: text/markdown`, GFM;
 * that the description renders to non-empty HTML;
 * that no link in the rendered HTML is relative, `src` and `href` alike;
@@ -34,6 +35,7 @@ For each file it checks:
 Files are also checked against *each other*: the same name, version and license
 in every wheel and in the sdist.
 """
+
 from __future__ import annotations
 
 import email
@@ -41,18 +43,22 @@ import pathlib
 import re
 import sys
 import tarfile
+import tomllib
 import warnings
 import zipfile
 
-import readme_renderer.markdown
+# The build's metadata is generated from here, so this is the only honest place
+# to read the Python requirement a released wheel must carry.
+PROJECT_FILE = pathlib.Path(__file__).resolve().parent.parent / "pyproject.toml"
 
 # A field is checked for presence, or for an exact value when one is given.
+# `Requires-Python` is deliberately absent: `declared_requires_python` reads it
+# from `pyproject.toml` instead of a constant that can drift from it.
 REQUIRED = {
     "Metadata-Version": "2.4",
     "Name": "blastit",
     "Version": None,
     "Summary": None,
-    "Requires-Python": ">=3.13",
     "License-Expression": "Apache-2.0",
     "License-File": "LICENSE",
     "Author-email": None,
@@ -77,6 +83,47 @@ class Failure(Exception):
     """Something a release must not ship."""
 
 
+def declared_requires_python(path: pathlib.Path | None = None) -> str:
+    """The Python requirement `pyproject.toml` declares for the project.
+
+    The requirement lives in one place (`[project].requires-python`), which is
+    where the build's metadata comes from: a constant here once said `>=3.13`
+    after `ADR-0017` moved the wheel to `>=3.12`, and nothing noticed until the
+    publish job rendered the description.
+
+    `path` defaults to this repository's `pyproject.toml` at *call* time, not at
+    definition time, so a test can point the module's `PROJECT_FILE` at a
+    temporary file and exercise `main` end to end.
+
+    A `pyproject.toml` this cannot read is a configuration error, not a verdict
+    on a description, so `main` reports it once and exits 2. This helper is
+    stdlib-only — the renderer is imported by `check_description` — so it can be
+    exercised without the third-party dependencies.
+    """
+    path = path or PROJECT_FILE
+    try:
+        with path.open("rb") as stream:
+            declared = tomllib.load(stream)["project"]["requires-python"]
+    except KeyError as error:
+        raise Failure(
+            f"{path} has no `[project].requires-python`: it is the source of the wheel's `Requires-Python`"
+        ) from error
+    except OSError as error:
+        # A missing or unreadable file says nothing about the metadata inside it,
+        # so it gets its own wording: the file may be perfectly valid.
+        raise Failure(f"cannot read {path}: {error}") from error
+    except (TypeError, ValueError) as error:
+        # `ValueError` covers both a `tomllib.TOMLDecodeError` and a
+        # `UnicodeDecodeError`: a non-UTF-8 `pyproject.toml` used to escape as a
+        # traceback instead of a readable failure.
+        raise Failure(f"{path} is not valid project metadata: {error}") from error
+    if not isinstance(declared, str) or not declared.strip():
+        raise Failure(
+            f"`requires-python` in {path} is {declared!r}, not a PEP 440 specifier such as `>=3.12`"
+        )
+    return declared.strip()
+
+
 def metadata_of(path: pathlib.Path) -> tuple[email.message.Message, str]:
     """The headers and the description of a wheel's METADATA or an sdist's
     PKG-INFO.
@@ -87,13 +134,18 @@ def metadata_of(path: pathlib.Path) -> tuple[email.message.Message, str]:
     """
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
-            name = next((n for n in archive.namelist() if n.endswith(".dist-info/METADATA")), None)
+            name = next(
+                (n for n in archive.namelist() if n.endswith(".dist-info/METADATA")),
+                None,
+            )
             if name is None:
                 raise Failure("no `.dist-info/METADATA` in the wheel")
             raw = archive.read(name)
     elif path.name.endswith((".tar.gz", ".tgz")):
         with tarfile.open(path) as archive:
-            member = next((m for m in archive.getmembers() if m.name.endswith("/PKG-INFO")), None)
+            member = next(
+                (m for m in archive.getmembers() if m.name.endswith("/PKG-INFO")), None
+            )
             if member is None:
                 raise Failure("no `PKG-INFO` in the sdist")
             handle = archive.extractfile(member)
@@ -105,17 +157,26 @@ def metadata_of(path: pathlib.Path) -> tuple[email.message.Message, str]:
 
     head, separator, body = raw.partition(b"\n\n")
     if not separator:
-        raise Failure("no description: the metadata has no blank line after the headers")
+        raise Failure(
+            "no description: the metadata has no blank line after the headers"
+        )
     return email.message_from_bytes(head), body.decode("utf-8")
 
 
-def check_metadata(headers: email.message.Message) -> None:
-    for field, expected in REQUIRED.items():
+def check_metadata(
+    headers: email.message.Message, required: dict[str, str | None]
+) -> None:
+    for field, expected in required.items():
         values = headers.get_all(field)
         if not values:
             raise Failure(f"`{field}` is missing")
         if expected is not None and expected not in values:
-            raise Failure(f"`{field}` is {values!r}, expected `{expected}`")
+            # `Requires-Python` is the one value that comes from outside this
+            # file, so the failure says where it came from.
+            origin = ""
+            if field == "Requires-Python":
+                origin = f" (from {PROJECT_FILE.name}'s [project].requires-python)"
+            raise Failure(f"`{field}` is {values!r}, expected `{expected}`{origin}")
 
     urls = {}
     for value in headers.get_all("Project-URL", []):
@@ -129,15 +190,31 @@ def check_metadata(headers: email.message.Message) -> None:
 
     content_type = headers.get("Description-Content-Type", "")
     if not content_type.startswith(CONTENT_TYPE):
-        raise Failure(f"`Description-Content-Type` is {content_type!r}, expected `{CONTENT_TYPE}`")
+        raise Failure(
+            f"`Description-Content-Type` is {content_type!r}, expected `{CONTENT_TYPE}`"
+        )
     parameters = dict(
-        part.split("=", 1) for part in (p.strip() for p in content_type.split(";")[1:]) if "=" in part
+        part.split("=", 1)
+        for part in (p.strip() for p in content_type.split(";")[1:])
+        if "=" in part
     )
     if parameters.get("variant") != VARIANT:
         raise Failure(f"the description is not rendered as {VARIANT}: {content_type!r}")
 
 
 def check_description(description: str) -> None:
+    # Imported here, not at module level: `declared_requires_python` is a
+    # stdlib-only helper the release tests import without this dependency. A
+    # missing renderer is a wrong invocation, not a broken description, so it
+    # says how to run the script instead of escaping as a traceback.
+    try:
+        import readme_renderer.markdown
+    except ImportError as error:
+        raise Failure(
+            "the renderer is missing: run me with "
+            "`uv run --no-project scripts/check-long-description.py DIST...`"
+        ) from error
+
     if not description.strip():
         raise Failure("the description is empty")
 
@@ -148,7 +225,8 @@ def check_description(description: str) -> None:
         html = readme_renderer.markdown.render(description, variant=VARIANT)
     if complaints:
         raise Failure(
-            "the renderer complained: " + "; ".join(str(complaint.message) for complaint in complaints)
+            "the renderer complained: "
+            + "; ".join(str(complaint.message) for complaint in complaints)
         )
     if not html or not html.strip():
         raise Failure("the description renders to nothing")
@@ -156,11 +234,15 @@ def check_description(description: str) -> None:
     for match in ATTRIBUTE.finditer(html):
         url = match.group("url")
         if not ABSOLUTE.match(url):
-            raise Failure(f"`{match.group('name')}` in the rendered description is relative: {url!r}")
+            raise Failure(
+                f"`{match.group('name')}` in the rendered description is relative: {url!r}"
+            )
 
     images = IMAGE.findall(html)
     if not images:
-        raise Failure("no `<img>` in the rendered description: the README banner is gone")
+        raise Failure(
+            "no `<img>` in the rendered description: the README banner is gone"
+        )
     banner = ATTRIBUTE.search(images[0])
     if banner is None:
         raise Failure("the first image in the rendered description has no `src`")
@@ -171,9 +253,9 @@ def check_description(description: str) -> None:
         )
 
 
-def check(path: pathlib.Path) -> dict[str, str]:
+def check(path: pathlib.Path, required: dict[str, str | None]) -> dict[str, str]:
     headers, description = metadata_of(path)
-    check_metadata(headers)
+    check_metadata(headers, required)
     check_description(description)
     return {field: headers.get(field, "") for field in AGREE}
 
@@ -184,11 +266,20 @@ def main(argv: list[str]) -> int:
         print("usage: check-long-description.py DIST...", file=sys.stderr)
         return 2
 
+    # Read once, before any artifact: an unreadable `pyproject.toml` is a
+    # configuration error (exit 2), not a verdict on a description, and reporting
+    # it once beats prefixing the same message with every wheel's name.
+    try:
+        required = {**REQUIRED, "Requires-Python": declared_requires_python()}
+    except Failure as failure:
+        print(failure, file=sys.stderr)
+        return 2
+
     seen: dict[str, tuple[pathlib.Path, str]] = {}
     failures = []
     for path in paths:
         try:
-            fields = check(path)
+            fields = check(path, required)
             for field, value in fields.items():
                 if field in seen and seen[field][1] != value:
                     raise Failure(
@@ -202,7 +293,10 @@ def main(argv: list[str]) -> int:
             print(f"{path.name}: ok")
 
     if failures:
-        print("\nthe description PyPI would show is not the one we want:\n", file=sys.stderr)
+        print(
+            "\nthe description PyPI would show is not the one we want:\n",
+            file=sys.stderr,
+        )
         for failure in failures:
             print(f"  {failure}", file=sys.stderr)
         return 1
