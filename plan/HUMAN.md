@@ -153,7 +153,7 @@ Expensive budget exhausted (60.74/00). Please raise expensive_cap_usd in plan/BU
 
 **Answer:**
 
-## H-016 [open] (node MB)
+## H-016 [closed] (node MB)
 
 - asked: 2026-11-18T20:57 by conductor
 
@@ -174,6 +174,14 @@ TESTING_PLAN.md §2 promises 'conditional ETag / byte-range requests' but blasti
 - asked: 2026-11-20T23:02 by lead
 
 Pre-existing (not MB.56): split the >800-LOC god-files — blastit-events/src/lib.rs 1813, json.rs 1402, blastit-lsp/src/lib.rs 1386, blastit-php-sapi/src/loader.rs 1075, blastit-sys/src/fanotify.rs 1031, blastit/src/supervise.rs 2767, blastit-scheduler worker/discovery. Sliced L1-L6 in plan/nodes/MB/MB.56/MB.56.5/MB.56.5.1/RESULT.md.
+
+**Answer:**
+
+## H-019 [open] (node MB)
+
+- asked: 2026-11-21T12:35 by conductor
+
+Release v0.2.0 is ready on branch release/0.2.0 (PR #64 -> develop, HEAD ea5cd17). All GitHub Actions checks are green. Review and squash-merge the PR on GitHub: merging validates CI, Docs and the live DigitalOcean e2e on develop, and the automated pipeline then publishes v0.2.0 to PyPI, GitHub Releases and the signed Cloudsmith APT/RPM repositories. Scope: one libc-only blastit ELF for every role (CPython 3.13/3.14 + PHP 8.3-8.6 dlopen shims pinned by inode), signed APT/RPM repos + install.sh, 4 py3-none-* wheels, a Composer wrapper, a pruned codebase and E2E-first suite (-148,885 net LOC), and the human-gated user-story TESTING_PLAN.md.
 
 **Answer:**
 
