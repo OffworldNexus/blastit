@@ -4427,3 +4427,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T11:32 [MB.59] (lead) attempt 1/3 started
 - 2026-11-21T11:32 [MB.59] (lead) base 8b5600aa885f0f6fa18896e09a3020b65ac82cd4
 - 2026-11-21T11:32 [MB.59] (lead) status active -> done
+- 2026-11-21T11:32 [MB.59] (lead) committed da0e682 (1-line TESTING_PLAN.md edit; guard+validate OK)

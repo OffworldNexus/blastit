@@ -19,3 +19,7 @@ base 8b5600aa885f0f6fa18896e09a3020b65ac82cd4
 ## 2026-11-21T11:32 [lead]
 
 status active -> done
+
+## 2026-11-21T11:32 [lead]
+
+committed da0e682 (1-line TESTING_PLAN.md edit; guard+validate OK)
