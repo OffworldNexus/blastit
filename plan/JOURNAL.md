@@ -4421,3 +4421,9 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T00:17 [MB.58] (lead) commit 425bd05
 - 2026-11-21T00:17 [MB.58] (lead) commit 2398428 (amended: JOURNAL + LOG)
 - 2026-11-21T00:17 AUTOPILOT off by conductor awaiting human merge of release PR v0.2.0
+- 2026-11-21T11:31 HUMAN H-017 closed by conductor
+- 2026-11-21T11:31 [MB.59] (conductor) created (task) Drop '/ byte-range' from TESTING_PLAN.md §2 per owner H-017 decision
+- 2026-11-21T11:32 [MB.59] (lead) status ready -> active
+- 2026-11-21T11:32 [MB.59] (lead) attempt 1/3 started
+- 2026-11-21T11:32 [MB.59] (lead) base 8b5600aa885f0f6fa18896e09a3020b65ac82cd4
+- 2026-11-21T11:32 [MB.59] (lead) status active -> done

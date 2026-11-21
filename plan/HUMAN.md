@@ -161,7 +161,7 @@ Release v0.2.0 is ready on branch release/0.2.0 (HEAD 7cdb546, PR targeting deve
 
 **Answer:**
 
-## H-017 [open] (node MB.56.3.2.3)
+## H-017 [closed] (node MB.56.3.2.3)
 
 - asked: 2026-11-20T20:20 by lead
 
