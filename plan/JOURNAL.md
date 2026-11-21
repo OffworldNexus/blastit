@@ -4436,3 +4436,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T12:00 [MB.60] (lead) base dffa4b5a0e54dc503621be0ac4edc2ba5c22d964
 - 2026-11-21T12:21 [MB.60] (lead) status active -> review
 - 2026-11-21T12:34 [MB.60] (lead) status review -> done
+- 2026-11-21T12:34 [MB.60] (lead) commit a3d2f5e
