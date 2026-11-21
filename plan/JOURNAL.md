@@ -4469,3 +4469,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T15:37 [MB.63] (lead) REVIEW FIX: (1) MB.62 retry comment + failure echo must not attribute sury's measured mismatches to the distro mirror, and must not say Debian (Ubuntu legs exis
 - 2026-11-21T15:44 [MB.63] (lead) lead gate: e2e green on final bytes (EXIT=0, 3 probe legs ok); independent chain replay matched '.xz' (signed 6b5a7eae), plain+gz mismatch-skipped, 7/7 : OK; ru
 - 2026-11-21T15:44 [MB.63] (lead) status active -> done
+- 2026-11-21T15:44 [MB.63] (lead) commit 2b82366a0249a0170798d73e6f38fea1342ed90f

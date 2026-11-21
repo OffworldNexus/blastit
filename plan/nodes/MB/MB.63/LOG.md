@@ -31,3 +31,7 @@ lead gate: e2e green on final bytes (EXIT=0, 3 probe legs ok); independent chain
 ## 2026-11-21T15:44 [lead]
 
 status active -> done
+
+## 2026-11-21T15:44 [lead]
+
+commit 2b82366a0249a0170798d73e6f38fea1342ed90f
