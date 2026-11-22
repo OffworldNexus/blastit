@@ -1,6 +1,6 @@
 //! A temporary project root, shared by every `blastit dev` fixture.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// A temporary project, removed when dropped.
 pub struct Project {
@@ -11,7 +11,7 @@ pub struct Project {
 impl Project {
     /// A fresh directory for one case, with no `Blastfile` yet.
     pub fn new(tag: &str) -> Self {
-        let dir = scratch_root().join(format!("blastit-e2e-dev-{}-{tag}", std::process::id()));
+        let dir = scratch_root().join(tag);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("the fixture directory");
         Self { dir }
@@ -39,11 +39,21 @@ impl Drop for Project {
     }
 }
 
-/// `/tmp/opencode` when it exists, the platform's temporary directory otherwise.
+/// The process temporary directory (`TMPDIR` aware) with one short per-run segment.
+///
+/// The root must stay short: a fixture binds its PostgreSQL socket at
+/// `<root>/<tag>/tmp/blastit-check-<uid>-<pid>-<rand>-0/pg/.s.PGSQL.5432`, and a
+/// `sun_path` has to stay under `SUN_LEN` (108 bytes, including the trailing NUL).
+/// `/tmp/` plus that suffix alone is ~61 bytes, so a fixed multi-segment root such
+/// as `/tmp/opencode` leaves no budget once the pid and test tag are appended.
 fn scratch_root() -> PathBuf {
-    let preferred = Path::new("/tmp/opencode");
-    if std::fs::create_dir_all(preferred).is_ok() {
-        return preferred.to_path_buf();
-    }
-    std::env::temp_dir()
+    let root = std::env::temp_dir().join(format!("blastit-e2e-{}", std::process::id()));
+    let len = root.to_string_lossy().len();
+    assert!(
+        len <= 48,
+        "fixture root `{}` is {len} bytes; the deepest socket adds \
+         `blastit-check-<uid>-<pid>-<rand>-0/pg/.s.PGSQL.5432` and must stay under SUN_LEN (108)",
+        root.display()
+    );
+    root
 }
