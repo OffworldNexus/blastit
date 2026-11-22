@@ -4503,3 +4503,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T00:35 [MB.66] (lead) proof: rpm python shims are symmetric with php: blastit-python-3.13-0.2.1-1.x86_64.rpm -qpR = blastit = 0.2.1-1, glibc >= 2.34, libgcc (no python), --recommends
 - 2026-11-23T00:39 [MB.66] (lead) REVIEW: review-arch PASS zero blockers (6 MINORs rejected: core negative assertion sufficient, redundant table guard, substring recommends, spec-diff covered by
 - 2026-11-23T00:39 [MB.66] (lead) status review -> done
+- 2026-11-23T00:40 [MB.66] (lead) commit cd9712dfdac8d15450568b3ec725645f53ccbf87
