@@ -10,7 +10,7 @@ $ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
 ```
 
 The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM (Fedora/RHEL/Rocky/Alma)
-repository and installs `blastit`, or puts the release archive in `~/.local/bin` instead.
+repository and installs `blastit` plus a shim per runtime it finds, or the archive under `~/.local`.
 
 !!! warning "musl hosts need one more package"
 
@@ -20,7 +20,6 @@ repository and installs `blastit`, or puts the release archive in `~/.local/bin`
 ??? note "Escape hatches — one line each"
 
     * `--nightly` — the nightly repository component instead of the releases.
-    * `--mirror forgejo` — the mirror at `https://forge.offworld.nexus` instead of Cloudsmith.
     * `--user` — no root: the archive under `~/.local`, then the `PATH` line it prints.
     * `--develop [ref]` — the branch build CI made, with the digest you pass in `BLASTIT_SHA256`.
     * Alpine/musl, or neither `apt-get` nor `dnf` — the installer takes the `.tar.gz` itself;

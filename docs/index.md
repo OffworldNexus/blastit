@@ -23,8 +23,9 @@ $ blastit check
 ```
 
 The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM
-(Fedora/RHEL/Rocky/Alma) repository and installs `blastit`; where it cannot use a
-system package manager it puts the release archive in `~/.local/bin` instead
+(Fedora/RHEL/Rocky/Alma) repository and installs `blastit` plus a
+`blastit-python-*` / `blastit-php-*` shim for each runtime it finds; where it cannot
+use a package manager it puts the release archive in `~/.local/bin` instead
 ([install reference](install.md)).
 
 !!! note "Linux, and one file for every interface"

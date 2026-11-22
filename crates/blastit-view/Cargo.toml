@@ -20,10 +20,10 @@ workspace = true
 default = []
 
 [dependencies]
-blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
+blastit-frame = { version = "0.2.1", path = "../blastit-frame" }
 # The child's identity, filter and `RLIMIT_*` (`SpawnContext`), the `Fork` a
 # forker answers with, and the one documented order of the child sequence
 # (design §4.4 D1/D2). The view crates get the privileged primitives from the
 # crate that owns them, never from a second spelling.
-blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
+blastit-sys = { version = "0.2.1", path = "../blastit-sys" }
 thiserror = "2.0.21"

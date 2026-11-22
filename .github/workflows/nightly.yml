@@ -1,12 +1,19 @@
 name: Nightly
 
-# The nightly channel of the signed APT/RPM repositories (design §6.1, `MB.42.3.4`).
+# The nightly channel of the signed APT/RPM repositories
+# (`apt.offworld-nexus.app`, `rpm.offworld-nexus.app`).
 #
-# Every night (and on demand) `develop` is built as four stamped packages,
-# installed in every distribution the repositories advertise, published to the
-# `nightly` component of Cloudsmith and mirrored to Forgejo, and then pruned to
-# the newest seven. `packages.yml` is this file's sibling: same graph, release
-# versions, the `main` component and no retention.
+# Every night (and on demand) `develop` is built as seven stamped packages per
+# architecture, installed in every distribution the repositories advertise, and
+# staged as one `offworld-dist` artifact. The organization's
+# `offworld-nexus-packages` GitHub App signs and publishes it and posts an
+# `offworld-pkg / publish (nightly)` check run — **no token, key or secret lives
+# in this workflow**. `packages.yml` is this file's sibling: same graph, release
+# versions and the `stable` channel.
+#
+# The cron minute is staggered inside the `03:xx UTC` band so the organization's
+# nightly publications (one per repository) never queue behind each other on the
+# same minute.
 #
 # The long legs live here, not on a pull request: this run also carries
 # `TESTING_PLAN.md` §6 (`e2e/run_prod.py`) — both deployment presets, their OS
@@ -14,23 +21,38 @@ name: Nightly
 # containers — because that suite is a Docker image build per leg and does not
 # belong in front of a review.
 #
-# The two stamps are `scripts/publish_packages.py stamp`'s, and they are the two
-# the package formats need:
+# The two stamps are `packaging/package-stamp.sh`'s, and they are the two the
+# package formats need:
 #
-#   .deb   0.2.0~nightly20261120.r12+gabc1234      (`~` sorts below 0.2.0)
-#   .rpm   0.2.0-0.nightly.20261120.r12.gabc1234   (`-0.` release prefix)
+#   .deb   0.2.1~nightly20261122.r12+gabc1234      (`~` sorts below 0.2.1)
+#   .rpm   0.2.1-0.nightly.20261122.r12.gabc1234   (`-0.` release prefix)
 #
-# Every leg — the six distributions × two architectures, the four packages, the
-# shim legs — comes from `scripts/platform_matrix.py`.
+# Nothing is pruned here: the publisher keeps the newest seven nightlies
+# server-side (`release_set` retention), so a failed run can never delete a
+# package that is still being served.
 #
-# Secrets: `CLOUDSMITH_API_KEY` (required, never printed) and
-# `FORGEJO_PACKAGES_TOKEN` (optional: the mirror skips with one `::notice::`).
+# A `workflow_dispatch` on `develop` with `rehearsal: true` runs the whole matrix
+# and `packaging/stage-dist.py --dry-run`, uploading nothing — it is the branch
+# rehearsal `packages.yml` points at, and it touches no channel. A scheduled run
+# (or a dispatch without the input) publishes.
+#
+# Every leg — the six distributions × two architectures, the four package legs,
+# the shim legs — comes from `scripts/platform_matrix.py`.
 
 on:
   schedule:
-    # 03:17 UTC: after the release window, before the European morning.
-    - cron: "17 3 * * *"
+    # 03:41 UTC: after the release window, before the European morning.
+    - cron: "41 3 * * *"
   workflow_dispatch:
+    inputs:
+      rehearsal:
+        description: >-
+          Build and install-verify the whole matrix, then run
+          `packaging/stage-dist.py --dry-run` and upload nothing. A scheduled run
+          always publishes; use this to prove a change without touching the live
+          nightly channel.
+        type: boolean
+        default: false
 
 concurrency:
   group: nightly-${{ github.ref }}
@@ -48,11 +70,11 @@ jobs:
     name: the nightly stamps
     runs-on: ubuntu-24.04
     outputs:
+      channel: ${{ steps.stamp.outputs.channel }}
       deb_version: ${{ steps.stamp.outputs.deb_version }}
       deb_release: ${{ steps.stamp.outputs.deb_release }}
       rpm_version: ${{ steps.stamp.outputs.rpm_version }}
       rpm_release: ${{ steps.stamp.outputs.rpm_release }}
-      should_publish: ${{ steps.stamp.outputs.should_publish }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
@@ -68,12 +90,29 @@ jobs:
               echo "::error::nightlies are cut from develop (this run is $REF): merge there, or dispatch this workflow on develop"
               exit 1
           fi
+          base=$(awk '
+              /^\[workspace\.package\]/ { inside = 1; next }
+              /^\[/ { inside = 0 }
+              inside && /^version = "/ { sub(/^version = "/, ""); sub(/"$/, ""); print; exit }
+          ' Cargo.toml)
+          if [ -z "$base" ]; then
+              echo "::error::no [workspace.package] version in Cargo.toml"
+              exit 1
+          fi
+          echo "channel=nightly" >> "$GITHUB_OUTPUT"
           # Both stamps are printed: the log is the record of what was published,
           # and the same lines become the `$GITHUB_OUTPUT` the build jobs read.
-          stamps=$(uv run --no-project scripts/publish_packages.py stamp --format both \
-              --run "$RUN_NUMBER" --sha "$COMMIT_SHA")
-          printf '%s\n' "$stamps" | tee -a "$GITHUB_OUTPUT"
-          echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          stamps=$(packaging/package-stamp.sh --format both --channel nightly \
+              --base "$base" --run "$RUN_NUMBER" --sha "$COMMIT_SHA")
+          printf '%s\n' "$stamps" >> "$GITHUB_OUTPUT"
+          for key in deb_version rpm_version rpm_release; do
+              if ! printf '%s\n' "$stamps" | grep -q "^$key="; then
+                  echo "::error::packaging/package-stamp.sh printed no $key for $base (nightly r$RUN_NUMBER)"
+                  exit 1
+              fi
+          done
+          echo "nightly stamps for $base r$RUN_NUMBER:"
+          printf '%s\n' "$stamps"
 
   matrix:
     name: the leg list (scripts/platform_matrix.py)
@@ -194,7 +233,7 @@ jobs:
           if-no-files-found: error
 
   packages:
-    name: '§3 build the nightly ${{ matrix.format }} package for ${{ matrix.arch }}'
+    name: '§3 build the nightly ${{ matrix.format }} packages for ${{ matrix.arch }}'
     needs: [stamp, matrix, shims, py_shims]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 60
@@ -250,14 +289,23 @@ jobs:
                   exit 1
                   ;;
           esac
+          shopt -s nullglob
+          built=(dist/*.deb dist/*.rpm)
+          echo "this leg built ${#built[@]} package(s): ${built[*]:-none}"
+          if [ "${#built[@]}" -lt 7 ]; then
+              echo "::error::expected the seven package names for ${{ matrix.arch }}, found ${#built[@]}"
+              exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.name }}
-          path: dist/blastit*
+          path: |
+            dist/*.deb
+            dist/*.rpm
           if-no-files-found: error
 
   install:
-    name: '§3 ${{ matrix.image }} installs the nightly ${{ matrix.format }} package (${{ matrix.arch }})'
+    name: '§3 ${{ matrix.image }} installs the nightly ${{ matrix.format }} packages (${{ matrix.arch }})'
     needs: [matrix, packages]
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 25
@@ -275,76 +323,54 @@ jobs:
       - name: install in ${{ matrix.image }} and drive it
         run: scripts/install_matrix.sh --leg "${{ matrix.name }}" --dir dist
 
-  publish:
-    name: the nightly component
+  # The one artifact the App signs. `packaging/stage-dist.py` validates the
+  # nightly sort stamps and control headers; `--keep-nightlies 7` only records the
+  # retention the publisher enforces server-side — nothing is deleted here.
+  stage:
+    name: one offworld-dist bundle
     needs: [stamp, packages, install]
     if: >-
       !cancelled() &&
-      github.repository == 'offworld-nexus/blastit' &&
       needs.stamp.result == 'success' &&
       needs.packages.result == 'success' &&
       needs.install.result == 'success'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10.3.2
       - uses: actions/download-artifact@v4
         with:
           pattern: package-*
           path: dist
           merge-multiple: true
-      # No third-party binary runs beside the credential: `publish_packages.py`
-      # uploads over Cloudsmith's own endpoint (the same one `cloudsmith push`
-      # calls), so a nightly installs nothing from PyPI before it holds the key.
-      - name: Publish to the nightly component and mirror to Forgejo
+      - name: Validate the nightly package set and stage it (or rehearse it)
         env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-          FORGEJO_PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_TOKEN }}
-          FORGEJO_URL: ${{ vars.FORGEJO_URL }}
-          COMPONENT: nightly
+          CHANNEL: ${{ needs.stamp.outputs.channel }}
+          VERSION: ${{ needs.stamp.outputs.deb_version }}
+          REHEARSAL: ${{ inputs.rehearsal }}
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          for file in dist/*.deb; do
-              uv run --no-project scripts/publish_packages.py push \
-                  --format deb --file "$file" --component "$COMPONENT"
-          done
-          for file in dist/*.rpm; do
-              uv run --no-project scripts/publish_packages.py push \
-                  --format rpm --file "$file" --component "$COMPONENT"
-          done
-          for file in dist/*.deb; do
-              uv run --no-project scripts/publish_packages.py forgejo \
-                  --format deb --file "$file" --component "$COMPONENT"
-          done
-          for file in dist/*.rpm; do
-              uv run --no-project scripts/publish_packages.py forgejo \
-                  --format rpm --file "$file" --component "$COMPONENT"
-          done
-
-  prune:
-    name: keep the newest 7 nightly runs
-    needs: [stamp, publish]
-    if: >-
-      !cancelled() &&
-      needs.publish.result == 'success' &&
-      needs.stamp.outputs.should_publish == 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10.3.2
-      # The API list is read newest-first by the two numbers the stamp encodes
-      # (date, then run), because `r12` sorts below `r9` as a string. Only
-      # `~nightly`/`.nightly.` versions are candidates: the `main` component in
-      # the same repository is never pruned. `--keep 7` counts **runs**: a run
-      # ships one package per architecture, and a per-package sort deleted
-      # `r2-arm64` while keeping `r2-amd64` (review MAJOR 2).
-      - name: Prune the nightlies (Cloudsmith API — list, newest first, delete)
-        env:
-          CLOUDSMITH_API_KEY: ${{ secrets.CLOUDSMITH_API_KEY }}
-        run: |
-          set -euo pipefail
-          for format in deb rpm; do
-              uv run --no-project scripts/publish_packages.py prune --format "$format" --keep 7
-          done
+          echo "staging $(ls dist | wc -l) file(s) from dist/"
+          extra=()
+          if [ "$REHEARSAL" = true ]; then
+              extra+=(--dry-run)
+              echo "::notice::rehearsal: stage-dist.py validates the set and prints the manifest, and nothing is uploaded"
+          fi
+          python3 packaging/stage-dist.py \
+              --source blastit \
+              --channel "$CHANNEL" \
+              --version "$VERSION" \
+              --ref refs/heads/develop \
+              --keep-nightlies 7 \
+              --file 'deb:amd64:dist/*_amd64.deb' \
+              --file 'deb:arm64:dist/*_arm64.deb' \
+              --file 'rpm:x86_64:dist/*.x86_64.rpm' \
+              --file 'rpm:aarch64:dist/*.aarch64.rpm' \
+              --out "$RUNNER_TEMP/offworld-dist" "${extra[@]}"
+      - uses: actions/upload-artifact@v4
+        if: inputs.rehearsal != true
+        with:
+          name: offworld-dist
+          path: ${{ runner.temp }}/offworld-dist
+          if-no-files-found: error
+          retention-days: 7

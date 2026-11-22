@@ -11,21 +11,21 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
+blastit-frame = { version = "0.2.1", path = "../blastit-frame" }
 # The manifest data model, which discovery reads (`entrypoint php`, `static`
 # roots): a data crate with no cycle back into the root.
-blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+blastit-manifest = { version = "0.2.1", path = "../blastit-manifest" }
 # The frozen `blastit_php_abi_v1` surface and the one `dlopen` module. The
 # `dlopen` happens in a view worker, never in stage 0: `discovery` names no type
 # from here (`ADR-0010` §3, design §4.4 D5).
-blastit-php-sapi = { version = "0.2.0", path = "../blastit-php-sapi" }
+blastit-php-sapi = { version = "0.2.1", path = "../blastit-php-sapi" }
 # The child sequence (`enter`), the fork's `Fork`, the signal and polling
 # helpers: this crate composes them and never spells an order of its own
 # (design §4.4 D1).
-blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
+blastit-sys = { version = "0.2.1", path = "../blastit-sys" }
 # The `view.chan` transport: frames, credit windows, the loaded-file codec and
 # the fork seam. This crate is the PHP half of a view, never a second framing.
-blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+blastit-view = { version = "0.2.1", path = "../blastit-view", default-features = false }
 rustix = { version = "1.1.5", features = ["event", "fs", "process", "pipe"] }
 # The probe child's one report (`["8.4.27", <ini or null>]`): a JSON line keeps
 # a path with a newline from splitting it.

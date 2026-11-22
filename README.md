@@ -21,8 +21,9 @@ $ blastit check
 ```
 
 The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM
-(Fedora/RHEL/Rocky/Alma) repository and installs `blastit`; where it cannot use a
-system package manager it puts the release archive in `~/.local/bin` instead
+(Fedora/RHEL/Rocky/Alma) repository and installs `blastit` plus a shim for each
+runtime it finds; where it cannot use a package manager it puts the release archive
+in `~/.local/bin` instead
 ([install reference](https://offworldnexus.github.io/blastit/install/)).
 
 One binary serves all three interfaces. Python (WSGI) is a callable on CPython

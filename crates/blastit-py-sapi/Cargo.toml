@@ -18,4 +18,4 @@ workspace = true
 # `universal-distribution.md` §1.1), and the `dlopen`/`dlsym` declarations are
 # hand-written over `libdl` the way `blastit-php-sapi` does it.
 [dependencies]
-blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
+blastit-sys = { version = "0.2.1", path = "../blastit-sys" }

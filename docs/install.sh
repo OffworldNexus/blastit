@@ -5,9 +5,13 @@
 #
 # One machine install, one obvious path:
 #
-#   * **Default: the GPG-signed package repository.** apt or dnf verifies every
-#     package, and `apt-get upgrade` / `dnf upgrade` keep Blastit current. The
-#     `main` component carries releases; `--nightly` switches to `nightly`.
+#   * **Default: the signed Offworld Nexus package repositories.** apt (Debian,
+#     Ubuntu) or dnf (Fedora, RHEL, Rocky, Alma) verifies every package, and
+#     `apt-get upgrade` / `dnf upgrade` keep Blastit current. It installs the
+#     interpreter-free core (`blastit`) plus one shim per runtime this host can
+#     actually run: a `blastit-python-*` for an installed `python3.13`/`python3.14`,
+#     and a `blastit-php-*` for an installed `libphp8.x`. `main` carries releases;
+#     `--nightly` switches to the nightly channel.
 #   * **Fallback: the release `.tar.gz`.** `--user`, `--prefix <dir>`,
 #     `--develop [ref]`, a musl host, a distro with neither apt-get nor dnf, and
 #     an unprivileged shell with no usable sudo take this path. The archive is
@@ -15,14 +19,27 @@
 #     staged under a prefix (`~/.local` by default) with `bin/` symlinks. Archive
 #     installs do not upgrade themselves.
 #
-# **The trust anchor is the package signature, not the setup script.** The
-# default path downloads Cloudsmith's `bash.deb.sh` / `bash.rpm.sh` over TLS from
-# `dl.cloudsmith.io` and runs it as root. That script is *not* signature
-# verified (pin it with `BLASTIT_SETUP_SCRIPT_SHA256` if you want that): a
-# compromise of that host, or of the repository account, is root here. What it
-# enables — the APT/RPM repository — *is* verified: apt and dnf check every
-# package and every metadata file against the repository's GPG key, and this
-# installer never disables that.
+# **The trust anchor is the repository signature.** The default path writes the
+# canonical source definition — `https://apt.offworld-nexus.app` (a `.sources`
+# file with `Signed-By`) or `https://rpm.offworld-nexus.app` (a `.repo` with
+# `gpgcheck` and `repo_gpgcheck`) — and lets apt or dnf do the work. No setup
+# script arrives over the network to run as root: every metadata file and package
+# is verified by the package manager on every transaction, and this installer
+# never disables that.
+#
+# **A shim is offered only when the runtime it binds to is present.** A
+# `blastit-python-3.13` is a `dlopen`able `libblastit_py313-*.so`, so it is
+# useless on a host with no `python3.13`; `blastit-php-8.4` needs the host's
+# `libphp8.4.so`. The installer detects both, installs the core plus the shims
+# this machine can load, and says in one note what it skipped and why.
+#
+# **A locally built package carries no publisher signature.** Repository packages
+# are signed and every repository install verifies them — this installer never
+# switches that off. `BLASTIT_DEB`/`BLASTIT_RPM` instead installs a file you
+# built; on a host that refuses unsigned packages (Fedora sets
+# `%_pkgverify_level all`) that needs the explicit
+# `BLASTIT_PKG_ACCEPT_UNSIGNED=1`, which passes `--nosignature` to `rpm` for that
+# one invocation and prints a warning saying so.
 #
 # **`stdin` is never consulted.** `curl … | sh` carries this script on fd 0, so
 # interactivity is decided by `/dev/tty` alone: questions (and sudo's password)
@@ -40,11 +57,10 @@ set -eu
 # The version this copy of the installer was published for. The Docs job
 # (`.github/workflows/docs.yml`) refuses to publish a copy whose value differs
 # from `Cargo.toml`'s `workspace.package.version`.
-BLASTIT_DEFAULT_VERSION="0.2.0"
+BLASTIT_DEFAULT_VERSION="0.2.1"
 GITHUB_DOWNLOAD="https://github.com/OffworldNexus/blastit/releases/download"
-CLOUDSMITH_PUBLIC="https://dl.cloudsmith.io/public/offworld-nexus"
-FORGEJO_DEFAULT="https://forge.offworld.nexus"
-FORGEJO_OWNER="OffworldNexus"
+APT_BASE="https://apt.offworld-nexus.app"
+RPM_BASE="https://rpm.offworld-nexus.app"
 PKG=blastit
 # Every "do it again" hint names *this* command: the user arrived through a pipe,
 # so no `install.sh` exists in their working directory to re-run.
@@ -67,14 +83,13 @@ usage() {
     cat <<USAGE
 usage: install.sh [options]
 
-Install Blastit from its GPG-signed package repository (the default), or place
+Install Blastit from its GPG-signed package repositories (the default), or place
 the release archive under a prefix of your choice.
 
 options:
-  --version <ver>   install exactly this version       (default: $BLASTIT_DEFAULT_VERSION)
-  --nightly         install from the nightly repository component; re-run
-                    without it to return to releases
-  --mirror <name>   repository to use: cloudsmith (default) or forgejo
+  --version <ver>   install exactly this version, core and shims  (default: $BLASTIT_DEFAULT_VERSION)
+  --nightly         install from the nightly channel; re-run without it to
+                    return to releases
   --user            no root: install the archive under ~/.local
   --prefix <dir>    no root: install the archive under <dir> (absolute path)
   --develop [ref]   install the archive CI built for <ref> (default: develop);
@@ -87,15 +102,24 @@ environment:
                             with it (or --develop) a digest is mandatory
   BLASTIT_SHA256            expected sha256 of the archive, hex
   BLASTIT_SHA256SUMS_FILE   local SHA256SUMS file naming the archive
-  BLASTIT_DEB, BLASTIT_RPM  install that local .deb / .rpm with dpkg / rpm
-  BLASTIT_SETUP_SCRIPT_SHA256  pin the Cloudsmith setup script's sha256
+  BLASTIT_DEB, BLASTIT_RPM  install that local core .deb / .rpm with dpkg / rpm;
+                            sibling shim packages of the same version and
+                            architecture in the same directory are installed
+                            beside it for the runtimes this host has
+  BLASTIT_PKG_ACCEPT_UNSIGNED=1
+                            with BLASTIT_DEB/BLASTIT_RPM only: pass
+                            --nosignature to rpm for a package you built
+                            yourself (Fedora refuses an unsigned one); a
+                            repository install is always signature-verified
 
-The default needs root/sudo and uses apt-get or dnf. Without one of those, on a
+The default needs root/sudo and uses apt-get or dnf: it installs \`blastit\` plus a
+\`blastit-python-<ver>\` for an installed \`python3.13\`/\`python3.14\` and a
+\`blastit-php-<ver>\` for an installed \`libphp8.x\`. Without apt-get or dnf, on a
 musl host, or with no usable sudo, it installs the release archive under ~/.local
 instead and prints the PATH line. Archive installs check the sha256 first and
 refuse to unpack a mismatch, and they do not upgrade themselves. Questions and
 sudo read /dev/tty, never stdin, so "curl … | sh" is a normal interactive
-install.
+install. Core and shims always come from the same version.
 
 examples:
   curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
@@ -113,7 +137,7 @@ usage_error() {
 # --- arguments ---------------------------------------------------------------
 
 version=$BLASTIT_DEFAULT_VERSION; version_set=0; pin=
-nightly=0; mirror=cloudsmith; user_install=0; prefix=
+nightly=0; user_install=0; prefix=
 develop_ref=; assume_yes=0
 
 # A version, ref or tag reaches a URL and a package spec, so it may only contain
@@ -127,9 +151,6 @@ parse_args() {
                 version=$2; version_set=1; shift 2 ;;
             --version=*) version=${1#*=}; version_set=1; shift ;;
             --nightly) nightly=1; shift ;;
-            --mirror) [ "$#" -ge 2 ] || usage_error "--mirror needs a value: cloudsmith or forgejo"
-                mirror=$2; shift 2 ;;
-            --mirror=*) mirror=${1#*=}; shift ;;
             --user) user_install=1; shift ;;
             --prefix) [ "$#" -ge 2 ] || usage_error "--prefix needs a directory, e.g. --prefix \"\$HOME/.local\""
                 prefix=$2; shift 2 ;;
@@ -154,9 +175,8 @@ writable_dir() {
 }
 
 validate_args() {
-    case "$mirror" in cloudsmith|forgejo) ;; *) usage_error "--mirror must be cloudsmith or forgejo (got '$mirror')" ;; esac
     if [ "$nightly" -eq 1 ] && [ "$version_set" -eq 1 ]; then
-        usage_error "--nightly and --version are exclusive: the nightly component has no fixed version"
+        usage_error "--nightly and --version are exclusive: the nightly channel has no fixed version"
     fi
     if [ "$nightly" -eq 1 ] && { [ "$user_install" -eq 1 ] || [ -n "$prefix" ] || [ -n "$develop_ref" ]; }; then
         usage_error "--nightly installs from the signed repository; it does not combine with --user, --prefix or --develop"
@@ -203,8 +223,8 @@ detect_privilege() {
 
 # `</dev/null` on the non-interactive branches is load-bearing: this script
 # arrived on fd 0 via `curl … | sh`, and bash reads a piped script lazily, so a
-# child that reads stdin (a setup script, apt-get, dpkg, dnf) would otherwise eat
-# the rest of the installer and the run would exit 0 having installed nothing.
+# child that reads stdin (apt-get, dpkg, dnf) would otherwise eat the rest of the
+# installer and the run would exit 0 having installed nothing.
 as_root() {
     case "$privilege" in
         root) "$@" </dev/null ;;
@@ -342,101 +362,214 @@ ensure_libgcc() {
         die 1 "blastit needs libgcc_s.so.1 here and 'apk add --no-cache libgcc' failed: check the network or the apk repository, then re-run this installer"
 }
 
+# --- the interpreter shims this host can run ---------------------------------
+
+# A shim is offered only when the **package its own `Depends:` names** is
+# installed — not when a `python3.13` happens to be on PATH. A pyenv/conda
+# interpreter is not the distro package `apt`/`dnf` must satisfy, so offering its
+# shim would make the whole install fail on an unsatisfiable dependency.
+runtime_installed() { # <deb|rpm> <package>
+    case "$1" in
+        deb)
+            command -v dpkg-query >/dev/null 2>&1 || return 1
+            [ "$(dpkg-query -W -f='${Status}' "$2" 2>/dev/null </dev/null)" = "install ok installed" ]
+            ;;
+        rpm)
+            command -v rpm >/dev/null 2>&1 || return 1
+            rpm -q --quiet "$2" >/dev/null 2>&1 </dev/null
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# The PHP shims bind to the *embedded NTS* library (`libphp8.4.so`), which is
+# where each distribution puts it: `/usr/lib` on Debian/Ubuntu (and the
+# multiarch `/usr/lib/<triple>` beside it) and `/usr/lib64` on RPM distros.
+libphp_present() { # <minor>
+    for libdir in /usr/lib /usr/lib64 /usr/lib/*-linux-gnu*; do
+        [ -e "$libdir/libphp$1.so" ] && return 0
+    done
+    return 1
+}
+
+# Debian names the package (`libphp8.4-embed`); RPM distros ship no per-minor
+# embed package, so the library on disk is the dependency the shim `dlopen`s.
+php_runtime_installed() { # <deb|rpm> <minor>
+    if [ "$1" = deb ]; then
+        runtime_installed deb "libphp$2-embed"
+    else
+        libphp_present "$2"
+    fi
+}
+
+# A `libpython3.<m>.so` with no `python3.<m>` package is a real WSGI host (a
+# pyenv/conda build, or an interpreter installed outside the package manager),
+# but the shim's `Depends:` still names the distro package, so the shim cannot be
+# installed there. It is a hint for the skip note, never a reason to offer it.
+python_lib_hint() { # <digits>
+    for libdir in /usr/lib /usr/lib64 /usr/lib/*-linux-gnu* /usr/local/lib; do
+        for candidate in "$libdir/libpython3.$1.so"*; do
+            [ -e "$candidate" ] && return 0
+        done
+    done
+    return 1
+}
+
+shims=; missing_python=; missing_php=; hinted_python=
+
+detect_shims() { # <deb|rpm>
+    fmt=$1
+    shims=; missing_python=; missing_php=; hinted_python=
+    for minor in 3.13 3.14; do
+        if runtime_installed "$fmt" "python$minor"; then
+            shims="$shims blastit-python-$minor"
+        else
+            missing_python="$missing_python${missing_python:+/}$minor"
+            python_lib_hint "$(printf '%s' "$minor" | tr -d .)" &&
+                hinted_python="$hinted_python${hinted_python:+/}$minor"
+        fi
+    done
+    for minor in 8.3 8.4 8.5 8.6; do
+        if php_runtime_installed "$fmt" "$minor"; then
+            shims="$shims blastit-php-$minor"
+        else
+            missing_php="$missing_php${missing_php:+/}$minor"
+        fi
+    done
+    shims=${shims# }
+}
+
+# One sentence per kind of skip, and one more when a libpython is present without
+# its distro package: that host could serve WSGI, but only after installing the
+# package the shim's `Depends:` names.
+note_skipped_shims() {
+    if [ -n "$missing_python" ]; then
+        note "this host has no CPython $missing_python (WSGI views need one), so those shims are not installed: static views are unaffected"
+    fi
+    if [ -n "$hinted_python" ]; then
+        note "this host carries a libpython $hinted_python shared object but no python$hinted_python package: the shim's Depends: names the package, so install python$hinted_python to make WSGI views work"
+    fi
+    if [ -n "$missing_php" ]; then
+        note "this host has no libphp $missing_php (PHP views need one), so those shims are not installed: static views are unaffected"
+    fi
+}
+
+# What the package manager would install for a shim, quoted in the warning when
+# it refuses: the row a user needs to decide whether the runtime is obtainable.
+shim_candidate() { # <deb|rpm> <package>
+    case "$1" in
+        deb)
+            command -v apt-cache >/dev/null 2>&1 || return 0
+            apt-cache policy "$2" 2>/dev/null </dev/null | sed -n 's/^ *Candidate: *//p' | head -n 1
+            ;;
+        rpm)
+            command -v "$rpm_tool" >/dev/null 2>&1 || return 0
+            "$rpm_tool" -q list --available "$2" 2>/dev/null </dev/null | awk 'NF { print $1; exit }'
+            ;;
+    esac
+}
+
 # --- repository installs -----------------------------------------------------
 
-# Switches the component of the source file this run created, never of one that
-# was already there: a `--nightly` install may edit its own line and nothing else.
-select_apt_component() { # <component> <before-list>
-    found=0
-    for file in /etc/apt/sources.list.d/*.list; do
-        [ -f "$file" ] || continue
-        grep -qxF "${file##*/}" "$2" 2>/dev/null && continue
-        grep -q 'offworld-nexus' "$file" 2>/dev/null || continue
-        found=1
-        grep -Eq '^deb .*[[:space:]][A-Za-z0-9._-]+$' "$file" ||
-            die 1 "cannot identify the component of $file: run 'grep offworld-nexus $file' and set it to $1 by hand"
-        as_root sed -i "/^deb /s/[[:space:]][A-Za-z0-9._-]*\$/ $1/" "$file"
-        grep -Eq "^deb .* $1\$" "$file" ||
-            die 1 "the repository setup left no '$1' component in $file: run 'grep offworld-nexus $file' and fix the source line, or install the release: $SELF"
-    done
-    [ "$found" -eq 1 ] ||
-        die 1 "the repository setup wrote no new offworld-nexus APT source: run 'grep -r offworld-nexus /etc/apt/sources.list.d' and fix it by hand, or install the release: $SELF"
-    note "APT component set to $1"
+# The canonical signed repository, written as data: a `Signed-By` keyring and a
+# deb822 `.sources` file apt verifies on every transaction. Nothing runs as root
+# that did not arrive over TLS from `apt.offworld-nexus.app`.
+setup_apt_repo() {
+    step "adding the signed Blastit APT repository ($APT_BASE, $(pick main nightly))"
+    as_root install -d -m 0755 /etc/apt/keyrings
+    fetch "$APT_BASE/keyring.gpg" "$work/offworld-nexus.gpg" ||
+        die 1 "cannot download $APT_BASE/keyring.gpg: check your network, or install the archive: $SELF --user"
+    as_root install -m 0644 "$work/offworld-nexus.gpg" /etc/apt/keyrings/offworld-nexus.gpg
+    {
+        printf 'Types: deb\n'
+        printf 'URIs: %s\n' "$APT_BASE"
+        printf 'Suites: any-distro\n'
+        printf 'Components: %s\n' "$(pick main nightly)"
+        printf 'Signed-By: /etc/apt/keyrings/offworld-nexus.gpg\n'
+    } >"$work/offworld-nexus.sources"
+    as_root install -m 0644 "$work/offworld-nexus.sources" \
+        /etc/apt/sources.list.d/offworld-nexus.sources
 }
 
-# Snapshots the source directory, then runs the vendor's setup script, so the
-# component switch above can tell this run's file from a pre-existing one.
-apt_sources_before() {
-    ls /etc/apt/sources.list.d 2>/dev/null >"$work/sources.before" || : >"$work/sources.before"
-}
-
-setup_cloudsmith() { # <deb|rpm>
-    if [ "$1" = deb ]; then
-        repo=${CLOUDSMITH_APT_REPO:-apt}; script=bash.deb.sh
-        step "adding the signed Blastit APT repository (hosted by Cloudsmith)"
-    else
-        # RPM repos carry no components: the nightly channel is its own repo, and
-        # the release job must publish to the name this reads.
-        repo=$(pick "${CLOUDSMITH_RPM_REPO:-rpm}" "${CLOUDSMITH_RPM_NIGHTLY_REPO:-rpm-nightly}")
-        script=bash.rpm.sh
-        step "adding the signed Blastit RPM repository (hosted by Cloudsmith)"
-    fi
-    fetch "$CLOUDSMITH_PUBLIC/$repo/$script" "$work/$script" ||
-        die 1 "cannot download $CLOUDSMITH_PUBLIC/$repo/$script: check your network, or install the archive: $SELF --user"
-    if [ -n "${BLASTIT_SETUP_SCRIPT_SHA256:-}" ]; then
-        verify_archive "$work/$script" "$script" "$(printf '%s' "$BLASTIT_SETUP_SCRIPT_SHA256" | tr 'A-F' 'a-f')"
-    fi
-    note "running Cloudsmith's repository setup script (HTTPS, not signature-verified; the packages it enables are GPG-verified)"
-    [ "$1" != deb ] || apt_sources_before
-    as_root sh "$work/$script" ||
-        die 1 "the Cloudsmith repository setup failed: re-run this installer with sudo, or install the archive: $SELF --user"
-    if [ "$1" = deb ] && [ "$nightly" -eq 1 ]; then select_apt_component nightly "$work/sources.before"; fi
-}
-
-setup_forgejo() { # <deb|rpm>
-    base="${BLASTIT_FORGEJO_URL:-$FORGEJO_DEFAULT}/api/packages/$FORGEJO_OWNER/$1"
-    if [ "$1" = deb ]; then step "adding the signed Blastit APT mirror (hosted by Forgejo)"
-    else step "adding the signed Blastit RPM mirror (hosted by Forgejo)"
-    fi
-    fetch "$base/public.key" "$work/forgejo-$1.key" ||
-        die 1 "no public key at $base/public.key: nothing to trust, so nothing is installed — re-run without --mirror to use the default signed repository: $SELF"
-    if [ "$1" = deb ]; then
-        command -v gpg >/dev/null 2>&1 || die 1 "gpg is needed to trust the Forgejo key: install gnupg, then re-run"
-        as_root install -d -m 0755 /usr/share/keyrings
-        as_root sh -c 'gpg --batch --yes --dearmor --output "$1" "$2"' _ \
-            /usr/share/keyrings/blastit-archive-keyring.gpg "$work/forgejo-deb.key" ||
-            die 1 "cannot write the Forgejo key into /usr/share/keyrings: re-run with sudo"
-        printf 'deb [signed-by=/usr/share/keyrings/blastit-archive-keyring.gpg] %s any-distro %s\n' \
-            "$base" "$(pick main nightly)" >"$work/blastit.list"
-        as_root install -m 0644 "$work/blastit.list" /etc/apt/sources.list.d/blastit.list
-    else
-        as_root rpm --import "$work/forgejo-rpm.key" || die 1 "cannot import the Forgejo RPM key: re-run with sudo"
-        printf '[blastit]\nname=Blastit (Forgejo mirror)\nbaseurl=%s\nenabled=1\ngpgcheck=1\n' \
-            "$base" >"$work/blastit.repo"
-        as_root install -m 0644 "$work/blastit.repo" /etc/yum.repos.d/blastit.repo
-    fi
+# The same repository for dnf: `gpgcheck` verifies the package signature and
+# `repo_gpgcheck` verifies the repository metadata, which is the RPM half of the
+# `.sources` file's `Signed-By`.
+setup_rpm_repo() {
+    channel=$(pick stable nightly)
+    step "adding the signed Blastit RPM repository ($RPM_BASE/$channel)"
+    {
+        printf '[offworld-nexus]\n'
+        printf 'name=Blastit (Offworld Nexus)\n'
+        printf 'baseurl=%s/%s/$basearch/\n' "$RPM_BASE" "$channel"
+        printf 'enabled=1\n'
+        printf 'gpgcheck=1\n'
+        printf 'repo_gpgcheck=1\n'
+        printf 'gpgkey=%s/gpg.key\n' "$RPM_BASE"
+    } >"$work/offworld-nexus.repo"
+    as_root install -m 0644 "$work/offworld-nexus.repo" \
+        /etc/yum.repos.d/offworld-nexus.repo
 }
 
 install_repo_deb() {
     confirm "Install Blastit $(pick "$version" nightly) system-wide from the signed Blastit APT repository? (needs sudo; later updates are plain apt-get upgrade)" ||
         die 1 "cancelled: nothing was installed; re-run with: $SELF -y"
-    if [ "$mirror" = forgejo ]; then setup_forgejo deb; else setup_cloudsmith deb; fi
-    step "updating the package list, then installing blastit"
-    as_root apt-get update || die 1 "apt-get update failed: run 'sudo apt-get update' to see why, then re-run this installer"
+    setup_apt_repo
+    detect_shims deb
+    note_skipped_shims
+    # Core and shims are pinned together: a shim built against another core is a
+    # `Depends: blastit (= <version>)` the package manager would refuse anyway.
     spec=$PKG${pin:+=$pin}
+    plan=$spec
+    for shim in $shims; do plan="$plan $shim${pin:+=$pin}"; done
+    step "updating the package list, then installing $plan with apt-get"
+    as_root apt-get update || die 1 "apt-get update failed: run 'sudo apt-get update' to see why, then re-run this installer"
+    installed_shims=
+    # The core goes in **first and alone**: a shim whose runtime dependency this
+    # host cannot satisfy must never take `blastit` down with it. Each shim is
+    # then its own transaction, and a refusal is a warning, not an abort.
     as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$spec" ||
         die 1 "apt-get could not install $spec: check 'apt-cache policy $PKG' (components: main, nightly), or install without --version"
+    for shim in $shims; do
+        shim_spec=$shim${pin:+=$pin}
+        step "installing $shim_spec with apt-get"
+        if as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$shim_spec"; then
+            installed_shims="$installed_shims $shim"
+        else
+            candidate=$(shim_candidate deb "$shim")
+            warn "$shim_spec could not be installed (apt-get candidate: ${candidate:-none}): blastit is installed and static views work; that shim's runtime is the missing dependency — install it and re-run this installer"
+        fi
+    done
+    installed_shims=${installed_shims# }
     report_installed
 }
 
 install_repo_rpm() {
     confirm "Install Blastit $(pick "$version" nightly) system-wide from the signed Blastit RPM repository? (needs sudo; later updates are plain $rpm_tool upgrade)" ||
         die 1 "cancelled: nothing was installed; re-run with: $SELF -y"
-    if [ "$mirror" = forgejo ]; then setup_forgejo rpm; else setup_cloudsmith rpm; fi
+    setup_rpm_repo
+    detect_shims rpm
+    note_skipped_shims
     spec=$PKG${pin:+-$pin}
-    step "installing blastit with $rpm_tool"
+    plan=$spec
+    for shim in $shims; do plan="$plan $shim${pin:+-$pin}"; done
+    step "updating the package list, then installing $plan with $rpm_tool"
+    installed_shims=
+    # Same split as the APT path: the core first, then one shim at a time, and a
+    # shim the repository cannot resolve warns instead of leaving the user with
+    # nothing installed.
     as_root "$rpm_tool" install -y "$spec" ||
         die 1 "$rpm_tool could not install $spec: check '$rpm_tool --showduplicates list $PKG', or install without --version"
+    for shim in $shims; do
+        shim_spec=$shim${pin:+-$pin}
+        step "installing $shim_spec with $rpm_tool"
+        if as_root "$rpm_tool" install -y "$shim_spec"; then
+            installed_shims="$installed_shims $shim"
+        else
+            candidate=$(shim_candidate rpm "$shim")
+            warn "$shim_spec could not be installed ($rpm_tool candidate: ${candidate:-none}): blastit is installed and static views work; that shim's runtime is the missing dependency — install it and re-run this installer"
+        fi
+    done
+    installed_shims=${installed_shims# }
     report_installed
 }
 
@@ -447,6 +580,9 @@ report_installed() {
     else
         warn "blastit is installed but not on PATH in this shell: open a new shell, or check 'command -v blastit'"
     fi
+    # Only what was actually handed to the package manager: a shim that was
+    # detected but not installed must not be claimed.
+    [ -z "${installed_shims:-}" ] || note "language shims installed: $installed_shims"
     note "next: blastit dev — https://offworldnexus.github.io/blastit/getting-started/"
     case "$pkgmgr" in
         deb) note "upgrade later with: sudo apt-get update && sudo apt-get install --only-upgrade $PKG" ;;
@@ -554,23 +690,100 @@ install_archive() {
 
 # --- local package files -----------------------------------------------------
 
+# The sibling shim packages of the core package in `$2`, for the runtimes this
+# host has. The core's own file name carries the version and architecture
+# (`blastit_<ver>_amd64.deb`, `blastit-<ver>-<rel>.x86_64.rpm`), so a shim is
+# exactly `<shim><same version and arch>` beside it. A shim the host could run
+# whose sibling is absent is recorded, because the install must say so rather
+# than claim it.
+siblings=; local_shims=; missing_siblings=
+
+sibling_shims() { # <deb|rpm> <core path>
+    siblings=; local_shims=; missing_siblings=
+    dir=${2%/*}; [ "$dir" = "$2" ] && dir=.
+    base=${2##*/}
+    version_part=; arch_part=
+    case "$1" in
+        deb)
+            case "$base" in blastit_*_*.deb) ;; *) return 0 ;; esac
+            rest=${base%.deb}; rest=${rest#blastit_}
+            arch_part=${rest##*_}
+            version_part=${rest%_"$arch_part"}
+            ;;
+        rpm)
+            case "$base" in blastit-[0-9]*.*.rpm) ;; *) return 0 ;; esac
+            rest=${base%.rpm}
+            arch_part=${rest##*.}
+            version_part=${rest%.*}
+            version_part=${version_part#blastit-}
+            ;;
+    esac
+    [ -n "$version_part" ] && [ -n "$arch_part" ] || return 0
+    for shim in $shims; do
+        case "$1" in
+            deb) candidate="$dir/${shim}_${version_part}_${arch_part}.deb" ;;
+            rpm) candidate="$dir/${shim}-${version_part}.${arch_part}.rpm" ;;
+        esac
+        if [ -f "$candidate" ]; then
+            siblings="$siblings $candidate"
+            local_shims="$local_shims $shim"
+        else
+            missing_siblings="$missing_siblings $shim"
+        fi
+    done
+    siblings=${siblings# }; local_shims=${local_shims# }; missing_siblings=${missing_siblings# }
+    return 0
+}
+
 install_local_file() { # <deb|rpm> <path> <hint>
     [ -f "$2" ] || die 1 "$2 does not exist$3"
+    pkg=$2
+    detect_shims "$1"
+    note_skipped_shims
+    sibling_shims "$1" "$2"
+    shims_list=$siblings
+    # What the transaction installs, and nothing else: `report_installed` claims
+    # only these, so a shim whose sibling package is absent is never reported as
+    # installed.
+    installed_shims=$local_shims
+    # A locally built package carries no publisher signature. Fedora (F39+) sets
+    # `%_pkgverify_level all`, so `rpm -Uvh` refuses one; the escape is explicit,
+    # opt-in, and read **only** here — a repository install's signature check is
+    # never switched off.
+    accept_unsigned=0
+    [ "${BLASTIT_PKG_ACCEPT_UNSIGNED:-}" = 1 ] && accept_unsigned=1
     if [ "$1" = deb ]; then
         command -v dpkg >/dev/null 2>&1 ||
             die 1 "dpkg is not installed: a .deb needs a Debian-based host (or install the archive: $SELF --user)"
         pkgmgr=deb
-        [ "$privilege" != none ] || die 1 "installing a package needs root. Run: sudo dpkg -i \"$2\""
-        step "installing $2 with dpkg -i"
-        as_root dpkg -i "$2" || die 1 "dpkg refused $2. Run: sudo dpkg -i \"$2\" to see the full output"
+        [ "$privilege" != none ] || die 1 "installing a package needs root. Run: sudo dpkg -i \"$2\" $shims_list"
+        [ "$accept_unsigned" -eq 0 ] ||
+            note "BLASTIT_PKG_ACCEPT_UNSIGNED has nothing to switch off with dpkg: dpkg -i does not verify package signatures"
+        step "installing $pkg with dpkg -i${shims_list:+ and the shims this host can run}"
+        # shellcheck disable=SC2086 # `shims_list` is the package list, split on spaces
+        as_root dpkg -i "$pkg" $shims_list ||
+            die 1 "dpkg refused $2. Run: sudo dpkg -i \"$2\" $shims_list to see the full output"
     else
         command -v rpm >/dev/null 2>&1 ||
             die 1 "rpm is not installed: a .rpm needs a Fedora/RHEL-based host (or install the archive: $SELF --user)"
         pkgmgr=rpm
-        [ "$privilege" != none ] || die 1 "installing a package needs root. Run: sudo rpm -Uvh --replacepkgs \"$2\""
-        step "installing $2 with rpm -Uvh --replacepkgs"
-        as_root rpm -Uvh --replacepkgs "$2" ||
-            die 1 "rpm refused $2. Run: sudo rpm -Uvh --replacepkgs \"$2\" to see the full output"
+        rpm_flags=--replacepkgs
+        if [ "$accept_unsigned" -eq 1 ]; then
+            rpm_flags="--nosignature --replacepkgs"
+            warn "$pkg is unsigned: installing it without a signature check because BLASTIT_PKG_ACCEPT_UNSIGNED=1 — only for a package you built yourself; a repository install always verifies signatures"
+        fi
+        [ "$privilege" != none ] || die 1 "installing a package needs root. Run: sudo rpm -Uvh $rpm_flags \"$2\" $shims_list"
+        step "installing $pkg with rpm -Uvh $rpm_flags${shims_list:+ and the shims this host can run}"
+        # shellcheck disable=SC2086 # `rpm_flags` and `shims_list` are option/package lists
+        as_root rpm -Uvh $rpm_flags "$pkg" $shims_list ||
+            die 1 "rpm refused $2. Run: sudo rpm -Uvh $rpm_flags \"$2\" $shims_list to see the full output"
+    fi
+    if [ -n "$missing_siblings" ]; then
+        case "$1" in
+            deb) missing_hint="sudo apt-get install $missing_siblings" ;;
+            rpm) missing_hint="sudo ${rpm_tool:-dnf} install $missing_siblings" ;;
+        esac
+        warn "no sibling package for $missing_siblings in $dir, so it was not installed: install it with: $missing_hint"
     fi
     report_installed
 }
@@ -604,11 +817,11 @@ main() {
     fi
 
     if [ -n "${BLASTIT_DEB:-}" ]; then
-        install_local_file deb "$BLASTIT_DEB" ": build one with 'make packages', or point BLASTIT_DEB at the file"
+        install_local_file deb "$BLASTIT_DEB" ": build one with 'make packages', or point BLASTIT_DEB at the core .deb"
         return
     fi
     if [ -n "${BLASTIT_RPM:-}" ]; then
-        install_local_file rpm "$BLASTIT_RPM" ": build one with 'make packages', or point BLASTIT_RPM at the file"
+        install_local_file rpm "$BLASTIT_RPM" ": build one with 'make packages', or point BLASTIT_RPM at the core .rpm"
         return
     fi
     if [ -n "$develop_ref" ] || [ "$user_install" -eq 1 ] || [ -n "$prefix" ]; then

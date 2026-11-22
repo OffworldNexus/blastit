@@ -282,6 +282,8 @@ packages: py-sapi php-sapi ## Build the .deb + .rpm from a manylinux bundle (slo
 		--bundle "$(PACKAGES_PREFIX)" --out "$(PACKAGES_OUT)" \
 		--max-glibc "$(PACKAGES_SHIM_FLOOR)"
 
+# The output directory holds the seven-package set, so the glob must be the core
+# package: `*.deb` would hand `newest` a `blastit-python-3.13_…` shim.
 packages-test: ## The deb/rpm legs of `make e2e-packaging` for the packages under $(PACKAGES_OUT) (Docker, slow)
 	@set -eu; \
 	newest() { \
@@ -289,7 +291,7 @@ packages-test: ## The deb/rpm legs of `make e2e-packaging` for the packages unde
 			| while IFS= read -r file; do printf '%s %s\n' "$$(stat -c %Y "$$file")" "$$file"; done \
 			| sort -nr | head -n 1 | cut -d' ' -f2-; \
 	}; \
-	deb=$$(newest '*.deb'); rpm=$$(newest '*.rpm'); \
+	deb=$$(newest 'blastit_[0-9]*_*.deb'); rpm=$$(newest 'blastit-[0-9]*.*.rpm'); \
 	if [ -z "$$deb" ] && [ -z "$$rpm" ]; then \
 		echo "packages-test: no package under $(PACKAGES_OUT): run \`make packages\` first" >&2; \
 		exit 1; \

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the one §6.1 bundle a `.deb`/`.rpm` is packaged from (`MB.42.3.1`,
-# `universal-distribution.md` §6.1).
+# Builds the one §6.1 bundle the seven `.deb`s and seven `.rpm`s are packaged
+# from (`MB.42.3.1`, `MB.65`, `universal-distribution.md` §6.1).
 #
 #   scripts/build-package-bundle.sh --out /tmp/opencode/blastit-packages/bundle
 #
@@ -62,9 +62,9 @@ usage: scripts/build-package-bundle.sh --out <dir> [--arch x86_64|aarch64]
   --bundle-floor  ceiling for the whole bundle, every shim included (the matrix's
                   `--shim-floor`: the oldest advertised distribution)
 
-Both builders take this bundle next (`build-deb.sh`, `build-rpm.sh`), and the
-package's own ceiling is the matrix's shim floor:
-`scripts/platform_matrix.py --shim-floor`.
+Both builders take this bundle next (`build-deb.sh` writes the seven `.deb`s,
+`build-rpm.sh` the seven `.rpm`s), and each package's own ceiling is the matrix's
+shim floor: `scripts/platform_matrix.py --shim-floor`.
 USAGE
     exit 2
 }

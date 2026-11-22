@@ -45,8 +45,10 @@ Usage (stdlib only):
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -131,15 +133,43 @@ PY_MINORS = {"3.14": "314", "3.13": "313"}
 # The two native package formats (`MB.42.3.1`), one artifact family each. The
 # `pattern` is the filename `scripts/build-{deb,rpm}.sh` writes, with the placeholders
 # a caller substitutes; `image` is where `e2e/run_packaging.py` installs it.
+#
+# `pattern` is the **core** package and stays that way: every consumer that needs
+# "the package" (`scripts/install_matrix.sh`, `e2e/run_packaging.py`'s
+# `BLASTIT_DEB`/`BLASTIT_RPM`) resolves the core by it, and `install.sh` finds the
+# sibling shims in the same directory. `set` is the whole seven-package set
+# (`MB.65`): the interpreter-free core plus one shim per interpreter minor, named
+# in `packaging/package-set.sh`. `set_glob` matches all seven in one directory, so
+# a set that lost a shim is a missing name rather than an unnoticed count.
 PACKAGE_FORMATS = {
     "deb": {
         "arch": {"x86_64": "amd64", "aarch64": "arm64"},
         "pattern": "blastit_<version>_{package_arch}.deb",
+        "set": (
+            "blastit",
+            "blastit-python-3.13",
+            "blastit-python-3.14",
+            "blastit-php-8.3",
+            "blastit-php-8.4",
+            "blastit-php-8.5",
+            "blastit-php-8.6",
+        ),
+        "set_glob": "blastit*_{package_arch}.deb",
         "image": "debian:trixie",
     },
     "rpm": {
         "arch": {"x86_64": "x86_64", "aarch64": "aarch64"},
         "pattern": "blastit-<version>-<release>.{package_arch}.rpm",
+        "set": (
+            "blastit",
+            "blastit-python-3.13",
+            "blastit-python-3.14",
+            "blastit-php-8.3",
+            "blastit-php-8.4",
+            "blastit-php-8.5",
+            "blastit-php-8.6",
+        ),
+        "set_glob": "blastit-*.{package_arch}.rpm",
         "image": "rockylinux:9",
     },
 }
@@ -178,8 +208,12 @@ INSTALL_LEGS = (
         "installer": "apt",
         # The one leg that also runs the WSGI gate: Debian 13 ships the
         # `python3-pytest` + `libpython3.13` the packaged shim needs, so the
-        # package's own `python/blastit` tree is imported by a real gate.
-        "modes": "install static wsgi",
+        # package's own `python/blastit` tree is imported by a real gate. It is
+        # also the only leg with the `php` mode: trixie has `libphp8.4-embed`, so
+        # installing it first exercises `blastit-php-8.4`'s hard
+        # `Depends: libphp8.4-embed` for real (and 8.6, which trixie lacks, must
+        # stay uninstalled).
+        "modes": "install static wsgi php",
     },
     {
         "name": "ubuntu-22.04",
@@ -615,6 +649,12 @@ def package_legs() -> list[dict]:
             "libc": "gnu",
             "package_arch": spec["arch"][leg["arch"]],
             "pattern": spec["pattern"],
+            # The whole seven-package set this build writes, and one glob that
+            # matches it in a single directory (`MB.65`). `pattern` above is the
+            # core package; a consumer that installs "the package" gets the core
+            # and `docs/install.sh` installs the shims this host can run.
+            "set": list(spec["set"]),
+            "set_glob": spec["set_glob"].format(package_arch=spec["arch"][leg["arch"]]),
             "image": spec["image"],
             "builder_image": LIBCS["gnu"]["builder_image"].format(arch=leg["arch"]),
             # `<major>_<minor>`: what `build-{deb,rpm}.sh --max-glibc` is given.
@@ -651,8 +691,12 @@ def install_legs() -> list[dict]:
             "modes": leg["modes"],
             "arch": arch,
             # The filename half `build-{deb,rpm}.sh` writes for this arch, so a
-            # leg picks its package by the table rather than by a glob.
+            # leg picks its package by the table rather than by a glob. The core
+            # package is `pattern`; `set_glob` is the seven it installs with.
             "package_arch": PACKAGE_FORMATS[leg["format"]]["arch"][arch],
+            "set_glob": PACKAGE_FORMATS[leg["format"]]["set_glob"].format(
+                package_arch=PACKAGE_FORMATS[leg["format"]]["arch"][arch]
+            ),
             "runs_on": ARCHES[arch]["runs_on"],
         }
         for leg in INSTALL_LEGS
@@ -929,6 +973,26 @@ def reaches_sentence() -> str:
 # --- the output --------------------------------------------------------------
 
 
+def package_set_rows(*args: str) -> list[list[str]]:
+    """Rows of `packaging/package-set.sh`, the one table of package names (`MB.65`).
+
+    The builders execute that file; this module reads it through its CLI, so the
+    gate can diff the matrix's own copy (`PACKAGE_FORMATS[].set`).
+    """
+    result = subprocess.run(
+        ["bash", str(REPO / "packaging" / "package-set.sh"), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "scripts/platform_matrix.py: `packaging/package-set.sh "
+            f"{' '.join(args)}` failed: {result.stderr.strip()}"
+        )
+    return [line.split("\t") for line in result.stdout.splitlines() if line]
+
+
 def check(problems: list[str]) -> None:
     ids = [leg["id"] for leg in LEGS]
     if len(set(ids)) != len(ids):
@@ -1125,6 +1189,96 @@ def check(problems: list[str]) -> None:
                 "cannot both be right"
             )
 
+    # The seven-package set (`MB.65`): one interpreter-free core plus one shim per
+    # interpreter minor, and a `set_glob` that really matches all seven. A glob
+    # that missed a shim would let a directory hold a package nobody checks, and
+    # a `pattern` that named a shim would install the wrong package first.
+    for fmt, spec in PACKAGE_FORMATS.items():
+        names = list(spec["set"])
+        where = f"PACKAGE_FORMATS {fmt}"
+        if len(names) != 7:
+            problems.append(
+                f"{where}: names {len(names)} packages, a set is the core + 2 CPython "
+                "+ 4 PHP shims"
+            )
+        if not names or names[0] != "blastit":
+            problems.append(f"{where}: the first package is the core `blastit`")
+        if len(set(names)) != len(names):
+            problems.append(f"{where}: a package name is declared twice: {names}")
+        for minor in ("3.13", "3.14"):
+            if f"blastit-python-{minor}" not in names:
+                problems.append(f"{where}: no blastit-python-{minor} shim package")
+        for minor in ("8.3", "8.4", "8.5", "8.6"):
+            if f"blastit-php-{minor}" not in names:
+                problems.append(f"{where}: no blastit-php-{minor} shim package")
+        for package_arch in spec["arch"].values():
+            glob = spec["set_glob"].format(package_arch=package_arch)
+            for name in names:
+                filename = (
+                    f"{name}_1.0_{package_arch}.deb"
+                    if fmt == "deb"
+                    else f"{name}-1.0-1.{package_arch}.rpm"
+                )
+                if not fnmatch.fnmatchcase(filename, glob):
+                    problems.append(
+                        f"{where}: {filename} is not matched by set_glob {glob}: "
+                        "a directory could hold a package the set check cannot see"
+                    )
+            core = (
+                f"blastit_1.0_{package_arch}.deb"
+                if fmt == "deb"
+                else f"blastit-1.0-1.{package_arch}.rpm"
+            )
+            pattern = (
+                spec["pattern"]
+                .replace("<version>", "1.0")
+                .replace("<release>", "1")
+                .replace("{package_arch}", package_arch)
+            )
+            if pattern != core:
+                problems.append(
+                    f"{where}: pattern {pattern} is not the core package {core}: a "
+                    "consumer installs `pattern` and expects the interpreter-free core"
+                )
+
+    # The seven names exist in more than one place (`MB.65`):
+    # `packaging/package-set.sh` is the table the builders read, while this matrix
+    # and `scripts/rpm/blastit.spec` (asserted by `package-set.sh --check`) keep a
+    # copy, because rpmbuild and a Python module cannot run a shell script.
+    # `--check` diffs the matrix's copy here, so a rename that lands in one of them
+    # names the package that drifted. `e2e/run_packaging.py` keeps no copy: it runs
+    # `--shims` at test time, so there is nothing there to drift.
+    table = [row[0] for row in package_set_rows("--names")]
+    shim_globs = {row[0]: row[1] for row in package_set_rows("--shims")}
+    for fmt, spec in PACKAGE_FORMATS.items():
+        declared = list(spec["set"])
+        if declared != table:
+            missing = [name for name in table if name not in declared]
+            extra = [name for name in declared if name not in table]
+            detail = []
+            if missing:
+                detail.append("missing " + ", ".join(missing))
+            if extra:
+                detail.append("not in packaging/package-set.sh: " + ", ".join(extra))
+            if not missing and not extra:
+                detail.append("the same names in a different order")
+            problems.append(
+                f"PACKAGE_FORMATS {fmt}: `set` has drifted from "
+                f"packaging/package-set.sh --names ({'; '.join(detail)})"
+            )
+    for name, glob in shim_globs.items():
+        minor = name.rsplit("-", 1)[-1]
+        expected = (
+            py_shim_name(minor, "x86_64", "gnu")
+            if name.startswith("blastit-python-")
+            else shim_name(minor, "x86_64", "gnu")
+        )
+        if not fnmatch.fnmatchcase(expected, glob):
+            problems.append(
+                f"packaging/package-set.sh: {name} owns {glob}, which does not match "
+                f"{expected}: that package would ship no file"
+            )
+
     # Every declared artifact has a place in PROVEN or it is a promise; every
     # PROVEN key names an artifact the matrix actually builds.
     declared_keys = (
@@ -1174,9 +1328,9 @@ def check(problems: list[str]) -> None:
             )
         modes = leg["modes"].split()
         for mode in modes:
-            if mode not in ("install", "static", "wsgi"):
+            if mode not in ("install", "static", "wsgi", "php"):
                 problems.append(
-                    f"{where}: unknown smoke mode {mode!r} (install, static, wsgi)"
+                    f"{where}: unknown smoke mode {mode!r} (install, static, wsgi, php)"
                 )
         if "install" not in modes:
             problems.append(
@@ -1187,6 +1341,15 @@ def check(problems: list[str]) -> None:
                 f"{where}: runs the WSGI gate in {leg['image']}, which ships no CPython "
                 "3.13/3.14 (the `debian:trixie` leg is the one image that does), so the "
                 "leg would import through an interpreter the packaged shim never binds to"
+            )
+        # `php`: the leg installs the embed package the shim's hard `Depends:`
+        # names before the installer runs, so a package set whose `Depends:` is
+        # wrong fails here. Only `debian:trixie` in this table has
+        # `libphp8.4-embed` in its own repositories.
+        if "php" in modes and leg["image"] != "debian:trixie":
+            problems.append(
+                f"{where}: runs the PHP gate in {leg['image']}, which has no "
+                "`libphp8.4-embed`: the leg would prove a dependency it never installed"
             )
 
 
@@ -1305,10 +1468,21 @@ def summary(family: str = "") -> str:
         for leg in package_legs():
             node = PROVEN.get(("packages", leg["arch"], leg["format"]))
             lines.append(
-                f"| `{leg['pattern']}` ({leg['format']}) | {leg['image']} on "
-                f"{leg['runs_on']} | {'proved by ' + node if node else 'declared, unbuilt'}; "
+                f"| `{leg['pattern']}` + its 6 shims (`{leg['set_glob']}`) "
+                f"({leg['format']}) | {leg['image']} on {leg['runs_on']} | "
+                f"{'proved by ' + node if node else 'declared, unbuilt'}; "
                 f"bundle ceiling glibc {leg['bundle_ceiling']}, binaries {leg['binary_floor']} |"
             )
+        lines.append("")
+        lines.append(
+            "The seven binary packages one architecture writes (`packaging/package-set.sh`), "
+            "the same set in both formats: "
+            + ", ".join(f"`{name}`" for name in package_legs()[0]["set"])
+            + ". The core carries `blastit`, `blastit-lsp`, `LICENSE` and "
+            "`python/blastit/*.py`; each shim carries exactly one `libblastit_*.so` and "
+            "depends on the core at the same version, so a host installs the shims its "
+            "own interpreters can load (`docs/install.sh` detects them)."
+        )
     if wants("install"):
         for leg in install_legs():
             lines.append(

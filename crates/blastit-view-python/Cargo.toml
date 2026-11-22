@@ -11,14 +11,14 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
+blastit-frame = { version = "0.2.1", path = "../blastit-frame" }
 # The child sequence (`enter`), the fork's `Fork` and the limits a view child
 # runs under: the WSGI fork composes them here, and `blastit-sys` is the crate
 # that owns their order (design §4.4 D1).
-blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
+blastit-sys = { version = "0.2.1", path = "../blastit-sys" }
 # The `view.chan` transport: frames, credit windows and the loaded-file codec.
 # This crate is the interpreter half of a view, never a second framing.
-blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+blastit-view = { version = "0.2.1", path = "../blastit-view", default-features = false }
 # No `auto-initialize`: a view process is forked from an interpreter that
 # `init` has already initialised (§4, §9.3), and library code must never
 # start or stop one.

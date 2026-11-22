@@ -115,7 +115,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
 name = "blastit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-dbproxy",
  "blastit-env",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-dbproxy"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "blastit-events",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-env"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-manifest",
  "percent-encoding",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-events"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde_json",
  "thiserror 2.0.21",
@@ -179,14 +179,14 @@ dependencies = [
 
 [[package]]
 name = "blastit-frame"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "blastit-http"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-events",
  "blastit-frame",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-ingress"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "percent-encoding",
  "serde",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-lsp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-manifest",
  "serde_json",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-manifest"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-ingress",
  "blastit-sqlpolicy",
@@ -228,18 +228,18 @@ dependencies = [
 
 [[package]]
 name = "blastit-php-sapi"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "blastit-py-sapi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-sys",
 ]
 
 [[package]]
 name = "blastit-py-shim"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-frame",
  "blastit-py-sapi",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-scheduler"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-events",
  "blastit-frame",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-sqlpolicy"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "pg_query",
  "serde",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-sys"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "rustix 1.1.5",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-view"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-frame",
  "blastit-sys",
@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-view-php"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-frame",
  "blastit-manifest",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-view-python"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-frame",
  "blastit-sys",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "blastit-view-static"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "blastit-manifest",
  "blastit-view",

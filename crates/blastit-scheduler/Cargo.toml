@@ -21,18 +21,18 @@ default = ["static"]
 static = ["dep:blastit-view-static"]
 
 [dependencies]
-blastit-events = { version = "0.2.0", path = "../blastit-events" }
-blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
-blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
-blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+blastit-events = { version = "0.2.1", path = "../blastit-events" }
+blastit-frame = { version = "0.2.1", path = "../blastit-frame" }
+blastit-ingress = { version = "0.2.1", path = "../blastit-ingress" }
+blastit-manifest = { version = "0.2.1", path = "../blastit-manifest" }
 # The request-target decoder (`path`) is the transport crate's, and only its:
 # `default-features = false` because `blastit-view` still defaults `python`,
 # and an edge with defaults on would link `libpython` into the standalone
 # binary (`LESSONS.md` `MB.17`).
-blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+blastit-view = { version = "0.2.1", path = "../blastit-view", default-features = false }
 # The static responder: resolution, the rewrite order and the head builder.
 # Optional, and never the reverse edge (D3/D4).
-blastit-view-static = { version = "0.2.0", path = "../blastit-view-static", optional = true }
+blastit-view-static = { version = "0.2.1", path = "../blastit-view-static", optional = true }
 rustix = { version = "1.1.5", features = ["net", "process", "fs"] }
 serde_json = "1.0.154"
 thiserror = "2.0.21"

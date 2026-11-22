@@ -20,7 +20,13 @@ name: Publish
 #      from the `pypi` GitHub environment;
 #   4. `release` creates and pushes the annotated `v<version>` git tag on the
 #      validated commit and publishes the GitHub Release with artifacts and the
-#      `CHANGELOG.md` notes attached.
+#      `CHANGELOG.md` notes attached;
+#   5. `release` then **dispatches `packages.yml` on that tag** (`gh workflow run
+#      packages.yml --ref v<version>`). GitHub starts no workflow run for an
+#      event created with the repository's `GITHUB_TOKEN` — the tag above is
+#      pushed by it, so `on: push: tags` in `packages.yml` never fires, and
+#      `workflow_dispatch` is the documented exception. That omission is exactly
+#      why `v0.2.0`'s packages were never built.
 #
 # Two manual paths remain:
 #   * `workflow_dispatch` rehearses the build (and with `dry-run` unchecked uploads
@@ -52,10 +58,9 @@ on:
       - ".github/workflows/publish-pypi.yml"
 
 concurrency:
-  # One group with `.github/workflows/packages.yml`: both run from the same tag
-  # push and both reseal the GitHub release's `SHA256SUMS`, so they must never
-  # overlap — a group each is how the packages job resealed a checksum file that
-  # this workflow then overwrote with one that has no `.deb`/`.rpm` in it.
+  # One group with `.github/workflows/packages.yml`: `release` dispatches that
+  # workflow on the tag, and `cancel-in-progress: false` queues the dispatched run
+  # behind this one, so a tag never gets two package bundles built at once.
   group: release-${{ github.ref }}
   # Never cancel a run on `develop` or a `v*` tag — either can be halfway through
   # an upload, and queuing serialises back-to-back pushes to `develop` so the
@@ -133,7 +138,7 @@ jobs:
                       echo "version=$version"
                       echo "ref_for_links=$tag"
                   } >> "$GITHUB_OUTPUT"
-                  echo "New release $tag landed on develop: validating CI/Docs/Live and publishing."
+                  echo "New release $tag landed on develop: validating CI/Docs and publishing."
               fi
           else
               scripts/check-release-tag.sh "$tag"
@@ -939,8 +944,12 @@ jobs:
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/develop' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
+    # `contents: write` creates the tag and the GitHub release; `actions: write`
+    # is what allows the dispatch below — asking GitHub for a run of another
+    # workflow is an Actions write, not a contents write.
     permissions:
       contents: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1062,3 +1071,51 @@ jobs:
                 --title "blastit $RELEASE_TAG" \
                 --notes-file notes.md
           fi
+
+      # GitHub's documented rule: "When you use the repository's `GITHUB_TOKEN` to
+      # perform tasks, events triggered by the `GITHUB_TOKEN` ... will not create
+      # a new workflow run", with a stated exception for `workflow_dispatch` and
+      # `repository_dispatch`. On the `develop` path the tag above is pushed by
+      # `GITHUB_TOKEN`, so `packages.yml`'s `on: push: tags` is never fired — that
+      # is exactly why `v0.2.0`'s packages were never built — and the run is
+      # requested explicitly, on the tag ref.
+      #
+      # On a **human** `v*` tag push the tag event starts `packages.yml` natively,
+      # so this step is gated to `develop`: dispatching there as well would build
+      # and publish the same tag twice.
+      #
+      # Only this job reaches here, and only on the release path: its `if`
+      # requires `github.event_name == 'push'`, so a rehearsal (PR or dispatch)
+      # can never ask for packages.
+      - name: Dispatch Packages on the new tag
+        if: github.ref == 'refs/heads/develop'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.guard.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Five seconds of slack absorbs the runner's clock running ahead of the
+          # API's `createdAt`; the filter itself is what keeps a **re-run** of this
+          # job from accepting the run the previous attempt left behind.
+          now=$(date -u -d '-5 seconds' +%FT%TZ)
+          gh workflow run packages.yml --ref "$RELEASE_TAG"
+          deadline=$(( $(date +%s) + 60 ))
+          while :; do
+              # A dispatch on the tag reports the tag as its `head_branch`; the
+              # event filter keeps a `push` run (the human-tag path, which this
+              # step never dispatches) from being mistaken for the one asked for.
+              dispatched=$(gh run list --workflow packages.yml --limit 20 \
+                  --json headBranch,event,status,createdAt,databaseId \
+                  --jq "[.[] | select(.headBranch == \"$RELEASE_TAG\" and .event == \"workflow_dispatch\" and .createdAt >= \"$now\")] | length")
+              if [ "${dispatched:-0}" -gt 0 ]; then
+                  echo "Packages is running on $RELEASE_TAG ($dispatched dispatch run(s))."
+                  gh run list --workflow packages.yml --limit 5 \
+                      --json headBranch,event,status,databaseId,url --jq '.[]'
+                  exit 0
+              fi
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "::error::gh workflow run packages.yml --ref $RELEASE_TAG was accepted, but no workflow_dispatch run appeared within 60 s: check Actions → Packages, then re-run it with gh workflow run packages.yml --ref $RELEASE_TAG"
+                  exit 1
+              fi
+              sleep 5
+          done
