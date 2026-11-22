@@ -4491,3 +4491,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-22T23:53 AUTOPILOT off by conductor release PR v0.2.1 awaiting human merge
 - 2026-11-22T23:53 HUMAN H-020 opened by conductor (node MB)
 - 2026-11-22T23:53 HUMAN H-019 closed by conductor
+- 2026-11-23T00:13 HUMAN H-020 closed by conductor
+- 2026-11-23T00:13 HUMAN H-021 opened by conductor (node MB)
