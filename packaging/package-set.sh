@@ -7,14 +7,20 @@
 #   packaging/package-set.sh --rows          # the table, verbatim
 #   packaging/package-set.sh --check         # the table, and the spec that copies it
 #
+# The language versions are not named here: `packaging/languages.tsv` is the one
+# declaration (`MB.67`), `packaging/languages.sh` derives the rows from it, and
+# this file adds only the row-less core package `blastit`. Adding a version is a
+# one-line edit to the TSV.
+#
 # The builders and the set check *read* their names here:
 #
-#   scripts/build-deb.sh             the seven packages, their shim globs and
+#   scripts/build-deb.sh             the packages, their shim globs and
 #   scripts/build-rpm.sh             their interpreter runtimes
 #   scripts/check-bundle-layout.sh   the names a package set must contain
 #
-# Two files cannot run a shell script, so they keep their own copy and the gate
-# *asserts* it against this table instead of generating it:
+# One file cannot run a shell script, so it keeps its own copy and the gate
+# *asserts* it against this table: the spec copy stays asserted here until
+# `MB.67.2` generates it.
 #
 #   scripts/rpm/blastit.spec         `packaging/package-set.sh --check` diffs its
 #                                    `%package -n` stanzas and `%files` globs
@@ -47,34 +53,31 @@
 # `blastit-python-3.13` works the same way.
 set -euo pipefail
 
-# shellcheck disable=SC2034 # read by the functions below and by sourced callers
-BLASTIT_PACKAGE_ROWS=(
-    $'blastit\tcore\t(none)\t(none)\t(none)'
-    $'blastit-python-3.13\tshim\tlibblastit_py313-*-gnu.so\tpython3.13\tpython3.13'
-    $'blastit-python-3.14\tshim\tlibblastit_py314-*-gnu.so\tpython3.14\tpython3.14'
-    $'blastit-php-8.3\tshim\tlibblastit_php83-*-gnu.so\tlibphp8.3-embed\tphp-embedded'
-    $'blastit-php-8.4\tshim\tlibblastit_php84-*-gnu.so\tlibphp8.4-embed\tphp-embedded'
-    $'blastit-php-8.5\tshim\tlibblastit_php85-*-gnu.so\tlibphp8.5-embed\tphp-embedded'
-    $'blastit-php-8.6\tshim\tlibblastit_php86-*-gnu.so\tlibphp8.6-embed\tphp-embedded'
-)
 BLASTIT_PACKAGE_SET_SOURCED=1
 BLASTIT_PACKAGE_SET_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+# The version rows are derived from the canonical TSV (`MB.67`); this file only
+# adds the row-less core package `blastit` on top of them.
+# shellcheck source=./languages.sh
+source "$BLASTIT_PACKAGE_SET_ROOT/packaging/languages.sh"
+
 # --- readers ----------------------------------------------------------------
 
-# All five fields, in declaration order.
+# All five fields, in declaration order (core first).
 blastit_package_rows() {
-    printf '%s\n' "${BLASTIT_PACKAGE_ROWS[@]}"
+    blastit_language_rows
 }
 
 # Field `$2` of every row (`$1` is ignored so a call reads like
 # `blastit_package_field x 1`).
 blastit_package_field() {
-    local index=$2
-    printf '%s\n' "${BLASTIT_PACKAGE_ROWS[@]}" | cut -f"$index"
+    local index=$2 row
+    while IFS= read -r row; do
+        printf '%s\n' "$row" | cut -f"$index"
+    done < <(blastit_package_rows)
 }
 
-# The seven package names, in declaration order (core first).
+# The package names, in declaration order (core first).
 blastit_package_names() {
     blastit_package_field x 1
 }
@@ -106,23 +109,25 @@ blastit_package_owners() {
 
 # The deb runtime package a shim package recommends (`(none)` for core).
 blastit_package_deb_runtime() {
-    printf '%s\n' "${BLASTIT_PACKAGE_ROWS[@]}" | awk -F'\t' -v n="$1" '$1 == n { print $4 }'
+    blastit_language_field "$1" 4
 }
 
 # The RPM runtime recommendation (`Recommends:` for CPython and PHP alike);
 # `(none)` for core.
 blastit_package_rpm_weak() {
-    printf '%s\n' "${BLASTIT_PACKAGE_ROWS[@]}" | awk -F'\t' -v n="$1" '$1 == n { print $5 }'
+    blastit_language_field "$1" 5
 }
 
 blastit_package_kind() {
-    printf '%s\n' "${BLASTIT_PACKAGE_ROWS[@]}" | awk -F'\t' -v n="$1" '$1 == n { print $2 }'
+    blastit_language_field "$1" 2
 }
 
 # --- the table is only useful if it is consistent ---------------------------
 
 validate_table() {
-    local problems=0 rows=0 core=0 seen_names=() seen_globs=() row name kind glob
+    local problems=0 rows=0 core=0 language_rows seen_names=() seen_globs=() row name kind glob
+    blastit_language_check || problems=$((problems + 1))
+    language_rows=$(blastit_language_rows | tail -n +2 | grep -c '' || true)
     while IFS= read -r row; do
         rows=$((rows + 1))
         IFS=$'\t' read -r name kind glob _ _ <<<"$row"
@@ -154,8 +159,10 @@ validate_table() {
     done < <(blastit_package_rows)
     [ "$core" -eq 1 ] ||
         { echo "package-set: $core core packages, one blastit ships the binary" >&2; problems=$((problems + 1)); }
-    [ "$rows" -eq 7 ] ||
-        { echo "package-set: $rows packages, the release ships 7 (core + 2 CPython + 4 PHP)" >&2; problems=$((problems + 1)); }
+    [ "$language_rows" -gt 0 ] ||
+        { echo "package-set: packaging/languages.tsv declares no language rows" >&2; problems=$((problems + 1)); }
+    [ "$rows" -eq "$((1 + language_rows))" ] ||
+        { echo "package-set: $rows packages, but packaging/languages.tsv declares $language_rows language rows plus the one core package" >&2; problems=$((problems + 1)); }
     [ "$problems" -eq 0 ]
 }
 
@@ -220,13 +227,14 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
         --check)
             validate_table || exit 1
             check_spec || exit 1
-            echo "package-set: ok (7 packages; scripts/rpm/blastit.spec's %package stanzas and %files globs match)"
+            echo "package-set: ok ($(blastit_package_rows | grep -c '') packages; scripts/rpm/blastit.spec's %package stanzas and %files globs match)"
             ;;
         -h | --help)
             cat >&2 <<'USAGE'
 usage: packaging/package-set.sh --names|--rows|--shims|--check
 
-  --names   the seven binary package names, one per line
+  --names   the binary package names, one per line (core first; language
+            versions come from packaging/languages.tsv)
   --rows    name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-runtime
   --shims   <package><TAB><glob> for every package that ships a shim
   --check   validate the table, and assert scripts/rpm/blastit.spec's

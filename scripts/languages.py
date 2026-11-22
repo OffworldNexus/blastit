@@ -1,0 +1,325 @@
+"""The one Python loader for `packaging/languages.tsv` (`MB.67`).
+
+Stdlib only (run it with ``uv run --no-project scripts/languages.py``) and
+importable as a module (later slices do ``import languages``), with no argparse
+side effects at import time.
+
+Derivation rules, implemented here once:
+
+* package name  = ``blastit-<language>-<version>``
+* shim file     = ``libblastit_<slug>-<arch>-<libc>.so``; the table globs the
+  architecture and names the libc exactly as `packaging/package-set.sh` does
+* the core package ``blastit`` is the row-less base, spelled ``(none)`` in the
+  package-set vocabulary, and always comes first
+* ``deb-runtime`` / ``rpm-runtime`` are the ``Recommends:`` values
+* order is the file's order; a version is a string compared component by
+  component, never a float (``8.10`` sorts after ``8.9``)
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+from typing import NamedTuple
+
+HEADER = ("language", "version", "slug", "deb-runtime", "rpm-runtime")
+NONE = "(none)"
+CORE_PACKAGE = "blastit"
+CORE_ROW = (CORE_PACKAGE, "core", NONE, NONE, NONE)
+DEFAULT_TSV = Path(__file__).resolve().parent.parent / "packaging" / "languages.tsv"
+
+_VERSION = re.compile(r"^[0-9]+\.[0-9]+$")
+_SLUG = re.compile(r"^[a-z0-9_]+$")
+_RESERVED_LANGUAGES = {"core", "blastit", "language"}
+
+
+class LanguageError(Exception):
+    """The TSV cannot be read as the supported-language declaration."""
+
+
+class Language(NamedTuple):
+    language: str
+    version: str
+    slug: str
+    deb_runtime: str
+    rpm_runtime: str
+
+    @property
+    def package(self) -> str:
+        return package_name(self.language, self.version)
+
+    @property
+    def shim(self) -> str:
+        return shim_glob(self.slug)
+
+    @property
+    def kind(self) -> str:
+        return "shim"
+
+    def package_row(self) -> tuple[str, str, str, str, str]:
+        return (self.package, self.kind, self.shim, self.deb_runtime, self.rpm_runtime)
+
+
+def package_name(language: str, version: str) -> str:
+    return f"blastit-{language}-{version}"
+
+
+def shim_glob(slug: str) -> str:
+    return f"libblastit_{slug}-*-gnu.so"
+
+
+def version_key(version: str) -> tuple[int, ...]:
+    """Sort key for a version: components as integers, never a float."""
+    return tuple(int(part) for part in version.split("."))
+
+
+def _lines(text: str) -> list[tuple[int, str]]:
+    lines = []
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.rstrip("\r")
+        if line.strip() and not line.lstrip().startswith("#"):
+            lines.append((number, line))
+    return lines
+
+
+def validate(text: str, *, source: str = "packaging/languages.tsv") -> list[str]:
+    """Every problem in the TSV, in file order; an empty list means valid."""
+    problems: list[str] = []
+    rows: list[Language] = []
+    names: dict[str, str] = {}
+    slugs: dict[str, str] = {}
+    header_seen = False
+    for number, line in _lines(text):
+        fields = line.split("\t")
+        if not header_seen:
+            header_seen = True
+            if tuple(fields) != HEADER:
+                problems.append(
+                    f"{source}:{number}: header is {line!r}, expected "
+                    f"{chr(9).join(HEADER)!r}"
+                )
+            continue
+        if len(fields) != 5:
+            problems.append(
+                f"{source}:{number}: {len(fields)} fields, a row is exactly 5 "
+                "(language<TAB>version<TAB>slug<TAB>deb-runtime<TAB>rpm-runtime)"
+            )
+            continue
+        row = Language(*fields)
+        name = row.package
+        language, version, slug = row.language, row.version, row.slug
+        if not _VERSION.fullmatch(version):
+            problems.append(
+                f"{source}:{number}: {name} has version {version!r}; expected "
+                "<major>.<minor> like 8.10 (not 8 or 8.1.0)"
+            )
+        if not _SLUG.fullmatch(slug):
+            problems.append(
+                f"{source}:{number}: {name} has slug {slug!r}; expected lowercase "
+                "letters, digits or '_'"
+            )
+        if language in _RESERVED_LANGUAGES:
+            problems.append(
+                f"{source}:{number}: {language!r} is not a language "
+                f"({', '.join(sorted(_RESERVED_LANGUAGES))} are reserved)"
+            )
+        if row.deb_runtime == NONE or row.rpm_runtime == NONE:
+            problems.append(
+                f"{source}:{number}: shim {name} needs a deb-runtime and rpm-runtime "
+                f"Recommends value ({NONE} is only for the core package)"
+            )
+        if name in names:
+            problems.append(
+                f"{source}:{number}: package {name} is declared twice "
+                f"(first on line {names[name]})"
+            )
+        else:
+            names[name] = str(number)
+        if slug in slugs:
+            problems.append(
+                f"{source}:{number}: slug {slug} is declared twice "
+                f"(first on line {slugs[slug]})"
+            )
+        else:
+            slugs[slug] = str(number)
+        rows.append(row)
+    if not header_seen:
+        problems.append(f"{source}: no header line")
+    if header_seen and not rows:
+        problems.append(f"{source}: declares no language rows")
+    return problems
+
+
+def parse(text: str, *, source: str = "packaging/languages.tsv") -> list[Language]:
+    problems = validate(text, source=source)
+    if problems:
+        raise LanguageError("\n".join(problems))
+    return _rows_of(text)
+
+
+def _rows_of(text: str) -> list[Language]:
+    rows: list[Language] = []
+    header_seen = False
+    for _, line in _lines(text):
+        if not header_seen:
+            header_seen = True
+            continue
+        rows.append(Language(*line.split("\t")))
+    return rows
+
+
+def load(path: Path | str = DEFAULT_TSV) -> list[Language]:
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise LanguageError(f"{path}: {error.strerror or error}") from error
+    return parse(text, source=str(path))
+
+
+def package_rows(rows: list[Language]) -> list[tuple[str, ...]]:
+    """The five-field package-set rows, core first."""
+    return [CORE_ROW, *(row.package_row() for row in rows)]
+
+
+def names(rows: list[Language]) -> list[str]:
+    return [CORE_PACKAGE, *(row.package for row in rows)]
+
+
+def shims(rows: list[Language]) -> list[tuple[str, str]]:
+    return [(row.package, row.shim) for row in rows]
+
+
+def versions_of(rows: list[Language], language: str) -> list[str]:
+    """Versions of one language, newest first (component-wise, never float)."""
+    found = [row.version for row in rows if row.language == language]
+    return sorted(found, key=version_key, reverse=True)
+
+
+def as_json(rows: list[Language]) -> list[dict[str, object]]:
+    core = {
+        "package": CORE_PACKAGE,
+        "kind": "core",
+        "shim": NONE,
+        "deb_runtime": NONE,
+        "rpm_runtime": NONE,
+        "language": None,
+        "version": None,
+        "slug": None,
+    }
+    tail = [
+        {
+            "package": row.package,
+            "kind": row.kind,
+            "shim": row.shim,
+            "deb_runtime": row.deb_runtime,
+            "rpm_runtime": row.rpm_runtime,
+            "language": row.language,
+            "version": row.version,
+            "slug": row.slug,
+        }
+        for row in rows
+    ]
+    return [core, *tail]
+
+
+_COMMANDS = (
+    "--rows",
+    "--names",
+    "--shims",
+    "--php-minors",
+    "--py-minors",
+    "--json",
+    "--check",
+)
+_USAGE = f"""usage: scripts/languages.py [--tsv PATH] {"|".join(_COMMANDS)}
+
+  --rows        name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-runtime, core first
+  --names       the binary package names, one per line (core first)
+  --shims       <package><TAB><glob> for every package that ships a shim
+  --php-minors  PHP minors, newest first
+  --py-minors   CPython minors, newest first
+  --json        one JSON object per row, core first
+  --check       validate packaging/languages.tsv and print nothing on success
+"""
+
+
+def _compute(command: str, rows: list[Language]) -> tuple[str, int]:
+    if command == "--rows":
+        return "\n".join("\t".join(row) for row in package_rows(rows)) + "\n", 0
+    if command == "--names":
+        return "\n".join(names(rows)) + "\n", 0
+    if command == "--shims":
+        return "\n".join(f"{name}\t{glob}" for name, glob in shims(rows)) + "\n", 0
+    if command == "--php-minors":
+        return "\n".join(versions_of(rows, "php")) + "\n", 0
+    if command == "--py-minors":
+        return "\n".join(versions_of(rows, "python")) + "\n", 0
+    if command == "--json":
+        return "\n".join(
+            json.dumps(row, sort_keys=False) for row in as_json(rows)
+        ) + "\n", 0
+    if command == "--check":
+        counts = ", ".join(
+            f"{len([row for row in rows if row.language == language])} {language}"
+            for language in sorted({row.language for row in rows})
+        )
+        return f"languages: ok ({len(rows)} language rows: {counts})\n", 0
+    return "", 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    path = DEFAULT_TSV
+    commands: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in _COMMANDS:
+            commands.append(arg)
+        elif arg == "--tsv":
+            index += 1
+            if index >= len(args):
+                sys.stderr.write("languages: --tsv needs a path\n")
+                return 2
+            path = Path(args[index])
+        elif arg in ("-h", "--help"):
+            sys.stdout.write(_USAGE)
+            return 0
+        elif arg.startswith("-"):
+            sys.stderr.write(f"languages: unknown option {arg}\n{_USAGE}")
+            return 2
+        else:
+            commands.append(arg)
+        index += 1
+    if len(commands) != 1:
+        sys.stderr.write(f"languages: exactly one command is required\n{_USAGE}")
+        return 2
+    command = commands[0]
+    if command == "--check":
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as error:
+            sys.stderr.write(f"languages: {path}: {error.strerror or error}\n")
+            return 1
+        problems = validate(text, source=str(path))
+        if problems:
+            for problem in problems:
+                sys.stderr.write(problem + "\n")
+            return 1
+        rows = _rows_of(text)
+    else:
+        try:
+            rows = load(path)
+        except LanguageError as error:
+            sys.stderr.write(f"languages: {error}\n")
+            return 1
+    output, status = _compute(command, rows)
+    sys.stdout.write(output)
+    return status
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
