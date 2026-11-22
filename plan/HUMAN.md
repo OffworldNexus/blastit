@@ -185,3 +185,11 @@ Release v0.2.0 is ready on branch release/0.2.0 (PR #64 -> develop, HEAD ea5cd17
 
 **Answer:**
 
+## H-020 [open] (node MB)
+
+- asked: 2026-11-22T23:53 by conductor
+
+Release v0.2.1 is ready on branch release/0.2.1-packages (PR into develop). It ships the Offworld Nexus packaging pipeline (zero secrets: CI stages one offworld-dist artifact, the offworld-nexus-packages App signs and publishes to *.offworld-nexus.app) and splits the packages to one per interpreter: blastit, blastit-python-3.13, blastit-python-3.14, blastit-php-8.3, blastit-php-8.4, blastit-php-8.5, blastit-php-8.6 (28 artifacts: 7 names x amd64/arm64 x deb/rpm). Merging it makes Publish upload PyPI 0.2.1, cut the annotated v0.2.1 tag, create the GitHub Release, and dispatch Packages on that tag -- the exact step that was missing for 0.2.0. Please review and squash-merge.
+
+**Answer:**
+
