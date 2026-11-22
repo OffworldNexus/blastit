@@ -4,7 +4,7 @@
 - autopilot: off
 - current milestone: MB Modern 12-Factor Backends: Static, PHP (embedded libphp), Vite/Node, Tomcat (0.2.x) [ready]
 - tasks: proposed=1, ready=1, done=334, superseded=144
-- open human requests: 3 (answered, awaiting pickup: 0)
+- open human requests: 2 (answered, awaiting pickup: 0)
 - escalations to expensive model so far: 18; expensive spent: $419.08 of $600.00 cap (70%)
 
 ## Milestones
@@ -25,7 +25,6 @@
 
 ## Recent journal
 
-- 2026-11-21T16:12 [MB.64] (lead) status active -> done
 - 2026-11-21T16:12 [MB.64] (lead) commit 15b1620ad865afaffe8151389a9d463258d6e1a9
 - 2026-11-22T23:00 [MB.65] (conductor) created (task) Offworld Nexus packaging pipeline + one Debian package per interpreter version
 - 2026-11-22T23:00 AUTOPILOT on by conductor offworld packaging migration in MB.65
@@ -40,3 +39,4 @@
 - 2026-11-22T23:52 [MB.65] (lead) commit 3841a5a4ebc3dbef52edd89cc00c5d49e6af9c4b
 - 2026-11-22T23:53 AUTOPILOT off by conductor release PR v0.2.1 awaiting human merge
 - 2026-11-22T23:53 HUMAN H-020 opened by conductor (node MB)
+- 2026-11-22T23:53 HUMAN H-019 closed by conductor
