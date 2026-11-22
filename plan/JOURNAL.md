@@ -4504,3 +4504,23 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T00:39 [MB.66] (lead) REVIEW: review-arch PASS zero blockers (6 MINORs rejected: core negative assertion sufficient, redundant table guard, substring recommends, spec-diff covered by
 - 2026-11-23T00:39 [MB.66] (lead) status review -> done
 - 2026-11-23T00:40 [MB.66] (lead) commit cd9712dfdac8d15450568b3ec725645f53ccbf87
+- 2026-11-23T00:43 [MB.67] (conductor) created (epic) Canonical supported-language table: one file, everything derives
+- 2026-11-23T00:43 AUTOPILOT on by conductor canonical language table in MB.67
+- 2026-11-23T00:44 [MB.67.1] (planner) created (task) Canonical languages.tsv + bash/Python loaders + package-set derives
+- 2026-11-23T00:44 [MB.67.2] (planner) created (task) CI & packaging matrices + RPM spec generated from languages.tsv
+- 2026-11-23T00:44 [MB.67.3] (planner) created (task) Rust compile-time language tables (view-php, php-sapi, py-shim)
+- 2026-11-23T00:44 [MB.67.4] (planner) created (task) Generated docs/installer blocks, e2e + php 8.7 propagation proof
+- 2026-11-23T00:45 [MB.67.1] (lead) status ready -> active
+- 2026-11-23T00:45 [MB.67.1] (lead) attempt 1/3 started
+- 2026-11-23T00:45 [MB.67.1] (lead) base 6401e5f7e9a08348efd19d32fdb1d5062e3a72b0
+- 2026-11-23T00:47 [MB.67] (unknown) edited fields
+- 2026-11-23T00:47 [MB.67] (unknown) edited fields
+- 2026-11-23T00:47 [MB.67.5] (unknown) created (task) Workspace version has one source (Cargo.toml), every fixture and doc example derives
+- 2026-11-23T00:47 [MB.67.3] (unknown) edited fields
+- 2026-11-23T00:51 [MB.67.6] (unknown) created (task) Test fixtures: honour TMPDIR and keep socket paths under SUN_LEN
+- 2026-11-23T00:51 [MB.67] (unknown) edited fields
+- 2026-11-23T00:51 [MB.67.6] (lead) status ready -> active
+- 2026-11-23T00:51 [MB.67.6] (lead) attempt 1/3 started
+- 2026-11-23T00:51 [MB.67.6] (lead) base 6401e5f7e9a08348efd19d32fdb1d5062e3a72b0
+- 2026-11-23T00:57 [MB.67.1] (lead) status active -> done
+- 2026-11-23T00:57 [MB.67.6] (lead) status active -> done
