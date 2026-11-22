@@ -31,10 +31,13 @@ and then runs the story's own commands *where the artifact was installed*:
   `libphp8.4-embed` first, then imports and serves the WSGI fixture through the
   package's own `python/blastit` and the `blastit-python-3.13` shim (`MB.42.11`)
   and asserts `blastit-php-8.4` installed with its `libblastit_php84` file while
-  `blastit-php-8.6` (whose embed package trixie lacks) did not — the hard
-  `Depends:` end to end. An rpm leg additionally
-  installs the whole seven-package set in one `dnf` transaction, which proves no
-  subpackage carries an unsatisfiable hard `Requires:`.
+  `blastit-php-8.6` (whose embed package trixie lacks) did not — the installer's
+  runtime choice end to end. Both legs also read the package headers: a shim
+  depends only on `blastit` and a measured libc floor and *recommends* its
+  runtime, while the core names no runtime at all. An rpm leg additionally
+  installs the whole seven-package set in one `dnf` transaction with weak
+  dependencies off, which proves no subpackage carries an unsatisfiable hard
+  `Requires:`.
 * `wheel` — the universal `py3-none` wheel installed with `pip` into
   `python:3.12-slim` (the CLI/`check` half) and `python:3.13-slim` /
   `python:3.14-slim` (WSGI served through the shipped shim).
@@ -123,6 +126,31 @@ def shim_packages() -> tuple[str, ...]:
     if not names:
         raise LegFailure(f"`bash {script} --shims` printed no package name")
     return names
+
+
+@functools.lru_cache(maxsize=1)
+def shim_runtimes() -> dict[str, tuple[str, str]]:
+    """`{shim package: (deb runtime, rpm runtime)}` from `package-set.sh --rows`.
+
+    The fourth and fifth columns name the distro runtime each shim *recommends* —
+    `python3.13`/`libphp8.4-embed` on Debian and `python3.13`/`php-embedded` on
+    RPM — so the header assertions read the one table instead of restating it.
+    """
+    script = ROOT / "packaging" / "package-set.sh"
+    result = run(["bash", str(script), "--rows"])
+    if result.returncode != 0:
+        raise LegFailure(
+            f"`bash {script} --rows` exits {result.returncode}: {tail(joined(result), 8)}"
+        )
+    table: dict[str, tuple[str, str]] = {}
+    for line in result.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 5 or fields[1] != "shim":
+            continue
+        table[fields[0]] = (fields[3], fields[4])
+    if not table:
+        raise LegFailure(f"`bash {script} --rows` named no shim package")
+    return table
 
 
 # What `docs/install.sh` detects, in the same words it uses: one
@@ -1013,9 +1041,9 @@ def leg_package(
                 f"the WSGI interpreter did not install in {image}: {tail(joined(fetched), 10)}",
             )
         if "php" in modes:
-            # `blastit-php-8.4`'s hard `Depends: libphp8.4-embed` is what makes
-            # the shim installable only where the runtime exists. trixie ships
-            # that package, so installing it first exercises the dependency end to
+            # `blastit-php-8.4` recommends `libphp8.4-embed`, and the installer
+            # offers the shim only where that runtime package is present. trixie
+            # ships it, so installing it first exercises the recommendation end to
             # end. A served PHP view needs a PHP fixture this suite does not have,
             # so the proof stops at the package and its `libblastit_php84` file.
             fetched = box.exec(
@@ -1084,8 +1112,9 @@ def leg_package(
             php84 = shim_path("blastit-php-8.4", machine)
             checks.that(
                 "blastit-php-8.4" in packages and php84 in payload,
-                f"the PHP leg installed no {php84}: the shim's hard "
-                "`Depends: libphp8.4-embed` was not honoured",
+                f"the PHP leg installed no {php84}: `blastit-php-8.4` recommends "
+                "`libphp8.4-embed`, and the installer offers the shim only where "
+                "that runtime package is installed",
             )
             checks.that(
                 "blastit-php-8.6" not in packages,
@@ -1132,6 +1161,73 @@ def leg_package(
                 if line and not line.startswith("root:root ")
             ]
         checks.that(not owned, f"payload entries not owned root: {owned[:3]}")
+
+        # The package *header*, not the payload: a shim depends only on the core
+        # and its own measured C library and names the distro runtime it binds to
+        # in `Recommends:` (`MB.66`), so a host whose interpreter comes from
+        # pyenv or a source build installs it too. The core names no runtime.
+        suffix = package.name.removeprefix("blastit")
+        runtimes = shim_runtimes()
+        checks.that(
+            set(runtimes) == set(expected_shim_names),
+            f"packaging/package-set.sh --rows names {sorted(runtimes)}, the shim "
+            f"packages here are {sorted(expected_shim_names)}",
+        )
+        core_file = f"/pkg/{package.name}"
+        if kind == "deb":
+            for shim in expected_shim_names:
+                deb = f"/pkg/{shim}{suffix}"
+                depends = box.exec(["dpkg-deb", "--field", deb, "Depends"]).stdout
+                names = {part.split("(")[0].strip() for part in depends.split(",")}
+                checks.that(
+                    "blastit" in names and names <= {"blastit", "libc6", "libgcc-s1"},
+                    f"{shim} Depends {depends.strip()!r}: a shim depends only on "
+                    "blastit and its measured C library",
+                )
+                runtime = runtimes.get(shim, ("", ""))[0]
+                recommends = box.exec(["dpkg-deb", "--field", deb, "Recommends"]).stdout
+                checks.that(
+                    bool(runtime) and runtime in recommends,
+                    f"{shim} does not recommend its runtime {runtime!r}: "
+                    f"Recommends {recommends.strip()!r}",
+                )
+            core_depends = box.exec(
+                ["dpkg-deb", "--field", core_file, "Depends"]
+            ).stdout
+            checks.that(
+                not any(
+                    token in core_depends
+                    for token in ("python3.", "libphp", "php-embedded")
+                ),
+                f"core blastit Depends {core_depends.strip()!r} names a runtime",
+            )
+        else:
+            for shim in expected_shim_names:
+                rpm_file = f"/pkg/{shim}{suffix}"
+                requires = box.exec(["rpm", "-qpR", rpm_file]).stdout
+                checks.that(
+                    not any(
+                        token in requires
+                        for token in ("python3.", "libphp", "php-embedded")
+                    ),
+                    f"{shim} Requires {requires.strip()!r}: a shim must not require "
+                    "a runtime (only recommend it)",
+                )
+                runtime = runtimes.get(shim, ("", ""))[1]
+                recommends = box.exec(["rpm", "-qp", "--recommends", rpm_file]).stdout
+                checks.that(
+                    bool(runtime) and runtime in recommends,
+                    f"{shim} does not recommend its runtime {runtime!r}: "
+                    f"recommends {recommends.strip()!r}",
+                )
+            core_requires = box.exec(["rpm", "-qpR", core_file]).stdout
+            checks.that(
+                not any(
+                    token in core_requires
+                    for token in ("python3.", "libphp", "php-embedded")
+                ),
+                f"core blastit Requires {core_requires.strip()!r} names a runtime",
+            )
 
         printed = box.exec(["blastit", "--version"])
         checks.that(
@@ -1250,8 +1346,8 @@ def leg_package(
             # The whole seven-package set in one transaction, with weak
             # dependencies switched off: nothing there may be an unsatisfiable
             # hard `Requires:` (Rocky 9 has no `python3.13`, and its
-            # `php-embedded` is 8.0, which is why the spec's shims carry
-            # `Recommends:`/`Suggests:`), and every subpackage's files still land.
+            # `php-embedded` is 8.0, which is why every shim carries
+            # `Recommends:`), and every subpackage's files still land.
             whole = box.exec(
                 [
                     "sh",

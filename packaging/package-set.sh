@@ -30,20 +30,21 @@
 #
 # A row is five tab-separated fields:
 #
-#   name <TAB> kind <TAB> shim-glob <TAB> deb-runtime <TAB> rpm-weak-dep
+#   name <TAB> kind <TAB> shim-glob <TAB> deb-runtime <TAB> rpm-runtime
 #
 # `kind` is `core` (the interpreter-free server, the LSP binary, `LICENSE` and
 # the pure-Python package) or `shim` (exactly one `libblastit_*.so`). `(none)`
-# is the literal spelling for "no shim", "no runtime package" and "no weak
-# dependency" — an empty field is invisible in a shell table and reads as a
-# mistake.
+# is the literal spelling for "no shim", "no runtime package" and "no runtime
+# recommendation" — an empty field is invisible in a shell table and reads as a
+# mistake. Both runtime columns are the `Recommends:` value, never a `Depends:`
+# or `Requires:`.
 #
 # The split is per **interpreter minor**, because that is the dependency a host
-# actually has: a machine installs `blastit` plus `blastit-php-8.4` (whose
-# `Depends: libphp8.4-embed` names the interpreter) or `blastit-python-3.13`,
-# and a Debian
-# package that names a missing interpreter package is a package `apt` refuses
-# rather than one that half-works.
+# actually has: a machine installs `blastit` plus `blastit-php-8.4`, and that shim
+# *recommends* `libphp8.4-embed` (the interpreter it `dlopen`s) instead of
+# depending on it, so a pyenv or source-built interpreter, or a distro without
+# that minor, is not refused — the shim is simply inert until one is present.
+# `blastit-python-3.13` works the same way.
 set -euo pipefail
 
 # shellcheck disable=SC2034 # read by the functions below and by sourced callers
@@ -103,12 +104,12 @@ blastit_package_owners() {
     [ "$match" -gt 0 ]
 }
 
-# The deb runtime package a shim package installs beside (`(none)` for core).
+# The deb runtime package a shim package recommends (`(none)` for core).
 blastit_package_deb_runtime() {
     printf '%s\n' "${BLASTIT_PACKAGE_ROWS[@]}" | awk -F'\t' -v n="$1" '$1 == n { print $4 }'
 }
 
-# The RPM weak dependency (`Recommends:` for CPython, `Suggests:` for PHP);
+# The RPM runtime recommendation (`Recommends:` for CPython and PHP alike);
 # `(none)` for core.
 blastit_package_rpm_weak() {
     printf '%s\n' "${BLASTIT_PACKAGE_ROWS[@]}" | awk -F'\t' -v n="$1" '$1 == n { print $5 }'
@@ -226,7 +227,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
 usage: packaging/package-set.sh --names|--rows|--shims|--check
 
   --names   the seven binary package names, one per line
-  --rows    name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-weak-dep
+  --rows    name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-runtime
   --shims   <package><TAB><glob> for every package that ships a shim
   --check   validate the table, and assert scripts/rpm/blastit.spec's
             `%package -n` stanzas and `%files` globs against it

@@ -78,16 +78,18 @@ exact core build, so install the core and its shims from the same run.
 
 Published for **amd64 and arm64** only, with the same names on each architecture:
 
-| Package | What it adds | `Depends` |
-|---|---|---|
-| `blastit` | server, `blastit-lsp`, pure-Python CLI, `/usr/bin` links | measured `libc6 (>= …)`, plus `libgcc-s1` only when a shipped ELF needs it |
-| `blastit-python-3.13` · `-3.14` | the WSGI shim for that CPython | `blastit (= <version>)`, `python3.13` / `python3.14` |
-| `blastit-php-8.3` … `-8.6` | the PHP shim for that NTS `libphp` | `blastit (= <version>)`, `libphp8.x-embed` |
+| Package | What it adds | `Depends` | `Recommends` |
+|---|---|---|---|
+| `blastit` | server, `blastit-lsp`, pure-Python CLI, `/usr/bin` links | measured `libc6 (>= …)`, plus `libgcc-s1` only when a shipped ELF needs it | — |
+| `blastit-python-3.13` · `-3.14` | the WSGI shim for that CPython | `blastit (= <version>)` | `python3.13` / `python3.14` |
+| `blastit-php-8.3` … `-8.6` | the PHP shim for that NTS `libphp` | `blastit (= <version>)` | `libphp8.x-embed` |
 
 Core `blastit` installs alone and never depends on a shim; every shim depends on
-`blastit (= <version>)`. The version in the name makes `apt-get install blastit-php-8.4`
-read as *Blastit's PHP 8.4 shim*, and the libc floor is measured: apt or dnf refuse
-the package and name the libc they found.
+`blastit (= <version>)` and only *recommends* the matching distro runtime, so
+`apt-get install blastit-php-8.4` (which reads as *Blastit's PHP 8.4 shim*) still
+pulls Debian's `libphp8.4-embed` by default, while a pyenv or source-built
+interpreter is fine — add the shim by name, since the one-liner above only offers a
+shim whose distro runtime package it can see. apt/dnf name the libc they found.
 
 !!! note "PHP 8.3/8.4 beyond Debian 13 and Ubuntu 24.04"
 

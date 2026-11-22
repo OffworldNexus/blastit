@@ -29,16 +29,18 @@
 #
 # # The interpreter relationship is weak, and has to be
 #
-# Debian has hard `Depends: python3.13` / `libphp8.4-embed` per shim package
-# (`scripts/build-deb.sh`), because Debian's archive names one interpreter
-# package per minor today. RPM distributions do not: Rocky 9 has **no**
-# `python3.13` (it ships 3.9) and its `php-embedded` is 8.0, so
+# Every shim package — `blastit-python-*` and `blastit-php-*` — carries the
+# matching distro runtime as a **`Recommends:`**, exactly as
+# `scripts/build-deb.sh`'s control files do (`Recommends: python3.13` /
+# `Recommends: libphp8.4-embed` there, `Recommends: python3.13` /
+# `Recommends: php-embedded` here, because RPM distributions name no interpreter
+# package per minor). RPM distributions cannot back a hard requirement: Rocky 9
+# has **no** `python3.13` (it ships 3.9) and its `php-embedded` is 8.0, so
 # `Requires: python3.13` or `Requires: php-embedded` would make the shim package
-# uninstallable on a distribution the release still supports — an unsatisfiable
-# hard dependency is worse than a visible advisory one. `Recommends:` (CPython,
-# skipped by a plain `dnf install` only when truly unavailable) and `Suggests:`
-# (PHP) state the intent, show in `dnf info`, and leave the operator in control.
-# A host that follows the docs installs the matching interpreter first.
+# uninstallable on a distribution the release still supports. `Recommends:`
+# states the intent, shows in `dnf info`, is pulled by a plain `dnf install` when
+# available and skipped when it is not, and leaves the operator in control. A
+# host that follows the docs installs the matching interpreter first.
 #
 # `__os_install_post` is disabled so the payload stays byte-identical to the
 # bundle that was measured: a strip or a build-id relink would make the floor a
@@ -131,7 +133,7 @@ Requires: libgcc
 Requires: blastit = %{version}-%{release}
 AutoReq: no
 AutoProv: no
-Suggests: php-embedded
+Recommends: php-embedded
 
 %description -n blastit-php-8.3
 The libblastit_php83 shim lets blastit run PHP view scripts through the host's
@@ -147,7 +149,7 @@ Requires: libgcc
 Requires: blastit = %{version}-%{release}
 AutoReq: no
 AutoProv: no
-Suggests: php-embedded
+Recommends: php-embedded
 
 %description -n blastit-php-8.4
 The libblastit_php84 shim lets blastit run PHP view scripts through the host's
@@ -163,7 +165,7 @@ Requires: libgcc
 Requires: blastit = %{version}-%{release}
 AutoReq: no
 AutoProv: no
-Suggests: php-embedded
+Recommends: php-embedded
 
 %description -n blastit-php-8.5
 The libblastit_php85 shim lets blastit run PHP view scripts through the host's
@@ -179,7 +181,7 @@ Requires: libgcc
 Requires: blastit = %{version}-%{release}
 AutoReq: no
 AutoProv: no
-Suggests: php-embedded
+Recommends: php-embedded
 
 %description -n blastit-php-8.6
 The libblastit_php86 shim lets blastit run PHP view scripts through the host's

@@ -40,9 +40,9 @@
 # `WEAK` version needs (glibc's own advisory references) do not raise the floor,
 # because the loader does not require them.
 #
-# The interpreter relationship is `Recommends: python3.13` / `Suggests:
-# php-embedded` rather than a hard `Requires:`, because Rocky 9 has no
-# `python3.13` and its `php-embedded` is 8.0: a shim package that cannot be
+# The interpreter relationship is `Recommends: python3.13` and `Recommends:
+# php-embedded` — weak on both formats, never a hard `Requires:`, because Rocky 9
+# has no `python3.13` and its `php-embedded` is 8.0: a shim package that cannot be
 # installed on a supported distribution is worse than a visible advisory (see the
 # spec's comment).
 set -euo pipefail
@@ -388,6 +388,7 @@ else
                 cp "$pkg" /out/
                 copied+=("/out/$(basename "$pkg")")
                 rpm -qp --requires "$pkg" | sed "s/^/container-requires: /"
+                rpm -qp --recommends "$pkg" | sed "s/^/container-recommends: /"
             done
             # The build ran as root; only the files this run copied belong to the
             # caller who owns --out (a stale RPM in that directory is not ours).
@@ -416,5 +417,7 @@ if command -v rpm >/dev/null 2>&1; then
     for name in "${package_names[@]}"; do
         rpm -qp --requires "$out/$name-$version-$release.$rpm_arch.rpm" |
             sed "s/^/build-rpm: requires ($name): /"
+        rpm -qp --recommends "$out/$name-$version-$release.$rpm_arch.rpm" |
+            sed "s/^/build-rpm: recommends ($name): /"
     done
 fi

@@ -210,9 +210,9 @@ INSTALL_LEGS = (
         # `python3-pytest` + `libpython3.13` the packaged shim needs, so the
         # package's own `python/blastit` tree is imported by a real gate. It is
         # also the only leg with the `php` mode: trixie has `libphp8.4-embed`, so
-        # installing it first exercises `blastit-php-8.4`'s hard
-        # `Depends: libphp8.4-embed` for real (and 8.6, which trixie lacks, must
-        # stay uninstalled).
+        # installing it first exercises the shim's `Recommends:` for real — the
+        # installer offers a shim only where its runtime package is installed —
+        # and 8.6, which trixie lacks, must stay uninstalled.
         "modes": "install static wsgi php",
     },
     {
@@ -1342,9 +1342,9 @@ def check(problems: list[str]) -> None:
                 "3.13/3.14 (the `debian:trixie` leg is the one image that does), so the "
                 "leg would import through an interpreter the packaged shim never binds to"
             )
-        # `php`: the leg installs the embed package the shim's hard `Depends:`
-        # names before the installer runs, so a package set whose `Depends:` is
-        # wrong fails here. Only `debian:trixie` in this table has
+        # `php`: the leg installs the embed package the shim recommends before
+        # the installer runs, so a package set whose runtime row or `Recommends:`
+        # is wrong fails here. Only `debian:trixie` in this table has
         # `libphp8.4-embed` in its own repositories.
         if "php" in modes and leg["image"] != "debian:trixie":
             problems.append(

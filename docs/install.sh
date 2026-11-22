@@ -364,10 +364,10 @@ ensure_libgcc() {
 
 # --- the interpreter shims this host can run ---------------------------------
 
-# A shim is offered only when the **package its own `Depends:` names** is
+# A shim is offered only when the **distro runtime package it recommends** is
 # installed — not when a `python3.13` happens to be on PATH. A pyenv/conda
-# interpreter is not the distro package `apt`/`dnf` must satisfy, so offering its
-# shim would make the whole install fail on an unsatisfiable dependency.
+# interpreter has no package that `apt`/`dnf` can see, so the installer only
+# offers the shim the package manager could satisfy alone.
 runtime_installed() { # <deb|rpm> <package>
     case "$1" in
         deb)
@@ -403,9 +403,10 @@ php_runtime_installed() { # <deb|rpm> <minor>
 }
 
 # A `libpython3.<m>.so` with no `python3.<m>` package is a real WSGI host (a
-# pyenv/conda build, or an interpreter installed outside the package manager),
-# but the shim's `Depends:` still names the distro package, so the shim cannot be
-# installed there. It is a hint for the skip note, never a reason to offer it.
+# pyenv/conda build, or an interpreter installed outside the package manager).
+# The shim would install there (it only *recommends* the runtime), but the
+# installer still offers a shim only for a distro runtime package it can see, so a
+# bare library is a hint for the skip note, never a reason to offer it.
 python_lib_hint() { # <digits>
     for libdir in /usr/lib /usr/lib64 /usr/lib/*-linux-gnu* /usr/local/lib; do
         for candidate in "$libdir/libpython3.$1.so"*; do
@@ -440,14 +441,15 @@ detect_shims() { # <deb|rpm>
 }
 
 # One sentence per kind of skip, and one more when a libpython is present without
-# its distro package: that host could serve WSGI, but only after installing the
-# package the shim's `Depends:` names.
+# its distro package: that host could serve WSGI once its *shim package* is
+# installed — it already has the runtime — and it is only `detect_shims`' distro
+# package check that skips it.
 note_skipped_shims() {
     if [ -n "$missing_python" ]; then
         note "this host has no CPython $missing_python (WSGI views need one), so those shims are not installed: static views are unaffected"
     fi
     if [ -n "$hinted_python" ]; then
-        note "this host carries a libpython $hinted_python shared object but no python$hinted_python package: the shim's Depends: names the package, so install python$hinted_python to make WSGI views work"
+        note "this host carries a libpython $hinted_python shared object but no python$hinted_python package, so no shim was added: install blastit-python-$hinted_python directly (or install python$hinted_python and re-run this installer) to make WSGI views work"
     fi
     if [ -n "$missing_php" ]; then
         note "this host has no libphp $missing_php (PHP views need one), so those shims are not installed: static views are unaffected"

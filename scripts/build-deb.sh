@@ -16,10 +16,12 @@
 #   blastit-php-8.3 …8.6  /usr/share/blastit/lib/libblastit_php8{3,4,5,6}-<arch>-gnu.so
 #
 # The split is per **interpreter**, because that is the dependency a host has:
-# `blastit-python-3.13` depends on `python3.13`, `blastit-php-8.4` on
-# `libphp8.4-embed`, and every shim package on `blastit (= <version>)`. The
-# package that carries the shim therefore cannot be installed beside an
-# interpreter that cannot load it.
+# `blastit-python-3.13` recommends `python3.13`, `blastit-php-8.4` recommends
+# `libphp8.4-embed`, and every shim package depends on `blastit (= <version>)`.
+# The interpreter is a **`Recommends:`**, never a `Depends:`: apt pulls the
+# distro runtime by default, and the shim still installs beside a pyenv or
+# source-built interpreter, or on a distro without that minor (it is inert until
+# one is present).
 #
 # The names, globs and runtimes are read from `packaging/package-set.sh`; this
 # script refuses to write anything if a shim in the bundle is owned by no
@@ -37,11 +39,12 @@
 # typed — and prints the `DT_NEEDED` allowlist that became the dependency names.
 # `blastit` gets `libc6 (>= <its measured floor>)`, plus `libgcc-s1` only when a
 # shipped ELF actually needs `libgcc_s.so.1`; each shim package gets its own
-# measured `libc6 (>= …)` beside the interpreter and `blastit` dependencies. A
-# host build that outgrew the ceiling fails instead of producing a higher floor,
-# and pass `--max-glibc <shim_floor>` (from `scripts/platform_matrix.py`) to
-# enforce it. Version needs the loader marks `WEAK` are advisory (glibc prints a
-# note and runs), so they do not raise the floor.
+# measured `libc6 (>= …)` beside its `blastit` dependency, and names the
+# interpreter only in `Recommends:`. A host build that outgrew the ceiling fails
+# instead of producing a higher floor, and pass `--max-glibc <shim_floor>` (from
+# `scripts/platform_matrix.py`) to enforce it. Version needs the loader marks
+# `WEAK` are advisory (glibc prints a note and runs), so they do not raise the
+# floor.
 #
 # Everything is staged under `$TMPDIR/opencode` (or `--out`), the archives are
 # written with `dpkg-deb --root-owner-group`, and nothing is ever installed on
@@ -277,27 +280,34 @@ c_depends() {
 }
 
 write_control() {
-    # $1 stage, $2 package, $3 Depends, $4 section, $5 summary, $6 body
-    local stage=$1 package=$2 depends=$3 section=$4 summary=$5 body=$6 installed_kb
+    # $1 stage, $2 package, $3 Depends, $4 section, $5 summary, $6 body,
+    # $7 Recommends (empty for the core, which recommends no interpreter)
+    local stage=$1 package=$2 depends=$3 section=$4 summary=$5 body=$6
+    local recommends=${7:-} installed_kb
     installed_kb=$(du -sk "$stage/usr" | cut -f1)
-    cat >"$stage/DEBIAN/control" <<CONTROL
+    {
+        cat <<CONTROL
 Package: $package
 Version: $deb_version
 Architecture: $arch
 Maintainer: Offworld Nexus <maintainers@offworld.nexus>
 Installed-Size: $installed_kb
 Depends: $depends
+CONTROL
+        [ -z "$recommends" ] || printf 'Recommends: %s\n' "$recommends"
+        cat <<CONTROL
 Section: $section
 Priority: optional
 Homepage: https://github.com/offworld-nexus/blastit
 Description: $summary
 $(printf '%s\n' "$body" | sed 's/^/ /')
 CONTROL
+    } >"$stage/DEBIAN/control"
 }
 
 finish_package() {
     # $1 stage, $2 package: md5sums, owner normalisation and the ar archive.
-    local stage=$1 package=$2 filename
+    local stage=$1 package=$2 filename recommends
     # `dpkg-deb --build` only fills `md5sums` in when it is absent; write it
     # ourselves from the staged files so the archive's own integrity list is
     # deterministic.
@@ -312,7 +322,9 @@ finish_package() {
     fi
     rm -f "$filename"
     dpkg-deb --root-owner-group --build "$stage" "$filename" >/dev/null
-    echo "build-deb: $filename ($(wc -c <"$filename") bytes, Depends: $(dpkg-deb --field "$filename" Depends))"
+    recommends=$(dpkg-deb --field "$filename" Recommends)
+    [ -z "$recommends" ] || recommends=", Recommends: $recommends"
+    echo "build-deb: $filename ($(wc -c <"$filename") bytes, Depends: $(dpkg-deb --field "$filename" Depends)$recommends)"
 }
 
 deb_version="$version"
@@ -342,7 +354,7 @@ write_control "$core_stage" blastit "$core_depends" admin \
 validates every inbound byte, and keeps credentials behind protocol-aware
 capability proxies. This package ships the interpreter-free server, the native
 language server, and the pure-Python helper package; the language shims are
-separate packages so a host installs only the interpreter it runs."
+separate packages so a host installs only the interpreter it runs." ""
 finish_package "$core_stage" blastit
 
 # --- one package per interpreter minor --------------------------------------
@@ -360,8 +372,8 @@ for shim in "$lib"/libblastit_*.so; do
     install -m 0755 "$shim" "$stage/usr/share/blastit/lib/"
 
     floor_of "$shim"
-    depends="$runtime, blastit (= $deb_version), $(c_depends)"
-    echo "build-deb: $owner -> Depends: $depends"
+    depends="blastit (= $deb_version), $(c_depends)"
+    echo "build-deb: $owner -> Depends: $depends, Recommends: $runtime"
     # The minor is in the package name, so it is read back out of it rather than
     # spelled a second time here.
     case "$owner" in
@@ -375,14 +387,16 @@ for shim in "$lib"/libblastit_*.so; do
                 "CPython ${minor} view shim for blastit" \
                 "The libblastit_py${digits} shim lets blastit run Python WSGI views on
 CPython ${minor}. It is loaded into the host interpreter by the blastit
-binary; install it together with blastit, never instead of it."
+binary; install it together with blastit, never instead of it." \
+                "$runtime"
             ;;
         blastit-php-*)
             write_control "$stage" "$owner" "$depends" php \
                 "PHP ${minor} embedded SAPI shim for blastit" \
                 "The libblastit_php${digits} shim lets blastit run PHP view scripts
 through the host's embedded NTS libphp ${minor}. It is loaded by the blastit
-binary; install it together with blastit, never instead of it."
+binary; install it together with blastit, never instead of it." \
+                "$runtime"
             ;;
         *) die "$owner is a shim package whose description this builder does not know" ;;
     esac

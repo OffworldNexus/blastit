@@ -202,7 +202,7 @@ present=$scratch/h/present
 mkdir -p "$hbin"
 : >"$present"
 # What the *package manager* says is installed: the installer offers a shim from
-# the package its `Depends:` names, never from a `python3.13` on PATH.
+# the distro runtime package it recommends, never from a `python3.13` on PATH.
 cat >"$hbin/dpkg-query" <<STUB
 #!/bin/sh
 pkg=
