@@ -193,7 +193,7 @@ Release v0.2.1 is ready on branch release/0.2.1-packages (PR into develop). It s
 
 **Answer:**
 
-## H-021 [open] (node MB)
+## H-021 [closed] (node MB)
 
 - asked: 2026-11-23T00:13 by conductor
 

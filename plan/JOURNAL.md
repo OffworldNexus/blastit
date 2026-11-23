@@ -4619,3 +4619,4 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T11:41 [MB.75] (planner) status ready -> blocked: TESTING_PLAN.md user-story gate H-022: validate stable 3.13-3.15 / nightly 3.16 before any test/code slice starts
 - 2026-11-23T11:42 HUMAN H-022 closed by conductor
 - 2026-11-23T11:42 [MB.75] (conductor) status blocked -> ready: H-022 approved: stable 3.13-3.15, nightly adds 3.16
+- 2026-11-23T12:09 HUMAN H-021 closed by conductor
