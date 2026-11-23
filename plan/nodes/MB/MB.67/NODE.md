@@ -19,6 +19,7 @@ paths:
   - "scripts/build-package-bundle.sh"
   - "scripts/build-standalone.sh"
   - "scripts/build-standalone-in-image.sh"
+  - "scripts/standalone-runtime-check.sh"
   - scripts/py_sapi_leg.sh
   - "scripts/build-musl-wheel.sh"
   - scripts/install_matrix.sh
@@ -47,11 +48,12 @@ paths:
   - "e2e/**"
   - Makefile
   - ".github/workflows/**"
+  - "docs/design/universal-distribution.md"
 attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T02:18"
+updated: "2026-11-23T02:53"
 ---
 
 # Goal

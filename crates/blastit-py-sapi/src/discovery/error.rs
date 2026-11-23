@@ -147,7 +147,7 @@ impl fmt::Display for DiscoveryError {
             ),
             Self::NoInterpreter { command, searched } => write!(
                 f,
-                "blastit {command}: no interpreter for {} was found (searched {}); run uv python \
+                "blastit {command}: no {} interpreter was found (searched {}); run uv python \
                  install {DEFAULT_MINOR}",
                 supported_minors_sentence(),
                 searched

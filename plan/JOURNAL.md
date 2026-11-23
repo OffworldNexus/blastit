@@ -4569,3 +4569,8 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T02:18 [MB.67.4] (unknown) edited fields
 - 2026-11-23T02:18 [MB.67] (unknown) edited fields
 - 2026-11-23T02:18 [MB.67.4] (lead) CI FIX: probe expected php_minor code 803 vs digits sets; sdist missing packaging/languages.{tsv,rs.inc}
+- 2026-11-23T02:53 [MB.67.7] (unknown) edited fields
+- 2026-11-23T02:53 [MB.67] (unknown) edited fields
+- 2026-11-23T02:53 [MB.67.7] (lead) CI FIX: standalone-runtime-check greps stale NoInterpreter sentence; version-agnostic guard
+- 2026-11-23T02:53 [MB.67.7] (unknown) edited fields
+- 2026-11-23T02:53 [MB.67] (unknown) edited fields

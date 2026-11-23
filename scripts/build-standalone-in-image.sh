@@ -269,6 +269,8 @@ docker run --rm \
         # delimiter is backslash-quoted rather than `<<BUILD_BODY` so the body is
         # literal, and NOT apostrophe-quoted because this whole container script
         # is one single-quoted `bash -c` argument: a literal quote ends it early.
+        # For the same reason the body below carries no single quote at all, not
+        # even in a printf format: it splits the minors with positional parameters.
         # `CARGO_HOME` is a *writable* directory **seeded by copying** the
         # read-only host cache: cargo extracts `registry/src/<crate>` and
         # `git/checkouts/<dep>` into `CARGO_HOME`, so symlinking those at the
@@ -326,16 +328,28 @@ case "${TARGET##*-}" in
 esac
 arch=${TARGET%%-*}
 py_minors=$(bash /src/packaging/languages.sh --py-minors)
+set -- $py_minors
 py_vars=()
-for minor in $py_minors; do
+for minor in "$@"; do
     digits=${minor//./}
     py_vars+=("PY_SAPI_PYTHON_$digits=/opt/python/cp$digits-cp$digits/bin/python3")
 done
-make py-sapi PY_MINORS="$(printf '%s\n' $py_minors | tr '\n' ' ')" PY_SAPI_REQUIRE_ALL=1 \
+[ "${#py_vars[@]}" -gt 0 ] || {
+    echo "error: packaging/languages.tsv declares no CPython minor, so no shim can be built" >&2
+    exit 1
+}
+make py-sapi PY_MINORS="$*" PY_SAPI_REQUIRE_ALL=1 \
     PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC="$shim_libc" \
     "${py_vars[@]}"
 bash scripts/build-standalone.sh "${build[@]}"
 BUILD_BODY
+        # The heredoc is literal inside this single-quoted argument, so a stray
+        # character in it can silently truncate the generated script. Parse it
+        # before chmod (bash -n prints the file and line it rejects).
+        if ! bash -n /tmp/blastit-inner-build.sh; then
+            echo "error: the generated build body /tmp/blastit-inner-build.sh is not valid bash" >&2
+            exit 1
+        fi
         chmod 0755 /tmp/blastit-inner-build.sh
 
         exec setpriv --reuid "$HOST_UID" --regid "$HOST_GID" --clear-groups \
@@ -343,4 +357,13 @@ BUILD_BODY
             bash -euo pipefail /tmp/blastit-inner-build.sh
     '
 
-echo "build-standalone-in-image: $out/blastit-$target.tar.gz"
+# The container can exit 0 after a truncated body: a stray quote in the
+# single-quoted argument ends it before the archive is written, and the outer
+# script then reported a path that does not exist (PR #66). The archive is the
+# proof, so it is required here.
+archive="$out/blastit-$target.tar.gz"
+[ -s "$archive" ] || {
+    echo "build-standalone-in-image: the builder exited 0 but wrote no $archive" >&2
+    exit 1
+}
+echo "build-standalone-in-image: $archive"

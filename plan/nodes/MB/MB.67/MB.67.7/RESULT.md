@@ -159,3 +159,128 @@ $ make -n py-sapi   (unchanged from the proof above, not re-run)
 for minor in 3.14 3.13
 ```
 
+## Quote bug in the container argument (PR #66 standalone jobs)
+
+The MB.67.7 derivation above used `printf '%s\n' … | tr '\n' ' '` *inside* the
+container's own single-quoted `bash -euo pipefail -c '…'` argument. The `'` in
+`'%s\n'` closed that argument early, so the literal heredoc was truncated
+(`here-document … delimited by end-of-file (wanted BUILD_BODY)`) while the outer
+script still printed an archive path that did not exist and exited 0.
+
+Fixes in `scripts/build-standalone-in-image.sh`:
+
+- The body splits the table's minors with positional parameters instead
+  (`py_minors=$(bash /src/packaging/languages.sh --py-minors)`; `set -- $py_minors`;
+  `PY_MINORS="$*"`), and an empty table is a hard error.
+- **Zero** single quotes remain between the opening `bash -euo pipefail -c '` and its
+  closing line (scanned, not eyeballed).
+- The container runs `bash -n /tmp/blastit-inner-build.sh` after the heredoc and before
+  `chmod`, so an invalid body fails with bash's own `file: line:` message.
+- The host requires a non-empty archive before printing anything:
+  `[ -s "$archive" ] || exit 1` with "the builder exited 0 but wrote no …".
+
+Evidence:
+
+```
+$ bash -n scripts/build-standalone-in-image.sh        -> ok
+$ scan of the container argument: inner lines carrying a single quote: 0
+$ git diff --stat 6401e5f -- scripts/build-standalone-in-image.sh
+ scripts/build-standalone-in-image.sh | 51 ++++++++++++++++++++--------
+ 1 file changed, 40 insertions(+), 11 deletions(-)
+   (only the derivation, the bash -n guard, the host archive check, two comment paragraphs)
+$ git diff 6401e5f -- …   (no temp line left: `grep -n 'if ; then'` -> reverted)
+
+$ scripts/build-standalone-in-image.sh --image quay.io/pypa/manylinux_2_28_x86_64 \
+    --target x86_64-unknown-linux-gnu --max-glibc 2_28 --out target/standalone-gnu
+...
+build-standalone: 4 shims for x86_64-gnu from /src/target/php-sapi
+build-standalone: 2 CPython shims for x86_64-gnu from /src/target/py-sapi
+build-standalone: 6485373 bytes -> target/standalone-gnu/blastit-x86_64-unknown-linux-gnu.tar.gz
+build-standalone-in-image: target/standalone-gnu/blastit-x86_64-unknown-linux-gnu.tar.gz
+(exit 0)
+
+$ ls -l target/standalone-gnu/blastit-x86_64-unknown-linux-gnu.tar.gz
+-rw-r--r-- 1 remy remy 6485373 Nov 23 02:47 …/blastit-x86_64-unknown-linux-gnu.tar.gz
+$ tar tzf … | head -3
+blastit-x86_64-unknown-linux-gnu/
+blastit-x86_64-unknown-linux-gnu/blastit
+blastit-x86_64-unknown-linux-gnu/LICENSE
+```
+
+`--out /tmp/…` is not usable for this script: `inside()` refuses an absolute path outside
+the repository, so the run used a repo-internal output directory.
+
+Negative case (temporary `if ; then` inside the heredoc, since reverted):
+
+```
+/tmp/blastit-inner-build.sh: line 13: syntax error near unexpected token `;'
+/tmp/blastit-inner-build.sh: line 13: `if ; then'
+error: the generated build body /tmp/blastit-inner-build.sh is not valid bash
+exit=1        # no archive path printed; target/standalone-neg stayed empty
+```
+
+### §2 apps and §3 standalone do not invoke this script
+
+`grep -n build-standalone-in-image .github/workflows/ci.yml` -> no match. §2 apps builds
+`cargo build -p blastit --release --locked` and runs `e2e/run_apps.py`; §3 builds
+`cargo build -p blastit --locked` and runs the runtime checks directly. Host steps run
+here: `cargo build -p blastit --locked` ok, `check-portable-elf.sh target/debug/blastit`
+ok, `make python-runtime` ok (2 shims), the derived no-Python probe in
+`debian:trixie-slim` ok (`python python3 python3.14 python3.13`), `check-exec-env.sh` ok
+(needs glibc 2.39, image provides 2.41).
+
+`scripts/standalone-runtime-check.sh --require-no-python` still FAILS here, for a
+**pre-existing** reason unrelated to this diff: commit 375a89e (MB.67.3) made the refusal
+read `no interpreter for CPython 3.13 and 3.14 was found`, but the script (unchanged since
+v0.2.0) greps `no CPython 3.13 or 3.14 interpreter was found`. One-line fix for the §3
+owner: grep the current sentence.
+
+```
+$ make fast-check   -> exit 0
+install-test: ok (j) gen_language_blocks.py --check: the committed blocks are the table's and Cargo.toml's version
+install-test: all cases passed (fixture on http://127.0.0.1:8745, scratch /tmp/opencode/install-sh-test)
+```
+
+## §3 red job: the sentence shape, not the string
+
+MB.67.3 made `NoInterpreter` read `no interpreter for CPython 3.13 and 3.14 was found`, while
+`scripts/standalone-runtime-check.sh` still grepped the v0.2.0 phrase `no CPython 3.13 or 3.14
+interpreter was found`, so the §3 standalone job was red on this branch.
+
+Fixed as a shape, so a row added/removed in `packaging/languages.tsv` cannot break it again:
+
+- `crates/blastit-py-sapi/src/discovery/error.rs`: `NoInterpreter` is now
+  `blastit {command}: no {supported_minors_sentence()} interpreter was found (searched …); run uv
+  python install {DEFAULT_MINOR}` — the generated sentence sits in the middle, so the result reads
+  `no CPython 3.13 and 3.14 interpreter was found …`. `UnsupportedMinor` unchanged.
+- `scripts/standalone-runtime-check.sh`: every assertion version-agnostic —
+  `grep -Eq 'no CPython .* interpreter was found'` (was an exact minor list),
+  `grep -Eq 'run uv python install [0-9]+\.[0-9]+'` (was `3.14`), the `--require-no-python` guard
+  keeps `python`/`python3` and globs each `PATH` entry for `python[0-9]*` executables while
+  skipping `*-config` (checked on a fake bin dir: finds `python3.14`, ignores
+  `python3.13-config`), and the `ok` line names no minor.
+- `docs/design/universal-distribution.md` §2.2 quotes that shape (`{sentence}` +
+  `{DEFAULT_MINOR}`), not a checked-in list.
+
+Evidence, in the order run:
+
+```
+$ cargo test -p blastit-py-sapi --locked       -> test result: ok (0, 2, 5 and 1 passed), exit 0
+$ cargo build -p blastit --locked              -> Finished dev profile
+$ docker run --rm -v $PWD/target/debug/blastit:/usr/local/bin/blastit:ro … \
+    debian:trixie-slim bash /usr/local/bin/standalone-runtime-check.sh --require-no-python
+host: no CPython on PATH, no BLASTIT_PYTHON/VIRTUAL_ENV/BLASTIT_WHEEL_PYTHON, no BLASTIT_PY_SHIM_DIR
+ok   200  /                      Cache-Control: no-cache
+ok   404  /mb17-does-not-exist
+ok   2/2 static responses without touching an interpreter
+standalone-runtime-check: /usr/local/bin/blastit dev --port 18460 (no CPython on this host)
+ok   exit 1 before binding: no CPython (discovery names the 'uv python install <minor>' step)
+standalone-runtime-check: 3/3 passed on a host with no CPython        (exit 0)
+
+$ scripts/check-portable-elf.sh target/debug/blastit   -> ok (no RPATH/RUNPATH)
+$ cargo fmt --all && cargo fmt --all -- --check        -> exit 0
+$ make fast-check                                      -> exit 0 (install-test: all cases passed …)
+```
+
+
+
