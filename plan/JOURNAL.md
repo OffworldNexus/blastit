@@ -4578,3 +4578,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T03:15 [MB.67] (unknown) edited fields
 - 2026-11-23T03:15 [MB.67.7] (lead) CI FIX: publish-pypi musl block apostrophes; add workflow inline-script syntax gate
 - 2026-11-23T03:15 [MB.67] (unknown) edited fields
+- 2026-11-23T09:23 [MB.68] (lead) status ready -> active
+- 2026-11-23T09:23 [MB.68] (lead) attempt 1/3 started
+- 2026-11-23T09:23 [MB.68] (lead) base 3a098e35f2f293bdeaedf07f235f4fe79a689837
+- 2026-11-23T09:26 [MB.68] (lead) REVIEW (review-arch): clean. NOTE: action re-runs setup-uv after publish-pypi's own step (idempotent, harmless). FOLLOW-UP: platform: input in build-wheel/actio
+- 2026-11-23T09:26 [MB.68] (lead) status active -> done
+- 2026-11-23T09:26 [MB.68] (lead) commit f8ad425f993cb265c9a791ac5cca08640304a285
+- 2026-11-23T09:26 [MB.68] (lead) commit 6553ee7 (amended to carry the node log)

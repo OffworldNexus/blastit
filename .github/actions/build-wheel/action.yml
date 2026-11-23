@@ -18,6 +18,10 @@ description: >
   action is a thin, honest caller: one place builds and proves a wheel, on a
   developer's machine and in CI alike.
 
+  `scripts/build-wheel.sh` needs `uv` (or `PYO3_PYTHON`) for its README-link
+  rewrite and fails closed without one, so this action installs `uv` **before**
+  it builds; no caller has to know.
+
   A wheel this action builds carries the two CPython shims the builder image can
   compile. The four PHP shims need a distro's `php_config.h`, so they only travel
   when a caller stages them (`shims-from:`); `publish-pypi.yml` is that caller —
@@ -65,6 +69,10 @@ runs:
   using: composite
   steps:
     - uses: dtolnay/rust-toolchain@stable
+    # `scripts/build-wheel.sh` runs its README-link rewrite through `uv` (or
+    # `PYO3_PYTHON`) and fails closed without one, so `uv` must exist before the
+    # build step below.
+    - uses: astral-sh/setup-uv@v10.3.2
     # Refused here rather than built on the runner: a host build would carry the
     # runner's glibc tag, and `--max-glibc 2_28` would reject it after the compile.
     - name: Refuse a wheel with no manylinux container
@@ -99,7 +107,6 @@ runs:
     # wheel), drives `--version`, `blastit fmt` and `blastit check`, and serves a
     # WSGI view through the shipped shim. One harness, no second copy of the
     # install commands.
-    - uses: astral-sh/setup-uv@v10.3.2
     - name: Install the wheel in the matrix's images and drive it (e2e/run_packaging.py)
       shell: bash
       run: |
