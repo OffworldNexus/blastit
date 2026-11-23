@@ -31,3 +31,11 @@ CI FIX: standalone-runtime-check greps stale NoInterpreter sentence; version-agn
 ## 2026-11-23T02:53 [unknown]
 
 edited fields
+
+## 2026-11-23T03:15 [unknown]
+
+edited fields
+
+## 2026-11-23T03:15 [lead]
+
+CI FIX: publish-pypi musl block apostrophes; add workflow inline-script syntax gate

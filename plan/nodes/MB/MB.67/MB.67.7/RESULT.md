@@ -282,5 +282,57 @@ $ cargo fmt --all && cargo fmt --all -- --check        -> exit 0
 $ make fast-check                                      -> exit 0 (install-test: all cases passed …)
 ```
 
+## Workflow `-c '…'` quoting: the musl reds and the gate that catches them
+
+PR #66's `standalone (x86_64-musl)` / `(aarch64-musl)` reds came from the workflow follow-up
+line in `publish-pypi.yml`: `uv python install $(bash packaging/languages.sh --py-minors |
+tr '\n' ' ')` sits inside a single-quoted `sh -eu -c '…'` word, so the `'` in `'\n'` / `' '`
+closed that word — the runner ran the rest, and the container received a truncated script
+(`syntax error: unexpected end of file (expecting ")")`), directly under the comment saying
+"No apostrophe anywhere in this block".
+
+- The line is now `… --py-minors | xargs) >/dev/null`: `xargs` joins tokens with spaces and
+  needs no quoting.
+- The other single-quoted blocks are clean — `ci.yml:312`, `publish-pypi.yml:370/429/601`,
+  `wheels.yml:116` — five words, all parsed.
+- New `scripts/workflow_script_syntax.py` (stdlib only): reads every
+  `.github/workflows/*.yml` as text, finds each `sh`/`bash` invocation ending in `-c '`,
+  extracts the text between that opening quote and the next `'` (exactly the word the outer
+  shell sees, `shell_words()`), and runs `bash -n -c` on it (bash's grammar is a superset of
+  sh's). An unterminated word is a failure too. It prints `file:line` plus bash's own stderr
+  and exits non-zero; this is a parser + shell-syntax check on the inner script, not a source
+  scanner.
+- `Makefile`: new `workflow-syntax` target
+  (`$(UV) run --no-project scripts/workflow_script_syntax.py`), wired into both `fast-check`
+  and `check` (cheap: five words, seconds) and added to `.PHONY`.
+
+Evidence:
+
+```
+$ uv run --no-project scripts/workflow_script_syntax.py
+workflow-script-syntax: ok (5 shell word(s) in 8 workflow(s))                 (exit 0)
+
+$ # gate proof: apostrophe line restored, run, then reverted
+/home/remy/…/.github/workflows/publish-pypi.yml:370: bash: -c: line 24: unexpected EOF while looking for matching `)'
+workflow-script-syntax: 1 bad shell word(s) in 8 workflow(s)                 (exit 1)
+
+$ # the fixed block, extracted and parsed directly
+extracted line 370: 1988 chars
+bash -n /tmp/mb67/musl-body.sh   -> exit 0
+sh   -n /tmp/mb67/musl-body.sh   -> exit 0
+23:  uv python install $(bash packaging/languages.sh --py-minors | xargs) >/dev/null
+
+$ make fast-check     -> exit 0
+workflow-script-syntax: ok (5 shell word(s) in 8 workflow(s))
+install-test: all cases passed (fixture on http://127.0.0.1:8745, scratch /tmp/opencode/install-sh-test)
+$ uv run --no-project tools/plan.py validate   -> plan OK (exit 0)
+```
+
+The musl leg itself was not run to completion here (it needs the Alpine image plus network for
+rustup/uv inside the container); the extracted-body parse is the proof that the red was
+quoting, and the archive check added to `build-standalone-in-image.sh` earlier makes a build
+that produces nothing fail instead of printing a path.
+
+
 
 

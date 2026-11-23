@@ -4574,3 +4574,7 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T02:53 [MB.67.7] (lead) CI FIX: standalone-runtime-check greps stale NoInterpreter sentence; version-agnostic guard
 - 2026-11-23T02:53 [MB.67.7] (unknown) edited fields
 - 2026-11-23T02:53 [MB.67] (unknown) edited fields
+- 2026-11-23T03:15 [MB.67.7] (unknown) edited fields
+- 2026-11-23T03:15 [MB.67] (unknown) edited fields
+- 2026-11-23T03:15 [MB.67.7] (lead) CI FIX: publish-pypi musl block apostrophes; add workflow inline-script syntax gate
+- 2026-11-23T03:15 [MB.67] (unknown) edited fields

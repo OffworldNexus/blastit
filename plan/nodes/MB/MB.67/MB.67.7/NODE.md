@@ -16,6 +16,7 @@ paths:
   - "scripts/standalone-runtime-check.sh"
   - scripts/py_sapi_leg.sh
   - "scripts/build-musl-wheel.sh"
+  - scripts/workflow_script_syntax.py
   - Makefile
   - ".github/workflows/**"
   - "crates/blastit-py-sapi/src/discovery/error.rs"
@@ -24,7 +25,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:57"
-updated: "2026-11-23T02:53"
+updated: "2026-11-23T03:15"
 ---
 
 # Goal

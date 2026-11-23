@@ -49,11 +49,12 @@ paths:
   - Makefile
   - ".github/workflows/**"
   - "docs/design/universal-distribution.md"
+  - scripts/workflow_script_syntax.py
 attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T02:53"
+updated: "2026-11-23T03:15"
 ---
 
 # Goal

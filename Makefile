@@ -102,7 +102,7 @@ endif
 CRITICAL_STAGE ?= $(CURDIR)/target/python-critical
 CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytest\.mark\.skip|pytest\.skip[[:space:]]*\(|importorskip[[:space:]]*\(|unittest\.skip
 
-.PHONY: help fast-check check clean guard critical-skip-check plan-validate \
+.PHONY: help fast-check check clean guard workflow-syntax critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default coverage \
         universal-smoke py-format py-lint test-critical docs-check docs-blocks-check docs-unit e2e e2e-prod e2e-packaging \
         e2e-universal \
@@ -118,6 +118,14 @@ clean: rs-format py-format rs-lint py-lint ## Format Rust + Python tools, then l
 
 guard: ## Refuse >5 MiB files, .env secrets, or stray binary artefacts
 	$(UV) run --no-project tools/guard.py
+
+# Every workflow hands a script to a container as one single-quoted `sh -c '…'`
+# word, and a stray `'` inside it truncates the word (PR #66: the container got
+# `syntax error: unexpected end of file` while the runner exited 0). This parses
+# each such word out of the YAML and runs `bash -n -c` on it — a parser, not a
+# source grep; seconds, no image and no network.
+workflow-syntax: ## Parse every `sh`/`bash -c '…'` word in .github/workflows as bash
+	$(UV) run --no-project scripts/workflow_script_syntax.py
 
 plan-validate: ## Validate plan/nodes consistency
 	$(UV) run --no-project tools/plan.py validate
@@ -840,9 +848,9 @@ rs-test-php-image: ## Docker: run the image-built e2e_dev PHP legs (root + unpri
 		echo "rs-test-php-image: $$label run served, crashed and recovered, no leg skipped"; \
 	done
 
-fast-check: guard rs-fmt rs-lint rs-doc rs-test py-lint plan-validate universal-smoke ## Fast per-slice Rust + Python + plan check
+fast-check: guard workflow-syntax rs-fmt rs-lint rs-doc rs-test py-lint plan-validate universal-smoke ## Fast per-slice Rust + Python + plan check
 
-check: guard rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check rs-no-python rs-no-default e2e-universal zed-check plan-validate ## Full unprivileged epic/release gate
+check: guard workflow-syntax rs-fmt rs-lint rs-doc rs-test test-critical py-lint docs-unit docs-check rs-no-python rs-no-default e2e-universal zed-check plan-validate ## Full unprivileged epic/release gate
 
 # `make install` stages the §6.1 bundle: one universal `blastit` (the default
 # `python,php,static` features), its `blastit-lsp`, every shim this host built,
