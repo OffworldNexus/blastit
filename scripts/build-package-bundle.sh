@@ -59,15 +59,13 @@ shim_dir=""
 py_shim_dir=""
 binary_floor="2_28"
 bundle_floor=""
-# One shim per row of the table, per language family.
-require_php=$(shim_count_of php)
-require_py=$(shim_count_of python)
 
 usage() {
     cat >&2 <<'USAGE'
 usage: scripts/build-package-bundle.sh --out <dir> [--arch x86_64|aarch64]
                                        [--shim-dir <dir>] [--py-shim-dir <dir>]
                                        [--binary-floor 2_28] [--bundle-floor 2_34]
+                                       [--channel stable|nightly]
 
   --out           where the §6.1 bundle (bin/ + share/blastit/) is assembled
   --arch          default: this machine (only native builds are allowed)
@@ -78,10 +76,14 @@ usage: scripts/build-package-bundle.sh --out <dir> [--arch x86_64|aarch64]
   --binary-floor  ceiling for blastit/blastit-lsp in the manylinux image (2_28)
   --bundle-floor  ceiling for the whole bundle, every shim included (the matrix's
                   `--shim-floor`: the oldest advertised distribution)
+  --channel       the release channel whose shims are required (`stable`, the
+                  default, or `nightly`, which also requires
+                  `libblastit_py316`)
 
-Both builders take this bundle next (`build-deb.sh` writes the seven `.deb`s,
-`build-rpm.sh` the seven `.rpm`s), and each package's own ceiling is the matrix's
-shim floor: `scripts/platform_matrix.py --shim-floor`.
+Both builders take this bundle next (`build-deb.sh` writes the eight `.deb`s,
+`build-rpm.sh` the eight `.rpm`s — nine on the nightly channel), and each
+package's own ceiling is the matrix's shim floor:
+`scripts/platform_matrix.py --shim-floor`.
 USAGE
     exit 2
 }
@@ -99,10 +101,25 @@ while [ "$#" -gt 0 ]; do
         --py-shim-dir) [ "$#" -ge 2 ] || usage; py_shim_dir=$2; shift 2 ;;
         --binary-floor) [ "$#" -ge 2 ] || usage; binary_floor=$2; shift 2 ;;
         --bundle-floor) [ "$#" -ge 2 ] || usage; bundle_floor=$2; shift 2 ;;
+        --channel)
+            [ "$#" -ge 2 ] || usage
+            BLASTIT_LANGUAGES_CHANNEL=$2
+            shift 2
+            ;;
         -h | --help) usage ;;
         *) usage ;;
     esac
 done
+
+# The channel decides how many shims the bundle must carry (`MB.75`): a stable
+# bundle has no nightly-only shim, a nightly one does.
+case " $BLASTIT_LANGUAGES_CHANNELS " in
+    *" $BLASTIT_LANGUAGES_CHANNEL "*) ;;
+    *) die "--channel '$BLASTIT_LANGUAGES_CHANNEL' is not stable|nightly" ;;
+esac
+# One shim per row of the table, per language family, for the selected channel.
+require_php=$(shim_count_of php)
+require_py=$(shim_count_of python)
 
 [ -n "$out" ] || usage
 command -v docker >/dev/null 2>&1 ||

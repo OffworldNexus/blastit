@@ -63,7 +63,7 @@ arch=""
 
 usage_text() {
     cat <<'USAGE'
-usage: scripts/check-bundle-layout.sh PREFIX
+usage: scripts/check-bundle-layout.sh [--channel stable|nightly] PREFIX
        scripts/check-bundle-layout.sh --deb-set <dir> [--arch amd64|arm64]
        scripts/check-bundle-layout.sh --rpm-set <dir> [--arch x86_64|aarch64]
 
@@ -71,6 +71,9 @@ usage: scripts/check-bundle-layout.sh PREFIX
   --deb-set    a directory of the `.deb`s `scripts/build-deb.sh` wrote
   --rpm-set    a directory of the `.rpm`s `scripts/build-rpm.sh` wrote
   --arch       the package architecture of the set (default: this machine)
+  --channel    the release channel whose names are required (`stable`, the
+               default, or `nightly`, for a set that also carries a
+               nightly-only shim such as `blastit-python-3.16`)
 
 A set check extracts every package into one scratch root and asserts the same
 §6.1 tree as the PREFIX check; a set missing one of the packages
@@ -98,6 +101,11 @@ while [ "$#" -gt 0 ]; do
         --deb-set) [ "$#" -ge 2 ] || usage; mode=deb; setdir=$2; shift 2 ;;
         --rpm-set) [ "$#" -ge 2 ] || usage; mode=rpm; setdir=$2; shift 2 ;;
         --arch) [ "$#" -ge 2 ] || usage; arch=$2; shift 2 ;;
+        --channel)
+            [ "$#" -ge 2 ] || usage
+            BLASTIT_LANGUAGES_CHANNEL=$2
+            shift 2
+            ;;
         -h | --help) usage 0 ;;
         -*) usage ;;
         *)
@@ -107,6 +115,15 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+# A set that carries a nightly-only shim is checked with `--channel nightly`
+# (`MB.75`): the required names are the channel's, so the layout check never
+# calls `blastit-python-3.16` unowned, and a stable set is still exactly the
+# stable names.
+case " $BLASTIT_LANGUAGES_CHANNELS " in
+    *" $BLASTIT_LANGUAGES_CHANNEL "*) ;;
+    *) die "--channel '$BLASTIT_LANGUAGES_CHANNEL' is not stable|nightly" ;;
+esac
 
 if [ "$mode" = prefix ]; then
     [ -n "$prefix" ] || usage
