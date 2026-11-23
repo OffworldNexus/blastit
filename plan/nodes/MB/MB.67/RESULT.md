@@ -51,3 +51,25 @@ filenames and `test_install.sh`'s fake packages; reverted with no drift.
   `CHANGELOG`, ADRs, `plan/`, `docs/testing/*`.
 - Follow-up (recorded, not done): `scripts/platform_matrix.py` is now ~1900 LOC; `PHP_LEG_DATA` +
   `_php_leg` and `check()` are a natural module split, deliberately not churned inside this epic.
+
+## Post-gate CI fix (PR #66 shim lint)
+
+PR #66 reddened `.github/workflows/py-sapi.yml`'s `lint: the shim crates` job on:
+`cargo clippy -p blastit-py-shim --features extension-module --all-targets --locked -- -D warnings`
+→ `error: constant BUILT_PY_MINOR is never used` (the `surface` module that reads it is compiled
+out under `all(test, feature = "extension-module")`, but `build.rs` emitted the const
+unconditionally).
+
+- `crates/blastit-py-shim/build.rs` now emits **both** `const BUILT_PY_MINOR` and the
+  `const _: () = assert!(supports_py_minor(BUILT_PY_MINOR));` block under
+  `#[cfg(not(all(test, feature = "extension-module")))]` — the exact shape that compiles the
+  reader — keeping `if artifact` on the assert. No `#[allow(dead_code)]`; the assertion stays.
+- `make rs-lint` (used by both `fast-check` and `check`) now also runs the exact CI invocation,
+  commented as mirroring `py-sapi.yml`'s lint job, so the feature shape cannot pass the epic gate
+  while failing CI.
+- The gate gap: `make check` EXIT 0 did not cover the shim's `extension-module` + `test` shape;
+  the workspace clippy (default features) and the artifact build never compile it.
+
+Verified: exact CI command EXIT 0; `cargo test -p blastit-py-shim` 2 passed; no-feature clippy
+EXIT 0; artifact build (`--features extension-module --release`) EXIT 0. Final `make check` below.
+

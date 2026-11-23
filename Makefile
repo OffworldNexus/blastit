@@ -138,6 +138,8 @@ rs-fmt: ## Check Rust workspace formatting
 
 rs-lint: ## Clippy workspace with warnings denied (python feature enabled)
 	$(RUST_ENV) $(CARGO) clippy --workspace --all-targets --locked --features python -- -D warnings
+	@# Mirrors .github/workflows/py-sapi.yml's "lint: the shim crates" job: the shim's extension-module shape.
+	$(RUST_ENV) $(CARGO) clippy -p blastit-py-shim --features extension-module --all-targets --locked -- -D warnings
 
 rs-doc: ## Check rustdoc across workspace with warnings denied
 	$(RUST_ENV) RUSTDOCFLAGS="-D warnings" $(CARGO) doc --workspace --no-deps --locked --features python

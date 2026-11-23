@@ -107,11 +107,11 @@ fn emit(python: &[&Row], minor: u32, artifact: bool) -> String {
             .join(" | ")
     );
 
-    out.push_str("/// The CPython minor this shim was built for (`PYO3_PYTHON`).\n");
+    out.push_str("/// The CPython minor this shim was built for (`PYO3_PYTHON`).\n// Emitted only in the shapes that compile its reader (`surface`), so a\n// `test` + `extension-module` build has no dead constant.\n#[cfg(not(all(test, feature = \"extension-module\")))]\n");
     let _ = writeln!(out, "const BUILT_PY_MINOR: u32 = {minor};\n");
 
     if artifact {
-        out.push_str("// The shipped artifact's own reported minor must be a declared one: a\n// shim no boot can select is a build error, not a runtime surprise. Only the\n// `make py-sapi` shape (`extension-module` + `PYO3_PYTHON`) is held to it, so a\n// plain `cargo test` on a host with an older `python3` still builds.\nconst _: () = assert!(supports_py_minor(BUILT_PY_MINOR));\n");
+        out.push_str("// The shipped artifact's own reported minor must be a declared one: a\n// shim no boot can select is a build error, not a runtime surprise. Only the\n// `make py-sapi` shape (`extension-module` + `PYO3_PYTHON`) is held to it, so a\n// plain `cargo test` on a host with an older `python3` still builds.\n#[cfg(not(all(test, feature = \"extension-module\")))]\nconst _: () = assert!(supports_py_minor(BUILT_PY_MINOR));\n");
     }
 
     out
