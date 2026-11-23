@@ -19,7 +19,8 @@
 # `blastit-<ver>-py3-none-<platform>.whl` — the binary out of `.data/scripts/`
 # into `blastit/_bin/blastit`, `blastit-lsp` and the shims added beside it,
 # `Root-Is-Purelib: false`, the `py3-none` tag, the three console scripts, and a
-# fresh `RECORD`. One artifact then serves CPython 3.12, 3.13 and 3.14.
+# fresh `RECORD`. One artifact then serves every minor the selected channel
+# declares (`--channel stable|nightly`).
 #
 # The shims the wheel carries are staged in `$BLOB_DIR` (`--blobs`, default
 # `target/wheel-blobs`):
@@ -28,14 +29,25 @@
 #     distro has `php_config.h`), and they are the *only* embedded ELFs whose
 #     floor is not this image's: `check-portable-elf.sh --max-glibc` measures
 #     each one against the wheel's floor before it travels;
-#   * `blastit-lsp` and the two CPython shims are compiled **inside** the
+#   * `blastit-lsp` and the per-minor CPython shims are compiled **inside** the
 #     manylinux image, because they must meet the `2_28` floor the wheel claims
 #     (built on a developer host they need `GLIBC_2.34`).
 #
+# Which CPython minors those are is `packaging/languages.tsv`'s answer, read
+# through its one loader (`packaging/languages.sh --py-minors --channel
+# stable|nightly`, newest first) here and inside the builder image alike. A minor
+# added to the table is a shim in every wheel of that channel, so a wheel cannot
+# stage a subset and leave a declared host to `Connection reset by peer` when a
+# WSGI view boots.
+#
 # `--require-shims py|all` fails closed when the staged set is incomplete (the
-# release legs pass `all`: six shims, design §6.1). A caller that boots the
-# wheel's WSGI path from a bundle passes `py` — it needs the two CPython shims —
-# and the plain host path passes nothing: that wheel is a developer artifact.
+# release legs pass `all`: six shims, design §6.1), and every `make py-sapi` below
+# also passes `PY_SAPI_REQUIRE_ALL=1`: a declared minor whose interpreter the image
+# or host does not carry stops the build, naming that minor, instead of staging a
+# subset — the silent subset that once shipped a wheel with no shim for a host the
+# table declares. A caller that boots the wheel's WSGI path from a bundle passes
+# `py` — it needs the CPython shims — and the plain host path passes nothing: that
+# wheel is a developer artifact.
 #
 # Platform tag & glibc floor:
 #
@@ -65,7 +77,8 @@
 # found 2`). So this script refuses `--compatibility` from its caller when
 # `--manylinux` already chose one.
 #
-# Usage: scripts/build-wheel.sh [--manylinux 2_28] [extra arguments for `maturin build`]
+# Usage: scripts/build-wheel.sh [--manylinux 2_28] [--channel stable|nightly]
+#                               [extra arguments for `maturin build`]
 #
 # The README is rewritten to absolute links for the duration of the build and
 # restored afterwards (see the `trap` below), so the tree is unchanged when this
@@ -82,6 +95,9 @@ requested_interp=""
 blob_dir="${BLASTIT_WHEEL_BLOBS:-}"
 require_shims="${BLASTIT_WHEEL_REQUIRE_SHIMS:-}"
 shims_from="${BLASTIT_WHEEL_SHIMS_FROM:-}"
+# The release channel whose declared CPython minors get a shim (`MB.75`): the
+# same selector every other builder takes, from the same variable.
+channel="${BLASTIT_LANGUAGES_CHANNEL:-stable}"
 # The glibc floor a wheel claims, derived from its platform (`MB.42.13`).
 #
 # A maturin `bindings = "bin"` wheel is tagged `manylinux_2_39_x86_64`, so the
@@ -152,6 +168,14 @@ while [ "$#" -gt 0 ]; do
             shims_from=${1#--shims-from=}
             shift
             ;;
+        --channel)
+            channel=${2:?--channel requires stable or nightly}
+            shift 2
+            ;;
+        --channel=*)
+            channel=${1#--channel=}
+            shift
+            ;;
         -o|--out)
             out_dir=${2:?$1 requires an output directory}
             shift 2
@@ -176,6 +200,67 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+# The channels `packaging/languages.sh` declares (`BLASTIT_LANGUAGES_CHANNELS`): a
+# channel decides which minors this wheel serves, so an unknown one is a usage
+# error here, never a silently stable build.
+channels="stable nightly"
+case " $channels " in
+    *" $channel "*) ;;
+    *)
+        echo "error: --channel '$channel' is not stable|nightly" >&2
+        exit 2
+        ;;
+esac
+# The minors this wheel stages shims for: the table's, newest first, from its one
+# loader. Derived once, joined to one space-separated line (`make` expands a
+# multi-line `PY_MINORS` into extra recipe lines); neither the container block nor
+# the musl host path spells a version.
+py_minors=$(bash "$root/packaging/languages.sh" --py-minors --channel "$channel" | tr '\n' ' ')
+py_minors=${py_minors% }
+if [ -z "$py_minors" ]; then
+    echo "error: packaging/languages.sh --py-minors --channel $channel named no CPython minor" >&2
+    exit 1
+fi
+# The oldest declared minor (the list is newest first): the `>=` spec the host
+# probe asks uv for, and the minor this build assumes when nothing on the host can
+# be probed.
+py_floor=${py_minors##* }
+
+# The minors a `make py-sapi` builds: the selected channel's list, or a caller's
+# `PY_MINORS` when it restates that same set. The set must match — order does not
+# matter, because `scripts/build-musl-wheel.sh` passes `packaging/languages.tsv`'s
+# order — since a narrower list would override `--channel nightly` and stage the
+# subset this build exists to stop; a differing set is a usage error. The result is
+# one space-separated line either way: a raw multi-line value makes `make` expand
+# it into extra recipe lines (`/bin/sh: -c: syntax error`).
+requested_py_minors() {
+    local channel_name=$1 declared=$2 normalised minor dropped="" added=""
+    if [ -z "${PY_MINORS:-}" ]; then
+        printf '%s\n' "$declared"
+        return 0
+    fi
+    normalised=$(printf '%s\n' "$PY_MINORS" | tr '\n' ' ')
+    normalised=${normalised% }
+    for minor in $declared; do
+        case " $normalised " in
+            *" $minor "*) ;;
+            *) dropped="$dropped $minor" ;;
+        esac
+    done
+    for minor in $normalised; do
+        case " $declared " in
+            *" $minor "*) ;;
+            *) added="$added $minor" ;;
+        esac
+    done
+    if [ -n "$dropped$added" ]; then
+        echo "error: PY_MINORS='$normalised' would drop:${dropped:- none} and add:${added:- none}" >&2
+        echo "  a $channel_name build stages $declared; forward --channel $channel_name instead of narrowing PY_MINORS" >&2
+        return 2
+    fi
+    printf '%s\n' "$normalised"
+}
 
 # The staged `blastit/_bin/` payload for the repack: `blastit-lsp` and the shims.
 blob_dir=${blob_dir:-target/wheel-blobs}
@@ -320,29 +405,32 @@ if [[ -n $manylinux_ver ]]; then
     esac
 
     # Match the CPython minor the caller asked for (`--interpreter`, `PYO3_PYTHON`,
-    # or uv's default >= 3.13) so `/opt/python/cp3NN-cp3NN/bin/python` inside the
-    # manylinux container produces the wheel `e2e/` expects.
+    # or uv's default >= the oldest declared minor) so
+    # `/opt/python/cp<digits>-cp<digits>/bin/python` inside the manylinux container
+    # produces the wheel `e2e/` expects.
     probe_py=${requested_interp:-${PYO3_PYTHON:-}}
     if [[ -n $probe_py ]] && command -v "$probe_py" >/dev/null 2>&1; then
         py_minor=$("$probe_py" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
     elif command -v uv >/dev/null 2>&1; then
         # The host probe is a *preference*, not a requirement: the wheel is
-        # compiled inside the manylinux image, which has `/opt/python/cp313-cp313`
-        # whatever the host runs. `uv python find '>=3.13'` exits 2 on a runner
-        # that only has the system 3.12 (`ubuntu-24.04`), and under `set -e` that
-        # killed the build before the container started (`MB.49`).
-        py_bin=$(uv python find --no-project '>=3.13' 2>/dev/null || true)
+        # compiled inside the manylinux image, which carries one
+        # `/opt/python/cp<digits>-cp<digits>` per declared minor whatever the host
+        # runs. `uv python find ">=$py_floor"` exits 2 on a runner whose only
+        # CPython is older than the floor (`ubuntu-24.04`), and under `set -e`
+        # that killed the build before the container started (`MB.49`).
+        py_bin=$(uv python find --no-project ">=$py_floor" 2>/dev/null || true)
         if [[ -n $py_bin ]]; then
             py_minor=$("$py_bin" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
         else
             # Named, not silent: the caller asked for a minor (or left it to uv)
-            # and is getting 3.13's wheel, so a build log says which one ran.
-            echo "build-wheel: no host CPython >=3.13 to probe; assuming 3.13 (the image's /opt/python/cp313-cp313)" >&2
-            py_minor="3.13"
+            # and is getting the oldest declared one, so a build log says which
+            # ran.
+            py_minor=$py_floor
+            echo "build-wheel: no host CPython >=$py_floor to probe; maturin builds against /opt/python/cp${py_floor//./}-cp${py_floor//./} in the image" >&2
         fi
     else
-        echo "build-wheel: no uv and no --interpreter/PYO3_PYTHON; assuming 3.13 (the image's /opt/python/cp313-cp313)" >&2
-        py_minor="3.13"
+        py_minor=$py_floor
+        echo "build-wheel: no uv and no --interpreter/PYO3_PYTHON; maturin builds against /opt/python/cp${py_floor//./}-cp${py_floor//./} in the image" >&2
     fi
     py_digits=${py_minor//./}
     container_py="/opt/python/cp${py_digits}-cp${py_digits}/bin/python"
@@ -446,10 +534,25 @@ DOCKER
             # needs no shared libpython.
             cargo build --release --locked -p blastit-lsp
             install -D -m 0755 "/src/target/manylinux_'"${manylinux_ver}"'/release/blastit-lsp" "$BLOB_DIR/blastit-lsp"
-            ( cd /src && make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_OUT="$BLOB_DIR" \
-                PY_SAPI_ARCH='"${arch}"' PY_SAPI_LIBC=gnu \
-                PY_SAPI_PYTHON_313=/opt/python/cp313-cp313/bin/python3 \
-                PY_SAPI_PYTHON_314=/opt/python/cp314-cp314/bin/python3 )
+            # One shim per declared minor, read from the mounted table: the image
+            # carries `/opt/python/cp<digits>-cp<digits>` for each of them, and
+            # `PY_SAPI_PYTHON_<digits>` names it explicitly so the build log says
+            # which interpreter compiled each shim. `PY_MINORS` is one
+            # space-separated line, because `make` expands a multi-line value into
+            # extra recipe lines, and `PY_SAPI_REQUIRE_ALL=1` makes the image the
+            # final word: a declared minor it cannot build (no `cp<digits>`) stops
+            # this build by name rather than staging a subset.
+            shim_minors=$(bash /src/packaging/languages.sh --py-minors --channel '"${channel}"')
+            shim_env=()
+            shim_words=""
+            for minor in $shim_minors; do
+                digits=${minor//./}
+                shim_env+=("PY_SAPI_PYTHON_${digits}=/opt/python/cp${digits}-cp${digits}/bin/python3")
+                shim_words="$shim_words $minor"
+            done
+            ( cd /src && make py-sapi PY_MINORS="${shim_words# }" PY_SAPI_OUT="$BLOB_DIR" \
+                PY_SAPI_ARCH='"${arch}"' PY_SAPI_LIBC=gnu PY_SAPI_REQUIRE_ALL=1 \
+                ${shim_env[@]+"${shim_env[@]}"} )
             maturin build --release --out /wheel-out \
                 --interpreter "'"$container_py"'" \
                 --compatibility "manylinux_'"${manylinux_ver}"'" \
@@ -491,10 +594,28 @@ if [[ -z ${wheel_platform:-} ]]; then
     stage_shims "$host_arch" "$host_libc"
     # A musl host can compile its own CPython shims (no `--target`: the default
     # triple *is* musl, so `NEEDED` names `libc.musl-<arch>.so.1`), and
-    # `make py-sapi` asserts the artifact contract on each one.
+    # `make py-sapi` asserts the artifact contract on each one and fails closed
+    # (`PY_SAPI_REQUIRE_ALL=1`) on a declared minor it cannot find. The list is the
+    # channel's: a caller's `PY_MINORS` may restate it, never narrow it
+    # (`requested_py_minors`), and a `PY_SAPI_PYTHON_<digits>` the caller exported
+    # is kept as the pin — a path/uv cache lookup would discard a pre-release pin
+    # (`scripts/build-musl-wheel.sh`).
     if [ "$host_libc" = musl ] && [ "${BLASTIT_WHEEL_BUILD_PY_SHIMS:-}" = 1 ]; then
-        make py-sapi PY_MINORS="${PY_MINORS:-3.14 3.13}" PY_SAPI_OUT="$blob_abs" \
-            PY_SAPI_ARCH="$host_arch" PY_SAPI_LIBC=musl
+        musl_minors=$(requested_py_minors "$channel" "$py_minors") || exit 2
+        py_env=()
+        for minor in $musl_minors; do
+            digits=${minor//./}
+            pin="PY_SAPI_PYTHON_${digits}"
+            interp=${!pin:-}
+            if [ -z "$interp" ]; then
+                interp=$(uv python find --no-project "$minor" 2>/dev/null || true)
+            fi
+            [ -n "$interp" ] || continue
+            py_env+=("PY_SAPI_PYTHON_${digits}=${interp}")
+        done
+        make py-sapi PY_MINORS="$musl_minors" PY_SAPI_OUT="$blob_abs" \
+            PY_SAPI_ARCH="$host_arch" PY_SAPI_LIBC=musl PY_SAPI_REQUIRE_ALL=1 \
+            ${py_env[@]+"${py_env[@]}"}
     fi
 fi
 
@@ -665,9 +786,9 @@ with zipfile.ZipFile(wheel) as archive:
             )
 
     # The tag of the *repacked* wheel: `py3-none-<platform>`, the promise that one
-    # artifact serves CPython 3.12, 3.13 and 3.14. The repack names the file from
-    # this platform, so a disagreement is a repack bug caught here rather than at
-    # `pip install`.
+    # artifact serves every CPython minor `packaging/languages.tsv` declares. The
+    # repack names the file from this platform, so a disagreement is a repack bug
+    # caught here rather than at `pip install`.
     wheel_meta = next((name for name in infos if name.endswith(".dist-info/WHEEL")), "")
     if not wheel_meta:
         problems.append("no *.dist-info/WHEEL in the archive")
