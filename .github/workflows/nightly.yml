@@ -76,7 +76,7 @@ jobs:
       rpm_version: ${{ steps.stamp.outputs.rpm_version }}
       rpm_release: ${{ steps.stamp.outputs.rpm_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Stamp the nightly from the run number and the commit
         id: stamp
@@ -124,7 +124,7 @@ jobs:
       py_shims_gnu: ${{ steps.legs.outputs.py_shims_gnu }}
       prod_host: ${{ steps.legs.outputs.prod_host }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: The matrix and the published counts agree
         run: uv run --no-project scripts/platform_matrix.py --check
@@ -148,7 +148,7 @@ jobs:
     runs-on: ${{ needs.matrix.outputs.prod_host }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -194,7 +194,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.shims_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: build the shim and run the real-load probe
         run: >-
@@ -205,7 +205,7 @@ jobs:
           scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
           target/proven-shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }}
           --arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: shim-${{ matrix.name }}
           path: target/proven-shims/*.so
@@ -220,13 +220,13 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.py_shims_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: the interpreter this shim binds to
         run: uv python install ${{ matrix.python }}
       - name: build the shim and assert its ELF contract
         run: make py-sapi PY_SAPI_REQUIRE_ALL=1 PY_MINORS="${{ matrix.minor }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: py-shim-${{ matrix.name }}
           path: target/py-sapi/${{ matrix.shim }}
@@ -241,14 +241,14 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: shim-${{ matrix.arch }}-gnu-*
           path: target/proven-shims
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: py-shim-${{ matrix.arch }}-gnu-*
           path: target/py-sapi
@@ -299,7 +299,7 @@ jobs:
               echo "::error::expected $expected packages for ${{ matrix.arch }}, found ${#built[@]}"
               exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: package-${{ matrix.name }}
           path: |
@@ -316,9 +316,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.install) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: package-*
           path: dist
@@ -340,8 +340,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           pattern: package-*
           path: dist
@@ -370,7 +370,7 @@ jobs:
               --file 'rpm:x86_64:dist/*.x86_64.rpm' \
               --file 'rpm:aarch64:dist/*.aarch64.rpm' \
               --out "$RUNNER_TEMP/offworld-dist" "${extra[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: inputs.rehearsal != true
         with:
           name: offworld-dist

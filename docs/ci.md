@@ -38,7 +38,7 @@ One command per runtime below; each job is a copy-paste workflow.
             options: >-
               --health-cmd pg_isready --health-interval 5s --health-retries 20
         steps:
-          - uses: actions/checkout@v4
+          - uses: actions/checkout@v5
           - uses: astral-sh/setup-uv@v10.3.2
           - run: uv sync --frozen
           - run: blastit check --json
@@ -59,7 +59,7 @@ One command per runtime below; each job is a copy-paste workflow.
       blastit:
         runs-on: ubuntu-24.04
         steps:
-          - uses: actions/checkout@v4
+          - uses: actions/checkout@v5
           - run: sudo apt-get update && sudo apt-get install -y libphp-embed php-pgsql
           - run: curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz
           - run: tar -xzf blastit-*.tar.gz && echo "$PWD/blastit-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
@@ -81,7 +81,7 @@ One command per runtime below; each job is a copy-paste workflow.
       blastit:
         runs-on: ubuntu-24.04
         steps:
-          - uses: actions/checkout@v4
+          - uses: actions/checkout@v5
           - run: npx vite build --outDir public
           - run: curl -fsSLO https://github.com/OffworldNexus/blastit/releases/latest/download/blastit-x86_64-unknown-linux-gnu.tar.gz
           - run: tar -xzf blastit-*.tar.gz && echo "$PWD/blastit-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"

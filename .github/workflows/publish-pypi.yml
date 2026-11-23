@@ -81,7 +81,7 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       ref_for_links: ${{ steps.plan.outputs.ref_for_links }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Fetch all tags from origin
@@ -176,7 +176,7 @@ jobs:
       lsp: ${{ steps.legs.outputs.lsp }}
       hosts: ${{ steps.legs.outputs.hosts }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # `MB.3.18`: one place declares every leg. A release that publishes a
       # wheel/archive/shim for a target the matrix does not build — or a page
@@ -212,7 +212,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.shims) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # Built **natively** in this leg's own distro image: `php_config.h` encodes
       # platform type widths and `ZEND_MM_ALIGNMENT`, so a cross-compiled shim
@@ -230,7 +230,7 @@ jobs:
         run: >-
           scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
           dist/shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }} --arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: shim-${{ matrix.name }}
           path: dist/shims/*.so
@@ -245,7 +245,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.binaries_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # The Rust toolchain is the **host** one, mounted read-only into the
       # builder image by `scripts/build-standalone-in-image.sh`: no second
@@ -253,7 +253,7 @@ jobs:
       # hardware (an emulated compiler would make the floor evidence about qemu).
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: shim-${{ matrix.name }}-*
           path: dist/shims
@@ -318,7 +318,7 @@ jobs:
       # four files all called `SHA256SUMS` would leave one of them.
       - name: Name the checksum file after its target
         run: mv dist/SHA256SUMS "dist/SHA256SUMS.${{ matrix.target }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: standalone-${{ matrix.name }}
           path: |
@@ -341,9 +341,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.binaries_musl) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: shim-${{ matrix.name }}-*
           path: dist/shims
@@ -431,7 +431,7 @@ jobs:
                            "/art/blastit-${{ matrix.target }}/blastit"'
       - name: Name the checksum file after its target
         run: mv dist/SHA256SUMS "dist/SHA256SUMS.${{ matrix.target }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: standalone-${{ matrix.name }}
           path: |
@@ -452,8 +452,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.lsp) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - uses: dtolnay/rust-toolchain@stable
@@ -509,7 +509,7 @@ jobs:
       # prefixes its own (`lsp-`) rather than overwriting another family's.
       - name: Name the checksum file after its target and family
         run: mv dist/SHA256SUMS "dist/SHA256SUMS.lsp-${{ matrix.target }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: lsp-${{ matrix.target }}
           # Explicit: the archive is the asset the extension downloads, and the
@@ -532,14 +532,14 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.wheels_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # `uvx` for the README rewrite. Pinned to a release tag rather than to a
       # major one: `astral-sh/setup-uv` stopped publishing major tags after `v7`.
       - uses: astral-sh/setup-uv@v10.3.2
       # The same shape `binaries_gnu` uses: every `shim-*` of this leg's
       # `(arch, libc)`, which `--require-shims all` then insists on finding in
       # the wheel (`ADR-0017` decision 4: `4` PHP shims, `83`-`86`).
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: shim-${{ matrix.name }}-*
           path: dist/shims
@@ -574,11 +574,11 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.wheels_musl) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # `dist/shims` is relative to `$PWD`, which the build below mounts as
       # `/src`, so the same path resolves inside Alpine.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: shim-${{ matrix.name }}-*
           path: dist/shims
@@ -609,7 +609,7 @@ jobs:
               '
       - name: Install it in every image its leg names and drive it (e2e/run_packaging.py)
         run: uv run --no-project e2e/run_packaging.py --leg wheel --wheel "$(ls dist/blastit-*-py3-none-musllinux_*.whl | head -n 1)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: wheel-${{ matrix.name }}
           path: dist/*.whl
@@ -630,9 +630,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.hosts) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -667,7 +667,7 @@ jobs:
     if: needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
       - name: README links, as PyPI needs them
@@ -699,7 +699,7 @@ jobs:
           retired=$(find /tmp/from-sdist -name 'blastit-dbproxy' -print -quit)
           test -z "$retired"
           ls -l /tmp/from-sdist/bin/blastit
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -711,12 +711,12 @@ jobs:
     if: needs.guard.outputs.should_build == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # Only the two artifact families PyPI accepts. The standalone archives and
       # the shims are GitHub Release files (`MB.3.18`), and a `.tar.gz` in this
       # directory would make `check-long-description.py` read it as a
       # distribution.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -727,7 +727,7 @@ jobs:
       # `MB.45`: the one place all four wheels are seen at once, so the release
       # artifact — not each leg's staging directory — is what the description
       # check reads. No extra download: the shims are *inside* the wheels.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -863,12 +863,12 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
           pattern: wheel-*
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -908,12 +908,12 @@ jobs:
     steps:
       # Wheels and sdist only: PyPI refuses anything else, and the archives go to
       # the GitHub Release in `release` (`MB.3.18`).
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
           pattern: wheel-*
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -952,18 +952,18 @@ jobs:
       contents: write
       actions: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.3.2
       # Explicitly download the three GitHub Release families (`standalone-*`,
       # `shim-*` and `lsp-*`); PyPI owns `wheel-*` and `sdist`.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
           pattern: standalone-*
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
@@ -971,7 +971,7 @@ jobs:
       # The editor binaries are their own family (`MB.35`): five assets whose
       # names start `blastit-lsp-`, counted by `--count lsp` and never by the
       # standalone family's count.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true

@@ -269,7 +269,7 @@ artifacts (`--matrix`/`--count`/`--leg` are what the workflows consume, and
 
 ## What floats
 
-Every action is pinned to a major version (`actions/checkout@v4`,
+Every action is pinned to a major version (`actions/checkout@v5`,
 `PyO3/maturin-action@v1`, …), which follows upstream's fixes without a diff per
 release. Three of them move more than a version number does:
 
