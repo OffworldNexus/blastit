@@ -36,6 +36,7 @@ paths:
   - docs/security.md
   - docs/troubleshooting.md
   - docs/deploy/index.md
+  - docs/frameworks/index.md
   - docs/frameworks/php/index.md
   - docs/frameworks/python/index.md
   - docs/reference/settings.md
@@ -48,7 +49,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T01:23"
+updated: "2026-11-23T01:39"
 ---
 
 # Goal

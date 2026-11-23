@@ -12,11 +12,11 @@ Symptom → fix. Read the [`boot` and `sql.denied` events](reference/log-events.
 | `./Blastfile: no such file or directory` | there is no `Blastfile` in this directory: `cd` to the project, or set `BLASTIT_MANIFEST` |
 | `the file is not a regular file; Blastfile must be a plain file` | a FIFO, socket or device sits at that path: the boot stats before it opens, so it refuses instead of hanging. Replace it with a regular file, or point `BLASTIT_MANIFEST` at one |
 | `BLASTIT_APP: the WSGI callable … is required` | the file exists but names no callable: write `entrypoint python "module:attribute"`, or set `BLASTIT_APP` |
-| the boot names no usable `libphp` | install the distro's NTS package for 8.3, 8.4, 8.5 or 8.6 (`apt install libphp-embed`, `apk add php84-embed`, `dnf install php-embedded`), or set `BLASTIT_LIBPHP` to the library's absolute path ([PHP install](frameworks/php/index.md#install)) |
+| the boot names no usable `libphp` | install the distro's NTS package for a minor the [install table](install.md#one-package-per-language-version) lists (`apt install libphp-embed`, `apk add php84-embed`, `dnf install php-embedded`), or set `BLASTIT_LIBPHP` to the library's absolute path ([PHP install](frameworks/php/index.md#install)) |
 | `libphp` is a ZTS build | the embedded SAPI must be **NTS**: install the distro's `…-embed` package rather than a thread-safe build, which exports no `php_version` for the shim to check |
 | `no shared libpython for CPython 3.X` | the interpreter is installed but its shared library is not: `apt install libpython3.X` (Debian/Ubuntu), `apk add python3` (Alpine), `dnf install python3-libs` (Fedora/RHEL), or `uv python install 3.X` |
 | `BLASTIT_PYTHON (…) is not an executable file` | the value names nothing runnable: unset it, or point it at an absolute `…/.venv/bin/python3` ([settings](reference/settings.md#backends)) |
-| `CPython 3.13 and 3.14 are supported` | a WSGI view needs 3.13/3.14 even though `blastit check`, `fmt` and `fold` run on 3.12+: `uv python install 3.14 && uv venv --python 3.14` |
+| the boot says `CPython … is not supported for WSGI views` | a WSGI view needs a minor the boot lists as supported (the same list as the [install table](install.md#one-package-per-language-version)), even though `blastit check`, `fmt` and `fold` run on 3.12+: `uv python install <minor> && uv venv --python <minor>` |
 | `is free-threaded and cannot serve WSGI views` | reinstall the interpreter without `--free-threaded` (`uv python install cpython-3.14`) |
 | `No module named '_blastit'` / a `cp3NN` tag | this package is incomplete: it ships no `blastit` binary | reinstall the wheel: `pip install --force-reinstall blastit` |
 | `BLASTIT_FOO: …` | a variable that does not parse; the message names it |

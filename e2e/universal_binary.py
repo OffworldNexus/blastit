@@ -53,16 +53,36 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
-#: The NTS embed packages the PHP leg may prove, in discovery order: the
-#: Debian/Ubuntu name, then Alpine 8.4's per-minor directory. The *shim* always
-#: comes from the bundle (`<exe_dir>/libblastit_php<mm>-*.so`), never from the
-#: build tree; only `libphp` itself is a host fact the driver has to name.
-LIBPHP_84 = (
-    "/usr/lib/libphp8.4.so",
-    "/usr/local/lib/libphp8.4.so",
-    "/usr/lib/php84/libphp.so",
-)
+import languages  # noqa: E402
+
+
+def libphp_candidates(minor: str) -> tuple[str, ...]:
+    """Where a host keeps the NTS embed of `minor`.
+
+    Debian/Ubuntu install `/usr/lib/libphp<minor>.so`, a source build may land in
+    `/usr/local/lib`, and Alpine 8.4+ uses a per-minor directory. The minor is
+    `packaging/languages.tsv`'s, so this list is a function of the table.
+    """
+    digits = minor.replace(".", "")
+    return (
+        f"/usr/lib/libphp{minor}.so",
+        f"/usr/local/lib/libphp{minor}.so",
+        f"/usr/lib/php{digits}/libphp.so",
+    )
+
+
+def print_legs() -> None:
+    """The legs this driver derives from the table, one per line (no Docker)."""
+    rows = languages.load()
+    for language in ("python", "php"):
+        for version in languages.versions_of(rows, language):
+            print(f"{language}\t{version}")
+    for minor in languages.versions_of(rows, "php"):
+        for path in libphp_candidates(minor):
+            print(f"libphp\t{minor}\t{path}")
+
 
 WSGI_MANIFEST = """app "universal"
 
@@ -574,7 +594,10 @@ def leg_php(ctx: Context, minor: str) -> str:
     """
     digits = minor.replace(".", "")
     shims = sorted(ctx.binary.resolve().parent.glob(f"libblastit_php{digits}-*.so"))
-    libphp = next((Path(path) for path in LIBPHP_84 if Path(path).is_file()), None)
+    libphp = next(
+        (Path(path) for path in libphp_candidates(minor) if Path(path).is_file()),
+        None,
+    )
     missing = []
     if not shims:
         missing.append(
@@ -819,7 +842,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--binary",
-        required=True,
         type=Path,
         help="the staged bundle's bin/blastit (`make install PREFIX=<dir>`)",
     )
@@ -857,7 +879,18 @@ def main(argv: list[str] | None = None) -> int:
         help="exit 0 when a requested leg was SKIPped (a host fact, not a proof); "
         "`make check` and `make e2e-universal` never pass this",
     )
+    parser.add_argument(
+        "--print-legs",
+        action="store_true",
+        help="print the derived minors, shim names and libphp paths and exit (no Docker)",
+    )
     arguments = parser.parse_args(argv)
+
+    if arguments.print_legs:
+        print_legs()
+        return 0
+    if arguments.binary is None:
+        parser.error("--binary is required (the staged bundle's bin/blastit)")
 
     binary = arguments.binary
     if not os.access(binary, os.X_OK):

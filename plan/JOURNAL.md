@@ -4547,3 +4547,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T01:23 [MB.67] (unknown) edited fields
 - 2026-11-23T01:23 [MB.67.4] (unknown) edited fields
 - 2026-11-23T01:28 [MB.67.3] (lead) status review -> done
+- 2026-11-23T01:29 [MB.67.4] (lead) status ready -> active
+- 2026-11-23T01:29 [MB.67.4] (lead) attempt 1/3 started
+- 2026-11-23T01:29 [MB.67.4] (lead) base 375a89e284daa6739d45a712c7bd2081c804f6ec
+- 2026-11-23T01:37 [MB.67.4] (lead) status active -> review
+- 2026-11-23T01:39 [MB.67.4] (unknown) edited fields
+- 2026-11-23T01:39 [MB.67] (unknown) edited fields
+- 2026-11-23T01:39 [MB.67.4] (lead) REVIEW FIX: frameworks/index list, Debian/Ubuntu repo commands, rpm Recommends column, python3-absent guard, e2e README overclaim, 7-package docstrings, help po
+- 2026-11-23T01:42 [MB.67.4] (lead) status review -> done

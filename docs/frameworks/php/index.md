@@ -24,7 +24,7 @@ from the signed repository ([install](../../install.md)):
 $ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
 ```
 
-Then install the distro's NTS `libphp` (8.3, 8.4, 8.5 or 8.6) and the PDO driver on the host
+Then install the distro's NTS `libphp` for one of the [install table](../../install.md#one-package-per-language-version)'s minors and the PDO driver on the host
 or in the CI runner:
 
 ```text

@@ -1,20 +1,15 @@
 # Native packages (`packaging/`)
 
-Blastit ships **seven** binary packages per architecture instead of one archive
-that carries every interpreter shim, because the shim a host can load is the
-interpreter that host has. The names, their payload and their dependency live in
-one file — [`package-set.sh`](package-set.sh) — and the `.deb`/`.rpm` builders,
-the spec's payload lists and the set check all read it.
+Blastit ships the interpreter-free core `blastit` plus **one shim package per row of
+[`languages.tsv`](languages.tsv)** — the one file a version is added to. The package
+names, their payload and their dependency are declared once in
+[`package-set.sh`](package-set.sh), which derives every row from that table; the
+`.deb`/`.rpm` builders, the generated RPM spec and the set check all read it.
 
-| Package | Payload under `/usr/share/blastit/` | Debian `Depends:` | RPM weak dep |
+| Package | Payload under `/usr/share/blastit/` | Hard dependency | Weak dependency |
 | --- | --- | --- | --- |
-| `blastit` | `lib/{blastit,blastit-lsp}`, `LICENSE`, `python/blastit/*.py`, `/usr/bin` symlinks | `libc6 (>= measured)` (`+ libgcc-s1` when measured) | — |
-| `blastit-python-3.13` | `lib/libblastit_py313-<arch>-gnu.so` | `python3.13`, `blastit (= <version>)`, `libc6 (>= its floor)` | `Recommends: python3.13` |
-| `blastit-python-3.14` | `lib/libblastit_py314-<arch>-gnu.so` | `python3.14`, `blastit (= <version>)`, `libc6 (>= its floor)` | `Recommends: python3.14` |
-| `blastit-php-8.3` | `lib/libblastit_php83-<arch>-gnu.so` | `libphp8.3-embed`, `blastit (= <version>)`, `libc6 (>= its floor)` | `Suggests: php-embedded` |
-| `blastit-php-8.4` | `lib/libblastit_php84-<arch>-gnu.so` | `libphp8.4-embed`, `blastit (= <version>)`, `libc6 (>= its floor)` | `Suggests: php-embedded` |
-| `blastit-php-8.5` | `lib/libblastit_php85-<arch>-gnu.so` | `libphp8.5-embed`, `blastit (= <version>)`, `libc6 (>= its floor)` | `Suggests: php-embedded` |
-| `blastit-php-8.6` | `lib/libblastit_php86-<arch>-gnu.so` | `libphp8.6-embed`, `blastit (= <version>)`, `libc6 (>= its floor)` | `Suggests: php-embedded` |
+| `blastit` | `lib/{blastit,blastit-lsp}`, `LICENSE`, `python/blastit/*.py`, `/usr/bin` symlinks | measured `libc6` floor (`+ libgcc-s1` when measured) | — |
+| `blastit-php-8.4` — a worked example; every [`languages.tsv`](languages.tsv) row is the same shape, one package per interpreter minor | `lib/libblastit_php84-<arch>-gnu.so` | `blastit (= <version>)`, `libc6 (>= its floor)` | `Recommends: libphp8.4-embed` (deb) / `php-embedded` (rpm) |
 
 `blastit` is the interpreter-free server: it `dlopen`s a shim, never links
 `libpython`/`libphp`. A shim package is useless without `blastit` (hence the hard
@@ -24,11 +19,10 @@ any shim, so the split costs a host nothing it does not use.
 ## Why the version is (only) in the dependency, not the name
 
 The interpreter minor is part of the **package name**, not of a version suffix:
-`blastit-php-8.4` upgrades like any other package and can be installed beside
-`blastit-php-8.3` (two PHP minors on one host is normal — Debian's `trixie` is
-8.4, Ubuntu `noble` is 8.3). A `blastit-8.4` versioned package would instead
-look like a second Blastit and could never coexist. Debian file names follow the
-name, so they read `blastit-php-8.4_0.2.1_amd64.deb` and
+`blastit-php-8.4` upgrades like any other package and can be installed beside the shim
+of another minor (the table decides which). A `blastit-8.4` versioned package would
+instead look like a second Blastit and could never coexist. Debian file names follow
+the name, so they read `blastit-php-8.4_0.2.1_amd64.deb` and
 `blastit-php-8.4-0.2.1-1.x86_64.rpm`.
 
 ## Repositories and channels
@@ -71,12 +65,11 @@ version and needs only `--base`.
 
 ## The RPM interpreter dependency is deliberately weak
 
-Debian's archive names one interpreter package per minor, so `Depends:
-python3.13` / `libphp8.4-embed` is satisfiable and hard. RPM distributions do
-not: **Rocky 9 has no `python3.13`** (it ships 3.9) and its `php-embedded` is
-**8.0**. A hard `Requires:` there would make the shim package uninstallable on a
-distribution the release still supports, so the RPM subpackages declare
-`Recommends: python3.13`/`3.14` and `Suggests: php-embedded` and require only
+Debian's archive names one interpreter package per minor, so a `Depends:` on the row's
+runtime is satisfiable and hard. RPM distributions do not: Rocky 9 ships an older CPython
+and an older `php-embedded` than the declared rows, so a hard `Requires:` there would make
+the shim package uninstallable on a distribution the release still supports. The RPM
+subpackages therefore declare each row's runtime as `Recommends:` and require only
 `blastit = <version>`. Install the matching interpreter first — that is what
 `docs/install.md` and `docs/install.sh` do.
 

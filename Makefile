@@ -104,7 +104,7 @@ CRITICAL_SKIP_PATTERN := \#\[[[:space:]]*ignore|\bneeds_root[[:space:]]*\(|pytes
 
 .PHONY: help fast-check check clean guard critical-skip-check plan-validate \
         rs-format rs-fmt rs-lint rs-doc rs-test rs-test-critical rs-no-python rs-no-default coverage \
-        universal-smoke py-format py-lint test-critical docs-check docs-unit e2e e2e-prod e2e-packaging \
+        universal-smoke py-format py-lint test-critical docs-check docs-blocks-check docs-unit e2e e2e-prod e2e-packaging \
         e2e-universal \
         docs-serve docs-serve-stage docs-serve-check install uninstall php-sapi php-sapi-e2e py-sapi \
         rs-test-php rs-test-php-image python-runtime standalone standalone-glibc \
@@ -359,8 +359,11 @@ test-critical: critical-skip-check ## Run critical skip check + staged Python cr
 		$(RUST_ENV) $(UV) run --no-project python -m unittest discover \
 		-s python/tests/critical -p 'test_*.py'
 
-docs-check: ## Build Zensical documentation site with --strict
+docs-check: docs-blocks-check ## Build Zensical documentation site with --strict
 	$(UVX) zensical build --strict
+
+docs-blocks-check: ## Assert the generated language blocks match packaging/languages.tsv
+	$(UV) run --no-project scripts/gen_language_blocks.py --check
 
 docs-unit: ## Run the package's offline Python suites (no wheel build)
 	UV_OFFLINE=1 PYTHONPATH="$(CURDIR)/python" $(UV) run --no-project python -m unittest \

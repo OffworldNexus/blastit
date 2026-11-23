@@ -2,7 +2,7 @@
 id: MB.67.4
 title: "Generated docs/installer blocks, e2e + php 8.7 propagation proof"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.67.3]
@@ -24,14 +24,16 @@ paths:
   - docs/security.md
   - docs/troubleshooting.md
   - docs/deploy/index.md
+  - docs/frameworks/index.md
   - docs/frameworks/php/index.md
   - docs/frameworks/python/index.md
   - docs/reference/settings.md
-attempts: 0
+  - Makefile
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:44"
-updated: "2026-11-23T01:23"
+updated: "2026-11-23T01:42"
 ---
 
 # Goal

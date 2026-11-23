@@ -1,7 +1,7 @@
 # Getting started
 
 Blastit is a **Linux** application server: three steps from a `./Blastfile`, no root, no `sudo`.
-One binary serves Python WSGI, embedded NTS PHP (8.3, 8.4, 8.5 and 8.6) and static sites.
+One binary serves Python WSGI, embedded NTS PHP (one shim per `libphp` minor — the [install table](install.md#one-package-per-language-version) lists them) and static sites.
 
 ## 1. Install
 
@@ -118,8 +118,9 @@ flowchart LR
 ??? note "Linux targets, one wheel, one binary"
 
     Linux x86_64 and aarch64, glibc and musl: one `py3-none` wheel per platform runs
-    `blastit check`, `fmt` and `fold` on any CPython 3.12+; serving WSGI needs CPython
-    3.13 or 3.14 on the host. The same binary serves PHP on the NTS `libphp` and static sites.
+    `blastit check`, `fmt` and `fold` on any CPython 3.12+; serving WSGI needs one of the
+    CPython minors the [install table](install.md#one-package-per-language-version) lists on
+    the host. The same binary serves PHP on the NTS `libphp` and static sites.
 
 ## Where next
 

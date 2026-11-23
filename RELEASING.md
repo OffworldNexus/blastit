@@ -89,14 +89,15 @@ release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
      not exist yet, and every leg comes from `scripts/platform_matrix.py`; then
      `wheels_gnu` + `wheels_musl` (`4` universal
      `py3-none-{manylinux_2_28,musllinux_1_2}_{x86_64,aarch64}` wheels,
-     `manylinux` wheels smoke-tested on CPython `3.12`/`3.13`/`3.14`,
-     `musllinux` on `3.13`, each carrying the four PHP shims of its own
+     `manylinux` wheels smoke-tested on the matrix's CPython smoke images
+     (`--matrix wheels`), `musllinux` on its own, each carrying the PHP shims of its own
      `<arch>`/`<libc>` beside the CPython ones — a short shim leg fails its own
      leg and skips the wheels rather than publishing a wheel without PHP — built
      by `scripts/build-wheel.sh`
      (`maturin build --bindings bin` + `scripts/repack_universal_wheel.py` — no
      extension module compiled any more), `sdist`, `shims`
-     (`16` probed PHP `8.3`–`8.6` legs), `binaries_gnu` + `binaries_musl`
+     (every `--matrix shims` leg: `packaging/languages.tsv`'s PHP minors × arch ×
+     libc), `binaries_gnu` + `binaries_musl`
      (`4` standalone Linux archives), `lsp` (`5` `blastit-lsp` archives across
      Linux, macOS, and Windows), and `verify` (`scripts/check-long-description.py`)
      rehearse the full distribution build.
@@ -174,21 +175,21 @@ idempotently — the human-pushed tag is not a `GITHUB_TOKEN` event, so `Package
 starts from its own `on: push: tags` and `Publish`'s dispatch step (gated to
 `develop`) stays out of the way, rather than building the tag twice.)*
 
-## The seven package names
+## The package names
 
-Every architecture gets the same seven names, so a host installs `blastit` plus the
-one shim it needs:
+Every architecture gets the same names, so a host installs `blastit` plus the shim(s) it
+needs. [`packaging/languages.tsv`](packaging/languages.tsv) is the one place a name is
+added; [`packaging/package-set.sh`](packaging/package-set.sh) derives the full set from it:
 
-| Package | Payload | `Depends` |
+| Package | Payload | Hard dependency |
 |---|---|---|
 | `blastit` | `blastit`, `blastit-lsp`, `LICENSE`, the pure-Python modules, `/usr/bin` links | measured `libc6` floor |
-| `blastit-python-3.13` · `-3.14` | that CPython's WSGI shim | `blastit (= <version>)`, `python3.13` / `python3.14` |
-| `blastit-php-8.3` … `-8.6` | that `libphp`'s PHP shim | `blastit (= <version>)`, `libphp8.x-embed` |
+| `blastit-php-8.4` — worked example; one such package per `languages.tsv` row | that `libphp`'s PHP shim | `blastit (= <version>)`, measured `libc6`; recommends `libphp8.4-embed` |
 
 The version sits in the name so `apt-get install blastit-php-8.4` reads as "Blastit's
-PHP 8.4 shim", and every shim pins the exact core version it was built against.
-`libphp8.5-embed` and `libphp8.6-embed` come from Ondřej Surý's repository on Debian
-and Ubuntu; 8.3 and 8.4 ship with the distributions themselves.
+PHP 8.4 shim", and every shim pins the exact core version it was built against. A minor
+the distribution does not ship comes from a signed third-party repository (Ondřej Surý's
+on Debian and Ubuntu).
 
 ## When it goes wrong
 
@@ -249,8 +250,8 @@ artifacts (`--matrix`/`--count`/`--leg` are what the workflows consume, and
 `--check` validates the matrix itself):
 
 * **Linux serving artifacts** (the `4` universal `blastit` wheels, `4` standalone
-  archives, the `16` PHP `8.3`–`8.6` C SAPI shims, and the `8` CPython
-  `3.13`/`3.14` Python SAPI shims) target `{x86_64, aarch64} × {gnu
+  archives, one PHP C SAPI shim per `packaging/languages.tsv` row, and the CPython
+  shims the same file declares) target `{x86_64, aarch64} × {gnu
   (manylinux_2_28), musl (musllinux_1_2 / Alpine)}`. Every `x86_64` wheel,
   standalone archive, and shim is built and smoked locally on Linux `x86_64`;
   the `aarch64` legs build and run natively in GitHub Actions on

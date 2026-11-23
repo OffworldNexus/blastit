@@ -14,9 +14,11 @@
 # the interpreter this host has (and none when it has none), (i) the local-file
 # path installs the core package plus only the sibling shims whose runtime is
 # present, in one transaction, and its rpm half passes `--nosignature` only when
-# `BLASTIT_PKG_ACCEPT_UNSIGNED=1`. (h) and (i) redirect every `/etc` write into the
-# scratch tree with a stub `install`, and stub `apt-get`/`dpkg`/`curl`/`sudo`, so
-# no real package tool and no real repository is ever involved.
+# `BLASTIT_PKG_ACCEPT_UNSIGNED=1`, and (j) the generated language blocks in
+# `docs/install.md`/`docs/install.sh` match `packaging/languages.tsv`. (h) and (i)
+# redirect every `/etc` write into the scratch tree with a stub `install`, and stub
+# `apt-get`/`dpkg`/`curl`/`sudo`, so no real package tool and no real repository is
+# ever involved. The interpreter minors in every case are the table's, read here.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -25,6 +27,17 @@ scratch=${BLASTIT_INSTALL_TEST_DIR:-${TMPDIR:-/tmp}/opencode}/install-sh-test
 uv=${BLASTIT_TEST_UV:-uv}
 asset=blastit-x86_64-unknown-linux-gnu.tar.gz
 fixture_version='blastit 0.2.0 (fixture)'
+
+# The interpreter versions are `packaging/languages.tsv`'s, read here instead of
+# spelled: adding or withdrawing a row changes what (h) and (i) exercise with no
+# edit to this file.
+languages=$root/packaging/languages.sh
+py_minors=$(bash "$languages" --py-minors | sort -t. -k1,1n -k2,2n | tr '\n' ' ')
+php_minors=$(bash "$languages" --php-minors | sort -t. -k1,1n -k2,2n | tr '\n' ' ')
+py_primary=$(printf '%s\n' $py_minors | sed -n 1p)
+py_other=$(printf '%s\n' $py_minors | sed -n 2p)
+py_slashed=$(printf '%s\n' $py_minors | paste -sd/ -)
+php_primary=$(printf '%s\n' $php_minors | sed -n 1p)
 
 fail() { printf 'install-test: FAIL %s\n' "$*" >&2; [ ! -f "$scratch/last.log" ] || tail -20 "$scratch/last.log" >&2; exit 1; }
 pass() { printf 'install-test: ok %s\n' "$*"; }
@@ -290,9 +303,9 @@ STUB
     chmod 0755 "$hbin/sudo" "$hbin/curl" "$hbin/apt-get" "$hbin/install" \
         "$hbin/dpkg-query" "$hbin/rpm" "$hbin/blastit"
 
-    # Run 1: `python3.13` is installed as a *package*, so its shim is offered —
-    # and installed as its own transaction, after the core.
-    printf 'python3.13\n' >"$present"
+    # Run 1: the table's first CPython is installed as a *package*, so its shim is
+    # offered — and installed as its own transaction, after the core.
+    printf 'python%s\n' "$py_primary" >"$present"
     : >"$scratch/h/apt.log"
     log_h=$scratch/h/h1.log
     if ! env PATH="$hbin:$PATH" sh "$installer" -y >"$log_h" 2>&1; then
@@ -308,14 +321,14 @@ STUB
     [ -s "$hroot/etc/apt/keyrings/offworld-nexus.gpg" ] ||
         { log "$log_h"; fail "(h) the keyring was not installed"; }
     core_line=$(grep -n 'apt-get install .*--no-install-recommends blastit$' "$scratch/h/apt.log" | cut -d: -f1)
-    shim_line=$(grep -n 'blastit-python-3\.13$' "$scratch/h/apt.log" | cut -d: -f1)
+    shim_line=$(grep -nF "blastit-python-$py_primary" "$scratch/h/apt.log" | cut -d: -f1)
     [ -n "$core_line" ] || { log "$log_h"; fail "(h) apt-get never installed the core on its own"; }
-    [ -n "$shim_line" ] || { log "$log_h"; fail "(h) the shim of the installed python3.13 was not installed"; }
+    [ -n "$shim_line" ] || { log "$log_h"; fail "(h) the shim of the installed python$py_primary was not installed"; }
     [ "$core_line" -lt "$shim_line" ] ||
         { log "$log_h"; fail "(h) the shim went in before the core (lines $core_line/$shim_line)"; }
-    grep -q 'installing blastit blastit-python-3.13 with apt-get' "$log_h" ||
+    grep -qF "installing blastit blastit-python-$py_primary with apt-get" "$log_h" ||
         { log "$log_h"; fail "(h) the step line does not name the transaction"; }
-    grep -q 'language shims installed: blastit-python-3.13' "$log_h" ||
+    grep -qF "language shims installed: blastit-python-$py_primary" "$log_h" ||
         { log "$log_h"; fail "(h) the installed shim is not reported"; }
 
     # Run 2: the shim's install fails (its runtime package exists but cannot be
@@ -327,7 +340,7 @@ STUB
         log "$log_h2"; fail "(h) a shim that cannot be installed aborted the whole install"
     fi
     rm -f "$scratch/h/fail-shims"
-    grep -q 'blastit-python-3.13 could not be installed' "$log_h2" ||
+    grep -qF "blastit-python-$py_primary could not be installed" "$log_h2" ||
         { log "$log_h2"; fail "(h) the shim refusal does not name the shim"; }
     grep -q 'candidate:' "$log_h2" ||
         { log "$log_h2"; fail "(h) the shim refusal names no package-manager candidate"; }
@@ -348,16 +361,16 @@ STUB
     if grep -Eq 'blastit-(python-3|php-8)' "$scratch/h/apt.log"; then
         log "$log_h3"; fail "(h) a shim was installed with no runtime package on the host"
     fi
-    notes=$(grep -c 'this host has no CPython 3.13/3.14' "$log_h3" || true)
+    notes=$(grep -cF "this host has no CPython $py_slashed" "$log_h3" || true)
     [ "$notes" -eq 1 ] ||
         { log "$log_h3"; fail "(h) the skipped CPython shims are $notes note(s), not one"; }
     pass "(h) apt installs the core first, each shim alone, and warns instead of aborting on a shim it cannot install"
 fi
 
 # (i) the local-file path -----------------------------------------------------
-# The core .deb with two sibling shims: 3.13 (its interpreter is on PATH) and PHP
-# 8.6 (no libphp8.6.so on this host). One dpkg transaction, the core plus only
-# the shim this host can load.
+# The core .deb with two sibling shims: the first CPython (its interpreter is a
+# package here) and the oldest PHP (no libphp<minor>.so on this host). One dpkg
+# transaction, the core plus only the shim this host can load.
 case "$(uname -m)" in
     x86_64|amd64) deb_arch=amd64 ;;
     aarch64|arm64) deb_arch=arm64 ;;
@@ -366,12 +379,12 @@ esac
 setdir=$scratch/h/set
 mkdir -p "$setdir"
 : >"$setdir/blastit_0.2.0_${deb_arch}.deb"
-: >"$setdir/blastit-python-3.13_0.2.0_${deb_arch}.deb"
-: >"$setdir/blastit-php-8.6_0.2.0_${deb_arch}.deb"
-# Both CPython runtimes are installed as packages here, but only the 3.13 shim
-# package is in the directory: the local-file install must warn about 3.14 rather
-# than claim it.
-printf 'python3.13\npython3.14\n' >"$present"
+: >"$setdir/blastit-python-${py_primary}_0.2.0_${deb_arch}.deb"
+: >"$setdir/blastit-php-${php_primary}_0.2.0_${deb_arch}.deb"
+# Both CPython runtimes are installed as packages here, but only the first one's
+# shim package is in the directory: the local-file install must warn about the
+# other rather than claim it.
+printf 'python%s\npython%s\n' "$py_primary" "$py_other" >"$present"
 cat >"$scratch/h/bin/dpkg" <<STUB
 #!/bin/sh
 printf 'dpkg %s\n' "\$*" >>"$scratch/h/dpkg.log"
@@ -393,20 +406,20 @@ case "$command" in
     *) log "$log_i"; fail "(i) the core package is not in the dpkg transaction" ;;
 esac
 case "$command" in
-    *blastit-python-3.13_0.2.0_*) ;;
-    *) log "$log_i"; fail "(i) the shim of the installed python3.13 was not installed" ;;
+    *"blastit-python-${py_primary}_0.2.0_"*) ;;
+    *) log "$log_i"; fail "(i) the shim of the installed python$py_primary was not installed" ;;
 esac
 case "$command" in
-    *blastit-python-3.14*) log "$log_i"; fail "(i) a shim with no sibling package was installed" ;;
+    *"blastit-python-${py_other}"*) log "$log_i"; fail "(i) a shim with no sibling package was installed" ;;
 esac
 case "$command" in
-    *blastit-php-8.6*) log "$log_i"; fail "(i) a shim with no libphp8.6-embed was installed" ;;
+    *"blastit-php-${php_primary}"*) log "$log_i"; fail "(i) a shim with no libphp${php_primary}-embed was installed" ;;
 esac
-grep -q 'no sibling package for blastit-python-3.14' "$log_i" ||
+grep -qF "no sibling package for blastit-python-$py_other" "$log_i" ||
     { log "$log_i"; fail "(i) the absent sibling package is not named"; }
-grep -q 'sudo apt-get install blastit-python-3.14' "$log_i" ||
+grep -qF "sudo apt-get install blastit-python-$py_other" "$log_i" ||
     { log "$log_i"; fail "(i) the warning names no command that installs it"; }
-grep -q 'language shims installed: blastit-python-3.13' "$log_i" ||
+grep -qF "language shims installed: blastit-python-$py_primary" "$log_i" ||
     { log "$log_i"; fail "(i) the installed shim is not reported, or an absent one is claimed"; }
 pass "(i) the local-file path installs the core plus only the shim packages it has, and warns about the rest"
 
@@ -421,7 +434,7 @@ esac
 rpmset=$scratch/h/rpmset
 mkdir -p "$rpmset"
 : >"$rpmset/blastit-0.2.0-1.${rpm_arch}.rpm"
-: >"$rpmset/blastit-php-8.6-0.2.0-1.${rpm_arch}.rpm"
+: >"$rpmset/blastit-php-${php_primary}-0.2.0-1.${rpm_arch}.rpm"
 
 : >"$scratch/h/rpm.log"
 log_i2=$scratch/h/i2.log
@@ -451,5 +464,15 @@ fi
 grep -q 'only for a package you built yourself' "$log_i3" &&
     { log "$log_i3"; fail "(i) the unsigned warning printed without the opt-in"; }
 pass "(i) the rpm half passes --nosignature only with BLASTIT_PKG_ACCEPT_UNSIGNED=1"
+
+# (j) the generated docs/installer blocks are the table's ----------------------
+# `make docs-check` runs the same `--check`; proving it here means a stale block
+# fails `make fast-check` too (no network, no root, no site build).
+log_j=$scratch/j.log
+if ! "$uv" run --no-project python "$root/scripts/gen_language_blocks.py" --check \
+    >"$log_j" 2>&1; then
+    log "$log_j"; fail "(j) docs/install.md or docs/install.sh is stale"
+fi
+pass "(j) gen_language_blocks.py --check: the committed blocks are packaging/languages.tsv's"
 
 printf 'install-test: all cases passed (fixture on %s, scratch %s)\n' "$base" "$scratch"

@@ -9,9 +9,10 @@
 #     Ubuntu) or dnf (Fedora, RHEL, Rocky, Alma) verifies every package, and
 #     `apt-get upgrade` / `dnf upgrade` keep Blastit current. It installs the
 #     interpreter-free core (`blastit`) plus one shim per runtime this host can
-#     actually run: a `blastit-python-*` for an installed `python3.13`/`python3.14`,
-#     and a `blastit-php-*` for an installed `libphp8.x`. `main` carries releases;
-#     `--nightly` switches to the nightly channel.
+#     actually run: a `blastit-python-*` for an installed `python3.<minor>`, and a
+#     `blastit-php-*` for an installed `libphp<minor>` (the versions are
+#     `packaging/languages.tsv`'s). `main` carries releases; `--nightly` switches
+#     to the nightly channel.
 #   * **Fallback: the release `.tar.gz`.** `--user`, `--prefix <dir>`,
 #     `--develop [ref]`, a musl host, a distro with neither apt-get nor dnf, and
 #     an unprivileged shell with no usable sudo take this path. The archive is
@@ -113,8 +114,11 @@ environment:
                             repository install is always signature-verified
 
 The default needs root/sudo and uses apt-get or dnf: it installs \`blastit\` plus a
-\`blastit-python-<ver>\` for an installed \`python3.13\`/\`python3.14\` and a
-\`blastit-php-<ver>\` for an installed \`libphp8.x\`. Without apt-get or dnf, on a
+\`blastit-python-<ver>\` for an installed \`python3.<minor>\` and a
+\`blastit-php-<ver>\` for an installed \`libphp<minor>\`; the versions Blastit
+ships, and the shims each one adds, are listed at
+<https://offworldnexus.github.io/blastit/install/#one-package-per-language-version>.
+Without apt-get or dnf, on a
 musl host, or with no usable sudo, it installs the release archive under ~/.local
 instead and prints the PATH line. Archive installs check the sha256 first and
 refuse to unpack a mismatch, and they do not upgrade themselves. Questions and
@@ -421,6 +425,8 @@ shims=; missing_python=; missing_php=; hinted_python=
 detect_shims() { # <deb|rpm>
     fmt=$1
     shims=; missing_python=; missing_php=; hinted_python=
+    # The shim versions ship with Blastit; this list is generated — do not edit.
+    # BEGIN generated:languages
     for minor in 3.13 3.14; do
         if runtime_installed "$fmt" "python$minor"; then
             shims="$shims blastit-python-$minor"
@@ -437,6 +443,7 @@ detect_shims() { # <deb|rpm>
             missing_php="$missing_php${missing_php:+/}$minor"
         fi
     done
+    # END generated:languages
     shims=${shims# }
 }
 
