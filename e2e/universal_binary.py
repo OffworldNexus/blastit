@@ -56,6 +56,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import languages  # noqa: E402
+import platform_matrix  # noqa: E402
+
+
+def uv_install_spec(minor: str) -> str:
+    """The `uv python install` argument that provides `minor`.
+
+    The one pin for a pre-release-only minor (`3.16` -> `cpython-3.16.0a2`, `MB.75`)
+    lives in `scripts/platform_matrix.py`; `uv python install 3.16` would look for
+    a stable release that does not exist yet, so failure advice reads it here.
+    """
+    return platform_matrix.py_interpreter(minor)
 
 
 def libphp_candidates(minor: str) -> tuple[str, ...]:
@@ -541,7 +552,7 @@ def leg_python(ctx: Context, minor: str) -> str:
     base = interpreter(minor)
     if base is None:
         raise Skip(
-            f"no CPython {minor} on this host; install it with `uv python install {minor}`"
+            f"no CPython {minor} on this host; install it with `uv python install {uv_install_spec(minor)}`"
         )
     project = ctx.work / f"python-{minor}"
     write(project / "Blastfile", WSGI_MANIFEST)
@@ -768,7 +779,7 @@ def leg_check(ctx: Context, minor: str) -> str:
     base = interpreter(minor)
     if base is None:
         raise Skip(
-            f"no CPython {minor} on this host; install it with `uv python install {minor}`"
+            f"no CPython {minor} on this host; install it with `uv python install {uv_install_spec(minor)}`"
         )
     digits = minor.replace(".", "")
     expect(
@@ -850,7 +861,7 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         metavar="MINOR",
-        help="serve a WSGI app under this CPython (repeatable: 3.13, 3.14)",
+        help="serve a WSGI app under this CPython (repeatable; any minor the table declares)",
     )
     parser.add_argument(
         "--php", metavar="MINOR", help="serve the PHP fixture under this minor (8.4)"

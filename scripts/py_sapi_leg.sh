@@ -112,6 +112,17 @@ if [ "$libc" = musl ]; then
     export "PY_SAPI_PYTHON_$digits=$(uv python find "$minor")"
 fi
 
+# The `uv python install` argument for a minor. The one pin for a
+# pre-release-only minor lives in `scripts/platform_matrix.py`
+# (`PY_INTERPRETER_PINS`: `3.16` -> `cpython-3.16.0a2`), so it is read here and
+# never respelled: `uv python install 3.16` would look for a stable release that
+# does not exist yet (`MB.75`).
+install_spec() {
+    uv run --no-project "$root/scripts/platform_matrix.py" \
+        --leg py-shims --python "$1" --libc gnu --arch x86_64 2>/dev/null |
+        sed -n 's/^interpreter=//p'
+}
+
 # The gnu legs run on a runner whose oldest CPython may be 3.12: fetch the minor
 # the leg names when nothing names an interpreter for it yet.
 # `PY_SAPI_PYTHON_<digits>` is the Makefile's first stop: it validates that this
@@ -119,8 +130,10 @@ fi
 py_var="PY_SAPI_PYTHON_$digits"
 if [ "$libc" = gnu ] && [ -z "${!py_var:-}" ] && command -v uv >/dev/null 2>&1; then
     if ! interpreter=$(uv python find --no-project "$minor" 2>/dev/null); then
-        uv python install "$minor" >/dev/null
-        interpreter=$(uv python find --no-project "$minor")
+        spec=$(install_spec "$minor")
+        [ -n "$spec" ] || spec=$minor
+        uv python install "$spec" >/dev/null
+        interpreter=$(uv python find --no-project "$spec")
     fi
     export "$py_var=$interpreter"
 fi

@@ -661,6 +661,12 @@ PY_SAPI_LIBC ?=
 PY_SAPI_REQUIRE_ALL ?=
 PY_SAPI_PYTHON_313 ?=
 PY_SAPI_PYTHON_314 ?=
+PY_SAPI_PYTHON_315 ?=
+# A pre-release-only minor (`MB.75`): `uv python install 3.16` looks for a stable
+# release, so the alpha's exact name is the one pin, in
+# `scripts/platform_matrix.py` (`PY_INTERPRETER_PINS`) — `scripts/py_sapi_leg.sh`
+# reads it from there. Pass `PY_SAPI_PYTHON_316=$(uv python find cpython-3.16.0a2)`.
+PY_SAPI_PYTHON_316 ?=
 
 py-sapi: ## Build CPython shims per declared minor (PY_MINORS; PY_SAPI_REQUIRE_ALL=1 fails closed)
 	@set -eu; \
