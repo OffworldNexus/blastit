@@ -4611,3 +4611,5 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T13:08 [MB.76] (lead) REVIEW FIX: [MAJOR1] build stream is file-only, tee it to stdout too; [MAJOR2] bound rustup-init mid-transfer with timeout; [accepted MINOR] curl --retry-connre
 - 2026-11-23T13:23 [MB.76] (lead) status review -> done
 - 2026-11-23T13:23 [MB.76] (lead) commit a52a0bd (gnu 8.4 + musl 8.6 probes green, blackholed fail-fast, BUILD_TIMEOUT tail)
+- 2026-11-23T14:07 [MB.77] (conductor) created (task) Wheel builder derives its CPython minor list from the table (3.15 included)
+- 2026-11-23T14:07 AUTOPILOT on by conductor wheel minor derivation in MB.77
