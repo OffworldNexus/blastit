@@ -259,8 +259,11 @@ if [ -n "$image" ]; then
             # hand the build to HOST_UID so one identity writes the cache, the
             # target directory and the archive (`MB.3.63`).
             if command -v dnf >/dev/null 2>&1; then
-                dnf install -y --setopt=install_weak_deps=False clang binutils tar gzip libcap \
-                    >/dev/null
+                # `scripts/dnf-retry.sh` (`MB.74`) is the one retry: the
+                # mirror can serve an index its own metadata does not match
+                # while it publishes.
+                . /src/scripts/dnf-retry.sh
+                dnf_install_retry clang binutils tar gzip libcap >/dev/null
             elif command -v apt-get >/dev/null 2>&1; then
                 apt-get update >/dev/null
                 apt-get install -y --no-install-recommends clang libclang-dev binutils \

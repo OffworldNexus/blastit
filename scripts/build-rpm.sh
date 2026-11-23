@@ -398,11 +398,15 @@ else
         --env "BLASTIT_RPM_DEFINES=$defines_text" \
         --volume "$stage:/bundle:ro" \
         --volume "$root/scripts/rpm:/spec:ro" \
+        --volume "$root/scripts/dnf-retry.sh:/usr/local/lib/blastit/dnf-retry.sh:ro" \
         --volume "$out:/out" \
         "$builder_image" \
         bash -euc '
+            # `scripts/dnf-retry.sh` (`MB.74`): the Rocky Linux mirror can serve
+            # an index its own metadata does not match while it publishes.
+            . /usr/local/lib/blastit/dnf-retry.sh
             if ! command -v rpmbuild >/dev/null 2>&1; then
-                dnf -y -q install rpm-build >/dev/null
+                dnf_install_retry rpm-build >/dev/null
             fi
             command -v setpriv >/dev/null 2>&1 || {
                 echo "error: no setpriv (util-linux): the build cannot drop to uid $HOST_UID" >&2

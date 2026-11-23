@@ -174,8 +174,13 @@ docker run --rm \
     -w /src \
     "$image" \
     bash -euo pipefail -c '
+        # The retry lives in one place (`scripts/dnf-retry.sh`, `MB.74`): the
+        # AlmaLinux mirror can serve an index its own metadata does not match
+        # while it publishes, which killed the v0.2.1 section 3 deb aarch64 leg.
+        # Only transport is retried; a bad package name still fails.
         if command -v dnf >/dev/null 2>&1; then
-            dnf install -y --setopt=install_weak_deps=False clang binutils tar gzip git >/dev/null
+            . /src/scripts/dnf-retry.sh
+            dnf_install_retry clang binutils tar gzip git >/dev/null
         else
             echo "error: $0 needs a builder with dnf (manylinux is AlmaLinux)" >&2
             exit 1

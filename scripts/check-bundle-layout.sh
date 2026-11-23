@@ -375,10 +375,15 @@ else
         --env "HOST_GID=$(id -g)" \
         --volume "$setdir:/set:ro" \
         --volume "$scratch/root:/root" \
+        --volume "$root/scripts/dnf-retry.sh:/usr/local/lib/blastit/dnf-retry.sh:ro" \
         "$image" \
         bash -euc '
+            # `scripts/dnf-retry.sh` (`MB.74`): the mirror can serve an index
+            # its own metadata does not match while it publishes; the helper
+            # is one read-only file, so nothing else gains a mount.
+            . /usr/local/lib/blastit/dnf-retry.sh
             if ! command -v rpm2cpio >/dev/null 2>&1 || ! command -v cpio >/dev/null 2>&1; then
-                dnf -y -q install rpm cpio >/dev/null
+                dnf_install_retry rpm cpio >/dev/null
             fi
             cd /root
             for pkg in /set/*.rpm; do

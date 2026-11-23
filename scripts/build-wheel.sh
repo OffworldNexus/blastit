@@ -356,11 +356,18 @@ if [[ -n $manylinux_ver ]]; then
     wheel_platform="manylinux_${manylinux_ver}_${arch}"
     if ! docker image inspect "$builder_image" >/dev/null 2>&1; then
         echo "build-wheel: provisioning $builder_image from $base_image (+ clang for bindgen)"
-        docker build -t "$builder_image" - <<DOCKER
+        # The retry is `scripts/dnf-retry.sh` and nowhere else (`MB.74`): the
+        # manylinux mirror can serve an index its own metadata does not match
+        # while it publishes. `docker build -f -` reads the Dockerfile on stdin,
+        # so the helper arrives through a throwaway context inside the already
+        # trapped `$scratch` (removed by `restore_readme` on exit).
+        builder_ctx=$scratch/builder-context
+        mkdir -p "$builder_ctx"
+        cp "$root/scripts/dnf-retry.sh" "$builder_ctx/dnf-retry.sh"
+        docker build -t "$builder_image" -f - "$builder_ctx" <<DOCKER
 FROM ${base_image}
-RUN for attempt in 1 2 3; do dnf install -y --setopt=install_weak_deps=False clang && break; dnf clean all; sleep 2; done \
- && command -v clang || exit 1
-RUN dnf clean all || true
+COPY dnf-retry.sh /usr/local/lib/blastit/dnf-retry.sh
+RUN bash -euo pipefail -c '. /usr/local/lib/blastit/dnf-retry.sh && dnf_install_retry clang && command -v clang >/dev/null && { dnf clean all || true; }'
 DOCKER
     fi
 
