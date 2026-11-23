@@ -1,7 +1,6 @@
 # Install
 
-Blastit installs on Linux as `blastit` plus **one shim package per language version your
-host runs** — Python WSGI, embedded NTS PHP and static sites all drive the same server.
+Blastit installs on Linux as `blastit` plus **one shim package per language version your host runs** — Python WSGI, embedded NTS PHP and static sites all drive the same server.
 
 ```console
 $ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
@@ -91,10 +90,8 @@ supported-but-unavailable, and core `blastit` still serves static mounts, `check
 | `blastit-php-8.6` | the PHP shim for NTS `libphp` 8.6 | `blastit (= <version>)`, measured `libc6` | `libphp8.6-embed` / `php-embedded` |
 <!-- END generated:languages:table -->
 
-Published for **amd64 and arm64** only, with the same names on each: core `blastit` needs no shim;
-each shim depends on `blastit (= <version>)` — the release it was built against, e.g. 0.2.1,
-resolved by apt/dnf and never typed by hand — and only *recommends* its distro runtime, so
-`apt-get install blastit-php-8.4` still pulls `libphp8.4-embed`; a pyenv build needs the shim by name.
+Published for **amd64 and arm64** only, with the same names on each: core `blastit` needs no shim, and each shim depends on `blastit (= <version>)` — the release it was built against, resolved by apt/dnf and never typed by hand.
+Each shim only *recommends* its distro runtime, so `apt-get install blastit-php-8.4` still pulls `libphp8.4-embed`; a pyenv build needs the shim by name.
 
 !!! note "a newer minor than the distro ships"
 
@@ -108,10 +105,12 @@ resolved by apt/dnf and never typed by hand — and only *recommends* its distro
 
 A machine with no `curl`, or a policy against piping a script into a shell, installs downloaded packages directly — the repository is then yours to add:
 
+<!-- BEGIN generated:version -->
 ```console
-$ sudo apt-get install ./blastit_0.2.1_amd64.deb ./blastit-php-8.4_0.2.1_amd64.deb
-$ sudo dnf install ./blastit-0.2.1-1.x86_64.rpm ./blastit-php-8.4-0.2.1-1.x86_64.rpm
+$ sudo apt-get install ./blastit_0.2.1_amd64.deb ./blastit-php-8.6_0.2.1_amd64.deb
+$ sudo dnf install ./blastit-0.2.1-1.x86_64.rpm ./blastit-php-8.6-0.2.1-1.x86_64.rpm
 ```
+<!-- END generated:version -->
 
 The installer's own steps are readable: `sh -s -- --help` on the same URL prints every flag, including `--prefix <dir>`. A local package is verified by apt/dnf and adds no repository.
 

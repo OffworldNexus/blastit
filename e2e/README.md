@@ -175,9 +175,12 @@ row means changing that fixture deliberately, not just the table.
 $ make e2e-packaging                                 # every leg
 $ uv run --no-project e2e/run_packaging.py --leg composer
 $ uv run --no-project e2e/run_packaging.py \
-    --deb dist/blastit_0.2.0_amd64.deb --rpm dist/blastit-0.2.0-1.x86_64.rpm \
-    --wheel dist/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl
+    --deb dist/blastit_<version>_amd64.deb --rpm dist/blastit-<version>-1.x86_64.rpm \
+    --wheel dist/blastit-<version>-py3-none-manylinux_2_28_x86_64.whl
 ```
+
+`<version>` is `Cargo.toml`'s `[workspace.package] version` — the release the
+artifacts were built from.
 
 | Leg | What it installs | What it proves |
 |---|---|---|

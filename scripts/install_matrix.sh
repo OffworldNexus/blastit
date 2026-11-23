@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs one *built* package set in one distribution from the matrix (`MB.42.3.4`).
 #
-#   scripts/install_matrix.sh --deb dist/blastit_0.2.0_amd64.deb --leg debian-13-x86_64
+#   scripts/install_matrix.sh --deb dist/blastit_<version>_amd64.deb --leg debian-13-x86_64
 #   scripts/install_matrix.sh --deb dist        --leg debian-13-x86_64   # the directory
 #   scripts/install_matrix.sh --matrix --dir dist        # the whole survey, in order
 #

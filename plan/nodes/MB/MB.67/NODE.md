@@ -20,6 +20,7 @@ paths:
   - "scripts/build-standalone-in-image.sh"
   - scripts/py_sapi_leg.sh
   - "scripts/build-musl-wheel.sh"
+  - scripts/install_matrix.sh
   - scripts/test_install.sh
   - "scripts/offworld**"
   - "crates/blastit-view-php/**"
@@ -49,7 +50,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T01:39"
+updated: "2026-11-23T01:49"
 ---
 
 # Goal

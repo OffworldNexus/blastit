@@ -2,7 +2,7 @@
 
     uv run --no-project e2e/run_packaging.py       # every leg, free ports 28080+
     uv run --no-project e2e/run_packaging.py --leg composer
-    uv run --no-project e2e/run_packaging.py --deb dist/blastit_0.2.0_amd64.deb
+    uv run --no-project e2e/run_packaging.py --deb dist/blastit_<version>_amd64.deb
 
 One leg per install story, and every leg installs the artifact the story names
 and then runs the story's own commands *where the artifact was installed*:

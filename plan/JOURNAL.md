@@ -4555,3 +4555,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T01:39 [MB.67] (unknown) edited fields
 - 2026-11-23T01:39 [MB.67.4] (lead) REVIEW FIX: frameworks/index list, Debian/Ubuntu repo commands, rpm Recommends column, python3-absent guard, e2e README overclaim, 7-package docstrings, help po
 - 2026-11-23T01:42 [MB.67.4] (lead) status review -> done
+- 2026-11-23T01:42 [MB.67.5] (unknown) edited fields
+- 2026-11-23T01:42 [MB.67.5] (lead) status ready -> active
+- 2026-11-23T01:42 [MB.67.5] (lead) attempt 1/3 started
+- 2026-11-23T01:42 [MB.67.5] (lead) base 815e5d8dc021931f02f68786fc68541f2a5fcb35
+- 2026-11-23T01:49 [MB.67.5] (unknown) edited fields
+- 2026-11-23T01:49 [MB.67] (unknown) edited fields
+- 2026-11-23T01:49 [MB.67.5] (lead) REVIEW FIX: generate BLASTIT_DEFAULT_VERSION; RELEASING pip example; e2e/install_matrix usage; packaging/README worked examples
+- 2026-11-23T01:53 [MB.67.5] (lead) status active -> done

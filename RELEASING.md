@@ -154,21 +154,23 @@ release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
      token, key or secret lives in Actions: the App holds the signing key, and the
      workflow only hands it the bytes.
    * **Nightly** (`.github/workflows/nightly.yml`, cron `41 3 * * *`) stamps
-     `0.2.1~nightly<YYYYMMDD>.r<run>+g<sha7>` (`.deb`) and
-     `0.2.1-0.nightly.<YYYYMMDD>.r<run>.g<sha7>` (`.rpm`) into the `nightly`
+     `<version>~nightly<YYYYMMDD>.r<run>+g<sha7>` (`.deb`) and
+     `<version>-0.nightly.<YYYYMMDD>.r<run>.g<sha7>` (`.rpm`) into the `nightly`
      component and keeps nothing locally; the server retains the newest seven.
    * Ordinary non-release PRs merged into `develop` (where `v<version>` already
      exists) skip the release jobs in a few seconds.
 4. **Check the result**:
 
    ```console
-   $ uv venv /tmp/blastit-check && VIRTUAL_ENV=/tmp/blastit-check uv pip install blastit==0.2.1
+   $ uv venv /tmp/blastit-check && VIRTUAL_ENV=/tmp/blastit-check uv pip install blastit==<version>
    $ /tmp/blastit-check/bin/blastit --help
    ```
 
-   and the [project page](https://pypi.org/project/blastit/), whose description
-   is the README (with its links rewritten to absolute ones pinned to `v<version>`,
-   because PyPI renders it without a repository around it).
+   `<version>` is `Cargo.toml`'s `[workspace.package] version` — the release the
+   merge just published — and the [project page](https://pypi.org/project/blastit/)
+   shows it, with the description taken from the README (and its links rewritten to
+   absolute ones pinned to `v<version>`, because PyPI renders it without a repository
+   around it).
 
 *(Manual fallback: pushing an annotated `v<version>` tag by hand still releases
 idempotently — the human-pushed tag is not a `GITHUB_TOKEN` event, so `Packages`
@@ -215,9 +217,9 @@ on Debian and Ubuntu).
 ## The development wheels are not this
 
 Every commit to `develop` builds the same wheels (`.github/workflows/wheels.yml`)
-and leaves them as artifacts of that run, with a `<version>-dev<run>` version
-(for example, `0.2.0-dev<run>`) so they can't be mistaken for the release of the
-same commit. Nothing publishes
+and leaves them as artifacts of that run, with a `<version>-dev<run>` version —
+the workspace version above plus `-dev<run>` (`scripts/dev-version.sh`) — so they
+can't be mistaken for the release of the same commit. Nothing publishes
 them, and nothing outside the run can install from them — they exist to catch a
 broken wheel on the commit that broke it, and for whoever wants to try the
 current tree. The two workflows build with the same action,

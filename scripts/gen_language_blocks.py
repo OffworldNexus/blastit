@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the language blocks in `docs/install.md` and `docs/install.sh`.
+"""Regenerate the language and version blocks in `docs/install.md` and `docs/install.sh`.
 
 `packaging/languages.tsv` is the one declaration of the languages Blastit ships
 and at which versions; `scripts/languages.py` is its one Python reader. Two of
@@ -8,17 +8,26 @@ page renders in a browser, and `docs/install.sh` runs on a host that may have no
 Python — so their version-bearing lines are generated from the table, committed,
 and checked for staleness here.
 
+The download sample's *workspace* version (`docs/install.md`'s "Without
+`curl | sh`" filenames) and the installer's own `BLASTIT_DEFAULT_VERSION` stamp
+have the same shape and a different source: `Cargo.toml`'s
+`[workspace.package] version`, read through its one loader, `scripts/version.sh`,
+so this file never parses a manifest itself. A workspace version bump therefore
+makes both committed blocks stale, exactly as adding a language row does.
+
     scripts/gen_language_blocks.py            # the same as --check
     scripts/gen_language_blocks.py --write    # rewrite both files
     scripts/gen_language_blocks.py --check    # exit 1 + a unified diff when stale
 
-The marked blocks (`<!-- BEGIN generated:languages:<name> -->` … in Markdown,
-`# BEGIN generated:languages` … in the installer) are regenerated whole, never
+The marked blocks (`<!-- BEGIN generated:languages:<name> -->` and
+`<!-- BEGIN generated:version -->` … in Markdown, `# BEGIN generated:languages`
+and `# BEGIN generated:version` … in the installer) are regenerated whole, never
 hand-edited: adding a language version is a one-line edit to
-`packaging/languages.tsv`. `make docs-check` and `scripts/test_install.sh` run
-`--check`, so a stale block fails the same gate that builds the site.
+`packaging/languages.tsv`, and a release is a one-line edit to `Cargo.toml`.
+`make docs-check` and `scripts/test_install.sh` run `--check`, so a stale block
+fails the same gate that builds the site.
 
-The markers around the install page's two shell snippets sit *outside* the
+The markers around the install page's three shell snippets sit *outside* the
 fenced blocks: an HTML comment inside a fence renders as text, so each snippet
 is generated whole (its repository definition included) and the reader never
 sees a marker.
@@ -27,6 +36,7 @@ sees a marker.
 from __future__ import annotations
 
 import difflib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -106,8 +116,12 @@ EOF"""
 
 MD_BEGIN = "<!-- BEGIN generated:languages:{name} -->"
 MD_END = "<!-- END generated:languages:{name} -->"
+VERSION_BEGIN = "<!-- BEGIN generated:version -->"
+VERSION_END = "<!-- END generated:version -->"
 SH_BEGIN = "# BEGIN generated:languages"
 SH_END = "# END generated:languages"
+SH_VERSION_BEGIN = "# BEGIN generated:version"
+SH_VERSION_END = "# END generated:version"
 
 
 class BlockError(Exception):
@@ -128,6 +142,40 @@ def versions_of(rows: list[languages.Language], language: str) -> list[str]:
     return sorted(languages.versions_of(rows, language), key=languages.version_key)
 
 
+def newest(rows: list[languages.Language], language: str) -> str:
+    """The newest declared version of `language`, component-wise (8.10 after 8.9)."""
+    found = versions_of(rows, language)
+    if not found:
+        raise BlockError(
+            f"packaging/languages.tsv declares no {language} row, so the "
+            "download sample cannot name a shim package"
+        )
+    return found[-1]
+
+
+def workspace_version() -> str:
+    """`Cargo.toml`'s `[workspace.package] version`, through its one loader.
+
+    `scripts/version.sh` is the single place that parses the manifest (it is the
+    line `scripts/dev-version.sh` bumps), so this generator shells out to it
+    rather than keeping a second parser — the same rule that keeps
+    `packaging/languages.tsv` behind `scripts/languages.py`.
+    """
+    loader = ROOT / "scripts" / "version.sh"
+    shown = loader.relative_to(ROOT)
+    try:
+        result = subprocess.run(
+            ["bash", str(loader)], capture_output=True, text=True, check=False
+        )
+    except OSError as error:
+        raise BlockError(f"{shown}: {error.strerror or error}") from error
+    version = result.stdout.strip()
+    if result.returncode != 0 or not version:
+        reason = result.stderr.strip() or f"exit {result.returncode}"
+        raise BlockError(f"{shown}: no workspace version ({reason})")
+    return version
+
+
 def sentence(items: list[str]) -> str:
     """`["8.3", "8.4", "8.5", "8.6"]` -> `"8.3, 8.4, 8.5 and 8.6"`."""
     if len(items) < 2:
@@ -141,6 +189,26 @@ def render_apt(rows: list[languages.Language]) -> str:
 
 def render_dnf(rows: list[languages.Language]) -> str:
     return _manager_snippet("dnf", DNF_SETUP, rows)
+
+
+def render_download(rows: list[languages.Language], version: str) -> str:
+    """The "Without `curl | sh`" filenames of this version (`<version>`, not typed)."""
+    php = newest(rows, "php")
+    return "\n".join(
+        [
+            "```console",
+            f"$ sudo apt-get install ./blastit_{version}_amd64.deb "
+            f"./blastit-php-{php}_{version}_amd64.deb",
+            f"$ sudo dnf install ./blastit-{version}-1.x86_64.rpm "
+            f"./blastit-php-{php}-{version}-1.x86_64.rpm",
+            "```",
+        ]
+    )
+
+
+def render_default_version(version: str) -> str:
+    """The installer's release stamp, which its digest table keys on."""
+    return f'BLASTIT_DEFAULT_VERSION="{version}"'
 
 
 def _manager_snippet(manager: str, setup: str, rows: list[languages.Language]) -> str:
@@ -246,8 +314,8 @@ def _marker(lines: list[str], marker: str, path: Path, after: int = -1) -> int:
     raise BlockError(f"{path}: no `{marker}` line {where}")
 
 
-def render_file(path: Path, rows: list[languages.Language]) -> str:
-    """`path` with every one of its marked blocks rewritten from `rows`."""
+def render_file(path: Path, rows: list[languages.Language], version: str) -> str:
+    """`path` with every one of its marked blocks rewritten from `rows`/`version`."""
     text = path.read_text(encoding="utf-8")
     if path == INSTALL_MD:
         rendered = (
@@ -264,14 +332,23 @@ def render_file(path: Path, rows: list[languages.Language]) -> str:
                 MD_END.format(name=name),
                 body,
             )
-        return text
+        return _replace(
+            path, text, VERSION_BEGIN, VERSION_END, render_download(rows, version)
+        )
     if path == INSTALL_SH:
-        return _replace(path, text, SH_BEGIN, SH_END, render_shims(rows))
+        text = _replace(path, text, SH_BEGIN, SH_END, render_shims(rows))
+        return _replace(
+            path,
+            text,
+            SH_VERSION_BEGIN,
+            SH_VERSION_END,
+            render_default_version(version),
+        )
     raise BlockError(f"{path}: no marked blocks are declared for this file")
 
 
-def expected(rows: list[languages.Language]) -> dict[Path, str]:
-    return {path: render_file(path, rows) for path in (INSTALL_MD, INSTALL_SH)}
+def expected(rows: list[languages.Language], version: str) -> dict[Path, str]:
+    return {path: render_file(path, rows, version) for path in (INSTALL_MD, INSTALL_SH)}
 
 
 def _usage() -> str:
@@ -279,7 +356,8 @@ def _usage() -> str:
         "usage: scripts/gen_language_blocks.py [--write|--check]\n"
         "\n"
         "  --write   rewrite the marked blocks in docs/install.md and\n"
-        "            docs/install.sh from packaging/languages.tsv\n"
+        "            docs/install.sh from packaging/languages.tsv (the download\n"
+        "            sample's version comes from Cargo.toml via scripts/version.sh)\n"
         "  --check   exit 1 with a unified diff when a committed block is stale\n"
         "            (the default)\n"
     )
@@ -300,7 +378,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         rows = languages.load()
-        files = expected(rows)
+        files = expected(rows, workspace_version())
     except languages.LanguageError as error:
         sys.stderr.write(f"generated-blocks: {error}\n")
         return 1

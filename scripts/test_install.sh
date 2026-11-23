@@ -14,11 +14,14 @@
 # the interpreter this host has (and none when it has none), (i) the local-file
 # path installs the core package plus only the sibling shims whose runtime is
 # present, in one transaction, and its rpm half passes `--nosignature` only when
-# `BLASTIT_PKG_ACCEPT_UNSIGNED=1`, and (j) the generated language blocks in
-# `docs/install.md`/`docs/install.sh` match `packaging/languages.tsv`. (h) and (i)
-# redirect every `/etc` write into the scratch tree with a stub `install`, and stub
-# `apt-get`/`dpkg`/`curl`/`sudo`, so no real package tool and no real repository is
-# ever involved. The interpreter minors in every case are the table's, read here.
+# `BLASTIT_PKG_ACCEPT_UNSIGNED=1`, and (j) the generated blocks in
+# `docs/install.md`/`docs/install.sh` match `packaging/languages.tsv` and the
+# workspace version, read from `Cargo.toml` through `scripts/version.sh` — the
+# same loader the faked package names below come from, so a language row or a
+# version bump needs no edit here. (h) and (i) redirect every `/etc` write into the
+# scratch tree with a stub `install`, and stub `apt-get`/`dpkg`/`curl`/`sudo`, so
+# no real package tool and no real repository is ever involved. The interpreter
+# minors in every case are the table's, read here.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -26,7 +29,12 @@ installer=$root/docs/install.sh
 scratch=${BLASTIT_INSTALL_TEST_DIR:-${TMPDIR:-/tmp}/opencode}/install-sh-test
 uv=${BLASTIT_TEST_UV:-uv}
 asset=blastit-x86_64-unknown-linux-gnu.tar.gz
-fixture_version='blastit 0.2.0 (fixture)'
+# The workspace version is `Cargo.toml`'s, through its one loader: the fixture
+# binary and every faked package name below carry it, so a release needs no edit
+# here.
+workspace_version=$(bash "$root/scripts/version.sh") ||
+    { printf 'install-test: FAIL scripts/version.sh printed no workspace version\n' >&2; exit 1; }
+fixture_version="blastit $workspace_version (fixture)"
 
 # The interpreter versions are `packaging/languages.tsv`'s, read here instead of
 # spelled: adding or withdrawing a row changes what (h) and (i) exercise with no
@@ -299,7 +307,7 @@ done
 exec $install_bin \$args
 STUB
     # The `dpkg-query`/`rpm` probes are shared with (i) and created above.
-    printf '#!/bin/sh\nprintf "blastit 0.2.0 (stub)\\n"\n' >"$hbin/blastit"
+    printf '#!/bin/sh\nprintf "blastit %s (stub)\\n"\n' "$workspace_version" >"$hbin/blastit"
     chmod 0755 "$hbin/sudo" "$hbin/curl" "$hbin/apt-get" "$hbin/install" \
         "$hbin/dpkg-query" "$hbin/rpm" "$hbin/blastit"
 
@@ -378,9 +386,9 @@ case "$(uname -m)" in
 esac
 setdir=$scratch/h/set
 mkdir -p "$setdir"
-: >"$setdir/blastit_0.2.0_${deb_arch}.deb"
-: >"$setdir/blastit-python-${py_primary}_0.2.0_${deb_arch}.deb"
-: >"$setdir/blastit-php-${php_primary}_0.2.0_${deb_arch}.deb"
+: >"$setdir/blastit_${workspace_version}_${deb_arch}.deb"
+: >"$setdir/blastit-python-${py_primary}_${workspace_version}_${deb_arch}.deb"
+: >"$setdir/blastit-php-${php_primary}_${workspace_version}_${deb_arch}.deb"
 # Both CPython runtimes are installed as packages here, but only the first one's
 # shim package is in the directory: the local-file install must warn about the
 # other rather than claim it.
@@ -394,7 +402,7 @@ chmod 0755 "$scratch/h/bin/dpkg"
 : >"$scratch/h/dpkg.log"
 log_i=$scratch/h/i.log
 if ! env PATH="$scratch/h/bin:$PATH" \
-    BLASTIT_DEB="$setdir/blastit_0.2.0_${deb_arch}.deb" \
+    BLASTIT_DEB="$setdir/blastit_${workspace_version}_${deb_arch}.deb" \
     sh "$installer" -y >"$log_i" 2>&1; then
     log "$log_i"; fail "(i) the local-file install exited non-zero"
 fi
@@ -402,11 +410,11 @@ runs=$(grep -c '^dpkg ' "$scratch/h/dpkg.log" || true)
 [ "$runs" -eq 1 ] || { log "$log_i"; fail "(i) dpkg ran $runs times for one package set, not once"; }
 command=$(cat "$scratch/h/dpkg.log")
 case "$command" in
-    *"$setdir/blastit_0.2.0_${deb_arch}.deb"*) ;;
+    *"$setdir/blastit_${workspace_version}_${deb_arch}.deb"*) ;;
     *) log "$log_i"; fail "(i) the core package is not in the dpkg transaction" ;;
 esac
 case "$command" in
-    *"blastit-python-${py_primary}_0.2.0_"*) ;;
+    *"blastit-python-${py_primary}_${workspace_version}_"*) ;;
     *) log "$log_i"; fail "(i) the shim of the installed python$py_primary was not installed" ;;
 esac
 case "$command" in
@@ -433,13 +441,13 @@ case "$(uname -m)" in
 esac
 rpmset=$scratch/h/rpmset
 mkdir -p "$rpmset"
-: >"$rpmset/blastit-0.2.0-1.${rpm_arch}.rpm"
-: >"$rpmset/blastit-php-${php_primary}-0.2.0-1.${rpm_arch}.rpm"
+: >"$rpmset/blastit-${workspace_version}-1.${rpm_arch}.rpm"
+: >"$rpmset/blastit-php-${php_primary}-${workspace_version}-1.${rpm_arch}.rpm"
 
 : >"$scratch/h/rpm.log"
 log_i2=$scratch/h/i2.log
 if ! env PATH="$scratch/h/bin:$PATH" \
-    BLASTIT_RPM="$rpmset/blastit-0.2.0-1.${rpm_arch}.rpm" \
+    BLASTIT_RPM="$rpmset/blastit-${workspace_version}-1.${rpm_arch}.rpm" \
     BLASTIT_PKG_ACCEPT_UNSIGNED=1 \
     sh "$installer" -y >"$log_i2" 2>&1; then
     log "$log_i2"; fail "(i) the unsigned rpm install exited non-zero"
@@ -454,7 +462,7 @@ grep -q 'only for a package you built yourself' "$log_i2" ||
 : >"$scratch/h/rpm.log"
 log_i3=$scratch/h/i3.log
 if ! env PATH="$scratch/h/bin:$PATH" \
-    BLASTIT_RPM="$rpmset/blastit-0.2.0-1.${rpm_arch}.rpm" \
+    BLASTIT_RPM="$rpmset/blastit-${workspace_version}-1.${rpm_arch}.rpm" \
     sh "$installer" -y >"$log_i3" 2>&1; then
     log "$log_i3"; fail "(i) the signed-path rpm install exited non-zero"
 fi
@@ -465,7 +473,7 @@ grep -q 'only for a package you built yourself' "$log_i3" &&
     { log "$log_i3"; fail "(i) the unsigned warning printed without the opt-in"; }
 pass "(i) the rpm half passes --nosignature only with BLASTIT_PKG_ACCEPT_UNSIGNED=1"
 
-# (j) the generated docs/installer blocks are the table's ----------------------
+# (j) the generated docs/installer blocks are the table's and the version's ----
 # `make docs-check` runs the same `--check`; proving it here means a stale block
 # fails `make fast-check` too (no network, no root, no site build).
 log_j=$scratch/j.log
@@ -473,6 +481,6 @@ if ! "$uv" run --no-project python "$root/scripts/gen_language_blocks.py" --chec
     >"$log_j" 2>&1; then
     log "$log_j"; fail "(j) docs/install.md or docs/install.sh is stale"
 fi
-pass "(j) gen_language_blocks.py --check: the committed blocks are packaging/languages.tsv's"
+pass "(j) gen_language_blocks.py --check: the committed blocks are the table's and Cargo.toml's version"
 
 printf 'install-test: all cases passed (fixture on %s, scratch %s)\n' "$base" "$scratch"

@@ -2,24 +2,27 @@
 id: MB.67.5
 title: "Workspace version has one source (Cargo.toml), every fixture and doc example derives"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.67.4]
 paths:
   - scripts/version.sh
   - scripts/test_install.sh
+  - scripts/install_matrix.sh
   - docs/install.md
   - docs/install.sh
   - scripts/gen_language_blocks.py
   - "packaging/package-set.sh"
   - packaging/README.md
   - e2e/README.md
-attempts: 0
+  - e2e/run_packaging.py
+  - RELEASING.md
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:47"
-updated: "2026-11-23T00:47"
+updated: "2026-11-23T01:53"
 ---
 
 # Goal

@@ -5,6 +5,7 @@
 #   packaging/package-set.sh --names         # one package name per line
 #   packaging/package-set.sh --shims         # <package> <TAB> <shim glob>
 #   packaging/package-set.sh --rows          # the table, verbatim
+#   packaging/package-set.sh --version       # the workspace version (`Cargo.toml`)
 #   packaging/package-set.sh --check         # the table itself (see the note below)
 #
 # The language versions are not named here: `packaging/languages.tsv` is the one
@@ -63,7 +64,18 @@ BLASTIT_PACKAGE_SET_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=./languages.sh
 source "$BLASTIT_PACKAGE_SET_ROOT/packaging/languages.sh"
 
+# The workspace version comes from `Cargo.toml` through its one loader, exactly
+# as the language rows come from the TSV through theirs.
+# shellcheck source=../scripts/version.sh
+source "$BLASTIT_PACKAGE_SET_ROOT/scripts/version.sh"
+
 # --- readers ----------------------------------------------------------------
+
+# The version a package set is built at: `Cargo.toml`'s
+# `[workspace.package] version`, never a copy.
+blastit_package_version() {
+    blastit_workspace_version
+}
 
 # All five fields, in declaration order (core first).
 blastit_package_rows() {
@@ -180,6 +192,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             validate_table || exit 1
             blastit_package_names
             ;;
+        --version)
+            blastit_package_version
+            ;;
         --rows)
             validate_table || exit 1
             blastit_package_rows
@@ -194,21 +209,24 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             ;;
         -h | --help)
             cat >&2 <<'USAGE'
-usage: packaging/package-set.sh --names|--rows|--shims|--check
+usage: packaging/package-set.sh --names|--rows|--shims|--version|--check
 
   --names   the binary package names, one per line (core first; language
             versions come from packaging/languages.tsv)
   --rows    name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-runtime
   --shims   <package><TAB><glob> for every package that ships a shim
+  --version the workspace version a set is built at: Cargo.toml's
+            `[workspace.package] version`, through scripts/version.sh
   --check   validate this table and packaging/languages.tsv; the generated
             scripts/rpm/blastit.spec has its own gate, `scripts/rpm/gen_spec.py
             --check`, run by `scripts/platform_matrix.py --check`
 
 The file is also sourceable: `source packaging/package-set.sh` then
 `blastit_package_names`, `blastit_package_shims`, `blastit_package_owners FILE`,
-`blastit_package_deb_runtime NAME`, `blastit_package_rpm_weak NAME`.
+`blastit_package_deb_runtime NAME`, `blastit_package_rpm_weak NAME`,
+`blastit_package_version`.
 USAGE
             ;;
-        *) echo "usage: packaging/package-set.sh --names|--rows|--shims|--check" >&2; exit 2 ;;
+        *) echo "usage: packaging/package-set.sh --names|--rows|--shims|--version|--check" >&2; exit 2 ;;
     esac
 fi

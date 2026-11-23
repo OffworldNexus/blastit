@@ -22,8 +22,9 @@ The interpreter minor is part of the **package name**, not of a version suffix:
 `blastit-php-8.4` upgrades like any other package and can be installed beside the shim
 of another minor (the table decides which). A `blastit-8.4` versioned package would
 instead look like a second Blastit and could never coexist. Debian file names follow
-the name, so they read `blastit-php-8.4_0.2.1_amd64.deb` and
-`blastit-php-8.4-0.2.1-1.x86_64.rpm`.
+the name, so they read `blastit-php-8.4_<version>_amd64.deb` and
+`blastit-php-8.4-<version>-1.x86_64.rpm`, where `<version>` is `Cargo.toml`'s
+`[workspace.package] version`.
 
 ## Repositories and channels
 
@@ -41,27 +42,28 @@ upgrade in both directions:
 
 | Format | Stable | Nightly |
 | --- | --- | --- |
-| `.deb` | `Version: 0.2.1` | `Version: 0.2.1~nightly20261122.r42+g90cb2db` |
-| `.rpm` | `Version: 0.2.1`, `Release: 1` | `Version: 0.2.1`, `Release: 0.nightly.20261122.r42.g90cb2db` |
+| `.deb` | `Version: <version>` | `Version: <version>~nightly20261122.r42+g90cb2db` |
+| `.rpm` | `Version: <version>`, `Release: 1` | `Version: <version>`, `Release: 0.nightly.20261122.r42.g90cb2db` |
 
 `package-stamp.sh` prints both fields for either format; the workflows call it
 instead of spelling the grammar twice, and the key names go straight into
 `$GITHUB_OUTPUT`:
 
 ```sh
-packaging/package-stamp.sh --base 0.2.1 --channel stable --format deb
-# deb_version=0.2.1
+packaging/package-stamp.sh --base <version> --channel stable --format deb
+# deb_version=<version>
 # deb_release=
-packaging/package-stamp.sh --base 0.2.1 --channel nightly \
+packaging/package-stamp.sh --base <version> --channel nightly \
     --run 42 --sha 90cb2db1234 --format both
-# deb_version=0.2.1~nightly20261122.r42+g90cb2db
+# deb_version=<version>~nightly20261122.r42+g90cb2db
 # deb_release=
-# rpm_version=0.2.1
+# rpm_version=<version>
 # rpm_release=0.nightly.20261122.r42.g90cb2db
 ```
 
 `--run`/`--sha` are required only for `nightly`; a stable stamp is the workspace
-version and needs only `--base`.
+version and needs only `--base`. Everywhere in this file, `<version>` is
+`Cargo.toml`'s `[workspace.package] version`.
 
 ## The RPM interpreter dependency is deliberately weak
 
@@ -87,11 +89,11 @@ when it changes and prove the copy with
 ```sh
 make install PREFIX=/tmp/opencode/bundle
 make packages                       # or:
-scripts/build-deb.sh --version 0.2.1 --bundle /tmp/opencode/bundle --out dist
-scripts/build-rpm.sh --version 0.2.1 --bundle /tmp/opencode/bundle --out dist
+scripts/build-deb.sh --version <version> --bundle /tmp/opencode/bundle --out dist
+scripts/build-rpm.sh --version <version> --bundle /tmp/opencode/bundle --out dist
 scripts/check-bundle-layout.sh --deb-set dist --arch amd64
 scripts/check-bundle-layout.sh --rpm-set dist --arch x86_64
 packaging/stage-dist.py --dry-run --source blastit --channel stable \
-    --version 0.2.1 --ref refs/tags/v0.2.1 \
+    --version <version> --ref refs/tags/v<version> \
     --file 'deb:amd64:dist/*_amd64.deb' --file 'rpm:x86_64:dist/*.x86_64.rpm'
 ```
