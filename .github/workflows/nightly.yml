@@ -76,7 +76,7 @@ jobs:
       rpm_version: ${{ steps.stamp.outputs.rpm_version }}
       rpm_release: ${{ steps.stamp.outputs.rpm_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Stamp the nightly from the run number and the commit
         id: stamp
@@ -124,19 +124,19 @@ jobs:
       py_shims_gnu: ${{ steps.legs.outputs.py_shims_gnu }}
       prod_host: ${{ steps.legs.outputs.prod_host }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: The matrix and the published counts agree
-        run: uv run --no-project scripts/platform_matrix.py --check
+        run: uv run --no-project scripts/platform_matrix.py --check --channel nightly
       - id: legs
         run: |
           set -euo pipefail
           # A package is built from a `gnu` bundle (§6.1), so the shim legs this
           # workflow needs are that libc's — and they are still the matrix's list.
-          echo "install=$(uv run --no-project scripts/platform_matrix.py --matrix install)" >> "$GITHUB_OUTPUT"
-          echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages)" >> "$GITHUB_OUTPUT"
-          echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu)" >> "$GITHUB_OUTPUT"
-          echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu)" >> "$GITHUB_OUTPUT"
+          echo "install=$(uv run --no-project scripts/platform_matrix.py --matrix install --channel nightly)" >> "$GITHUB_OUTPUT"
+          echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages --channel nightly)" >> "$GITHUB_OUTPUT"
+          echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu --channel nightly)" >> "$GITHUB_OUTPUT"
+          echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu --channel nightly)" >> "$GITHUB_OUTPUT"
           # `§6` runs on a host, not in a container: the runner is the
           # architecture's native one, from the matrix like every other leg.
           echo "prod_host=$(uv run --no-project scripts/platform_matrix.py --matrix hosts --arch x86_64 |
@@ -148,7 +148,7 @@ jobs:
     runs-on: ${{ needs.matrix.outputs.prod_host }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -194,7 +194,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.shims_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: build the shim and run the real-load probe
         run: >-
@@ -205,7 +205,7 @@ jobs:
           scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
           target/proven-shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }}
           --arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: shim-${{ matrix.name }}
           path: target/proven-shims/*.so
@@ -220,13 +220,13 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.py_shims_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: the interpreter this shim binds to
-        run: uv python install ${{ matrix.python }}
+        run: uv python install ${{ matrix.interpreter }}
       - name: build the shim and assert its ELF contract
         run: make py-sapi PY_SAPI_REQUIRE_ALL=1 PY_MINORS="${{ matrix.minor }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: py-shim-${{ matrix.name }}
           path: target/py-sapi/${{ matrix.shim }}
@@ -241,14 +241,14 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: shim-${{ matrix.arch }}-gnu-*
           path: target/proven-shims
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: py-shim-${{ matrix.arch }}-gnu-*
           path: target/py-sapi
@@ -261,7 +261,8 @@ jobs:
               --arch "${{ matrix.arch }}" \
               --shim-dir target/proven-shims \
               --py-shim-dir target/py-sapi \
-              --bundle-floor "$(uv run --no-project scripts/platform_matrix.py --shim-floor)"
+              --bundle-floor "$(uv run --no-project scripts/platform_matrix.py --shim-floor)" \
+              --channel nightly
       - name: ${{ matrix.format }} from that bundle
         env:
           DEB_VERSION: ${{ needs.stamp.outputs.deb_version }}
@@ -278,11 +279,12 @@ jobs:
                   # `.deb` carries no Debian revision unless the stamp names one.
                   args=(--version "$DEB_VERSION" --bundle "$bundle" --out dist --max-glibc "$floor")
                   [ -z "$DEB_RELEASE" ] || args+=(--release "$DEB_RELEASE")
-                  scripts/build-deb.sh "${args[@]}"
+                  scripts/build-deb.sh --channel nightly "${args[@]}"
                   ;;
               rpm)
                   scripts/build-rpm.sh --version "$RPM_VERSION" --release "$RPM_RELEASE" \
-                      --bundle "$bundle" --out dist --max-glibc "$floor"
+                      --bundle "$bundle" --out dist --max-glibc "$floor" \
+                      --channel nightly
                   ;;
               *)
                   echo "::error::${{ matrix.format }} is not a package format this workflow builds"
@@ -293,13 +295,13 @@ jobs:
           built=(dist/*.deb dist/*.rpm)
           # The declared set comes from packaging/languages.tsv (`MB.67`), so the
           # count is derived too: a literal here would be a second table.
-          expected=$(packaging/package-set.sh --names | grep -c '')
+          expected=$(packaging/package-set.sh --channel nightly --names | grep -c '')
           echo "this leg built ${#built[@]} of ${expected} package(s): ${built[*]:-none}"
           if [ "${#built[@]}" -lt "$expected" ]; then
               echo "::error::expected $expected packages for ${{ matrix.arch }}, found ${#built[@]}"
               exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: package-${{ matrix.name }}
           path: |
@@ -316,9 +318,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.install) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: package-*
           path: dist
@@ -340,8 +342,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           pattern: package-*
           path: dist
@@ -370,7 +372,7 @@ jobs:
               --file 'rpm:x86_64:dist/*.x86_64.rpm' \
               --file 'rpm:aarch64:dist/*.aarch64.rpm' \
               --out "$RUNNER_TEMP/offworld-dist" "${extra[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: inputs.rehearsal != true
         with:
           name: offworld-dist

@@ -132,10 +132,21 @@ fi
 # Every CPython minor the table declares (`MB.42.3.3`, design §6.1): the wheel's
 # `blastit/_bin/` carries one `libblastit_py<digits>-…musl.so` per declared minor,
 # and the `--require-shims` value below (default `py`) refuses a wheel with fewer.
+#
+# The `uv python install` argument comes from the matrix's one pin for a
+# pre-release-only minor (`3.16` -> `cpython-3.16.0a2`, `MB.75`): `uv python
+# install 3.16` would look for a stable release that does not exist yet.
+install_spec() {
+    uv run --no-project "$root/scripts/platform_matrix.py" \
+        --leg py-shims --python "$1" --libc musl --arch x86_64 2>/dev/null |
+        sed -n 's/^interpreter=//p'
+}
 for minor in $declared_py_minors; do
-    uv python install "$minor" >/dev/null
+    spec=$(install_spec "$minor")
+    [ -n "$spec" ] || spec=$minor
+    uv python install "$spec" >/dev/null
     digits=${minor//./}
-    export "PY_SAPI_PYTHON_$digits=$(uv python find "$minor")"
+    export "PY_SAPI_PYTHON_$digits=$(uv python find "$spec")"
 done
 interpreter=$(uv python find "$python")
 echo "build-musl-wheel: $("$interpreter" -c 'import sys, sysconfig; print(sys.version.split()[0], sysconfig.get_platform())')"

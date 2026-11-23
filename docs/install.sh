@@ -431,7 +431,7 @@ detect_shims() { # <deb|rpm>
     shims=; missing_python=; missing_php=; hinted_python=
     # The shim versions ship with Blastit; this list is generated — do not edit.
     # BEGIN generated:languages
-    for minor in 3.13 3.14; do
+    for minor in 3.13 3.14 3.15; do
         if runtime_installed "$fmt" "python$minor"; then
             shims="$shims blastit-python-$minor"
         else
@@ -457,7 +457,7 @@ detect_shims() { # <deb|rpm>
 # package check that skips it.
 note_skipped_shims() {
     if [ -n "$missing_python" ]; then
-        note "this host has no CPython $missing_python (WSGI views need one), so those shims are not installed: static views are unaffected"
+        note "this host has no CPython $missing_python (WSGI views need one), so those shims are not installed: static views are unaffected. The nightly channel adds blastit-python-3.16 (built from CPython 3.16.0a2): install it with --nightly against Components: nightly"
     fi
     if [ -n "$hinted_python" ]; then
         note "this host carries a libpython $hinted_python shared object but no python$hinted_python package, so no shim was added: install blastit-python-$hinted_python directly (or install python$hinted_python and re-run this installer) to make WSGI views work"

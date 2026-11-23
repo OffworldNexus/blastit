@@ -119,12 +119,13 @@ clean: rs-format py-format rs-lint py-lint ## Format Rust + Python tools, then l
 guard: ## Refuse >5 MiB files, .env secrets, or stray binary artefacts
 	$(UV) run --no-project tools/guard.py
 
-# Every workflow hands a script to a container as one single-quoted `sh -c '…'`
-# word, and a stray `'` inside it truncates the word (PR #66: the container got
-# `syntax error: unexpected end of file` while the runner exited 0). This parses
-# each such word out of the YAML and runs `bash -n -c` on it — a parser, not a
-# source grep; seconds, no image and no network.
-workflow-syntax: ## Parse every `sh`/`bash -c '…'` word in .github/workflows as bash
+# Every workflow and every `scripts/*.sh` hands a script to a container as one
+# single-quoted `sh -c '…'` word, and a stray `'` inside it truncates the word
+# (PR #66: the container got `syntax error: unexpected end of file` while the
+# runner exited 0). This parses each such word out of the source — splices and
+# all — and runs `bash -n -c` on it: a parser, not a source grep; seconds, no
+# image and no network.
+workflow-syntax: ## Parse every `sh`/`bash -c '…'` word in .github/workflows and scripts/*.sh as bash
 	$(UV) run --no-project scripts/workflow_script_syntax.py
 
 plan-validate: ## Validate plan/nodes consistency
@@ -661,6 +662,12 @@ PY_SAPI_LIBC ?=
 PY_SAPI_REQUIRE_ALL ?=
 PY_SAPI_PYTHON_313 ?=
 PY_SAPI_PYTHON_314 ?=
+PY_SAPI_PYTHON_315 ?=
+# A pre-release-only minor (`MB.75`): `uv python install 3.16` looks for a stable
+# release, so the alpha's exact name is the one pin, in
+# `scripts/platform_matrix.py` (`PY_INTERPRETER_PINS`) — `scripts/py_sapi_leg.sh`
+# reads it from there. Pass `PY_SAPI_PYTHON_316=$(uv python find cpython-3.16.0a2)`.
+PY_SAPI_PYTHON_316 ?=
 
 py-sapi: ## Build CPython shims per declared minor (PY_MINORS; PY_SAPI_REQUIRE_ALL=1 fails closed)
 	@set -eu; \

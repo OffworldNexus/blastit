@@ -193,11 +193,19 @@ Release v0.2.1 is ready on branch release/0.2.1-packages (PR into develop). It s
 
 **Answer:**
 
-## H-021 [open] (node MB)
+## H-021 [closed] (node MB)
 
 - asked: 2026-11-23T00:13 by conductor
 
 Release v0.2.1 is ready and fully green: PR #66 (https://github.com/OffworldNexus/blastit/pull/66) from release/0.2.1 into develop, head ae6b10d1, 79 checks pass / 0 fail / 10 skipped, MERGEABLE. It ships the Offworld Nexus packaging pipeline (zero secrets: CI stages one offworld-dist artifact; the offworld-nexus-packages App signs and publishes to *.offworld-nexus.app) and one package per interpreter: blastit, blastit-python-3.13/3.14, blastit-php-8.3/8.4/8.5/8.6 (28 artifacts = 7 names x amd64/arm64 x deb/rpm). Merging makes Publish upload PyPI 0.2.1, cut the annotated v0.2.1 tag, create the GitHub Release, and DISPATCH Packages on that tag -- the step missing for 0.2.0 -- after which the App publishes the signed packages.
+
+**Answer:**
+
+## H-022 [closed] (node MB.75)
+
+- asked: 2026-11-23T11:41 by planner
+
+Validate the TESTING_PLAN.md update for the nightly CPython 3.16 channel: stable ships CPython 3.13/3.14/3.15, nightly additionally ships 3.16 built from cpython-3.16.0a2, and the same blastit binary selects every declared minor.
 
 **Answer:**
 

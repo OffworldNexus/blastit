@@ -223,10 +223,12 @@ can't be mistaken for the release of the same commit. Nothing publishes
 them, and nothing outside the run can install from them — they exist to catch a
 broken wheel on the commit that broke it, and for whoever wants to try the
 current tree. The two workflows build with the same action,
-`.github/actions/build-wheel`. A `develop` wheel carries the two CPython shims
-only (`require-shims: py`) — that workflow has no shim legs — so PHP is a
-release-wheel capability: only `publish-pypi.yml`'s wheels carry the four PHP
-shims, and its `verify` job proves it on every libc before anything reaches PyPI.
+`.github/actions/build-wheel`. A `develop` wheel carries the stable CPython shims
+only (`require-shims: py` — one per stable `python` row, 3.13/3.14/3.15; the
+nightly-only 3.16 shim is never part of a stable wheel) — that workflow has no
+shim legs — so PHP is a release-wheel capability: only `publish-pypi.yml`'s
+wheels carry the four PHP shims, and its `verify` job proves it on every libc
+before anything reaches PyPI.
 
 ## The description PyPI shows
 
@@ -269,7 +271,7 @@ artifacts (`--matrix`/`--count`/`--leg` are what the workflows consume, and
 
 ## What floats
 
-Every action is pinned to a major version (`actions/checkout@v4`,
+Every action is pinned to a major version (`actions/checkout@v5`,
 `PyO3/maturin-action@v1`, …), which follows upstream's fixes without a diff per
 release. Three of them move more than a version number does:
 

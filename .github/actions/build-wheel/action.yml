@@ -113,7 +113,7 @@ runs:
         set -euo pipefail
         uv run --no-project e2e/run_packaging.py --require-legs --leg wheel \
             --wheel "$(ls dist/blastit-*-py3-none-*.whl | head -n 1)"
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v6
       with:
         name: ${{ inputs.artifact }}
         path: dist/*-py3-none-*.whl

@@ -84,12 +84,15 @@ usage_text() {
 usage: scripts/build-deb.sh --version <ver> --bundle <dir>
                             [--release <rel>] [--arch amd64|arm64]
                             [--max-glibc <major>_<minor>] [--out <dir>]
-       scripts/build-deb.sh --print-set
+                            [--channel stable|nightly]
+       scripts/build-deb.sh [--channel stable|nightly] --print-set
 
   --bundle     a `make install PREFIX=<dir>` tree (bin/ + share/blastit/)
   --release    appended as `-<rel>` to the Debian version (optional)
   --arch       defaults to the machine type of the bundle's `blastit`
   --max-glibc  refuse an archive whose measured floor is above this ceiling
+  --channel    the release channel whose rows are packaged (`stable`, the
+               default, or `nightly`, which adds the nightly-only rows)
   --out        where the archives are written; `packaging/package-set.sh` names
                them (the core `blastit` plus one per shim row of
                `packaging/languages.tsv`), as `blastit_<ver>_<arch>.deb` and
@@ -147,15 +150,30 @@ while [ "$#" -gt 0 ]; do
             shift 2
             ;;
         --print-set) print_set=1; shift ;;
+        --channel)
+            [ "$#" -ge 2 ] || usage
+            BLASTIT_LANGUAGES_CHANNEL=$2
+            shift 2
+            ;;
         -h | --help) usage 0 ;;
         *) usage ;;
     esac
 done
 
+# The channel decides the package set (`MB.75`), so an unknown one is a usage
+# error, never a silently stable build.
+case " $BLASTIT_LANGUAGES_CHANNELS " in
+    *" $BLASTIT_LANGUAGES_CHANNEL "*) ;;
+    *) die "--channel '$BLASTIT_LANGUAGES_CHANNEL' is not stable|nightly" ;;
+esac
+
 # `--print-set` is the table, not a build: it prints the rows an operator (or a
-# test) can compare before a bundle or root exists.
+# test) can compare before a bundle or root exists. The rows come from the
+# *sourced* loader so the selected channel is the one asked for (`MB.75`); a
+# subprocess would default back to stable.
 if [ -n "${print_set:-}" ]; then
-    "$root/packaging/package-set.sh" --rows
+    validate_table || exit 1
+    blastit_package_rows
     exit 0
 fi
 

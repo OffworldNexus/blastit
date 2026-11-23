@@ -74,18 +74,22 @@ def _version_digits(version: str) -> str:
     return version.replace(".", "")
 
 
-def _language_slugs(language: str) -> dict[str, str]:
-    """`{version: slug}` newest first, straight from the TSV.
+def _language_slugs(
+    language: str, channel: str = languages.DEFAULT_CHANNEL
+) -> dict[str, str]:
+    """`{version: slug}` newest first, straight from the TSV's `channel` rows.
 
     A version is a string compared per component, so `8.10` sorts after `8.9`
     (`languages.version_key`); the order is the one `--matrix` has always printed.
     """
     by_version = {
-        row.version: row.slug for row in LANGUAGE_ROWS if row.language == language
+        row.version: row.slug
+        for row in LANGUAGE_ROWS
+        if row.language == language and row.in_channel(channel)
     }
     return {
         version: by_version[version]
-        for version in languages.versions_of(LANGUAGE_ROWS, language)
+        for version in languages.versions_of(LANGUAGE_ROWS, language, channel)
     }
 
 
@@ -155,24 +159,46 @@ LIBCS = {
     },
 }
 
+
 # The CPython minors a **shim** exists for (`MB.42.2`, design §1): a WSGI view
 # `dlopen`s its own minor's shim, so one artifact per `(minor, arch, libc)`,
 # never one shim for several. `version -> slug`, newest first, from the TSV.
-PY_MINORS = _language_slugs("python")
+#
+# Every view below takes `channel` (`MB.75`): a *stable* release builds and ships
+# only the rows whose `channels` cell names `stable`, and the nightly workflow
+# asks for `nightly`, which adds the nightly-only rows (`python 3.16`). No matrix
+# row may spell a version: they all come from `packaging/languages.tsv` here.
+def py_minors(channel: str = languages.DEFAULT_CHANNEL) -> dict[str, str]:
+    """The CPython shim minors of `channel`, `version -> slug`, newest first."""
+    return _language_slugs("python", channel)
+
 
 # The PHP minors the shim legs build, `version -> slug`, newest first, from the
 # TSV. A declared minor with no measured build record still gets a leg
 # (`_php_leg`), so a new row is a matrix change without a second edit.
-PHP_MINORS = _language_slugs("php")
+def php_minors(channel: str = languages.DEFAULT_CHANNEL) -> dict[str, str]:
+    """The PHP shim minors of `channel`, `version -> slug`, newest first."""
+    return _language_slugs("php", channel)
 
-# The CPython minors one `py3-none` wheel is *smoked* in (design §6.1): the
-# artifact itself serves every CPython `>=3.12`, so the wheel's floor plus every
-# declared shim minor is the promise, and one `cpNN` wheel per minor would be a
-# second matrix. `3.12` is that floor, not a shim row, so it is spelled here —
-# and `dict.fromkeys` keeps a declared `python 3.12` row from repeating the image.
-SMOKE_PYTHONS = tuple(
-    dict.fromkeys(("3.12", *sorted(PY_MINORS, key=languages.version_key)))
-)
+
+def smoke_pythons(channel: str = languages.DEFAULT_CHANNEL) -> tuple[str, ...]:
+    """The CPython minors one `py3-none` wheel is *smoked* in (design §6.1).
+
+    The artifact itself serves every CPython `>=3.12`, so the wheel's floor plus
+    every declared shim minor of `channel` is the promise, and one `cpNN` wheel
+    per minor would be a second matrix. `3.12` is that floor, not a shim row, so
+    it is spelled here — and `dict.fromkeys` keeps a declared `python 3.12` row
+    from repeating the image.
+    """
+    return tuple(
+        dict.fromkeys(("3.12", *sorted(py_minors(channel), key=languages.version_key)))
+    )
+
+
+def package_set(fmt: str, channel: str = languages.DEFAULT_CHANNEL) -> list[str]:
+    """The whole package set of `channel` a `fmt` build writes, core first."""
+    return list(languages.names(LANGUAGE_ROWS, channel))
+
 
 # The two native package formats (`MB.42.3.1`), one artifact family each. The
 # `pattern` is the filename `scripts/build-{deb,rpm}.sh` writes, with the placeholders
@@ -181,24 +207,21 @@ SMOKE_PYTHONS = tuple(
 # `pattern` is the **core** package and stays that way: every consumer that needs
 # "the package" (`scripts/install_matrix.sh`, `e2e/run_packaging.py`'s
 # `BLASTIT_DEB`/`BLASTIT_RPM`) resolves the core by it, and `install.sh` finds the
-# sibling shims in the same directory. `set` is the whole package set (`MB.65`):
-# the interpreter-free core plus one shim per row of `packaging/languages.tsv`.
-# `set_glob` matches all of them in one directory, so a set that lost a shim is a
-# missing name rather than an unnoticed count.
+# sibling shims in the same directory. The whole package set (`MB.65`) is the
+# interpreter-free core plus one shim per row of `packaging/languages.tsv` for the
+# build's channel (`package_set`, `MB.75`). `set_glob` matches all of them in one
+# directory, so a set that lost a shim is a missing name rather than an unnoticed
+# count.
 PACKAGE_FORMATS = {
     "deb": {
         "arch": {"x86_64": "amd64", "aarch64": "arm64"},
         "pattern": "blastit_<version>_{package_arch}.deb",
-        # Its own tuple, not an alias of the other format's: the two package
-        # families are independent promises that happen to list the same names.
-        "set": tuple(languages.names(LANGUAGE_ROWS)),
         "set_glob": "blastit*_{package_arch}.deb",
         "image": "debian:trixie",
     },
     "rpm": {
         "arch": {"x86_64": "x86_64", "aarch64": "aarch64"},
         "pattern": "blastit-<version>-<release>.{package_arch}.rpm",
-        "set": tuple(languages.names(LANGUAGE_ROWS)),
         "set_glob": "blastit-*.{package_arch}.rpm",
         "image": "rockylinux:9",
     },
@@ -641,7 +664,7 @@ def enabled_legs() -> list[dict]:
     return [leg for leg in LEGS if leg["enabled"]]
 
 
-def wheel_legs() -> list[dict]:
+def wheel_legs(channel: str = languages.DEFAULT_CHANNEL) -> list[dict]:
     """One `py3-none` wheel per enabled (arch, libc) (design §6.1, `MB.42.3.3`).
 
     A wheel carries **no extension**: `maturin build --bindings bin` puts the
@@ -657,6 +680,7 @@ def wheel_legs() -> list[dict]:
     for leg in enabled_legs():
         libc = LIBCS[leg["libc"]]
         tag = f"{libc['wheel_tag']}_{leg['arch']}"
+        pythons = smoke_pythons(channel)
         legs.append(
             {
                 "name": leg["id"],
@@ -667,10 +691,10 @@ def wheel_legs() -> list[dict]:
                 "python_tag": "py3-none",
                 "wheel_tag": tag,
                 "wheel": f"blastit-<version>-py3-none-{tag}.whl",
-                "smoke_pythons": ",".join(SMOKE_PYTHONS),
+                "smoke_pythons": ",".join(pythons),
                 "runtime_images": ",".join(
                     f"python:{minor}-{'alpine' if leg['libc'] == 'musl' else 'slim'}"
-                    for minor in SMOKE_PYTHONS
+                    for minor in pythons
                 ),
                 "runs_on": ARCHES[leg["arch"]]["runs_on"],
                 "manylinux": libc.get("manylinux", ""),
@@ -710,7 +734,7 @@ def binary_legs() -> list[dict]:
     return legs
 
 
-def package_legs() -> list[dict]:
+def package_legs(channel: str = languages.DEFAULT_CHANNEL) -> list[dict]:
     """One `.deb` and one `.rpm` per enabled gnu arch (`MB.42.3.1`).
 
     A package is built from **one** §6.1 bundle: `blastit`, `blastit-lsp` and the
@@ -731,7 +755,7 @@ def package_legs() -> list[dict]:
             # matches it in a single directory (`MB.65`). `pattern` above is the
             # core package; a consumer that installs "the package" gets the core
             # and `docs/install.sh` installs the shims this host can run.
-            "set": list(spec["set"]),
+            "set": package_set(fmt, channel),
             "set_glob": spec["set_glob"].format(package_arch=spec["arch"][leg["arch"]]),
             "image": spec["image"],
             "builder_image": LIBCS["gnu"]["builder_image"].format(arch=leg["arch"]),
@@ -806,11 +830,11 @@ def shim_floor() -> str:
     return LIBCS["gnu"]["shim_floor"]
 
 
-def shim_legs() -> list[dict]:
+def shim_legs(channel: str = languages.DEFAULT_CHANNEL) -> list[dict]:
     """One shim per (minor, arch, libc), named `ADR-0010` §4.1's way.
 
-    The minors are the **TSV's** (`PHP_MINORS`), not a list of measured legs:
-    `_php_leg` answers with the measured record where one exists and the
+    The minors are the **TSV's** (`php_minors(channel)`), not a list of measured
+    legs: `_php_leg` answers with the measured record where one exists and the
     documented convention otherwise, so a new row is a new leg here at once.
     """
     return [
@@ -840,7 +864,7 @@ def shim_legs() -> list[dict]:
             "runs_on": ARCHES[leg["arch"]]["runs_on"],
         }
         for leg in enabled_legs()
-        for minor in PHP_MINORS
+        for minor in php_minors(channel)
     ]
 
 
@@ -855,8 +879,19 @@ def shim_name(minor: str, arch: str, libc: str) -> str:
 # musl binary — and the resulting `NEEDED libc.musl-<arch>.so.1` is asserted.
 PY_SHIM_BUILDER_IMAGES = {"gnu": "", "musl": "alpine:3.21"}
 
+# A declared minor only a **pre-release** provides (`MB.75`): `uv` resolves `3.16`
+# to a stable release that does not exist yet, so the interpreter is named by its
+# exact alpha. One spelling, read by the workflow's `uv python install` and by
+# `scripts/py_sapi_leg.sh` — never repeated as a literal in a matrix or workflow.
+PY_INTERPRETER_PINS = {"3.16": "cpython-3.16.0a2"}
 
-def py_shim_legs() -> list[dict]:
+
+def py_interpreter(minor: str) -> str:
+    """The `uv python install` argument that provides `minor` (a pin if needed)."""
+    return PY_INTERPRETER_PINS.get(minor, minor)
+
+
+def py_shim_legs(channel: str = languages.DEFAULT_CHANNEL) -> list[dict]:
     """One CPython shim per (minor, arch, libc) — `8` legs (`MB.42.2`, §1).
 
     The shim is `libblastit_py3<minor>-<arch>-<libc>.so`: a `cdylib` that exports
@@ -884,6 +919,9 @@ def py_shim_legs() -> list[dict]:
             # validates the pair and asserts the shim's exported and undefined
             # symbols on the artifact (a shim never links a libpython).
             "python": minor,
+            # The `uv python install` argument that provides it: the alpha's exact
+            # name for a pre-release-only minor (`MB.75`), the minor otherwise.
+            "interpreter": py_interpreter(minor),
             # Where this shim can actually be **linked** for its libc
             # (`MB.42.3.3` review): a musl shim built on a glibc runner was
             # linked against `libc.so.6` and every assertion still passed, so the
@@ -892,7 +930,7 @@ def py_shim_legs() -> list[dict]:
             "runs_on": ARCHES[leg["arch"]]["runs_on"],
         }
         for leg in enabled_legs()
-        for minor in PY_MINORS
+        for minor in py_minors(channel)
     ]
 
 
@@ -1010,34 +1048,34 @@ def proven_count(family: str) -> int:
     return len(proved(family))
 
 
-def reached(reaches: str) -> list[dict]:
+def reached(reaches: str, channel: str = languages.DEFAULT_CHANNEL) -> list[dict]:
     """The shim legs that reached `reaches` (the support statement)."""
-    return [leg for leg in shim_legs() if leg["reaches"] == reaches]
+    return [leg for leg in shim_legs(channel) if leg["reaches"] == reaches]
 
 
-def reaches_counts() -> dict[str, int]:
-    return {name: len(reached(name)) for name in REACHES} | {
-        "unbuilt": len(shim_legs()) - len(reached_any())
+def reached_any(channel: str = languages.DEFAULT_CHANNEL) -> list[dict]:
+    return [leg for leg in shim_legs(channel) if leg["reaches"]]
+
+
+def reaches_counts(channel: str = languages.DEFAULT_CHANNEL) -> dict[str, int]:
+    return {name: len(reached(name, channel)) for name in REACHES} | {
+        "unbuilt": len(shim_legs(channel)) - len(reached_any(channel))
     }
 
 
-def reached_any() -> list[dict]:
-    return [leg for leg in shim_legs() if leg["reaches"]]
-
-
-def reaches_sentence() -> str:
+def reaches_sentence(channel: str = languages.DEFAULT_CHANNEL) -> str:
     """The one sentence `--summary` and the release notes print.
 
     `MB.3.58` review: the gate and the summary disagreed in wording, so a number a
     reader quoted could be one no gate printed. One function, one string — the
     counts and the arm-runner projection included.
     """
-    counts = reaches_counts()
-    total = len(shim_legs())
+    counts = reaches_counts(channel)
+    total = len(shim_legs(channel))
     prospective = counts["served"] + len(
         [
             leg
-            for leg in shim_legs()
+            for leg in shim_legs(channel)
             # Unbuilt, but its (minor, libc) is served on x86_64: the arm runners
             # will add it, so the sentence says what the number becomes.
             if not leg["reaches"] and _php_leg(leg["minor"], leg["libc"])["suites"]
@@ -1060,7 +1098,7 @@ def package_set_rows(*args: str) -> list[list[str]]:
     """Rows of `packaging/package-set.sh`, the one table of package names (`MB.65`).
 
     The builders execute that file; this module reads it through its CLI, so the
-    gate can diff the matrix's own copy (`PACKAGE_FORMATS[].set`).
+    gate can diff the matrix's own copy (`package_set`).
     """
     result = subprocess.run(
         ["bash", str(REPO / "packaging" / "package-set.sh"), *args],
@@ -1076,7 +1114,7 @@ def package_set_rows(*args: str) -> list[list[str]]:
     return [line.split("\t") for line in result.stdout.splitlines() if line]
 
 
-def check(problems: list[str]) -> None:
+def check(problems: list[str], channel: str = languages.DEFAULT_CHANNEL) -> None:
     ids = [leg["id"] for leg in LEGS]
     if len(set(ids)) != len(ids):
         problems.append(f"duplicate leg id in LEGS: {ids}")
@@ -1109,7 +1147,7 @@ def check(problems: list[str]) -> None:
     # the TSV no longer declares is a stale measurement of a version nothing
     # builds, which is exactly the copy this slice exists to retire (`MB.67.2`).
     for (minor, libc), spec in PHP_LEG_DATA.items():
-        if minor not in PHP_MINORS:
+        if minor not in php_minors(channel):
             problems.append(
                 f"PHP_LEG_DATA names minor {minor!r}, which packaging/languages.tsv "
                 "does not declare: a measured leg for a version nothing builds"
@@ -1152,31 +1190,32 @@ def check(problems: list[str]) -> None:
     # CPython `>=3.12`, so a declared minor below it is a shim this wheel never
     # claims, and a repeated smoke image would stop `smoke_pythons` being a set.
     wheel_floor = languages.version_key("3.12")
-    for minor in PY_MINORS:
+    for minor in py_minors(channel):
         if languages.version_key(minor) < wheel_floor:
             problems.append(
                 f"packaging/languages.tsv declares CPython {minor}, below the "
                 "`py3-none` wheel's floor 3.12: the docs promise CPython >=3.12, so "
                 "this shim could never be smoked by the wheel that ships it"
             )
-    if len(set(SMOKE_PYTHONS)) != len(SMOKE_PYTHONS):
+    smoke = smoke_pythons(channel)
+    if len(set(smoke)) != len(smoke):
         problems.append(
-            f"SMOKE_PYTHONS has duplicates: {SMOKE_PYTHONS}: a smoke image is one "
+            f"smoke_pythons({channel}) has duplicates: {smoke}: a smoke image is one "
             "leg, and a repeated one would be pulled twice for one proof"
         )
 
     # The one leg list still spelled by hand: `IMAGES` is the only place a PHP
     # minor appears without being derived, so a version leaving the TSV must be
     # caught here. The shim families cannot go stale this way (they are built
-    # from `PHP_MINORS`/`PY_MINORS`), which is why they are not re-checked.
+    # from `php_minors`/`py_minors`), which is why they are not re-checked.
     for image in IMAGES:
-        if image["minor"] not in PHP_MINORS:
+        if image["minor"] not in php_minors(channel):
             problems.append(
                 f"IMAGES {image['tag']}: PHP {image['minor']} is not declared in "
                 "packaging/languages.tsv, so the image would name a version no leg builds"
             )
 
-    for leg in shim_legs():
+    for leg in shim_legs(channel):
         expected = shim_name(leg["minor"], leg["arch"], leg["libc"])
         if leg["shim"] != expected:
             problems.append(f"{leg['name']}: shim {leg['shim']} != {expected}")
@@ -1188,10 +1227,10 @@ def check(problems: list[str]) -> None:
     # The per-minor CPython shims (`MB.42.3.3`): one name per (minor, arch, libc),
     # and the name is the `DT_SONAME` the workflow asserts — an artifact whose
     # soname and file name disagree cannot be found by the loader the docs name.
-    py_shims = [leg["shim"] for leg in py_shim_legs()]
+    py_shims = [leg["shim"] for leg in py_shim_legs(channel)]
     if len(set(py_shims)) != len(py_shims):
-        problems.append(f"py_shim_legs(): duplicate shim name in {py_shims}")
-    for leg in py_shim_legs():
+        problems.append(f"py_shim_legs({channel}): duplicate shim name in {py_shims}")
+    for leg in py_shim_legs(channel):
         expected = py_shim_name(leg["minor"], leg["arch"], leg["libc"])
         if leg["shim"] != expected:
             problems.append(f"{leg['name']}: shim {leg['shim']} != {expected}")
@@ -1275,7 +1314,7 @@ def check(problems: list[str]) -> None:
     # suites for a leg whose own row says the boot refuses.
     for (minor, libc, arch), (value, because) in SHIM_REACHES.items():
         where = f"SHIM_REACHES {minor}/{libc}/{arch}"
-        if minor not in PHP_MINORS:
+        if minor not in php_minors(channel):
             problems.append(f"{where}: unknown PHP minor")
         if libc not in LIBCS:
             problems.append(f"{where}: unknown libc")
@@ -1290,7 +1329,7 @@ def check(problems: list[str]) -> None:
                 f"{where}: claims `served` for a leg whose `suites` is false, so no CI "
                 "leg re-proves it; run the suites there or record `probed`"
             )
-    for leg in shim_legs():
+    for leg in shim_legs(channel):
         spec = _php_leg(leg["minor"], leg["libc"])
         if spec["suites"] and leg["arch"] == "x86_64" and leg["reaches"] != "served":
             problems.append(
@@ -1303,20 +1342,21 @@ def check(problems: list[str]) -> None:
     # row of `packaging/languages.tsv`, and a `set_glob` that really matches every
     # one. A glob that missed a shim would let a directory hold a package nobody
     # checks, and a `pattern` that named a shim would install the wrong package.
-    expected_set = languages.names(LANGUAGE_ROWS)
+    expected_set = languages.names(LANGUAGE_ROWS, channel)
     for fmt, spec in PACKAGE_FORMATS.items():
-        names = list(spec["set"])
+        names = package_set(fmt, channel)
         where = f"PACKAGE_FORMATS {fmt}"
         if names != expected_set:
             problems.append(
                 f"{where}: `set` is {names}, not packaging/languages.tsv's names "
-                f"{expected_set} (core first): the matrix has its own copy again"
+                f"{expected_set} (core first, channel {channel}): the matrix has its "
+                "own copy again"
             )
         if not names or names[0] != languages.CORE_PACKAGE:
             problems.append(f"{where}: the first package is the core `blastit`")
         if len(set(names)) != len(names):
             problems.append(f"{where}: a package name is declared twice: {names}")
-        for row in LANGUAGE_ROWS:
+        for row in languages.rows_in_channel(LANGUAGE_ROWS, channel):
             if row.package not in names:
                 problems.append(f"{where}: no {row.package} shim package")
         for package_arch in spec["arch"].values():
@@ -1351,15 +1391,16 @@ def check(problems: list[str]) -> None:
 
     # The package names exist in more than one place (`MB.65`):
     # `packaging/package-set.sh` is the table the builders read, while this matrix
-    # keeps `PACKAGE_FORMATS[*]["set"]`, because a Python module cannot run a
-    # shell script.
-    # `--check` diffs the matrix's copy here, so a rename that lands in one of them
-    # names the package that drifted. `e2e/run_packaging.py` keeps no copy: it runs
-    # `--shims` at test time, so there is nothing there to drift.
-    table = [row[0] for row in package_set_rows("--names")]
-    shim_globs = {row[0]: row[1] for row in package_set_rows("--shims")}
+    # derives `package_set`, because a Python module cannot run a shell script.
+    # `--check` diffs one against the other for `channel` here, so a rename that
+    # lands in one of them names the package that drifted. `e2e/run_packaging.py`
+    # keeps no copy: it runs `--shims` at test time, so there is nothing to drift.
+    table = [row[0] for row in package_set_rows("--channel", channel, "--names")]
+    shim_globs = {
+        row[0]: row[1] for row in package_set_rows("--channel", channel, "--shims")
+    }
     for fmt, spec in PACKAGE_FORMATS.items():
-        declared = list(spec["set"])
+        declared = package_set(fmt, channel)
         if declared != table:
             missing = [name for name in table if name not in declared]
             extra = [name for name in declared if name not in table]
@@ -1372,7 +1413,8 @@ def check(problems: list[str]) -> None:
                 detail.append("the same names in a different order")
             problems.append(
                 f"PACKAGE_FORMATS {fmt}: `set` has drifted from "
-                f"packaging/package-set.sh --names ({'; '.join(detail)})"
+                f"packaging/package-set.sh --channel {channel} --names "
+                f"({'; '.join(detail)})"
             )
     # Each package owns the shim its own TSV row names — never "the PHP name for
     # everything, the CPython name for `blastit-python-*`" (`MB.67.2` review): a
@@ -1397,15 +1439,18 @@ def check(problems: list[str]) -> None:
     # Every declared artifact has a place in PROVEN or it is a promise; every
     # PROVEN key names an artifact the matrix actually builds.
     declared_keys = (
-        {("shims", leg["minor"], leg["arch"], leg["libc"]) for leg in shim_legs()}
+        {
+            ("shims", leg["minor"], leg["arch"], leg["libc"])
+            for leg in shim_legs(channel)
+        }
         | {
             ("py_shims", leg["minor"], leg["arch"], leg["libc"])
-            for leg in py_shim_legs()
+            for leg in py_shim_legs(channel)
         }
-        | {("wheels", leg["arch"], leg["libc"]) for leg in wheel_legs()}
+        | {("wheels", leg["arch"], leg["libc"]) for leg in wheel_legs(channel)}
         | {("archives", leg["arch"], leg["libc"]) for leg in binary_legs()}
         | {("lsp", leg["target"]) for leg in lsp_legs()}
-        | {("packages", leg["arch"], leg["format"]) for leg in package_legs()}
+        | {("packages", leg["arch"], leg["format"]) for leg in package_legs(channel)}
     )
     for key in PROVEN:
         if key not in declared_keys:
@@ -1422,7 +1467,7 @@ def check(problems: list[str]) -> None:
     # claims is installed before a package is published, so a leg must name a
     # package this matrix builds and the package manager that distribution has.
     seen_install: list[str] = []
-    built_formats = {leg["format"] for leg in package_legs()}
+    built_formats = {leg["format"] for leg in package_legs(channel)}
     for leg in install_legs():
         where = f"INSTALL_LEGS {leg['name']}"
         if leg["name"] in seen_install:
@@ -1472,8 +1517,19 @@ def check(problems: list[str]) -> None:
     # file is only honest while its generator reproduces it. `packages.yml` and
     # `nightly.yml` run exactly this `--check`, so the staleness gate is the one
     # they already execute — the spec's stanzas are never a second hand-kept copy.
+    #
+    # The committed spec is the **stable** shape (`MB.75`): only that rendering is
+    # diffed. The nightly one must merely *render* (`--stdout`), because
+    # committing a second spec would be a second copy of the table.
+    stable_spec = channel == languages.DEFAULT_CHANNEL
     generator = subprocess.run(
-        [sys.executable, str(REPO / "scripts" / "rpm" / "gen_spec.py"), "--check"],
+        [
+            sys.executable,
+            str(REPO / "scripts" / "rpm" / "gen_spec.py"),
+            "--channel",
+            channel,
+            "--check" if stable_spec else "--stdout",
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -1487,15 +1543,73 @@ def check(problems: list[str]) -> None:
             "scripts/rpm/gen_spec.py refuses this table: "
             + ("\n  ".join(reason[:4]) or "no reason printed")
         )
-    elif generator.returncode != 0:
+    elif stable_spec and generator.returncode != 0:
         detail = (generator.stderr or generator.stdout).strip().splitlines()
         problems.append(
             "scripts/rpm/blastit.spec is stale: `scripts/rpm/gen_spec.py --write` "
             "regenerates it from packaging/languages.tsv\n  " + "\n  ".join(detail[:40])
         )
+    elif not stable_spec and generator.returncode != 0:
+        detail = (generator.stderr or generator.stdout).strip().splitlines()
+        problems.append(
+            f"scripts/rpm/gen_spec.py cannot render the {channel} channel: "
+            + ("\n  ".join(detail[:4]) or "no reason printed")
+        )
 
 
 # --- the output -------------------------------------------------------------
+
+
+def check_channels(problems: list[str]) -> None:
+    """The channel split itself (`MB.75`), beside each channel's own check.
+
+    Both channels are validated independently by `check`; this cross-check states
+    the split a release depends on: the nightly matrix is the stable one plus
+    exactly the nightly-only rows, so the stable package set and its artefacts
+    never name a nightly-only minor, and the nightly one does.
+    """
+    stable = set(py_minors("stable"))
+    nightly = set(py_minors("nightly"))
+    nightly_only = {
+        row.version
+        for row in LANGUAGE_ROWS
+        if row.language == "python" and not row.in_channel("stable")
+    }
+    if nightly - stable != nightly_only:
+        problems.append(
+            f"the CPython matrix differs by {sorted(nightly - stable)} between the "
+            f"channels, but packaging/languages.tsv declares {sorted(nightly_only)} "
+            "nightly-only: a row's channel decides what a release ships"
+        )
+    if stable & nightly_only:
+        problems.append(
+            f"a nightly-only CPython minor ({sorted(stable & nightly_only)}) is in "
+            "the stable matrix"
+        )
+    if not nightly_only:
+        problems.append(
+            "no CPython row is nightly-only: the channel dimension would then be a "
+            "promise nothing proves"
+        )
+    expected_added = {
+        row.package
+        for row in LANGUAGE_ROWS
+        if row.language == "python" and not row.in_channel("stable")
+    }
+    for fmt in PACKAGE_FORMATS:
+        added = set(package_set(fmt, "nightly")) - set(package_set(fmt, "stable"))
+        if added != expected_added:
+            problems.append(
+                f"PACKAGE_FORMATS {fmt}: the nightly set adds {sorted(added)}, but the "
+                f"nightly-only rows are {sorted(expected_added)}"
+            )
+        leaked = set(package_set(fmt, "stable")) & expected_added
+        if leaked:
+            problems.append(
+                f"PACKAGE_FORMATS {fmt}: the stable set names a nightly-only package "
+                f"({sorted(leaked)}): a stable artefact set must never ship one"
+            )
+
 
 # One sentence for every leg whose smoke has not run on its own runner. It is the
 # wording `MB.35.5`'s RESULT and the evidence table must use, defined here so the
@@ -1503,7 +1617,7 @@ def check(problems: list[str]) -> None:
 UNPROVEN = "declared, unproven — NOT RUN (no CI runner or cross toolchain on this host)"
 
 
-def summary(family: str = "") -> str:
+def summary(family: str = "", channel: str = languages.DEFAULT_CHANNEL) -> str:
     """The Markdown report, whole or for one family (`--summary [FAMILY]`).
 
     `--summary lsp` prints the editor family's row, its five artifacts (with the
@@ -1533,16 +1647,16 @@ def summary(family: str = "") -> str:
         else "—"
     )
     for name, key, count in (
-        ("wheels", "wheels", len(wheel_legs())),
+        ("wheels", "wheels", len(wheel_legs(channel))),
         ("standalone archives", "archives", len(binary_legs())),
-        ("PHP shims", "shims", len(shim_legs())),
+        ("PHP shims", "shims", len(shim_legs(channel))),
         # The per-minor CPython family (`MB.42.3.3`): four wheels, but eight
         # shims, because a WSGI view `dlopen`s its own minor's shim.
-        ("CPython shims (per minor)", "py_shims", len(py_shim_legs())),
+        ("CPython shims (per minor)", "py_shims", len(py_shim_legs(channel))),
         # The editor family is counted on its own noun: an LSP archive is never an
         # "archive" here, because that count is the standalone family's (`R74`).
         ("lsp assets (editor)", "lsp", len(lsp_legs())),
-        ("native packages (.deb/.rpm)", "packages", len(package_legs())),
+        ("native packages (.deb/.rpm)", "packages", len(package_legs(channel))),
         # The container install matrix (`MB.42.3.4`): every distribution the
         # repositories advertise, on both architectures.
         ("container install legs", "install", len(install_legs())),
@@ -1565,14 +1679,14 @@ def summary(family: str = "") -> str:
     lines.append("| artifact | leg | status |")
     lines.append("|---|---|---|")
     if wants("wheels"):
-        for leg in wheel_legs():
+        for leg in wheel_legs(channel):
             node = PROVEN.get(("wheels", leg["arch"], leg["libc"]))
             lines.append(
                 f"| `{leg['wheel']}` (smoked in `{leg['smoke_pythons']}`) | "
                 f"{leg['runs_on']} | {'proved by ' + node if node else 'declared, unbuilt'} |"
             )
     if wants("py-shims"):
-        for leg in py_shim_legs():
+        for leg in py_shim_legs(channel):
             node = PROVEN.get(("py_shims", leg["minor"], leg["arch"], leg["libc"]))
             lines.append(
                 f"| `{leg['shim']}` | CPython {leg['minor']} on {leg['runs_on']} | "
@@ -1586,7 +1700,7 @@ def summary(family: str = "") -> str:
                 f"{'proved by ' + node if node else 'declared, unbuilt'} |"
             )
     if wants("shims"):
-        for leg in shim_legs():
+        for leg in shim_legs(channel):
             node = PROVEN.get(("shims", leg["minor"], leg["arch"], leg["libc"]))
             lines.append(
                 f"| `{leg['shim']}` | {leg['base']} ({leg['runs_on']}) | "
@@ -1607,7 +1721,7 @@ def summary(family: str = "") -> str:
                 f"{status}; the command CI runs is `{leg['ci_command']}` |"
             )
     if wants("packages"):
-        for leg in package_legs():
+        for leg in package_legs(channel):
             node = PROVEN.get(("packages", leg["arch"], leg["format"]))
             lines.append(
                 f"| `{leg['pattern']}` + its {len(leg['set']) - 1} shims (`{leg['set_glob']}`) "
@@ -1617,10 +1731,10 @@ def summary(family: str = "") -> str:
             )
         lines.append("")
         lines.append(
-            f"The {len(package_legs()[0]['set'])} binary packages one architecture writes "
+            f"The {len(package_legs(channel)[0]['set'])} binary packages one architecture writes "
             "(`packaging/package-set.sh`), "
             "the same set in both formats: "
-            + ", ".join(f"`{name}`" for name in package_legs()[0]["set"])
+            + ", ".join(f"`{name}`" for name in package_legs(channel)[0]["set"])
             + ". The core carries `blastit`, `blastit-lsp`, `LICENSE` and "
             "`python/blastit/*.py`; each shim carries exactly one `libblastit_*.so` and "
             "depends on the core at the same version, so a host installs the shims its "
@@ -1651,7 +1765,7 @@ def summary(family: str = "") -> str:
     lines.append("")
     lines.append("| (minor, libc) | suites in its image |")
     lines.append("|---|---|")
-    for minor in PHP_MINORS:
+    for minor in php_minors(channel):
         for libc in LIBCS:
             spec = _php_leg(minor, libc)
             cell = "yes" if spec["suites"] else f"no — {spec['suites_because']}"
@@ -1659,7 +1773,7 @@ def summary(family: str = "") -> str:
     lines.append("")
     lines.append("## Which PHP a user can actually run (measured, `SHIM_REACHES`)")
     lines.append("")
-    lines.append(f"reaches: {reaches_sentence()}.")
+    lines.append(f"reaches: {reaches_sentence(channel)}.")
     lines.append("")
     lines.append(
         "`PROVEN` says an artefact was built and exercised; this table says what the "
@@ -1668,7 +1782,7 @@ def summary(family: str = "") -> str:
     lines.append("")
     lines.append("| shim leg | reaches | why (measured) |")
     lines.append("|---|---|---|")
-    for leg in shim_legs():
+    for leg in shim_legs(channel):
         value, because = SHIM_REACHES.get(
             (leg["minor"], leg["libc"], leg["arch"]),
             ("unbuilt", "declared, never built"),
@@ -1677,7 +1791,7 @@ def summary(family: str = "") -> str:
     lines.append("")
     lines.append("| PHP minor | glibc (Debian/Ubuntu) | musl (Alpine) |")
     lines.append("|---|---|---|")
-    for minor in PHP_MINORS:
+    for minor in php_minors(channel):
         cells = [
             SHIM_REACHES.get((minor, libc, "x86_64"), ("unbuilt", ""))[0]
             for libc in LIBCS
@@ -1689,6 +1803,7 @@ def summary(family: str = "") -> str:
 def _filtered_legs(
     family: str,
     *,
+    channel: str = languages.DEFAULT_CHANNEL,
     minor: str = "",
     python: str = "",
     libc: str = "",
@@ -1696,17 +1811,30 @@ def _filtered_legs(
     target: str = "",
     name: str = "",
 ) -> list[dict]:
-    legs = {
+    builder = {
         "wheels": wheel_legs,
         "binaries": binary_legs,
         "shims": shim_legs,
         "py-shims": py_shim_legs,
-        "images": lambda: [dict(item) for item in IMAGES],
+        "images": None,
         "lsp": lsp_legs,
         "packages": package_legs,
         "install": install_legs,
         "hosts": host_legs,
-    }[family]()
+    }[family]
+    # The nine families are not uniform: five take a channel (`MB.75`), the rest
+    # have no language row to select.
+    channel_scoped = {
+        "wheels",
+        "shims",
+        "py-shims",
+        "packages",
+    }
+    legs = (
+        builder(channel)
+        if family in channel_scoped
+        else (builder() if builder else [dict(item) for item in IMAGES])
+    )
     if name:
         legs = [leg for leg in legs if leg.get("name") == name]
     if minor:
@@ -1728,6 +1856,16 @@ def main(argv: list[str] | None = None) -> int:
         "--check",
         action="store_true",
         help="validate the matrix itself (leg names, declared families, PROVEN keys)",
+    )
+    parser.add_argument(
+        "--channel",
+        default=languages.DEFAULT_CHANNEL,
+        choices=languages.CHANNELS,
+        help=(
+            "the release channel every language/package family is derived for: "
+            "stable (the default) or nightly, which adds the nightly-only rows "
+            "(`MB.75`). `--check` always validates both."
+        ),
     )
     parser.add_argument(
         "--matrix",
@@ -1832,10 +1970,15 @@ def main(argv: list[str] | None = None) -> int:
         help="accepted for compatibility; no longer used",
     )
     args = parser.parse_args(argv)
+    channel = args.channel
 
     problems: list[str] = []
     if args.check:
-        check(problems)
+        # Both channels (`MB.75`): a stable release and a nightly are two shapes of
+        # one declaration, and the nightly-only rows are the only difference.
+        for name in languages.CHANNELS:
+            check(problems, name)
+        check_channels(problems)
     if problems:
         for problem in problems:
             print(f"platform-matrix: {problem}", file=sys.stderr)
@@ -1847,6 +1990,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.matrix:
         legs = _filtered_legs(
             args.matrix,
+            channel=channel,
             minor=args.minor,
             python=args.python,
             libc=args.libc,
@@ -1858,6 +2002,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.count:
         legs = _filtered_legs(
             args.count,
+            channel=channel,
             minor=args.minor,
             python=args.python,
             libc=args.libc,
@@ -1869,6 +2014,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.leg:
         legs = _filtered_legs(
             args.leg,
+            channel=channel,
             minor=args.minor,
             python=args.python,
             libc=args.libc,
@@ -1906,20 +2052,20 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print("\n".join(f"{key}={value}" for key, value in legs[0].items()))
     if args.summary is not None:
-        print(summary(args.summary))
+        print(summary(args.summary, channel))
     if args.check and not (args.matrix or args.count or args.leg or args.summary):
         print(
-            f"platform-matrix: ok — {len(wheel_legs())} wheels, "
-            f"{len(binary_legs())} archives, {len(shim_legs())} shims, "
-            f"{len(py_shim_legs())} python shims, {len(lsp_legs())} lsp assets declared; "
-            f"built and exercised: {proven_count('wheels')}/{len(wheel_legs())} wheels, "
+            f"platform-matrix: ok — {len(wheel_legs(channel))} wheels, "
+            f"{len(binary_legs())} archives, {len(shim_legs(channel))} shims, "
+            f"{len(py_shim_legs(channel))} python shims, {len(lsp_legs())} lsp assets declared; "
+            f"built and exercised: {proven_count('wheels')}/{len(wheel_legs(channel))} wheels, "
             f"{proven_count('archives')}/{len(binary_legs())} archives, "
-            f"{proven_count('shims')}/{len(shim_legs())} shims, "
-            f"{proven_count('py_shims')}/{len(py_shim_legs())} python shims, "
+            f"{proven_count('shims')}/{len(shim_legs(channel))} shims, "
+            f"{proven_count('py_shims')}/{len(py_shim_legs(channel))} python shims, "
             f"{proven_count('lsp')}/{len(lsp_legs())} lsp assets; "
-            f"{len(package_legs())} packages installed in {len(install_legs())} "
+            f"{len(package_legs(channel))} packages installed in {len(install_legs())} "
             f"container legs; "
-            f"reaches: {reaches_sentence()}; "
+            f"reaches: {reaches_sentence(channel)}; "
             f"{len([leg for leg in LEGS if not leg['enabled']])} leg(s) dropped"
         )
     return 0

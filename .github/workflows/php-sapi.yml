@@ -67,7 +67,7 @@ jobs:
     outputs:
       legs: ${{ steps.legs.outputs.legs }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # A broken matrix fails here, once, before any container is pulled.
       - name: The matrix and the published counts agree
@@ -83,7 +83,7 @@ jobs:
     name: 'lint: the real-load probe and the e2e seccomp harness'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -118,7 +118,7 @@ jobs:
     # not a promise.
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # No Rust toolchain on the runner: every binary this leg executes — the
       # shim, the probe, and the PHP legs — is compiled inside the
@@ -209,7 +209,7 @@ jobs:
         run: >-
           scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
           target/proven-shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }} --arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: shim-${{ matrix.name }}
           path: target/proven-shims/*.so

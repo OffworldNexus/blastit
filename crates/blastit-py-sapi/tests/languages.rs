@@ -14,8 +14,8 @@
 include!("../../../packaging/languages.rs.inc");
 
 use blastit_py_sapi::{
-    DEFAULT_MINOR, PY_MINOR_313, PY_MINOR_314, SUPPORTED_MINORS, default_minor, encode_py_minor,
-    shim_file, supported_minors_sentence,
+    DEFAULT_MINOR, PREFERRED_MINORS, PY_MINOR_313, PY_MINOR_314, PY_MINOR_315, PY_MINOR_316,
+    SUPPORTED_MINORS, default_minor, encode_py_minor, shim_file, supported_minors_sentence,
 };
 
 const TSV: &str = include_str!("../../../packaging/languages.tsv");
@@ -49,12 +49,51 @@ fn the_default_minor_is_the_newest_row() {
     assert_eq!(default_minor(), DEFAULT_MINOR);
 }
 
+/// The preference order is the stable rows; acceptance is every row (`MB.75`).
+#[test]
+fn discovery_prefers_the_stable_minors_and_accepts_every_declared_one() {
+    let stable: Vec<u32> = python()
+        .iter()
+        .filter(|row| in_channel(row, "stable"))
+        .map(|row| minor_of(&row.version))
+        .collect();
+    assert_eq!(PREFERRED_MINORS.to_vec(), stable);
+    assert!(PREFERRED_MINORS.len() < SUPPORTED_MINORS.len());
+    for minor in PREFERRED_MINORS {
+        assert!(
+            SUPPORTED_MINORS.contains(&minor),
+            "{minor} is a stable row, so it is also declared"
+        );
+    }
+    let nightly_only: Vec<u32> = python()
+        .iter()
+        .filter(|row| !in_channel(row, "stable"))
+        .map(|row| minor_of(&row.version))
+        .collect();
+    for minor in nightly_only {
+        assert!(
+            !PREFERRED_MINORS.contains(&minor),
+            "a nightly-only minor is never discovered ahead of a stable one"
+        );
+        assert!(
+            SUPPORTED_MINORS.contains(&minor),
+            "the runtime still accepts a nightly-only minor: {minor}"
+        );
+    }
+}
+
 #[test]
 fn the_py_minor_constants_are_the_rows() {
     // One generated constant per declared row. A withdrawn row removes its line
     // here together with the constant (see `MB.67`); a wrong value on either
-    // side turns this red.
-    let published = [("3.13", PY_MINOR_313), ("3.14", PY_MINOR_314)];
+    // side turns this red. `3.16` is here even though only the nightly channel
+    // packages it: the runtime table is every row (`MB.75`).
+    let published = [
+        ("3.13", PY_MINOR_313),
+        ("3.14", PY_MINOR_314),
+        ("3.15", PY_MINOR_315),
+        ("3.16", PY_MINOR_316),
+    ];
     let rows = python();
     assert_eq!(published.len(), rows.len(), "one constant per declared row");
     for (version, value) in published {

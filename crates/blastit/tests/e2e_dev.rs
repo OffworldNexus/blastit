@@ -1081,8 +1081,8 @@ fn an_unusable_interpreter_is_refused_with_its_documented_sentence() {
     for expected in [
         "blastit dev: CPython 3.12 at",
         "is not supported for WSGI views",
-        "CPython 3.13 and 3.14 are supported",
-        "run uv python install 3.14 && uv venv --python 3.14",
+        "CPython 3.13, 3.14, 3.15 and 3.16 are supported",
+        "run uv python install 3.16 && uv venv --python 3.16",
     ] {
         assert!(
             outcome.stderr.contains(expected),
@@ -1100,7 +1100,7 @@ fn an_unusable_interpreter_is_refused_with_its_documented_sentence() {
     for expected in [
         "CPython 3.14t at",
         "is free-threaded and cannot serve WSGI views",
-        "uv python install cpython-3.14",
+        "uv python install cpython-3.16",
     ] {
         assert!(
             outcome.stderr.contains(expected),

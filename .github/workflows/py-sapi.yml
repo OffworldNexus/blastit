@@ -67,7 +67,7 @@ jobs:
       wsgi_host: ${{ steps.legs.outputs.wsgi_host }}
       minors: ${{ steps.legs.outputs.minors }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # A broken matrix fails here, once, before any interpreter is installed.
       - name: The matrix and the published counts agree
@@ -89,7 +89,7 @@ jobs:
     name: 'lint: the shim crates, fmt + clippy -D warnings'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -111,7 +111,7 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # The leg is `bash scripts/py_sapi_leg.sh`, which runs `make py-sapi`:
       # it needs cargo and a warm `target/` on the runner.
@@ -144,7 +144,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       # Built *and* asserted is the release bar: the shim leaves with the name the
       # bundle and the wheel embed, and the publish pipeline ships that file.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: py-shim-${{ matrix.name }}
           path: target/py-sapi/${{ matrix.shim }}
@@ -162,7 +162,7 @@ jobs:
     runs-on: ${{ needs.matrix.outputs.wsgi_host }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

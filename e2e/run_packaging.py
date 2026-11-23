@@ -21,24 +21,28 @@ and then runs the story's own commands *where the artifact was installed*:
   gone.
 * `deb` / `rpm` — `docs/install.sh` with `BLASTIT_DEB`/`BLASTIT_RPM` installs the
   built core package in `debian:trixie` / `rockylinux:9`, together with the
-  sibling shim packages this image can actually load (§6.1, `MB.65`): the core
-  payload under `/usr/share/blastit` (`LICENSE`, `blastit`, `blastit-lsp`, the
-  four modules) plus exactly one `libblastit_*.so` per shim package the installer
-  chose, every shim file owned by an installed package, `root:root`,
-  `blastit --version`, `blastit-lsp --version`, `blastit fmt`,
-  `blastit fmt --check`, `blastit check` and a served page all come from inside
-  the image. `--modes "install static wsgi php"` provisions CPython 3.13 and
-  `libphp8.4-embed` first, then imports and serves the WSGI fixture through the
-  package's own `python/blastit` and the shim the installer chose (`MB.42.11`);
-  it asserts that the shim whose runtime the image provisions installed with its
-  `libblastit_*` file, while a shim whose runtime the image lacks did not — the
-  installer's runtime choice end to end, with the shim and package names read from
-  `packaging/languages.tsv` at test time (each leg's host runtime is a named
-  fixture). Both legs also read the package headers: a shim
-  depends only on `blastit` and a measured libc floor and *recommends* its
-  runtime, while the core names no runtime at all. An rpm leg additionally
-  installs the whole package set (core plus one per shim row) in one `dnf`
-  transaction with weak dependencies off, which proves no subpackage carries an
+  sibling shim packages this image can actually load (§6.1, `MB.65`), and the leg
+  asserts that runtime choice. It then installs the **whole** package set (core
+  plus one file per shim row) by explicit path with weak dependencies off, which
+  is only supported because each shim's runtime is a `Recommends:` and never a
+  hard dependency (`MB.66`), so every artifact installs in every leg even where
+  its interpreter is absent (`MB.73`). The installed set must be exactly
+  `blastit` plus one package per shim row, and the payload under
+  `/usr/share/blastit` is `LICENSE`, `blastit`, `blastit-lsp`, the four pure
+  modules plus exactly one `libblastit_*.so` per shim row, every shim file owned
+  by an installed package, `root:root`, `blastit --version`, `blastit-lsp
+  --version`, `blastit fmt`, `blastit fmt --check`, `blastit check` and a served
+  page all from inside the image; one line names the shims installed here but not
+  runtime-exercised. `--modes "install static wsgi php"` provisions CPython 3.13
+  and `libphp8.4-embed` first, then imports and serves the WSGI fixture through
+  the package's own `python/blastit` and the shim the installer chose
+  (`MB.42.11`); it asserts that the shim whose runtime the image provisions
+  installed with its `libblastit_*` file — the installer's runtime choice end to
+  end, with the shim and package names read from `packaging/languages.tsv` at test
+  time (each leg's host runtime is a named fixture). Both legs also read the
+  package headers: a shim depends only on `blastit` and a measured libc floor and
+  *recommends* its runtime, while the core names no runtime at all; a single
+  `dnf` transaction with weak dependencies off proves no subpackage carries an
   unsatisfiable hard `Requires:`.
 * `wheel` — the universal `py3-none` wheel installed with `pip` into
   `python:3.12-slim` (the CLI/`check` half) and `python:3.13-slim` /
@@ -82,10 +86,9 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(ROOT / "scripts"))
 from typing import Self
 
+import languages
 from platform_matrix import wheel_legs
 from universal_binary import LegFailure, Skip, http
-
-import languages
 
 PORT_BASE = 28080
 WORK_ROOT = Path(os.environ.get("TMPDIR", "/tmp/opencode")) / "blastit-pkg"
@@ -93,9 +96,9 @@ LEGS = ("composer", "install", "alpine", "wheel", "deb", "rpm")
 
 # The core package's payload under `/usr/share/blastit/` (§6.1, `MB.65`): the
 # licence, the two entry-point binaries and the pure-Python package's four
-# modules. Every other path there belongs to exactly one shim package, so a leg
-# computes the expected tree from the shims the image can load instead of
-# asserting a count that a split package set would silently break.
+# modules. Every other path there belongs to exactly one shim package, and a leg
+# installs the whole set (`MB.73`), so the expected tree is these paths plus one
+# shim per row read from `packaging/package-set.sh` — never a literal count.
 CORE_SHARED = (
     "/usr/share/blastit/LICENSE",
     "/usr/share/blastit/lib/blastit",
@@ -107,20 +110,30 @@ CORE_SHARED = (
 )
 
 
+# The release channel this suite derives every name from (`MB.75`): the stable
+# artifacts are what `packages.yml` builds, and a nightly run passes
+# `--channel nightly` so the nightly-only shim (`blastit-python-3.16`) is expected
+# too. Set once from the command line before any leg runs, so the cached readers
+# below are keyed by a value that never changes mid-run.
+CHANNEL = languages.DEFAULT_CHANNEL
+
+
 @functools.lru_cache(maxsize=1)
 def shim_packages() -> tuple[str, ...]:
-    """The shim package names, from `packaging/package-set.sh --shims`.
+    """The shim package names, from `packaging/package-set.sh --channel … --shims`.
 
-    The split is declared once (`MB.65`): `package-set.sh` names the package set
-    (core plus one per shim row) and the shim glob each owns, so this suite reads
-    the names instead of restating them — a package added there is asserted here
-    without an edit, and an `ALL_SHIMS`-style copy cannot drift from the builders.
+    The split is declared once (`MB.65`, `MB.75`): `package-set.sh` names the
+    package set (core plus one per shim row) and the shim glob each owns, so this
+    suite reads the names instead of restating them — a package added there is
+    asserted here without an edit, and an `ALL_SHIMS`-style copy cannot drift from
+    the builders.
     """
     script = ROOT / "packaging" / "package-set.sh"
-    result = run(["bash", str(script), "--shims"])
+    result = run(["bash", str(script), "--channel", CHANNEL, "--shims"])
     if result.returncode != 0:
         raise LegFailure(
-            f"`bash {script} --shims` exits {result.returncode}: {tail(joined(result), 8)}"
+            f"`bash {script} --channel {CHANNEL} --shims` exits {result.returncode}: "
+            f"{tail(joined(result), 8)}"
         )
     names = tuple(
         line.split("\t", 1)[0].strip()
@@ -132,6 +145,29 @@ def shim_packages() -> tuple[str, ...]:
     return names
 
 
+def whole_set_files(package: Path) -> list[Path]:
+    """The core package plus one sibling per shim row (`MB.73`).
+
+    The suffix is the core's own (`_<version>_<arch>.deb` or
+    `-<version>-<release>.<arch>.rpm`), so every sibling name derives from the
+    artifact the leg was handed and `packaging/package-set.sh --shims` — never a
+    literal. A leg handed six of seven fails here, naming the file it did not get,
+    before it can install a partial set.
+    """
+    suffix = package.name.removeprefix("blastit")
+    files = [package]
+    for shim in shim_packages():
+        sibling = package.parent / f"{shim}{suffix}"
+        if not sibling.is_file():
+            raise LegFailure(
+                f"this leg holds no {sibling.name}: the package set is the core plus "
+                f"one file per shim row ({', '.join(shim_packages())}); build it with "
+                "`make packages`"
+            )
+        files.append(sibling)
+    return files
+
+
 @functools.lru_cache(maxsize=1)
 def shim_runtimes() -> dict[str, tuple[str, str]]:
     """`{shim package: (deb runtime, rpm runtime)}` from `package-set.sh --rows`.
@@ -141,7 +177,7 @@ def shim_runtimes() -> dict[str, tuple[str, str]]:
     RPM — so the header assertions read the one table instead of restating it.
     """
     script = ROOT / "packaging" / "package-set.sh"
-    result = run(["bash", str(script), "--rows"])
+    result = run(["bash", str(script), "--channel", CHANNEL, "--rows"])
     if result.returncode != 0:
         raise LegFailure(
             f"`bash {script} --rows` exits {result.returncode}: {tail(joined(result), 8)}"
@@ -161,14 +197,20 @@ def shim_runtimes() -> dict[str, tuple[str, str]]:
 # `blastit-python-*` per `python3.x` on PATH and one `blastit-php-*` per
 # `<libdir>/libphp8.x.so`. The minors are `packaging/languages.tsv`'s, read at
 # test time, so an image that gains an interpreter cannot make a stale
-# expectation pass, and a shim the installer skipped is named as a missing
-# package. `--print-legs` prints the same derivation without Docker.
+# expectation pass. This stays the runtime truth the installer's choice is
+# asserted against, while the leg itself then installs the whole set (`MB.73`).
+# `--print-legs` prints the same derivation without Docker.
 
 
 @functools.lru_cache(maxsize=1)
 def shim_probe() -> str:
-    """The probe, with the declared CPython and PHP minors interpolated."""
-    rows = languages.load()
+    """The probe, with the declared CPython and PHP minors interpolated.
+
+    The minors are the **selected channel's** (`MB.75`): a stable artifact set
+    ships no nightly-only shim, so a stable leg must not expect one, and a nightly
+    leg must.
+    """
+    rows = languages.rows_in_channel(languages.load(), CHANNEL)
     python = " ".join(languages.versions_of(rows, "python"))
     php = " ".join(languages.versions_of(rows, "php"))
     return f"""present=
@@ -202,11 +244,23 @@ def shim_for_deb_runtime(runtime: str) -> str:
 
 
 def print_legs() -> None:
-    """The legs this suite derives from the table: packages, shims, probes."""
-    for row in languages.package_rows(languages_rows()):
+    """The legs this suite derives from the table: packages, shims, probes.
+
+    The package rows are the **selected channel's** (`MB.75`); the probe rows are
+    **every** declared version, so a nightly-only minor is visible without
+    switching channel. Nothing here restates a name, a count or a version: they
+    all come from `packaging/package-set.sh` and `scripts/languages.py`.
+    """
+    for row in languages.package_rows(languages_rows(), CHANNEL):
         print("\t".join(row))
+    rows = languages_rows()
     for language in ("python", "php"):
-        for version in languages.versions_of(languages_rows(), language):
+        versions = sorted(
+            {row.version for row in rows if row.language == language},
+            key=languages.version_key,
+            reverse=True,
+        )
+        for version in versions:
             print(f"probe\t{language}\t{version}")
 
 
@@ -592,42 +646,6 @@ def shim_path(package: str, machine: str) -> str:
             f"{package} is not a shim package: the core ships no libblastit_*.so"
         )
     return f"/usr/share/blastit/lib/libblastit_{stem}-{machine}-gnu.so"
-
-
-def rpm_set_arch(package: Path) -> str:
-    """The RPM architecture to install, after asserting the leg holds that set.
-
-    `package` is the core `.rpm` (`blastit-0.2.1-1.x86_64.rpm`), so the arch is
-    the one the builder stamped into the filename — no literal, no second matrix
-    call. The directory beside it must then be exactly the core plus one `.rpm`
-    per shim row for that arch: a leg handed six of seven fails naming the count
-    instead of installing what it found, and the scoped glob it returns can never
-    name the other architecture.
-    """
-    fields = package.name.rsplit(".", 2)
-    if len(fields) != 3 or not fields[1]:
-        raise LegFailure(
-            f"{package.name} is not a `blastit-<version>-<release>.<arch>.rpm`"
-        )
-    arch = fields[1]
-    suffix = package.name.removeprefix("blastit")
-    expected = {package.name, *(shim + suffix for shim in shim_packages())}
-    present = {
-        entry.name
-        for entry in package.parent.iterdir()
-        if entry.is_file()
-        and entry.name.startswith("blastit-")
-        and entry.name.endswith(f".{arch}.rpm")
-    }
-    if present != expected:
-        missing = sorted(expected - present)
-        unexpected = sorted(present - expected)
-        raise LegFailure(
-            f"this leg saw {len(present)} of {len(expected)} rpm packages for "
-            f"{arch}: missing {', '.join(missing) or 'none'}"
-            + (f"; unexpected {', '.join(unexpected)}" if unexpected else "")
-        )
-    return arch
 
 
 def installed_packages(box: Container, kind: str) -> list[str]:
@@ -1055,10 +1073,12 @@ def leg_package(
 
     `package` is the **core** package and the rest of the package set (`MB.65`:
     core plus one per shim row) sits beside it; the installer picks the shims
-    this image can load.
-    The leg asserts that choice, then the tree it produced: the core payload plus
-    exactly one `libblastit_*.so` per chosen shim package, every shim file owned
-    by an installed package, and no other path under `/usr/share/blastit`.
+    this image can load, and the leg asserts that choice. It then installs the
+    whole set by explicit file path — supported only because each shim's runtime
+    is a `Recommends:` (`MB.66`) — and asserts the image holds exactly the core
+    plus one package per shim row and the tree they own: `CORE_SHARED` plus
+    exactly one `libblastit_*.so` per shim row, every shim file owned by an
+    installed package, and no other path under `/usr/share/blastit`.
     """
     require_docker()
     checks = Checks()
@@ -1144,27 +1164,118 @@ def leg_package(
             f"`install.sh` with {package.name} exits {installed.returncode} in {image}: "
             f"{tail(joined(installed), 14)}",
         )
-        # The set `docs/install.sh` chose, asserted against what the image can
-        # really run: a shim package installed without its interpreter, or a
-        # runtime shim the installer skipped, is a named failure either way.
-        expected_shims = box.exec(["sh", "-c", shim_probe()]).stdout.split()
+        # `runnable` is the runtime truth `shim_probe()` reads, asserted against
+        # what the installer chose to install before the whole set: the wsgi/php
+        # proofs read that pre-whole-set installation (`installer_*`), so a shim
+        # the installer skipped is still a named failure.
+        runnable = box.exec(["sh", "-c", shim_probe()]).stdout.split()
+        installer_packages = installed_packages(box, kind)
+        installer_payload = installed_files(box, kind, installer_packages)
+        checks.that(
+            set(installer_packages) == {"blastit", *runnable},
+            f"installed packages {installer_packages} are not the core plus the shims "
+            f"this image can load ({runnable or 'none'})",
+        )
+
+        # Then the whole set, by explicit file path: `MB.66` made each shim's
+        # runtime a `Recommends:`, so a shim whose interpreter this image lacks
+        # installs and stays inert instead of refusing — which is what lets a leg
+        # prove every artifact installs somewhere (`MB.73`). Weak dependencies
+        # stay off, so an absent runtime is never fetched just to satisfy the
+        # recommendation.
+        files = whole_set_files(package)
+        shim_files = dict(zip(expected_shim_names, files[1:]))
+        if kind == "deb":
+            rest = box.exec(
+                [
+                    "apt-get",
+                    "install",
+                    "-y",
+                    "--no-install-recommends",
+                    *[
+                        f"/pkg/{path.name}"
+                        for path in files
+                        if path.name != package.name
+                    ],
+                ],
+                timeout=1800,
+            )
+            checks.that(
+                rest.returncode == 0,
+                "`apt-get install -y --no-install-recommends` of the whole set "
+                f"exits {rest.returncode}: {tail(joined(rest), 14)}",
+            )
+        else:
+            # One transaction with weak dependencies off: no subpackage may carry
+            # an unsatisfiable hard `Requires:` (Rocky 9 has no `python3.13`, and
+            # its `php-embedded` is 8.0), and every subpackage's files still land.
+            rest = box.exec(
+                [
+                    "dnf",
+                    "install",
+                    "-y",
+                    "--setopt=install_weak_deps=False",
+                    *[f"/pkg/{path.name}" for path in files],
+                ],
+                timeout=1800,
+            )
+            checks.that(
+                rest.returncode == 0,
+                "`dnf install -y --setopt=install_weak_deps=False` of the whole set "
+                f"exits {rest.returncode}: {tail(joined(rest), 14)}",
+            )
         packages = installed_packages(box, kind)
         payload = installed_files(box, kind, packages)
+        expected_names = {"blastit", *expected_shim_names}
         checks.that(
-            set(packages) == {"blastit", *expected_shims},
-            f"installed packages {packages} are not the core plus the shims this image "
-            f"can load ({expected_shims or 'none'})",
+            set(packages) == expected_names,
+            f"{len(packages)} of {len(expected_names)} packages installed "
+            f"({', '.join(packages)}): missing "
+            f"{sorted(expected_names - set(packages)) or 'none'}"
+            + (
+                f"; unexpected {sorted(set(packages) - expected_names)}"
+                if set(packages) - expected_names
+                else ""
+            ),
         )
         expected_paths = set(CORE_SHARED) | {
-            shim_path(shim, machine) for shim in expected_shims
+            shim_path(shim, machine) for shim in expected_shim_names
         }
         shared = {path for path in payload if path.startswith("/usr/share/blastit/")}
         checks.that(
             shared == expected_paths,
             "the installed /usr/share/blastit tree is not the core payload plus one "
-            f"shim per shim package: missing {sorted(expected_paths - shared)}, "
+            f"libblastit_*.so per shim row: missing {sorted(expected_paths - shared)}, "
             f"unexpected {sorted(shared - expected_paths)}",
         )
+
+        # One line naming what this image actually exercised, gated on the same
+        # runtime truth the installer used: the WSGI shim is served through, the
+        # PHP proof stops at the package and its `libblastit_php84` file, and
+        # every shim whose runtime is absent here installed inert.
+        served = []
+        if "wsgi" in modes:
+            wsgi_shim = shim_for_deb_runtime("python3.13")
+            if wsgi_shim in runnable:
+                served.append(f"{wsgi_shim} (WSGI)")
+        not_loaded = []
+        if "php" in modes:
+            php_shim = shim_for_deb_runtime("libphp8.4-embed")
+            if php_shim in runnable:
+                not_loaded.append(f"{php_shim} (no PHP fixture)")
+        absent = [shim for shim in expected_shim_names if shim not in runnable]
+        line = (
+            f"{kind} ({image}): installed blastit + {len(expected_shim_names)} shims "
+            "(the whole set)"
+        )
+        if served:
+            line += f"; served through its shim: {', '.join(served)}"
+        if not_loaded:
+            line += f"; runtime present, not loaded: {', '.join(not_loaded)}"
+        if absent:
+            line += f"; runtime absent here, not exercised: {', '.join(absent)}"
+        print(line, flush=True)
+
         for path in (
             "/usr/bin/blastit",
             "/usr/bin/blastit-lsp",
@@ -1172,26 +1283,13 @@ def leg_package(
             "/usr/share/blastit/python/blastit/__main__.py",
         ):
             checks.that(path in payload, f"{path} is not in the installed payload")
-        for shim in expected_shim_names:
-            path = shim_path(shim, machine)
-            if shim in expected_shims:
-                checks.that(
-                    path in payload, f"the {shim} shim file {path} was not installed"
-                )
-            else:
-                checks.that(
-                    path not in payload,
-                    f"{path} was installed although this image has no runtime for {shim}",
-                )
         if "php" in modes:
-            php_shim = shim_for_deb_runtime("libphp8.4-embed")
             php_path = shim_path(php_shim, machine)
             checks.that(
-                php_shim in packages and php_path in payload,
+                php_shim in installer_packages and php_path in installer_payload,
                 f"the PHP leg installed no {php_path}: `{php_shim}` recommends "
                 "`libphp8.4-embed`, and the installer offers the shim only where "
-                "that runtime package is installed (a shim whose runtime is absent "
-                "is a named failure in the package-set assertion above)",
+                "that runtime package is installed",
             )
         for path in sorted(
             entry
@@ -1238,7 +1336,6 @@ def leg_package(
         # and its own measured C library and names the distro runtime it binds to
         # in `Recommends:` (`MB.66`), so a host whose interpreter comes from
         # pyenv or a source build installs it too. The core names no runtime.
-        suffix = package.name.removeprefix("blastit")
         runtimes = shim_runtimes()
         checks.that(
             set(runtimes) == set(expected_shim_names),
@@ -1248,7 +1345,7 @@ def leg_package(
         core_file = f"/pkg/{package.name}"
         if kind == "deb":
             for shim in expected_shim_names:
-                deb = f"/pkg/{shim}{suffix}"
+                deb = f"/pkg/{shim_files[shim].name}"
                 depends = box.exec(["dpkg-deb", "--field", deb, "Depends"]).stdout
                 names = {part.split("(")[0].strip() for part in depends.split(",")}
                 checks.that(
@@ -1275,7 +1372,7 @@ def leg_package(
             )
         else:
             for shim in expected_shim_names:
-                rpm_file = f"/pkg/{shim}{suffix}"
+                rpm_file = f"/pkg/{shim_files[shim].name}"
                 requires = box.exec(["rpm", "-qpR", rpm_file]).stdout
                 checks.that(
                     not any(
@@ -1370,7 +1467,7 @@ def leg_package(
             py_shim = shim_for_deb_runtime("python3.13")
             py_path = shim_path(py_shim, machine)
             checks.that(
-                py_shim in packages and py_path in payload,
+                py_shim in installer_packages and py_path in installer_payload,
                 f"the WSGI leg installed no {py_path}: the installer did not choose "
                 f"the {py_shim} shim on an image that has python3.13",
             )
@@ -1415,40 +1512,6 @@ def leg_package(
             except LegFailure as failure:
                 checks.that(False, f"the package's WSGI view never served: {failure}")
 
-        if kind == "rpm":
-            # The whole package set (core plus one per shim row) in one
-            # transaction, with weak dependencies switched off: nothing there may
-            # be an unsatisfiable hard `Requires:` (Rocky 9 has no `python3.13`,
-            # and its `php-embedded` is 8.0, which is why every shim carries
-            # `Recommends:`), and every subpackage's files still land. The glob is
-            # scoped to this leg's own architecture — `dnf` rejects a foreign one
-            # with "does not have a compatible architecture" — after asserting the
-            # set is whole for that architecture.
-            rpm_glob = f"/pkg/blastit-*.{rpm_set_arch(package)}.rpm"
-            whole = box.exec(
-                [
-                    "sh",
-                    "-c",
-                    f"dnf install -y --setopt=install_weak_deps=False {rpm_glob}",
-                ],
-                timeout=1800,
-            )
-            checks.that(
-                whole.returncode == 0,
-                "`dnf install -y --setopt=install_weak_deps=False "
-                f"{rpm_glob}` exits {whole.returncode}: {tail(joined(whole), 14)}",
-            )
-            full = installed_files(box, kind, installed_packages(box, kind))
-            for name in ("blastit", *expected_shim_names):
-                queried = box.exec(["rpm", "-q", name])
-                checks.that(
-                    queried.returncode == 0 and bool(queried.stdout.strip()),
-                    f"{name} is not installed after installing the set",
-                )
-                if name == "blastit":
-                    continue
-                path = shim_path(name, machine)
-                checks.that(path in full, f"{name} installed no {path}")
         if checks.failures:
             print(tail(box.logs(80), 50), flush=True)
     return checks.done(f"{kind} ({image})")
@@ -1829,6 +1892,15 @@ def main() -> int:
     )
     parser.add_argument("--keep", action="store_true", help="keep the work directory")
     parser.add_argument(
+        "--channel",
+        default=languages.DEFAULT_CHANNEL,
+        choices=languages.CHANNELS,
+        help=(
+            "the release channel whose package/shim names are expected: stable "
+            "(the default, what `packages.yml` builds) or nightly"
+        ),
+    )
+    parser.add_argument(
         "--print-legs",
         action="store_true",
         help="print the derived package/shim/probe legs and exit (no build, no Docker)",
@@ -1842,6 +1914,8 @@ def main() -> int:
         ),
     )
     arguments = parser.parse_args()
+    global CHANNEL
+    CHANNEL = arguments.channel
     if arguments.print_legs:
         print_legs()
         return 0

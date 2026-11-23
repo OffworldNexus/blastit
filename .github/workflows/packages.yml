@@ -62,7 +62,7 @@ jobs:
       rpm_version: ${{ steps.plan.outputs.rpm_version }}
       rpm_release: ${{ steps.plan.outputs.rpm_release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: astral-sh/setup-uv@v10.3.2
@@ -114,19 +114,19 @@ jobs:
       py_shims_gnu: ${{ steps.legs.outputs.py_shims_gnu }}
       hosts: ${{ steps.legs.outputs.hosts }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - name: The matrix and the published counts agree
-        run: uv run --no-project scripts/platform_matrix.py --check
+        run: uv run --no-project scripts/platform_matrix.py --check --channel stable
       - id: legs
         run: |
           set -euo pipefail
           # A package is built from a `gnu` bundle (§6.1), so the shim legs this
           # workflow needs are that libc's — and they are still the matrix's list.
-          echo "install=$(uv run --no-project scripts/platform_matrix.py --matrix install)" >> "$GITHUB_OUTPUT"
-          echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages)" >> "$GITHUB_OUTPUT"
-          echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu)" >> "$GITHUB_OUTPUT"
-          echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu)" >> "$GITHUB_OUTPUT"
+          echo "install=$(uv run --no-project scripts/platform_matrix.py --matrix install --channel stable)" >> "$GITHUB_OUTPUT"
+          echo "packages=$(uv run --no-project scripts/platform_matrix.py --matrix packages --channel stable)" >> "$GITHUB_OUTPUT"
+          echo "shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix shims --libc gnu --channel stable)" >> "$GITHUB_OUTPUT"
+          echo "py_shims_gnu=$(uv run --no-project scripts/platform_matrix.py --matrix py-shims --libc gnu --channel stable)" >> "$GITHUB_OUTPUT"
           # The host stories (install.sh --user, the Composer wrapper) run on a
           # native runner per architecture, from the same matrix.
           echo "hosts=$(uv run --no-project scripts/platform_matrix.py --matrix hosts)" >> "$GITHUB_OUTPUT"
@@ -140,7 +140,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.shims_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # Built natively in the leg's own distro image and `dlopen`ed beside that
       # distro's signed NTS `libphp`, exactly as `php-sapi.yml` proves it: a shim
@@ -154,7 +154,7 @@ jobs:
           scripts/collect-shim.sh blastit-php-sapi-e2e:${{ matrix.name }}
           target/proven-shims --minor ${{ matrix.minor }} --libc ${{ matrix.libc }}
           --arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: shim-${{ matrix.name }}
           path: target/proven-shims/*.so
@@ -169,15 +169,15 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.py_shims_gnu) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # The shim is bound to one minor: `make py-sapi` resolves that interpreter,
       # builds with its headers and `dlopen`s the result against its libpython.
       - name: the interpreter this shim binds to
-        run: uv python install ${{ matrix.python }}
+        run: uv python install ${{ matrix.interpreter }}
       - name: build the shim and assert its ELF contract
         run: make py-sapi PY_SAPI_REQUIRE_ALL=1 PY_MINORS="${{ matrix.minor }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: py-shim-${{ matrix.name }}
           path: target/py-sapi/${{ matrix.shim }}
@@ -192,14 +192,14 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: shim-${{ matrix.arch }}-gnu-*
           path: target/proven-shims
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: py-shim-${{ matrix.arch }}-gnu-*
           path: target/py-sapi
@@ -216,7 +216,8 @@ jobs:
               --arch "${{ matrix.arch }}" \
               --shim-dir target/proven-shims \
               --py-shim-dir target/py-sapi \
-              --bundle-floor "$(uv run --no-project scripts/platform_matrix.py --shim-floor)"
+              --bundle-floor "$(uv run --no-project scripts/platform_matrix.py --shim-floor)" \
+              --channel stable
       # One package per interpreter the bundle carries (plus the core `blastit`),
       # so a host installs only the shim it can load; the list is the table's.
       - name: ${{ matrix.format }} from that bundle
@@ -235,11 +236,12 @@ jobs:
                   # `~nightly…` stamp is part of the version, not of a revision.
                   args=(--version "$DEB_VERSION" --bundle "$bundle" --out dist --max-glibc "$floor")
                   [ -z "$DEB_RELEASE" ] || args+=(--release "$DEB_RELEASE")
-                  scripts/build-deb.sh "${args[@]}"
+                  scripts/build-deb.sh --channel stable "${args[@]}"
                   ;;
               rpm)
                   scripts/build-rpm.sh --version "$RPM_VERSION" --release "$RPM_RELEASE" \
-                      --bundle "$bundle" --out dist --max-glibc "$floor"
+                      --bundle "$bundle" --out dist --max-glibc "$floor" \
+                      --channel stable
                   ;;
               *)
                   echo "::error::${{ matrix.format }} is not a package format this workflow builds"
@@ -250,13 +252,13 @@ jobs:
           built=(dist/*.deb dist/*.rpm)
           # The declared set comes from packaging/languages.tsv (`MB.67`), so the
           # count is derived too: a literal here would be a second table.
-          expected=$(packaging/package-set.sh --names | grep -c '')
+          expected=$(packaging/package-set.sh --channel stable --names | grep -c '')
           echo "this leg built ${#built[@]} of ${expected} package(s): ${built[*]:-none}"
           if [ "${#built[@]}" -lt "$expected" ]; then
               echo "::error::expected $expected packages for ${{ matrix.arch }}, found ${#built[@]}"
               exit 1
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: package-${{ matrix.name }}
           path: |
@@ -273,12 +275,12 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.install) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       # Only this leg's architecture: a `package-*` download hands an x86_64
       # container the aarch64 RPMs too, and `dnf` refuses those with
       # "does not have a compatible architecture".
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: package-${{ matrix.arch }}-*
           path: dist
@@ -305,7 +307,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.matrix.outputs.hosts) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v10.3.2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -340,8 +342,8 @@ jobs:
     # (`rockylinux:9`), so this job is not the seconds-long step its size suggests.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v7
         with:
           pattern: package-*
           path: dist
@@ -362,10 +364,10 @@ jobs:
           cp dist/*_arm64.deb sets/deb-arm64/
           cp dist/*.x86_64.rpm sets/rpm-x86_64/
           cp dist/*.aarch64.rpm sets/rpm-aarch64/
-          scripts/check-bundle-layout.sh --deb-set sets/deb-amd64 --arch amd64
-          scripts/check-bundle-layout.sh --deb-set sets/deb-arm64 --arch arm64
-          scripts/check-bundle-layout.sh --rpm-set sets/rpm-x86_64 --arch x86_64
-          scripts/check-bundle-layout.sh --rpm-set sets/rpm-aarch64 --arch aarch64
+          scripts/check-bundle-layout.sh --deb-set sets/deb-amd64 --arch amd64 --channel stable
+          scripts/check-bundle-layout.sh --deb-set sets/deb-arm64 --arch arm64 --channel stable
+          scripts/check-bundle-layout.sh --rpm-set sets/rpm-x86_64 --arch x86_64 --channel stable
+          scripts/check-bundle-layout.sh --rpm-set sets/rpm-aarch64 --arch aarch64 --channel stable
       - name: Validate the package set and stage it (or rehearse it)
         env:
           CHANNEL: ${{ needs.plan.outputs.channel }}
@@ -391,7 +393,7 @@ jobs:
               echo "::notice::rehearsal: stage-dist.py validates the set and prints the manifest"
           fi
           python3 packaging/stage-dist.py "${args[@]}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: needs.plan.outputs.should_stage == 'true'
         with:
           name: offworld-dist

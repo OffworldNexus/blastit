@@ -79,6 +79,39 @@ fn emit(python: &[&Row]) -> String {
         quote(&python[0].version)
     );
 
+    // Discovery's *preference* order (`MB.75`): the rows a **stable** release
+    // packages a shim for. The runtime accepts every declared minor, but a
+    // stable install ships no nightly-only shim, so auto-picking a nightly-only
+    // interpreter that merely happens to be on `PATH` would refuse a boot the
+    // shipped artifacts can never satisfy. A table with no stable row falls back
+    // to the whole table, so a channel-less future table still discovers.
+    let stable: Vec<&&Row> = python
+        .iter()
+        .filter(|row| in_channel(row, "stable"))
+        .collect();
+    let preferred: Vec<&Row> = if stable.is_empty() {
+        python.to_vec()
+    } else {
+        stable.into_iter().copied().collect()
+    };
+    out.push_str(
+        "/// The CPython minors a **stable** install ships a shim for, newest first.\n\
+         ///\n\
+         /// Discovery prefers these; acceptance uses [`SUPPORTED_MINORS`], which is\n\
+         /// every declared row, so a nightly-only interpreter is still *served* once a\n\
+         /// caller names it (a project venv, `BLASTIT_PYTHON`, or the config's minor).\n",
+    );
+    let _ = writeln!(
+        out,
+        "pub const PREFERRED_MINORS: [u32; {}] = [{}];\n",
+        preferred.len(),
+        preferred
+            .iter()
+            .map(|row| minor(&row.version).to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
+    );
+
     out.push_str("/// [`DEFAULT_MINOR`], as one value a format string can name.\n#[must_use]\npub fn default_minor() -> &'static str {\n    DEFAULT_MINOR\n}\n\n");
 
     let ordered: Vec<&str> = python.iter().map(|row| row.version.as_str()).collect();
