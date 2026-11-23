@@ -4604,3 +4604,16 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T10:40 [MB.71] (lead) REVIEW (review-arch): clean. NO BLOCKER/MAJOR. MINOR rejected as non-actionable: rpm_set_arch guard does not also check fields[2]=='rpm' (unreachable path, alre
 - 2026-11-23T10:40 [MB.71] (lead) status review -> done
 - 2026-11-23T10:41 [MB.71] (lead) commit 55e6b1c (fast-check exit 0 by implementer; guard+plan validate green)
+- 2026-11-23T11:04 [MB.72] (conductor) created (task) Bump GitHub Actions off Node 20 so no job emits the deprecation warning
+- 2026-11-23T11:04 AUTOPILOT on by conductor actions Node 24 bump in MB.72
+- 2026-11-23T11:04 [MB.73] (conductor) created (task) Install legs must install every produced package, not just runtime-matched shims
+- 2026-11-23T11:04 AUTOPILOT on by conductor full package install coverage in MB.73
+- 2026-11-23T11:05 [MB.72] (lead) status ready -> active
+- 2026-11-23T11:05 [MB.72] (lead) attempt 1/3 started
+- 2026-11-23T11:05 [MB.72] (lead) base 8cbf0efbd3f19cb329964461d940f540c8c60c24
+- 2026-11-23T11:05 [MB.74] (conductor) created (task) One bounded dnf retry helper for every image that installs build tooling
+- 2026-11-23T11:05 AUTOPILOT on by conductor dnf retry parity in MB.74
+- 2026-11-23T11:06 [MB.73] (lead) status ready -> active
+- 2026-11-23T11:06 [MB.73] (lead) attempt 1/3 started
+- 2026-11-23T11:06 [MB.73] (lead) base 8cbf0efbd3f19cb329964461d940f540c8c60c24
+- 2026-11-23T11:09 [MB.72] (unknown) edited fields
