@@ -3,8 +3,11 @@
 #
 #   packaging/languages.sh    the bash loader (sourced by package-set.sh/builders)
 #   scripts/languages.py      the Python loader (stdlib only, `uv run --no-project`)
-#   scripts/rpm/blastit.spec  still keeps its own copy until `MB.67.2` generates it,
-#                             and `packaging/package-set.sh --check` asserts it
+#   scripts/rpm/blastit.spec  generated from this file by `scripts/rpm/gen_spec.py`;
+#                             `gen_spec.py --check` (run by `platform_matrix --check`)
+#                             fails when the committed spec is stale
+#   packaging/package-set.sh  derives its rows here (the core plus one per line) and
+#                             asserts only this file's consistency, never a copy
 #
 # Five tab-separated fields, one header line, `#` comments. A row is a shim
 # package: the package is `blastit-<language>-<version>`, the shim it ships is
