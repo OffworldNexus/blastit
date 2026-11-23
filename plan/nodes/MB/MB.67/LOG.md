@@ -31,3 +31,15 @@ edited fields
 ## 2026-11-23T01:49 [unknown]
 
 edited fields
+
+## 2026-11-23T01:54 [lead]
+
+status ready -> active
+
+## 2026-11-23T01:54 [lead]
+
+attempt 1/3 started
+
+## 2026-11-23T01:56 [lead]
+
+status active -> done

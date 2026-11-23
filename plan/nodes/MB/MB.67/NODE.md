@@ -2,7 +2,7 @@
 id: MB.67
 title: "Canonical supported-language table: one file, everything derives"
 kind: epic
-status: ready
+status: done
 priority: 1
 depends_on: []
 paths:
@@ -46,11 +46,11 @@ paths:
   - "e2e/**"
   - Makefile
   - ".github/workflows/**"
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T01:49"
+updated: "2026-11-23T01:56"
 ---
 
 # Goal

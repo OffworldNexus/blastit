@@ -4563,3 +4563,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T01:49 [MB.67] (unknown) edited fields
 - 2026-11-23T01:49 [MB.67.5] (lead) REVIEW FIX: generate BLASTIT_DEFAULT_VERSION; RELEASING pip example; e2e/install_matrix usage; packaging/README worked examples
 - 2026-11-23T01:53 [MB.67.5] (lead) status active -> done
+- 2026-11-23T01:54 [MB.67] (lead) status ready -> active
+- 2026-11-23T01:54 [MB.67] (lead) attempt 1/3 started
+- 2026-11-23T01:56 [MB.67] (lead) status active -> done
