@@ -7,6 +7,7 @@ priority: 1
 depends_on: []
 paths:
   - "packaging/**"
+  - pyproject.toml
   - scripts/languages.py
   - scripts/version.sh
   - scripts/gen_language_blocks.py
@@ -50,7 +51,7 @@ attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T01:56"
+updated: "2026-11-23T02:18"
 ---
 
 # Goal

@@ -73,3 +73,83 @@ unconditionally).
 Verified: exact CI command EXIT 0; `cargo test -p blastit-py-shim` 2 passed; no-feature clippy
 EXIT 0; artifact build (`--features extension-module --release`) EXIT 0. Final `make check` below.
 
+## Post-gate CI fix (PR #66: probe comparison + sdist packaging)
+
+The remaining 34 red jobs had two causes, both introduced by `MB.67.4`:
+
+### 1. `e2e/php_sapi_probe.py` compared the wrong representation (the oracle was right)
+
+`verify()` asked `str(report["php_minor"]) in SUPPORTED_DIGITS`, where
+`SUPPORTED_DIGITS` was the TSV's digits (`{"83","84","85","86"}`). The shim reports
+`Minor::code()` — `major * 100 + minor`, i.e. **803**
+(`crates/blastit-php-sapi/src/probe/main.rs:136,676`) — so all three egress cases
+failed *after* every request had passed, with:
+
+```
+php_minor 803 is not one of ['83', '84', '85', '86'] (packaging/languages.tsv's php rows)
+```
+
+`must_fail`, `inet_socket_errno`, `classes` and the classification were never
+wrong; only the comparison was. The expectation is now derived from the same rows
+in the code's own representation:
+
+```python
+SUPPORTED_MINORS = {row.version for row in languages.load() if row.language == "php"}
+EXPECTED_CODES = {int(v.split(".")[0]) * 100 + int(v.split(".")[1]) for v in SUPPORTED_MINORS}
+want(report.get("php_minor") in EXPECTED_CODES, ...)
+```
+
+Before / after on the real value the probe prints:
+
+```
+SUPPORTED_MINORS: ['8.3', '8.4', '8.5', '8.6']
+EXPECTED_CODES  : [803, 804, 805, 806]
+before: str(803) in {83,84,85,86} -> False     <- the red jobs
+after : 803 in EXPECTED_CODES     -> True
+```
+
+Proof with the real image (`ubuntu:24.04` + `php8.3-dev` + `libphp8.3-embed`,
+Docker 29.10.0): `make php-sapi-e2e PHP_MINOR=8.3 PHP_SAPI_LIBC=gnu` — all three
+egress cases `ok` (INI-only, filter + INI, filter with the INI control removed),
+after `readelf -d` proved the shim links no `libphp`.
+
+### 2. The `sdist` carried no `packaging/`, so a source build could not compile
+
+`[tool.maturin] include` listed only `crates/**/*`, while
+`crates/blastit-php-sapi/build.rs:25` (and the view-php/py-sapi/py-shim build
+scripts) `include!("../../packaging/languages.rs.inc")` at compile time. Installing
+from the sdist died with "couldn't find file `packaging/languages.rs.inc`". The
+sdist now carries exactly the two files a source build reads — not `scripts/` and
+not the rest of `packaging/` (that is release tooling):
+
+```toml
+{ path = "packaging/languages.tsv", format = "sdist" },
+{ path = "packaging/languages.rs.inc", format = "sdist" },
+```
+
+Proof, mirroring `publish-pypi.yml`'s three steps:
+
+```
+$ uvx maturin sdist --out /tmp/mb67/sdist2
+📦 Including files matching "packaging/languages.tsv"
+📦 Including files matching "packaging/languages.rs.inc"
+📦 Built source distribution to /tmp/mb67/sdist2/blastit-0.2.1.tar.gz
+$ tar tzf /tmp/mb67/sdist2/blastit-0.2.1.tar.gz | grep packaging/
+blastit-0.2.1/packaging/languages.rs.inc
+blastit-0.2.1/packaging/languages.tsv
+
+$ uv venv --python 3.13 /tmp/mb67/from-sdist2
+$ VIRTUAL_ENV=/tmp/mb67/from-sdist2 uv pip install --no-cache /tmp/mb67/sdist2/blastit-0.2.1.tar.gz
+   Building blastit @ file:///tmp/mb67/sdist2/blastit-0.2.1.tar.gz
+   Built blastit @ file:///tmp/mb67/sdist2/blastit-0.2.1.tar.gz
+Prepared 1 package in 1m 33s
+ + blastit==0.2.1 (from file:///tmp/mb67/sdist2/blastit-0.2.1.tar.gz)
+
+$ /tmp/mb67/from-sdist2/bin/blastit --help | grep -q "stage 0"        -> found
+$ find /tmp/mb67/from-sdist2 -name 'blastit-dbproxy' -print -quit     -> (empty)
+-rwxr-xr-x … /tmp/mb67/from-sdist2/bin/blastit                        (one program, 16.9 MB)
+```
+
+Also green: `cargo test -p blastit-php-sapi` (5 + 1 passed),
+`scripts/platform_matrix.py --check`, `make fast-check`.
+

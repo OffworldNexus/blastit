@@ -4566,3 +4566,6 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T01:54 [MB.67] (lead) status ready -> active
 - 2026-11-23T01:54 [MB.67] (lead) attempt 1/3 started
 - 2026-11-23T01:56 [MB.67] (lead) status active -> done
+- 2026-11-23T02:18 [MB.67.4] (unknown) edited fields
+- 2026-11-23T02:18 [MB.67] (unknown) edited fields
+- 2026-11-23T02:18 [MB.67.4] (lead) CI FIX: probe expected php_minor code 803 vs digits sets; sdist missing packaging/languages.{tsv,rs.inc}

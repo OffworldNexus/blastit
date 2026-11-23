@@ -66,11 +66,15 @@ import platform_matrix  # noqa: E402
 
 try:
     # `packaging/languages.tsv`'s PHP rows decide which `php_minor` values the
-    # probe may report; a version leaving the table therefore fails here too.
-    SUPPORTED_DIGITS = {
-        row.version.replace(".", "")
-        for row in languages.load()
-        if row.language == "php"
+    # probe may report. The shim reports `Minor::code()` — `major * 100 + minor`,
+    # so `803` for 8.3 — never the table's digits (`"83"`), so the rows are
+    # mapped to that code here; a version leaving the table fails here too.
+    SUPPORTED_MINORS = {
+        row.version for row in languages.load() if row.language == "php"
+    }
+    EXPECTED_CODES = {
+        int(version.split(".")[0]) * 100 + int(version.split(".")[1])
+        for version in SUPPORTED_MINORS
     }
 except languages.LanguageError as error:
     raise SystemExit(f"php-sapi-e2e: {error}") from error
@@ -368,9 +372,10 @@ def verify(report):
 
     want(report.get("abi") == 1, f"ABI version {report.get('abi')!r} is not 1")
     want(
-        str(report.get("php_minor")) in SUPPORTED_DIGITS,
+        report.get("php_minor") in EXPECTED_CODES,
         f"php_minor {report.get('php_minor')!r} is not one of "
-        f"{sorted(SUPPORTED_DIGITS)} (packaging/languages.tsv's php rows)",
+        f"{sorted(EXPECTED_CODES)} (packaging/languages.tsv's php rows, as "
+        "Minor::code() = major*100+minor)",
     )
     want(
         str(report.get("shim_before_libphp", "")).startswith("refused"),

@@ -35,3 +35,11 @@ REVIEW FIX: frameworks/index list, Debian/Ubuntu repo commands, rpm Recommends c
 ## 2026-11-23T01:42 [lead]
 
 status review -> done
+
+## 2026-11-23T02:18 [unknown]
+
+edited fields
+
+## 2026-11-23T02:18 [lead]
+
+CI FIX: probe expected php_minor code 803 vs digits sets; sdist missing packaging/languages.{tsv,rs.inc}

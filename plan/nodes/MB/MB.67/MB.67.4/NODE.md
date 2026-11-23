@@ -29,11 +29,12 @@ paths:
   - docs/frameworks/python/index.md
   - docs/reference/settings.md
   - Makefile
+  - pyproject.toml
 attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:44"
-updated: "2026-11-23T01:42"
+updated: "2026-11-23T02:18"
 ---
 
 # Goal
