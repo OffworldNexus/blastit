@@ -74,7 +74,7 @@ Shims ship for **CPython 3.13, 3.14 and 3.15, and PHP 8.3, 8.4, 8.5 and 8.6**, b
 supported-but-unavailable, and core `blastit` still serves static mounts, `check`.
 <!-- END generated:languages:sentence -->
 
-`nightly` is a second component — `Components: nightly` in the `.sources` file (remove it to return) or a nightly RPM `baseurl`; shims pin the exact core, so install both in one run.
+`nightly` is a second component — `Components: nightly` in the `.sources` file (remove it to return) or a nightly RPM `baseurl`; shims pin the exact core, so install both in one run. The nightly channel additionally ships **`blastit-python-3.16`** (built from CPython `3.16.0a2`), which no stable release carries: add the component (or `install.sh --nightly`) and `sudo apt-get install blastit-python-3.16` — the same binary serves it, so only the package is nightly.
 
 ## One package per language version
 

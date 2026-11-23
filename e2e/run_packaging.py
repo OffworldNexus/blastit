@@ -110,20 +110,30 @@ CORE_SHARED = (
 )
 
 
+# The release channel this suite derives every name from (`MB.75`): the stable
+# artifacts are what `packages.yml` builds, and a nightly run passes
+# `--channel nightly` so the nightly-only shim (`blastit-python-3.16`) is expected
+# too. Set once from the command line before any leg runs, so the cached readers
+# below are keyed by a value that never changes mid-run.
+CHANNEL = languages.DEFAULT_CHANNEL
+
+
 @functools.lru_cache(maxsize=1)
 def shim_packages() -> tuple[str, ...]:
-    """The shim package names, from `packaging/package-set.sh --shims`.
+    """The shim package names, from `packaging/package-set.sh --channel … --shims`.
 
-    The split is declared once (`MB.65`): `package-set.sh` names the package set
-    (core plus one per shim row) and the shim glob each owns, so this suite reads
-    the names instead of restating them — a package added there is asserted here
-    without an edit, and an `ALL_SHIMS`-style copy cannot drift from the builders.
+    The split is declared once (`MB.65`, `MB.75`): `package-set.sh` names the
+    package set (core plus one per shim row) and the shim glob each owns, so this
+    suite reads the names instead of restating them — a package added there is
+    asserted here without an edit, and an `ALL_SHIMS`-style copy cannot drift from
+    the builders.
     """
     script = ROOT / "packaging" / "package-set.sh"
-    result = run(["bash", str(script), "--shims"])
+    result = run(["bash", str(script), "--channel", CHANNEL, "--shims"])
     if result.returncode != 0:
         raise LegFailure(
-            f"`bash {script} --shims` exits {result.returncode}: {tail(joined(result), 8)}"
+            f"`bash {script} --channel {CHANNEL} --shims` exits {result.returncode}: "
+            f"{tail(joined(result), 8)}"
         )
     names = tuple(
         line.split("\t", 1)[0].strip()
@@ -167,7 +177,7 @@ def shim_runtimes() -> dict[str, tuple[str, str]]:
     RPM — so the header assertions read the one table instead of restating it.
     """
     script = ROOT / "packaging" / "package-set.sh"
-    result = run(["bash", str(script), "--rows"])
+    result = run(["bash", str(script), "--channel", CHANNEL, "--rows"])
     if result.returncode != 0:
         raise LegFailure(
             f"`bash {script} --rows` exits {result.returncode}: {tail(joined(result), 8)}"
@@ -194,8 +204,13 @@ def shim_runtimes() -> dict[str, tuple[str, str]]:
 
 @functools.lru_cache(maxsize=1)
 def shim_probe() -> str:
-    """The probe, with the declared CPython and PHP minors interpolated."""
-    rows = languages.load()
+    """The probe, with the declared CPython and PHP minors interpolated.
+
+    The minors are the **selected channel's** (`MB.75`): a stable artifact set
+    ships no nightly-only shim, so a stable leg must not expect one, and a nightly
+    leg must.
+    """
+    rows = languages.rows_in_channel(languages.load(), CHANNEL)
     python = " ".join(languages.versions_of(rows, "python"))
     php = " ".join(languages.versions_of(rows, "php"))
     return f"""present=
@@ -229,11 +244,23 @@ def shim_for_deb_runtime(runtime: str) -> str:
 
 
 def print_legs() -> None:
-    """The legs this suite derives from the table: packages, shims, probes."""
-    for row in languages.package_rows(languages_rows()):
+    """The legs this suite derives from the table: packages, shims, probes.
+
+    The package rows are the **selected channel's** (`MB.75`); the probe rows are
+    **every** declared version, so a nightly-only minor is visible without
+    switching channel. Nothing here restates a name, a count or a version: they
+    all come from `packaging/package-set.sh` and `scripts/languages.py`.
+    """
+    for row in languages.package_rows(languages_rows(), CHANNEL):
         print("\t".join(row))
+    rows = languages_rows()
     for language in ("python", "php"):
-        for version in languages.versions_of(languages_rows(), language):
+        versions = sorted(
+            {row.version for row in rows if row.language == language},
+            key=languages.version_key,
+            reverse=True,
+        )
+        for version in versions:
             print(f"probe\t{language}\t{version}")
 
 
@@ -1865,6 +1892,15 @@ def main() -> int:
     )
     parser.add_argument("--keep", action="store_true", help="keep the work directory")
     parser.add_argument(
+        "--channel",
+        default=languages.DEFAULT_CHANNEL,
+        choices=languages.CHANNELS,
+        help=(
+            "the release channel whose package/shim names are expected: stable "
+            "(the default, what `packages.yml` builds) or nightly"
+        ),
+    )
+    parser.add_argument(
         "--print-legs",
         action="store_true",
         help="print the derived package/shim/probe legs and exit (no build, no Docker)",
@@ -1878,6 +1914,8 @@ def main() -> int:
         ),
     )
     arguments = parser.parse_args()
+    global CHANNEL
+    CHANNEL = arguments.channel
     if arguments.print_legs:
         print_legs()
         return 0
