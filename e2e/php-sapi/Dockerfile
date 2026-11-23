@@ -35,6 +35,12 @@
 #
 # `make php-sapi-e2e PHP_MINOR=8.3` drives all of it (e2e/php_sapi_probe.py),
 # which reads this base/packages/libphp tuple from the matrix.
+#
+# Every network fetch below is bounded (`MB.76`): `APT_OPTS`, `APK_OPTS`,
+# `CURL_OPTS` and `RUSTUP_MAX_RETRIES` carry the deadlines, so one stalled
+# mirror or rustup download fails in seconds instead of eating the job's whole
+# `PHP_SAPI_TIMEOUT`. They are ARGs (not literals) so `e2e/php_sapi_probe.py`
+# passes them explicitly and a test can shrink them.
 ARG BASE=debian:trixie-slim
 FROM ${BASE}
 
@@ -58,6 +64,15 @@ ARG RUST_TOOLCHAIN=stable
 # out of the image entirely (`MB.3.58` review). The shim and the probe are built
 # either way: they are what the leg proves.
 ARG PHP_SAPI_SUITES=1
+
+# The bounded-acquire settings (`MB.76`). `Acquire::ForceIPv4=true` also skips a
+# blackholed v6 path, which is the usual CI stall: a v6 route that never answers
+# makes `apt-get update` hang with no deadline at all, and one such hang used the
+# entire 1800 s `PHP_SAPI_TIMEOUT` inside `docker build`.
+ARG APT_OPTS="-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::Retries=3 -o Acquire::ForceIPv4=true"
+ARG APK_OPTS="--timeout 60"
+ARG CURL_OPTS="--connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 --retry-connrefused"
+ARG RUSTUP_MAX_RETRIES=3
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PHP_MINOR=${PHP_MINOR} \
@@ -97,8 +112,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # exactly like the glibc legs.
 RUN set -eux; \
     if command -v apt-get >/dev/null; then \
-        apt-get update; \
-        apt-get install -y --no-install-recommends ca-certificates curl; \
+        apt-get ${APT_OPTS} update; \
+        apt-get ${APT_OPTS} install -y --no-install-recommends ca-certificates curl; \
         if [ "${EXTRA_REPO}" = "sury" ]; then \
             mkdir -p /tmp/sury-debs; \
         elif [ -n "${EXTRA_REPO}" ]; then \
@@ -115,14 +130,17 @@ RUN set -eux; \
         # fails the leg closed and says so in the log, so a repeat reads as
         # upstream rather than "rerun". Nothing sets a global
         # `CompressionTypes::Order` (that would hide real index mismatches).
-        if ! apt-get update; then \
+        # `MB.76` bounds each attempt (`APT_OPTS`) but leaves this ladder exactly
+        # as `MB.62` wrote it: a bounded attempt reaches the next rung in ~20 s
+        # instead of holding the build for the job's whole timeout.
+        if ! apt-get ${APT_OPTS} update; then \
             echo "apt-get update failed: the mirror is probably publishing indexes; retrying with the gz variant" >&2; \
             sleep 5; \
-            if ! apt-get -o Acquire::CompressionTypes::Order::=gz update; then \
+            if ! apt-get ${APT_OPTS} -o Acquire::CompressionTypes::Order::=gz update; then \
                 echo "apt-get update failed again; retrying plainly after a 15s pause" >&2; \
                 sleep 15; \
-                if ! apt-get update; then \
-                    echo "apt-get update failed 3 times in 20s: the distro mirror is serving indexes its signed InRelease does not match (sury is not an apt source here) — investigate, do not merely rerun" >&2; \
+                if ! apt-get ${APT_OPTS} update; then \
+                    echo "apt-get update failed on all three spaced attempts: the mirror was unreachable within the per-attempt deadline (a stall) or is serving indexes its signed InRelease does not match — investigate, do not merely rerun" >&2; \
                     exit 1; \
                 fi; \
             fi; \
@@ -151,16 +169,16 @@ RUN set -eux; \
             while [ "$#" -gt 0 ]; do \
                 sha=$1; path=$2; shift 2; \
                 file=$(basename "$path"); \
-                curl -fsSL --retry 3 "https://packages.sury.org/php/$path" -o "/tmp/sury-debs/$file"; \
+                curl -fsSL ${CURL_OPTS} "https://packages.sury.org/php/$path" -o "/tmp/sury-debs/$file"; \
                 printf '%s  /tmp/sury-debs/%s\n' "$sha" "$file" >> /tmp/sury-SUMS; \
             done; \
             sha256sum -c /tmp/sury-SUMS; \
-            apt-get install -y --no-install-recommends /tmp/sury-debs/*.deb \
+            apt-get ${APT_OPTS} install -y --no-install-recommends /tmp/sury-debs/*.deb \
                 gcc make pkg-config libc6-dev binutils ca-certificates curl bash tar xz-utils \
                 clang libclang-dev; \
             rm -rf /tmp/sury-*; \
         else \
-            apt-get install -y --no-install-recommends \
+            apt-get ${APT_OPTS} install -y --no-install-recommends \
                 "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
                 gcc make pkg-config libc6-dev binutils ca-certificates curl bash tar xz-utils \
                 clang libclang-dev; \
@@ -174,28 +192,42 @@ RUN set -eux; \
             echo "unknown EXTRA_REPO '${EXTRA_REPO}' for this image" >&2; \
             exit 1; \
         fi; \
-        apk update; \
-        apk add --no-cache \
+        apk update ${APK_OPTS}; \
+        apk add --no-cache ${APK_OPTS} \
             "${PHP_DEV}" "${PHP_EMBED}" "${PHP_CURL}" \
             gcc make pkgconf musl-dev binutils ca-certificates curl bash tar xz; \
         if [ "${PHP_SAPI_SUITES:-1}" = "1" ]; then \
-            apk add --no-cache clang llvm-dev; \
+            apk add --no-cache ${APK_OPTS} clang llvm-dev; \
             libclang=$(apk search -q 'clang*-libclang' \
                 | grep -xE 'clang[0-9]+-libclang' | sort -V | tail -n 1); \
             [ -n "$libclang" ] || { \
                 echo "no clang<version>-libclang package on this image (bindgen needs it)" >&2; \
                 exit 1; \
             }; \
-            apk add --no-cache "$libclang"; \
+            apk add --no-cache ${APK_OPTS} "$libclang"; \
         fi; \
     fi
 
 # rustup on both libcs: it ships a musl `rustup-init`, and the workspace's MSRV
 # (1.88) is newer than Alpine's packaged cargo, so `apk add rust` is not an
 # option. `cargo` already on PATH (a `rust:` base image) is kept.
+#
+# `-f -o` then run the script, never `curl … | bash` (`MB.76`): piping a failed
+# download into a shell executes an empty script and exits 0, so a dead mirror
+# produced a leg whose `cargo --version` at the end of this RUN was the only
+# failure — pointing at the toolchain instead of the fetch. `RUSTUP_MAX_RETRIES`
+# bounds rustup's own toolchain downloads the way `CURL_OPTS` bounds ours, and
+# `timeout 600` bounds *one* transfer: retries alone leave a connection that is
+# established and then goes silent (a CDN edge that accepts and stops, a proxy
+# that dribbles) with no deadline at all.
 RUN if ! command -v cargo >/dev/null; then \
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | bash -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"; \
+        curl --proto '=https' --tlsv1.2 -fsSL ${CURL_OPTS} -o /tmp/rustup-init.sh \
+            https://sh.rustup.rs \
+            || { echo "could not download https://sh.rustup.rs (bounded by: ${CURL_OPTS})" >&2; exit 1; }; \
+        RUSTUP_MAX_RETRIES="${RUSTUP_MAX_RETRIES}" \
+            timeout 600 sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" \
+            || { echo "rustup-init did not install the ${RUST_TOOLCHAIN} toolchain: the download from https://static.rust-lang.org stalled or hit the 600s deadline (RUSTUP_MAX_RETRIES=${RUSTUP_MAX_RETRIES})" >&2; exit 1; }; \
+        rm -f /tmp/rustup-init.sh; \
     fi \
     && cargo --version
 

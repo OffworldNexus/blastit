@@ -4604,21 +4604,10 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T10:40 [MB.71] (lead) REVIEW (review-arch): clean. NO BLOCKER/MAJOR. MINOR rejected as non-actionable: rpm_set_arch guard does not also check fields[2]=='rpm' (unreachable path, alre
 - 2026-11-23T10:40 [MB.71] (lead) status review -> done
 - 2026-11-23T10:41 [MB.71] (lead) commit 55e6b1c (fast-check exit 0 by implementer; guard+plan validate green)
-- 2026-11-23T11:06 [MB.74] (lead) status ready -> active
-- 2026-11-23T11:06 [MB.74] (lead) attempt 1/3 started
-- 2026-11-23T11:06 [MB.74] (lead) base 8cbf0ef; worktree .worktrees/dnf-retry on release/dnf-retry (release-0.2.0 worktree has MB.72 in flight)
-- 2026-11-23T11:22 [MB.74] (lead) REVIEW (review-arch): 1 MAJOR accepted on evidence - build-lsp.sh:262 + check-bundle-layout.sh:381 ARE release-path (publish-pypi.yml:483 runs build-lsp.sh --im
-- 2026-11-23T11:30 [MB.74] (lead) status active -> done
-- 2026-11-23T11:40 [MB.75] (conductor) created (epic) Add a channel dimension: Python 3.15 stable, 3.16 nightly-only
-- 2026-11-23T11:40 AUTOPILOT on by conductor python 3.15/3.16 channels in MB.75
-- 2026-11-23T11:41 HUMAN H-022 opened by planner (node MB.75)
-- 2026-11-23T11:41 [MB.75.1] (planner) created (task) MB.75.1 Schema: channels column in all three loaders + package-set channel + all-row Rust tables
-- 2026-11-23T11:41 [MB.75.2] (planner) created (task) MB.75.2 Channel-aware matrices, RPM spec, builders, bundle layout and workflows
-- 2026-11-23T11:41 [MB.75.3] (planner) created (task) MB.75.3 Docs/installer/e2e: stable 3.13-3.15 blocks, nightly 3.16 prose, derived counts
-- 2026-11-23T11:41 [MB.75.4] (planner) created (task) MB.75.4 Real 3.15/3.16 shim builds, 3.15 boot probe, stable-vs-nightly diff, install legs
-- 2026-11-23T11:41 [MB.75] (planner) status ready -> blocked: TESTING_PLAN.md user-story gate H-022: validate stable 3.13-3.15 / nightly 3.16 before any test/code slice starts
-- 2026-11-23T11:42 HUMAN H-022 closed by conductor
-- 2026-11-23T11:42 [MB.75] (conductor) status blocked -> ready: H-022 approved: stable 3.13-3.15, nightly adds 3.16
-- 2026-11-23T12:09 HUMAN H-021 closed by conductor
-- 2026-11-23T12:37 [MB.76] (conductor) created (task) Bound every network step in the php-sapi image so a stall fails fast
-- 2026-11-23T12:37 AUTOPILOT on by conductor bounded acquire timeouts in MB.76
+- 2026-11-23T12:38 [MB.76] (lead) status ready -> active
+- 2026-11-23T12:38 [MB.76] (lead) attempt 1/3 started
+- 2026-11-23T12:38 [MB.76] (lead) base 8cbf0efbd3f19cb329964461d940f540c8c60c24 (branch release/apt-timeouts)
+- 2026-11-23T13:00 [MB.76] (lead) status active -> review
+- 2026-11-23T13:08 [MB.76] (lead) REVIEW FIX: [MAJOR1] build stream is file-only, tee it to stdout too; [MAJOR2] bound rustup-init mid-transfer with timeout; [accepted MINOR] curl --retry-connre
+- 2026-11-23T13:23 [MB.76] (lead) status review -> done
+- 2026-11-23T13:23 [MB.76] (lead) commit a52a0bd (gnu 8.4 + musl 8.6 probes green, blackholed fail-fast, BUILD_TIMEOUT tail)

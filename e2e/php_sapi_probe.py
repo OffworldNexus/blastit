@@ -18,6 +18,13 @@ parse the one JSON line the probe prints, and fail non-zero with the container
 output on a mismatch. `make php-sapi-e2e` runs this; it is deliberately **not**
 part of `make check` (Docker + a Debian PHP image), exactly like `e2e/`.
 
+Every step is bounded (`MB.76`): the Dockerfile's own acquires carry their
+deadlines (`APT_OPTS`/`APK_OPTS`/`CURL_OPTS`, passed here so a test can shrink
+them), `BUILD_TIMEOUT` (`PHP_SAPI_BUILD_TIMEOUT`, 25 min) is the build's own
+ceiling, and `PHP_SAPI_TIMEOUT` is only the outer backstop. The build's output
+streams into `target/php-sapi-build.log` while it runs, so even a stall leaves
+the evidence on disk instead of a silent 30-minute hang.
+
 Four separate `docker run`s, because they answer different questions:
 
 1. `readelf -d libblastit_php84-<arch>-<libc>.so` — the shim must carry **no**
@@ -50,14 +57,43 @@ import argparse
 import json
 import os
 import platform
+import signal
 import subprocess
 import sys
+import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 DOCKERFILE = os.path.join(HERE, "php-sapi", "Dockerfile")
 DEFAULT_IMAGE = os.environ.get("PHP_SAPI_IMAGE", "blastit-php-sapi-e2e:local")
 TIMEOUT = int(os.environ.get("PHP_SAPI_TIMEOUT", "1800"))
+# The build's own ceiling (`MB.76`): 25 min against a ~16 min cold build with the
+# protected suites, so a 2-core or arm64 runner keeps real headroom. It is clamped
+# to `PHP_SAPI_TIMEOUT` so a smaller outer backstop can never make this bound
+# meaningless — the build then reports *itself* as timed out, with its log,
+# before the job is killed. `PHP_SAPI_TIMEOUT` stays the outer backstop only.
+BUILD_TIMEOUT = min(int(os.environ.get("PHP_SAPI_BUILD_TIMEOUT", "1500")), TIMEOUT)
+# `docker build`'s output goes here while it runs: a killed CI job must still
+# leave evidence on disk, because a 30-minute hang with zero output is exactly
+# what made the two cancelled runs undiagnosable. `target/` is repo-ignored.
+BUILD_LOG = os.environ.get(
+    "PHP_SAPI_BUILD_LOG", os.path.join(REPO, "target", "php-sapi-build.log")
+)
+# The bounded-acquire settings the Dockerfile declares as ARGs (`MB.76`). The
+# shipped defaults live there; passing them from here is what lets one run shrink
+# them (`PHP_SAPI_APT_OPTS='-o Acquire::http::Timeout=1'` against a blackholed
+# host) instead of editing the Dockerfile.
+APT_OPTS = os.environ.get(
+    "PHP_SAPI_APT_OPTS",
+    "-o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 "
+    "-o Acquire::Retries=3 -o Acquire::ForceIPv4=true",
+)
+APK_OPTS = os.environ.get("PHP_SAPI_APK_OPTS", "--timeout 60")
+CURL_OPTS = os.environ.get(
+    "PHP_SAPI_CURL_OPTS",
+    "--connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 --retry-connrefused",
+)
+RUSTUP_MAX_RETRIES = os.environ.get("PHP_SAPI_RUSTUP_MAX_RETRIES", "3")
 
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
@@ -130,11 +166,13 @@ EGRESS_CASES = (
 )
 
 
-def docker(*args, **kwargs):
-    """One `docker` call, text mode, never raising on a non-zero exit."""
-    return subprocess.run(
-        ["docker", *args], check=False, text=True, timeout=TIMEOUT, **kwargs
-    )
+def as_text(value):
+    """A timed-out subprocess's `bytes | str | None` output as text."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value
 
 
 def tail(text, lines=40):
@@ -143,6 +181,42 @@ def tail(text, lines=40):
     if not stripped:
         return "  (no output)"
     return "\n".join(f"  {line}" for line in stripped[-lines:])
+
+
+def omission_tail(log, keep=120):
+    """The last `keep` lines of `log`, with one marker for what was dropped.
+
+    `keep` is a single number here, so the count and the slice cannot disagree
+    (`MB.60`): a 40-line tail could end exactly before the `E: Failed to fetch …`
+    apt line that says what actually broke.
+    """
+    lines = (log or "").strip().splitlines()
+    omitted = len(lines) - keep
+    noun = "line" if omitted == 1 else "lines"
+    marker = f"  … {omitted} earlier {noun} omitted …\n" if omitted > 0 else ""
+    return marker + tail("\n".join(lines), lines=keep)
+
+
+def docker(*args, **kwargs):
+    """One `docker` call, text mode, never raising on a non-zero exit.
+
+    A `subprocess.TimeoutExpired` is turned into a failed result that carries the
+    output captured before the kill (`MB.76`): a timeout reported with no output
+    is the bug this guards against.
+    """
+    try:
+        return subprocess.run(
+            ["docker", *args], check=False, text=True, timeout=TIMEOUT, **kwargs
+        )
+    except subprocess.TimeoutExpired as expired:
+        output = as_text(expired.stdout) + as_text(expired.stderr)
+        return subprocess.CompletedProcess(
+            expired.cmd,
+            124,
+            f"  docker {' '.join(str(part) for part in args)} did not finish within "
+            f"PHP_SAPI_TIMEOUT={TIMEOUT}s: killed it\n" + omission_tail(output),
+            "",
+        )
 
 
 MATRIX = os.path.join(REPO, "scripts", "platform_matrix.py")
@@ -202,50 +276,117 @@ def build(image, minor, libc="gnu"):
     # nothing. The musl legs carry the suites too since `MB.3.59`; the shim and
     # the probe are built either way.
     suites = "1" if spec.get("suites", "true") == "true" else "0"
-    result = docker(
-        "build",
-        # `--progress` needs BuildKit/buildx (the default from docker 23 on); a
-        # classic builder (`DOCKER_BUILDKIT=0`) rejects it with `unknown flag`.
-        # It pins the plain display rather than repairing the swallowed output by
-        # itself: `docker()` captures both streams, so buildx's `auto` would pick
-        # plain under a pipe anyway, while the pin keeps each `RUN`'s own lines in
-        # the log whether the driver runs under a pipe (CI) or in a terminal. The
-        # actual repair for the missing `E: Failed to fetch …` apt line is the
-        # longer failure tail below.
-        "--progress=plain",
-        "-f",
-        DOCKERFILE,
-        "--build-arg",
-        f"BASE={spec['base']}",
-        "--build-arg",
-        f"PHP_MINOR={minor}",
-        "--build-arg",
-        f"PHP_DEV={spec['dev']}",
-        "--build-arg",
-        f"PHP_EMBED={spec['embed']}",
-        "--build-arg",
-        f"PHP_CURL={spec.get('curl', spec['dev'].replace('-dev', '-curl'))}",
-        "--build-arg",
-        f"LIBPHP={spec['libphp']}",
-        "--build-arg",
-        f"EXTRA_REPO={spec.get('extra_repo', '')}",
-        "--build-arg",
-        f"PHP_SAPI_SUITES={suites}",
-        "-t",
-        image,
-        REPO,
-        capture_output=True,
+    return run_build(
+        [
+            "docker",
+            "build",
+            # `--progress` needs BuildKit/buildx (the default from docker 23 on);
+            # a classic builder (`DOCKER_BUILDKIT=0`) rejects it with `unknown
+            # flag`. It pins the plain display rather than repairing the swallowed
+            # output by itself: buildx's `auto` would pick plain under a pipe
+            # anyway, while the pin keeps each `RUN`'s own lines in `BUILD_LOG`
+            # whether the driver runs under a pipe (CI) or in a terminal. The
+            # actual repair for the missing `E: Failed to fetch …` apt line is the
+            # longer failure tail below.
+            "--progress=plain",
+            "-f",
+            DOCKERFILE,
+            "--build-arg",
+            f"BASE={spec['base']}",
+            "--build-arg",
+            f"PHP_MINOR={minor}",
+            "--build-arg",
+            f"PHP_DEV={spec['dev']}",
+            "--build-arg",
+            f"PHP_EMBED={spec['embed']}",
+            "--build-arg",
+            f"PHP_CURL={spec.get('curl', spec['dev'].replace('-dev', '-curl'))}",
+            "--build-arg",
+            f"LIBPHP={spec['libphp']}",
+            "--build-arg",
+            f"EXTRA_REPO={spec.get('extra_repo', '')}",
+            "--build-arg",
+            f"PHP_SAPI_SUITES={suites}",
+            # The Dockerfile's own defaults are the shipped bounds; passing them
+            # explicitly is what lets a test shrink one (`MB.76`).
+            "--build-arg",
+            f"APT_OPTS={APT_OPTS}",
+            "--build-arg",
+            f"APK_OPTS={APK_OPTS}",
+            "--build-arg",
+            f"CURL_OPTS={CURL_OPTS}",
+            "--build-arg",
+            f"RUSTUP_MAX_RETRIES={RUSTUP_MAX_RETRIES}",
+            "-t",
+            image,
+            REPO,
+        ]
     )
-    if result.returncode != 0:
-        # BuildKit's own failure summary is ~38 lines, so the default 40-line tail
-        # can end exactly before the real `E: Failed to fetch …` apt line (that is
-        # how the sury index race took two CI runs to diagnose, MB.60).
-        log = result.stdout + result.stderr
-        keep = 120  # one number, so the count and the slice cannot disagree
-        omitted = len(log.strip().splitlines()) - keep
-        noun = "line" if omitted == 1 else "lines"
-        marker = f"  … {omitted} earlier {noun} omitted …\n" if omitted > 0 else ""
-        return False, marker + tail(log, lines=keep)
+
+
+def refusal_note(sentence):
+    """`sentence` plus `BUILD_LOG`'s 120-line tail, for a failed build report."""
+    with open(BUILD_LOG, encoding="utf-8", errors="replace") as log:
+        captured = log.read()
+    return f"  {sentence}; full log: {BUILD_LOG}\n" + omission_tail(captured)
+
+
+def mirror_build(stream, log):
+    """Copy the build's output to `BUILD_LOG` **and** this process's stdout.
+
+    The file is what `refusal_note` tails on failure; stdout is what a human —
+    and a *cancelled* CI job, which keeps nothing on the runner — actually sees
+    (`MB.76` review). Each line is flushed, so the live log names the step the
+    build died in instead of showing silence.
+    """
+    for line in stream:
+        log.write(line)
+        log.flush()
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
+def run_build(argv):
+    """`docker build` under its own bounded clock, with a log that survives a hang.
+
+    `capture_output=True` is why a stalled build showed **nothing**: its output was
+    only printed on a non-zero exit, so a 30-minute hang left the CI log at the
+    `uv run … php_sapi_probe.py` line (`MB.76`). Every line now reaches both
+    `BUILD_LOG` (the tail source) and stdout (the live job log) as it appears, and
+    `BUILD_TIMEOUT` turns a stall into a *build* failure with that tail rather
+    than the job's outer backstop firing with no explanation.
+    """
+    os.makedirs(os.path.dirname(BUILD_LOG) or ".", exist_ok=True)
+    timed_out = False
+    with open(BUILD_LOG, "w", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            # Its own session, so the timeout below kills buildx's plugin child
+            # too: a survivor would keep the pipe open and the reader would never
+            # see EOF, turning the bound into a hang.
+            start_new_session=True,
+        )
+        mirror = threading.Thread(
+            target=mirror_build, args=(process.stdout, log), daemon=True
+        )
+        mirror.start()
+        try:
+            returncode = process.wait(timeout=BUILD_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid, signal.SIGKILL)
+            returncode = process.wait()
+        mirror.join()
+    if timed_out:
+        return False, refusal_note(
+            f"docker build did not finish within BUILD_TIMEOUT={BUILD_TIMEOUT}s "
+            f"(PHP_SAPI_TIMEOUT={TIMEOUT}s is only the outer backstop); killed it"
+        )
+    if returncode != 0:
+        return False, refusal_note(f"docker build exited {returncode}")
     return True, ""
 
 
@@ -589,7 +730,11 @@ def main(argv=None):
     spec = leg(args.minor, args.libc)
     print(
         f"php-sapi-e2e: docker build --build-arg BASE={spec['base']} "
-        f"--build-arg PHP_MINOR={args.minor} -t {args.image}"
+        f"--build-arg PHP_MINOR={args.minor} -t {args.image} "
+        f"(build <= {BUILD_TIMEOUT}s, log {BUILD_LOG})",
+        # Unbuffered: a job killed mid-build never reaches interpreter exit, and
+        # a buffered line is exactly the "no output at all" this node fixes.
+        flush=True,
     )
     ok, log = build(args.image, args.minor, args.libc)
     if not ok:
