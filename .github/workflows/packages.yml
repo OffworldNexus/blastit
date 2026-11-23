@@ -2,7 +2,7 @@ name: Packages
 
 # The signed APT/RPM repositories (`apt.offworld-nexus.app`, `rpm.offworld-nexus.app`).
 #
-# A `v*` tag builds seven packages per architecture from the §6.1 bundle,
+# A `v*` tag builds the language package set per architecture from the §6.1 bundle,
 # installs each set in **every** distribution the repositories advertise, and
 # then stages exactly one `offworld-dist` artifact with
 # `packaging/stage-dist.py`. That artifact is the whole hand-off: the
@@ -217,8 +217,8 @@ jobs:
               --shim-dir target/proven-shims \
               --py-shim-dir target/py-sapi \
               --bundle-floor "$(uv run --no-project scripts/platform_matrix.py --shim-floor)"
-      # Seven packages per leg, one per interpreter the bundle carries (plus the
-      # core `blastit`), so a host installs only the shim it can load.
+      # One package per interpreter the bundle carries (plus the core `blastit`),
+      # so a host installs only the shim it can load; the list is the table's.
       - name: ${{ matrix.format }} from that bundle
         env:
           DEB_VERSION: ${{ needs.plan.outputs.deb_version }}
@@ -248,9 +248,12 @@ jobs:
           esac
           shopt -s nullglob
           built=(dist/*.deb dist/*.rpm)
-          echo "this leg built ${#built[@]} package(s): ${built[*]:-none}"
-          if [ "${#built[@]}" -lt 7 ]; then
-              echo "::error::expected the seven package names for ${{ matrix.arch }}, found ${#built[@]}"
+          # The declared set comes from packaging/languages.tsv (`MB.67`), so the
+          # count is derived too: a literal here would be a second table.
+          expected=$(packaging/package-set.sh --names | grep -c '')
+          echo "this leg built ${#built[@]} of ${expected} package(s): ${built[*]:-none}"
+          if [ "${#built[@]}" -lt "$expected" ]; then
+              echo "::error::expected $expected packages for ${{ matrix.arch }}, found ${#built[@]}"
               exit 1
           fi
       - uses: actions/upload-artifact@v4
@@ -341,14 +344,14 @@ jobs:
           path: dist
           merge-multiple: true
       # The acceptance criterion "a set missing one shim fails by name": each set
-      # is unpacked into one merged `/usr` and asserted as the seven-package
-      # release, naming the package that is missing. One directory per (format,
+      # is unpacked into one merged `/usr` and asserted as the release set
+      # `packaging/languages.tsv` declares, naming the package that is missing. One directory per (format,
       # arch), because the RPM set is unpacked into a single root by a container —
       # two arches in one directory would overwrite each other's `lib/blastit`.
       # This step makes no execution claim: `install` already runs each set in its
       # own distribution container, and the script itself skips `--version` for a
       # set unpacked on another architecture.
-      - name: The four package sets are the seven-package release
+      - name: The package sets are the declared release
         run: |
           set -euo pipefail
           mkdir -p sets/deb-amd64 sets/deb-arm64 sets/rpm-x86_64 sets/rpm-aarch64

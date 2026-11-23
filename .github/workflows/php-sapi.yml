@@ -8,10 +8,9 @@
 # documentation is allowed to state.
 #
 # Each leg builds the ADR-0010 §4.1 shim `libblastit_php<major><minor>-<arch>-<libc>.so`
-# natively, in the **distro that ships that PHP minor** — Ubuntu noble is 8.3,
-# Debian trixie is 8.4, Ubuntu 26.04 and Alpine 3.23 are 8.5,
-# `debian:bookworm-slim` + the Surý repository and `alpine:edge` + `edge/testing`
-# are 8.6, and no single distro ships all four. The leg's `extra_repo` travels
+# natively, in the **distro that ships that PHP minor** — the image, the package
+# names and the `extra_repo` are the matrix leg's own fields, so a new minor is a
+# row in `packaging/languages.tsv` and no edit here. The leg's `extra_repo` travels
 # from the matrix into `e2e/php_sapi_probe.py`, so a new repository is one word
 # there and no step here.
 # A shim is never cross-compiled against a foreign `php_config.h`: its type
@@ -29,15 +28,15 @@
 # fork, no `view.chan`, no scheduler, no respawn). The guard step after them
 # fails this job if a PHP leg prints `SKIP` instead of serving, so a runner
 # without a pair can never report green; that image is the only boot-level
-# witness of the docs' 8.3–8.6 support statement. The per-leg security
+# witness of the docs' supported-PHP statement. The per-leg security
 # checklist (M-1 worker environment, M-2/M-3 per-route uid and `SeccompRole::View`,
 # M-6 INI values) is evinced by the same boots.
 #
 # `TESTING_PLAN.md` §2's PHP compatibility story is the whole `--matrix shims`
-# list: **PHP 8.3, 8.4, 8.5 and 8.6** on `x86_64` **and** `aarch64`, both `gnu`
-# and `musl` (16 legs), each on the native runner for its architecture and in the
-# image that ships its minor. No leg is filtered in this file: the list, the
-# runner and the `suites` fact all come from the matrix.
+# list: every PHP minor `packaging/languages.tsv` declares, on both architectures
+# and both libcs, each on the native runner for its architecture and in the image
+# that ships its minor. No leg is filtered in this file and no minor is spelled
+# here: the list, the runner and the `suites` fact all come from the matrix.
 #
 # Kept out of `make check` (Docker + a PHP image + a Rust toolchain in the
 # image), exactly like `e2e/`, so the shim cannot rot unnoticed between gates.

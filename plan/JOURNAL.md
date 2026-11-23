@@ -4524,3 +4524,18 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T00:51 [MB.67.6] (lead) base 6401e5f7e9a08348efd19d32fdb1d5062e3a72b0
 - 2026-11-23T00:57 [MB.67.1] (lead) status active -> done
 - 2026-11-23T00:57 [MB.67.6] (lead) status active -> done
+- 2026-11-23T00:57 [MB.67.7] (unknown) created (task) Packaging builders & shell helpers derive counts and minors from the loaders
+- 2026-11-23T00:57 [MB.67.2] (unknown) edited fields
+- 2026-11-23T00:57 [MB.67.3] (unknown) edited fields
+- 2026-11-23T00:57 [MB.67] (unknown) edited fields
+- 2026-11-23T00:57 [MB.67.2] (lead) status ready -> active
+- 2026-11-23T00:57 [MB.67.2] (lead) attempt 1/3 started
+- 2026-11-23T00:57 [MB.67.2] (lead) base bc5d013171f0f4f96ad5ec58578b567b22d6c597
+- 2026-11-23T01:03 [MB.67.2] (lead) status active -> review
+- 2026-11-23T01:03 [MB.67.7] (lead) status ready -> active
+- 2026-11-23T01:03 [MB.67.7] (lead) attempt 1/3 started
+- 2026-11-23T01:03 [MB.67.7] (lead) base bc5d013171f0f4f96ad5ec58578b567b22d6c597
+- 2026-11-23T01:06 [MB.67.2] (unknown) edited fields
+- 2026-11-23T01:06 [MB.67.2] (lead) REVIEW FIX: SMOKE_PYTHONS dedupe+floor; packag-set shim cross-check by row slug; drop tautological leg loops; PACKAGE_SET per-format copy; spec prose example fr
+- 2026-11-23T01:10 [MB.67.2] (lead) status review -> done
+- 2026-11-23T01:10 [MB.67.7] (lead) status active -> done

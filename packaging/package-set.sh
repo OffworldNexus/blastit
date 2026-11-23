@@ -5,7 +5,7 @@
 #   packaging/package-set.sh --names         # one package name per line
 #   packaging/package-set.sh --shims         # <package> <TAB> <shim glob>
 #   packaging/package-set.sh --rows          # the table, verbatim
-#   packaging/package-set.sh --check         # the table, and the spec that copies it
+#   packaging/package-set.sh --check         # the table itself (see the note below)
 #
 # The language versions are not named here: `packaging/languages.tsv` is the one
 # declaration (`MB.67`), `packaging/languages.sh` derives the rows from it, and
@@ -18,21 +18,23 @@
 #   scripts/build-rpm.sh             their interpreter runtimes
 #   scripts/check-bundle-layout.sh   the names a package set must contain
 #
-# One file cannot run a shell script, so it keeps its own copy and the gate
-# *asserts* it against this table: the spec copy stays asserted here until
-# `MB.67.2` generates it.
+# One file cannot run a shell script, so `scripts/rpm/blastit.spec` is
+# **generated** from the TSV by `scripts/rpm/gen_spec.py --write`, which derives
+# its tag list, `%package -n`/`%files` stanzas and `Recommends:` values. The
+# committed spec's freshness gate is `scripts/rpm/gen_spec.py --check`, which
+# `scripts/platform_matrix.py --check` runs (and the package workflows run that),
+# so `--check` here validates this table only:
 #
-#   scripts/rpm/blastit.spec         `packaging/package-set.sh --check` diffs its
-#                                    `%package -n` stanzas and `%files` globs
-#   scripts/platform_matrix.py       `scripts/platform_matrix.py --check` diffs
-#     (`PACKAGE_FORMATS[].set`)      its `set` against `--names` and its shim
-#                                    names against `--shims`
+#   scripts/rpm/gen_spec.py --check  the generated spec reproduces the committed file
+#   scripts/platform_matrix.py       `scripts/platform_matrix.py --check` diffs the
+#     (`PACKAGE_SET`)               matrix's names against `--names`, its shim names
+#                                    against `--shims`, and runs the spec's `--check`
 #
 # `e2e/run_packaging.py` keeps no copy at all: it runs `--shims` at test time, so
 # there is nothing there to drift.
 #
-# Nothing generates a stanza or a matrix row from this file: the check names the
-# package that drifted, which is what keeps the copies honest.
+# Nothing generates a matrix row from this file: the check names the package that
+# drifted, which is what keeps the copies honest.
 #
 # A row is five tab-separated fields:
 #
@@ -166,47 +168,9 @@ validate_table() {
     [ "$problems" -eq 0 ]
 }
 
-# The RPM spec keeps its own `%package -n` stanzas and `%files` globs (rpmbuild
-# cannot read this table), so `--check` diffs them and names what drifted.
-check_spec() {
-    local spec="$BLASTIT_PACKAGE_SET_ROOT/scripts/rpm/blastit.spec"
-    local problems=0 name glob declared kind
-    [ -f "$spec" ] || {
-        echo "package-set: $spec is missing: the RPM payload lists cannot be checked" >&2
-        return 1
-    }
-    declared=$(sed -n 's/^%package -n \(.*\)$/\1/p' "$spec" | sort)
-    while IFS= read -r name; do
-        printf '%s\n' "$declared" | grep -qx "$name" || {
-            echo "package-set: $spec has no \`%package -n $name\` stanza" >&2
-            problems=$((problems + 1))
-        }
-    done < <(blastit_package_shims | cut -f1)
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        kind=$(blastit_package_kind "$name")
-        [ -n "$kind" ] || {
-            echo "package-set: $spec declares \`$name\`, which packaging/package-set.sh does not name" >&2
-            problems=$((problems + 1))
-        }
-    done <<<"$declared"
-    while IFS=$'\t' read -r name glob; do
-        # The table names the file as the bundle holds it
-        # (`libblastit_py313-*-gnu.so`); the spec lists it under `%{_datadir}` with
-        # the arch/libc wildcarded, so compare the name stem before the first `*`
-        # and let both wildcards be wildcards.
-        stem=${glob%%\**}
-        if ! awk -v want="$name" '
-            $0 == "%files -n " want { inside = 1; next }
-            inside && /^%files( |$)/ { exit }
-            inside { print }
-        ' "$spec" | grep -qF "$stem"; then
-            echo "package-set: $spec \`%files -n $name\` lists no $stem… file: that package would ship no shim" >&2
-            problems=$((problems + 1))
-        fi
-    done < <(blastit_package_shims)
-    [ "$problems" -eq 0 ]
-}
+# The RPM spec is generated from this table (`scripts/rpm/gen_spec.py --write`),
+# so there is no copy to diff here: its freshness gate is the generator's own
+# `--check`, run by `scripts/platform_matrix.py --check`.
 
 # --- CLI (only when executed, never when sourced) ---------------------------
 
@@ -226,8 +190,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             ;;
         --check)
             validate_table || exit 1
-            check_spec || exit 1
-            echo "package-set: ok ($(blastit_package_rows | grep -c '') packages; scripts/rpm/blastit.spec's %package stanzas and %files globs match)"
+            echo "package-set: ok ($(blastit_package_rows | grep -c '') packages; packaging/languages.tsv is consistent)"
             ;;
         -h | --help)
             cat >&2 <<'USAGE'
@@ -237,14 +200,13 @@ usage: packaging/package-set.sh --names|--rows|--shims|--check
             versions come from packaging/languages.tsv)
   --rows    name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-runtime
   --shims   <package><TAB><glob> for every package that ships a shim
-  --check   validate the table, and assert scripts/rpm/blastit.spec's
-            `%package -n` stanzas and `%files` globs against it
+  --check   validate this table and packaging/languages.tsv; the generated
+            scripts/rpm/blastit.spec has its own gate, `scripts/rpm/gen_spec.py
+            --check`, run by `scripts/platform_matrix.py --check`
 
 The file is also sourceable: `source packaging/package-set.sh` then
 `blastit_package_names`, `blastit_package_shims`, `blastit_package_owners FILE`,
 `blastit_package_deb_runtime NAME`, `blastit_package_rpm_weak NAME`.
-`scripts/platform_matrix.py --check` diffs the matrix's own copy of the names
-against `--names`/`--shims`.
 USAGE
             ;;
         *) echo "usage: packaging/package-set.sh --names|--rows|--shims|--check" >&2; exit 2 ;;

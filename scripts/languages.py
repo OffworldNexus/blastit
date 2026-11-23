@@ -130,6 +130,27 @@ def validate(text: str, *, source: str = "packaging/languages.tsv") -> list[str]
                 f"{source}:{number}: shim {name} needs a deb-runtime and rpm-runtime "
                 f"Recommends value ({NONE} is only for the core package)"
             )
+        # The runtime columns are interpolated into `Recommends:` in a Debian
+        # control file and an RPM spec (and read by `docs/install.sh`), so they
+        # are a package name, never spec/control syntax: `%`/`#`/`{`/`}` would
+        # either expand a macro or start a comment in one of the two consumers,
+        # and surrounding whitespace would silently change what is asked for.
+        for field, value in (
+            ("deb-runtime", row.deb_runtime),
+            ("rpm-runtime", row.rpm_runtime),
+        ):
+            if value != value.strip():
+                problems.append(
+                    f"{source}:{number}: {name} has {field} {value!r} with leading or "
+                    "trailing whitespace: it is a `Recommends:` value, not prose"
+                )
+            forbidden = sorted({char for char in "%#{}" if char in value})
+            if forbidden:
+                problems.append(
+                    f"{source}:{number}: {name} has {field} {value!r} containing "
+                    f"{' '.join(forbidden)}: a runtime column is a package name for "
+                    "`Recommends:`, never spec/control syntax"
+                )
         if name in names:
             problems.append(
                 f"{source}:{number}: package {name} is declared twice "

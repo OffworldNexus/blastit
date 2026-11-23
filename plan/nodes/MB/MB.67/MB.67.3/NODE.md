@@ -5,7 +5,7 @@ kind: task
 status: ready
 owner: implementer
 priority: 1
-depends_on: [MB.67.2]
+depends_on: [MB.67.2, MB.67.7]
 paths:
   - "crates/blastit-view-php/**"
   - "crates/blastit-php-sapi/**"
@@ -19,7 +19,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:44"
-updated: "2026-11-23T00:47"
+updated: "2026-11-23T00:57"
 ---
 
 # Goal

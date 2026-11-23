@@ -15,7 +15,7 @@
 # `scripts/build-deb.sh` measures `blastit`+`blastit-lsp` for the core and each
 # shim for its own package, and this spec is the RPM mirror of that: the core
 # `Requires: glibc >= %{blastit_glibc_core}` (2.34 on today's artifacts) and
-# `blastit-php-8.4` `Requires: glibc >= %{blastit_glibc_php84}` (2.17), so a
+# `blastit-php-8.6` `Requires: glibc >= %{blastit_glibc_php86}` (2.17), so a
 # shim does not demand a newer glibc than its own bytes need. `libgcc` is
 # declared only where the measured `DT_NEEDED` set carries `libgcc_s.so.1`
 # (the binaries and the CPython shims; not the PHP shims).
@@ -31,12 +31,12 @@
 #
 # Every shim package — `blastit-python-*` and `blastit-php-*` — carries the
 # matching distro runtime as a **`Recommends:`**, exactly as
-# `scripts/build-deb.sh`'s control files do (`Recommends: python3.13` /
-# `Recommends: libphp8.4-embed` there, `Recommends: python3.13` /
+# `scripts/build-deb.sh`'s control files do (`Recommends: python3.14` /
+# `Recommends: libphp8.6-embed` there, `Recommends: python3.14` /
 # `Recommends: php-embedded` here, because RPM distributions name no interpreter
 # package per minor). RPM distributions cannot back a hard requirement: Rocky 9
-# has **no** `python3.13` (it ships 3.9) and its `php-embedded` is 8.0, so
-# `Requires: python3.13` or `Requires: php-embedded` would make the shim package
+# has **no** `python3.14` (it ships 3.9) and its `php-embedded` is 8.0, so
+# `Requires: python3.14` or `Requires: php-embedded` would make the shim package
 # uninstallable on a distribution the release still supports. `Recommends:`
 # states the intent, shows in `dnf info`, is pulled by a plain `dnf install` when
 # available and skipped when it is not, and leaves the operator in control. A

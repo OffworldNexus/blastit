@@ -14,11 +14,15 @@ paths:
   - "scripts/build-rpm.sh"
   - "scripts/rpm/**"
   - "scripts/check-bundle-layout.sh"
+  - "scripts/build-package-bundle.sh"
+  - "scripts/build-standalone.sh"
+  - "scripts/build-standalone-in-image.sh"
+  - scripts/py_sapi_leg.sh
+  - "scripts/build-musl-wheel.sh"
   - scripts/test_install.sh
   - "scripts/offworld**"
   - "crates/blastit-view-php/**"
   - "crates/blastit-php-sapi/**"
-  - "crates/blastit-py/**"
   - "crates/blastit-py-sapi/**"
   - "crates/blastit-py-shim/**"
   - "crates/blastit-languages/**"
@@ -35,7 +39,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T00:51"
+updated: "2026-11-23T00:57"
 ---
 
 # Goal

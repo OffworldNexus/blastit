@@ -3,7 +3,7 @@ name: Nightly
 # The nightly channel of the signed APT/RPM repositories
 # (`apt.offworld-nexus.app`, `rpm.offworld-nexus.app`).
 #
-# Every night (and on demand) `develop` is built as seven stamped packages per
+# Every night (and on demand) `develop` is built as the language package set per
 # architecture, installed in every distribution the repositories advertise, and
 # staged as one `offworld-dist` artifact. The organization's
 # `offworld-nexus-packages` GitHub App signs and publishes it and posts an
@@ -291,9 +291,12 @@ jobs:
           esac
           shopt -s nullglob
           built=(dist/*.deb dist/*.rpm)
-          echo "this leg built ${#built[@]} package(s): ${built[*]:-none}"
-          if [ "${#built[@]}" -lt 7 ]; then
-              echo "::error::expected the seven package names for ${{ matrix.arch }}, found ${#built[@]}"
+          # The declared set comes from packaging/languages.tsv (`MB.67`), so the
+          # count is derived too: a literal here would be a second table.
+          expected=$(packaging/package-set.sh --names | grep -c '')
+          echo "this leg built ${#built[@]} of ${expected} package(s): ${built[*]:-none}"
+          if [ "${#built[@]}" -lt "$expected" ]; then
+              echo "::error::expected $expected packages for ${{ matrix.arch }}, found ${#built[@]}"
               exit 1
           fi
       - uses: actions/upload-artifact@v4

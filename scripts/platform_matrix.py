@@ -28,7 +28,7 @@ Usage (stdlib only):
     scripts/platform_matrix.py --matrix wheels      # GitHub Actions matrix JSON
     scripts/platform_matrix.py --matrix binaries
     scripts/platform_matrix.py --matrix shims
-    scripts/platform_matrix.py --matrix py-shims   # the 8 per-minor CPython shims
+    scripts/platform_matrix.py --matrix py-shims   # the per-minor CPython shims
     scripts/platform_matrix.py --matrix images
     scripts/platform_matrix.py --matrix lsp         # editor binaries (five targets)
     scripts/platform_matrix.py --matrix packages    # the 4 .deb/.rpm legs
@@ -53,6 +53,41 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+# The one parser for the canonical table (`MB.67`): `scripts/languages.py` reads
+# `packaging/languages.tsv` and is *imported*, never copied. One parse at import;
+# every family below — the PHP and CPython minors, the shim names, the package
+# set — is a view of `LANGUAGE_ROWS`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import languages  # noqa: E402
+
+try:
+    LANGUAGE_ROWS = languages.load()
+except languages.LanguageError as error:
+    sys.stderr.write(f"platform-matrix: {error}\n")
+    raise SystemExit(1) from error
+
+
+def _version_digits(version: str) -> str:
+    """The digits a shim file name spells for `version` (`8.10` -> `810`)."""
+    return version.replace(".", "")
+
+
+def _language_slugs(language: str) -> dict[str, str]:
+    """`{version: slug}` newest first, straight from the TSV.
+
+    A version is a string compared per component, so `8.10` sorts after `8.9`
+    (`languages.version_key`); the order is the one `--matrix` has always printed.
+    """
+    by_version = {
+        row.version: row.slug for row in LANGUAGE_ROWS if row.language == language
+    }
+    return {
+        version: by_version[version]
+        for version in languages.versions_of(LANGUAGE_ROWS, language)
+    }
+
 
 # --- the matrix -------------------------------------------------------------
 
@@ -120,15 +155,24 @@ LIBCS = {
     },
 }
 
-# The CPython minors one `py3-none` wheel is *smoked* in (design §6.1): the
-# artifact itself serves every CPython `>=3.12`, so three interpreted legs per
-# wheel is the promise, and one `cpNN` wheel per minor would be a second matrix.
-SMOKE_PYTHONS = ("3.12", "3.13", "3.14")
-
 # The CPython minors a **shim** exists for (`MB.42.2`, design §1): a WSGI view
-# `dlopen`s its own minor's shim, so `3.13` and `3.14` are two artifacts per
-# `(arch, libc)`, never one.
-PY_MINORS = {"3.14": "314", "3.13": "313"}
+# `dlopen`s its own minor's shim, so one artifact per `(minor, arch, libc)`,
+# never one shim for several. `version -> slug`, newest first, from the TSV.
+PY_MINORS = _language_slugs("python")
+
+# The PHP minors the shim legs build, `version -> slug`, newest first, from the
+# TSV. A declared minor with no measured build record still gets a leg
+# (`_php_leg`), so a new row is a matrix change without a second edit.
+PHP_MINORS = _language_slugs("php")
+
+# The CPython minors one `py3-none` wheel is *smoked* in (design §6.1): the
+# artifact itself serves every CPython `>=3.12`, so the wheel's floor plus every
+# declared shim minor is the promise, and one `cpNN` wheel per minor would be a
+# second matrix. `3.12` is that floor, not a shim row, so it is spelled here —
+# and `dict.fromkeys` keeps a declared `python 3.12` row from repeating the image.
+SMOKE_PYTHONS = tuple(
+    dict.fromkeys(("3.12", *sorted(PY_MINORS, key=languages.version_key)))
+)
 
 # The two native package formats (`MB.42.3.1`), one artifact family each. The
 # `pattern` is the filename `scripts/build-{deb,rpm}.sh` writes, with the placeholders
@@ -137,38 +181,24 @@ PY_MINORS = {"3.14": "314", "3.13": "313"}
 # `pattern` is the **core** package and stays that way: every consumer that needs
 # "the package" (`scripts/install_matrix.sh`, `e2e/run_packaging.py`'s
 # `BLASTIT_DEB`/`BLASTIT_RPM`) resolves the core by it, and `install.sh` finds the
-# sibling shims in the same directory. `set` is the whole seven-package set
-# (`MB.65`): the interpreter-free core plus one shim per interpreter minor, named
-# in `packaging/package-set.sh`. `set_glob` matches all seven in one directory, so
-# a set that lost a shim is a missing name rather than an unnoticed count.
+# sibling shims in the same directory. `set` is the whole package set (`MB.65`):
+# the interpreter-free core plus one shim per row of `packaging/languages.tsv`.
+# `set_glob` matches all of them in one directory, so a set that lost a shim is a
+# missing name rather than an unnoticed count.
 PACKAGE_FORMATS = {
     "deb": {
         "arch": {"x86_64": "amd64", "aarch64": "arm64"},
         "pattern": "blastit_<version>_{package_arch}.deb",
-        "set": (
-            "blastit",
-            "blastit-python-3.13",
-            "blastit-python-3.14",
-            "blastit-php-8.3",
-            "blastit-php-8.4",
-            "blastit-php-8.5",
-            "blastit-php-8.6",
-        ),
+        # Its own tuple, not an alias of the other format's: the two package
+        # families are independent promises that happen to list the same names.
+        "set": tuple(languages.names(LANGUAGE_ROWS)),
         "set_glob": "blastit*_{package_arch}.deb",
         "image": "debian:trixie",
     },
     "rpm": {
         "arch": {"x86_64": "x86_64", "aarch64": "aarch64"},
         "pattern": "blastit-<version>-<release>.{package_arch}.rpm",
-        "set": (
-            "blastit",
-            "blastit-python-3.13",
-            "blastit-python-3.14",
-            "blastit-php-8.3",
-            "blastit-php-8.4",
-            "blastit-php-8.5",
-            "blastit-php-8.6",
-        ),
+        "set": tuple(languages.names(LANGUAGE_ROWS)),
         "set_glob": "blastit-*.{package_arch}.rpm",
         "image": "rockylinux:9",
     },
@@ -254,10 +284,16 @@ INSTALL_LEGS = (
 )
 
 # The distro that carries the headers *and* the embedded SAPI for each
-# (minor, libc). Every entry is a signed distro package on a distro that ships
-# that minor: no single distro ships 8.3, 8.4, 8.5 and 8.6, and Alpine and Debian
-# disagree about both the package names (`php86-dev` vs `php8.6-dev`) and where
-# the library lives (`/usr/lib/php86/libphp.so` vs `/usr/lib/libphp8.6.so`).
+# (minor, libc) — the **measured** legs. Every entry is a signed distro package
+# on a distro that ships that minor: no single distro ships every declared
+# minor, and Alpine and Debian disagree about both the package names
+# (`php86-dev` vs `php8.6-dev`) and where the library lives
+# (`/usr/lib/php86/libphp.so` vs `/usr/lib/libphp8.6.so`).
+#
+# This is data, not the leg list: `shim_legs()` iterates the **TSV's** minors
+# and asks `_php_leg` for each, so a declared minor without a measured entry gets
+# the documented convention default (gnu: `debian:bookworm-slim` + Surý; musl:
+# `alpine:edge` + `edge/testing`) and `suites: False` instead of a silent gap.
 #
 # `extra_repo` is the repository a leg needs *before* its packages exist, as a
 # name this file declares and the consumers switch on (`MB.42.5`): no leg
@@ -271,7 +307,7 @@ INSTALL_LEGS = (
 # rather than a step condition buried in a workflow: "the shim builds and probes
 # here, but the worker-level legs cannot run" is a claim a reader has to be able
 # to see.
-PHP_BUILDS = {
+PHP_LEG_DATA = {
     ("8.6", "gnu"): {
         # `dpkg -L libphp8.6-embed` in `debian:bookworm-slim` (glibc 2.36, the
         # lowest floor of any PHP leg) with Ondřej Surý's signed repository:
@@ -353,7 +389,48 @@ PHP_BUILDS = {
     },
 }
 
-PHP_MINORS = {"8.6": "86", "8.5": "85", "8.4": "84", "8.3": "83"}
+
+def _php_leg(minor: str, libc: str) -> dict:
+    """The build record for `(minor, libc)`: the measured one, else the convention.
+
+    A minor declared in `packaging/languages.tsv` with no entry in
+    `PHP_LEG_DATA` is newly supported: it gets the image and package names its
+    libc family uses (gnu: the Debian base Ondřej Surý publishes every minor for;
+    musl: Alpine edge with `edge/testing`) so the leg exists without a second
+    edit, and `suites: False` with `suites_because` so nothing claims a proof no
+    leg has run.
+    """
+    measured = PHP_LEG_DATA.get((minor, libc))
+    if measured is not None:
+        return measured
+    digits = _version_digits(minor)
+    because = (
+        f"PHP {minor} is newly declared in packaging/languages.tsv and no leg has "
+        "built it yet: the image and package names are this file's convention, so "
+        "its worker-level suites wait for the first shim"
+    )
+    if libc == "gnu":
+        return {
+            "base": "debian:bookworm-slim",
+            "extra_repo": "sury",
+            "dev": f"php{minor}-dev",
+            "embed": f"libphp{minor}-embed",
+            "curl": f"php{minor}-curl",
+            "libphp": f"/usr/lib/libphp{minor}.so",
+            "suites": False,
+            "suites_because": because,
+        }
+    return {
+        "base": "alpine:edge",
+        "extra_repo": "alpine-edge-testing",
+        "dev": f"php{digits}-dev",
+        "embed": f"php{digits}-embed",
+        "curl": f"php{digits}-curl",
+        "libphp": f"/usr/lib/php{digits}/libphp.so",
+        "suites": False,
+        "suites_because": because,
+    }
+
 
 # The repository setup a leg can declare in `extra_repo`. The Dockerfile
 # (`e2e/php-sapi/Dockerfile`) performs the named setup before installing the
@@ -569,7 +646,8 @@ def wheel_legs() -> list[dict]:
 
     A wheel carries **no extension**: `maturin build --bindings bin` puts the
     universal binary in it and `scripts/repack_universal_wheel.py` retags it
-    `py3-none-<platform>`, so four artifacts serve CPython 3.12, 3.13 and 3.14.
+    `py3-none-<platform>`, so one artifact per (arch, libc) serves every CPython
+    `>=3.12`.
     The keys are the ones the two consumers actually read: `wheel_tag` is the
     platform half of the file name,
     `smoke_pythons`/`runtime_images` are the interpreters one wheel is installed
@@ -649,7 +727,7 @@ def package_legs() -> list[dict]:
             "libc": "gnu",
             "package_arch": spec["arch"][leg["arch"]],
             "pattern": spec["pattern"],
-            # The whole seven-package set this build writes, and one glob that
+            # The whole package set this build writes, and one glob that
             # matches it in a single directory (`MB.65`). `pattern` above is the
             # core package; a consumer that installs "the package" gets the core
             # and `docs/install.sh` installs the shims this host can run.
@@ -692,7 +770,7 @@ def install_legs() -> list[dict]:
             "arch": arch,
             # The filename half `build-{deb,rpm}.sh` writes for this arch, so a
             # leg picks its package by the table rather than by a glob. The core
-            # package is `pattern`; `set_glob` is the seven it installs with.
+            # package is `pattern`; `set_glob` is the whole set it installs with.
             "package_arch": PACKAGE_FORMATS[leg["format"]]["arch"][arch],
             "set_glob": PACKAGE_FORMATS[leg["format"]]["set_glob"].format(
                 package_arch=PACKAGE_FORMATS[leg["format"]]["arch"][arch]
@@ -729,27 +807,32 @@ def shim_floor() -> str:
 
 
 def shim_legs() -> list[dict]:
-    """One shim per (minor, arch, libc), named `ADR-0010` §4.1's way."""
+    """One shim per (minor, arch, libc), named `ADR-0010` §4.1's way.
+
+    The minors are the **TSV's** (`PHP_MINORS`), not a list of measured legs:
+    `_php_leg` answers with the measured record where one exists and the
+    documented convention otherwise, so a new row is a new leg here at once.
+    """
     return [
         {
-            "name": f"{leg['id']}-php{digits}",
+            "name": f"{leg['id']}-php{_version_digits(minor)}",
             "arch": leg["arch"],
             "libc": leg["libc"],
             "minor": minor,
-            "digits": digits,
+            "digits": _version_digits(minor),
             "shim": shim_name(minor, leg["arch"], leg["libc"]),
-            "base": PHP_BUILDS[(minor, leg["libc"])]["base"],
-            "dev": PHP_BUILDS[(minor, leg["libc"])]["dev"],
-            "embed": PHP_BUILDS[(minor, leg["libc"])]["embed"],
-            "curl": PHP_BUILDS[(minor, leg["libc"])]["curl"],
-            "libphp": PHP_BUILDS[(minor, leg["libc"])]["libphp"],
+            "base": _php_leg(minor, leg["libc"])["base"],
+            "dev": _php_leg(minor, leg["libc"])["dev"],
+            "embed": _php_leg(minor, leg["libc"])["embed"],
+            "curl": _php_leg(minor, leg["libc"])["curl"],
+            "libphp": _php_leg(minor, leg["libc"])["libphp"],
             # The repository this leg needs before its packages exist: named,
             # never performed here. `""` is a stock image's own repositories.
-            "extra_repo": PHP_BUILDS[(minor, leg["libc"])].get("extra_repo", ""),
+            "extra_repo": _php_leg(minor, leg["libc"]).get("extra_repo", ""),
             # A JSON string, not a bool: GitHub compares `matrix.suites` to
             # `'true'`, and the workflow auditor stringifies every matrix value,
             # so one spelling has to work for both.
-            "suites": "true" if PHP_BUILDS[(minor, leg["libc"])]["suites"] else "false",
+            "suites": "true" if _php_leg(minor, leg["libc"])["suites"] else "false",
             # `built|probed|served|refused`, empty when this leg has never been
             # built — the support statement a reader needs before choosing a
             # minor (`MB.3.58` review).
@@ -757,13 +840,13 @@ def shim_legs() -> list[dict]:
             "runs_on": ARCHES[leg["arch"]]["runs_on"],
         }
         for leg in enabled_legs()
-        for minor, digits in PHP_MINORS.items()
+        for minor in PHP_MINORS
     ]
 
 
 def shim_name(minor: str, arch: str, libc: str) -> str:
     """`libblastit_php84-x86_64-gnu.so` (`ADR-0010` §4.1)."""
-    return f"libblastit_php{PHP_MINORS[minor]}-{arch}-{libc}.so"
+    return f"libblastit_php{_version_digits(minor)}-{arch}-{libc}.so"
 
 
 # The image a CPython shim of each libc is built in. gnu builds on the runner
@@ -787,11 +870,11 @@ def py_shim_legs() -> list[dict]:
     """
     return [
         {
-            "name": f"{leg['id']}-py{digits}",
+            "name": f"{leg['id']}-py{_version_digits(minor)}",
             "arch": leg["arch"],
             "libc": leg["libc"],
             "minor": minor,
-            "digits": digits,
+            "digits": _version_digits(minor),
             "shim": py_shim_name(minor, leg["arch"], leg["libc"]),
             # The exports `nm -D --defined-only` must carry, and the one symbol
             # that must stay undefined (the host interpreter's).
@@ -809,13 +892,13 @@ def py_shim_legs() -> list[dict]:
             "runs_on": ARCHES[leg["arch"]]["runs_on"],
         }
         for leg in enabled_legs()
-        for minor, digits in PY_MINORS.items()
+        for minor in PY_MINORS
     ]
 
 
 def py_shim_name(minor: str, arch: str, libc: str) -> str:
     """`libblastit_py313-x86_64-gnu.so` (design §1, `MB.42.2`)."""
-    return f"libblastit_py{PY_MINORS[minor]}-{arch}-{libc}.so"
+    return f"libblastit_py{_version_digits(minor)}-{arch}-{libc}.so"
 
 
 def lsp_legs() -> list[dict]:
@@ -957,7 +1040,7 @@ def reaches_sentence() -> str:
             for leg in shim_legs()
             # Unbuilt, but its (minor, libc) is served on x86_64: the arm runners
             # will add it, so the sentence says what the number becomes.
-            if not leg["reaches"] and PHP_BUILDS[(leg["minor"], leg["libc"])]["suites"]
+            if not leg["reaches"] and _php_leg(leg["minor"], leg["libc"])["suites"]
         ]
     )
     sentence = (
@@ -1022,9 +1105,15 @@ def check(problems: list[str]) -> None:
                     "with a reason, never leave it out"
                 )
 
-    for (minor, libc), spec in PHP_BUILDS.items():
+    # `PHP_LEG_DATA` is the *measured* record, not the leg list: a key whose minor
+    # the TSV no longer declares is a stale measurement of a version nothing
+    # builds, which is exactly the copy this slice exists to retire (`MB.67.2`).
+    for (minor, libc), spec in PHP_LEG_DATA.items():
         if minor not in PHP_MINORS:
-            problems.append(f"PHP_BUILDS names an unknown minor {minor!r}")
+            problems.append(
+                f"PHP_LEG_DATA names minor {minor!r}, which packaging/languages.tsv "
+                "does not declare: a measured leg for a version nothing builds"
+            )
         for key in ("base", "dev", "embed", "curl", "libphp"):
             if not spec.get(key):
                 problems.append(
@@ -1058,20 +1147,41 @@ def check(problems: list[str]) -> None:
                 f"PHP {minor} on {libc}: `suites` is True and `suites_because` says why "
                 "it is not: the reason is stale"
             )
-    for minor in PHP_MINORS:
-        for leg in LEGS:
-            if (minor, leg["libc"]) not in PHP_BUILDS:
-                problems.append(
-                    f"PHP {minor} on {leg['libc']}: no build record, so {leg['id']} "
-                    "cannot produce that shim"
-                )
+
+    # The CPython floor (`MB.67`): the wheel is `py3-none` and the docs promise
+    # CPython `>=3.12`, so a declared minor below it is a shim this wheel never
+    # claims, and a repeated smoke image would stop `smoke_pythons` being a set.
+    wheel_floor = languages.version_key("3.12")
+    for minor in PY_MINORS:
+        if languages.version_key(minor) < wheel_floor:
+            problems.append(
+                f"packaging/languages.tsv declares CPython {minor}, below the "
+                "`py3-none` wheel's floor 3.12: the docs promise CPython >=3.12, so "
+                "this shim could never be smoked by the wheel that ships it"
+            )
+    if len(set(SMOKE_PYTHONS)) != len(SMOKE_PYTHONS):
+        problems.append(
+            f"SMOKE_PYTHONS has duplicates: {SMOKE_PYTHONS}: a smoke image is one "
+            "leg, and a repeated one would be pulled twice for one proof"
+        )
+
+    # The one leg list still spelled by hand: `IMAGES` is the only place a PHP
+    # minor appears without being derived, so a version leaving the TSV must be
+    # caught here. The shim families cannot go stale this way (they are built
+    # from `PHP_MINORS`/`PY_MINORS`), which is why they are not re-checked.
+    for image in IMAGES:
+        if image["minor"] not in PHP_MINORS:
+            problems.append(
+                f"IMAGES {image['tag']}: PHP {image['minor']} is not declared in "
+                "packaging/languages.tsv, so the image would name a version no leg builds"
+            )
 
     for leg in shim_legs():
         expected = shim_name(leg["minor"], leg["arch"], leg["libc"])
         if leg["shim"] != expected:
             problems.append(f"{leg['name']}: shim {leg['shim']} != {expected}")
         if not re.fullmatch(
-            r"libblastit_php8\d-(x86_64|aarch64)-(gnu|musl)\.so", leg["shim"]
+            r"libblastit_php[0-9]+-(x86_64|aarch64)-(gnu|musl)\.so", leg["shim"]
         ):
             problems.append(f"{leg['name']}: {leg['shim']} is not the §4.1 name")
 
@@ -1086,7 +1196,7 @@ def check(problems: list[str]) -> None:
         if leg["shim"] != expected:
             problems.append(f"{leg['name']}: shim {leg['shim']} != {expected}")
         if not re.fullmatch(
-            r"libblastit_py3(13|14)-(x86_64|aarch64)-(gnu|musl)\.so", leg["shim"]
+            r"libblastit_py[0-9]+-(x86_64|aarch64)-(gnu|musl)\.so", leg["shim"]
         ):
             problems.append(f"{leg['name']}: {leg['shim']} is not the §1 name")
         # A musl shim cannot be linked on a glibc runner (`MB.42.3.3` review):
@@ -1175,13 +1285,13 @@ def check(problems: list[str]) -> None:
             problems.append(f"{where}: {value!r} is not one of {REACHES}")
         if not because:
             problems.append(f"{where}: no reason recorded for {value!r}")
-        if value == "served" and not PHP_BUILDS.get((minor, libc), {}).get("suites"):
+        if value == "served" and not _php_leg(minor, libc)["suites"]:
             problems.append(
                 f"{where}: claims `served` for a leg whose `suites` is false, so no CI "
                 "leg re-proves it; run the suites there or record `probed`"
             )
     for leg in shim_legs():
-        spec = PHP_BUILDS[(leg["minor"], leg["libc"])]
+        spec = _php_leg(leg["minor"], leg["libc"])
         if spec["suites"] and leg["arch"] == "x86_64" and leg["reaches"] != "served":
             problems.append(
                 f"{leg['name']}: `suites` is true, so CI runs the worker-level suites "
@@ -1189,28 +1299,26 @@ def check(problems: list[str]) -> None:
                 "cannot both be right"
             )
 
-    # The seven-package set (`MB.65`): one interpreter-free core plus one shim per
-    # interpreter minor, and a `set_glob` that really matches all seven. A glob
-    # that missed a shim would let a directory hold a package nobody checks, and
-    # a `pattern` that named a shim would install the wrong package first.
+    # The whole package set (`MB.65`): the interpreter-free core plus one shim per
+    # row of `packaging/languages.tsv`, and a `set_glob` that really matches every
+    # one. A glob that missed a shim would let a directory hold a package nobody
+    # checks, and a `pattern` that named a shim would install the wrong package.
+    expected_set = languages.names(LANGUAGE_ROWS)
     for fmt, spec in PACKAGE_FORMATS.items():
         names = list(spec["set"])
         where = f"PACKAGE_FORMATS {fmt}"
-        if len(names) != 7:
+        if names != expected_set:
             problems.append(
-                f"{where}: names {len(names)} packages, a set is the core + 2 CPython "
-                "+ 4 PHP shims"
+                f"{where}: `set` is {names}, not packaging/languages.tsv's names "
+                f"{expected_set} (core first): the matrix has its own copy again"
             )
-        if not names or names[0] != "blastit":
+        if not names or names[0] != languages.CORE_PACKAGE:
             problems.append(f"{where}: the first package is the core `blastit`")
         if len(set(names)) != len(names):
             problems.append(f"{where}: a package name is declared twice: {names}")
-        for minor in ("3.13", "3.14"):
-            if f"blastit-python-{minor}" not in names:
-                problems.append(f"{where}: no blastit-python-{minor} shim package")
-        for minor in ("8.3", "8.4", "8.5", "8.6"):
-            if f"blastit-php-{minor}" not in names:
-                problems.append(f"{where}: no blastit-php-{minor} shim package")
+        for row in LANGUAGE_ROWS:
+            if row.package not in names:
+                problems.append(f"{where}: no {row.package} shim package")
         for package_arch in spec["arch"].values():
             glob = spec["set_glob"].format(package_arch=package_arch)
             for name in names:
@@ -1241,10 +1349,10 @@ def check(problems: list[str]) -> None:
                     "consumer installs `pattern` and expects the interpreter-free core"
                 )
 
-    # The seven names exist in more than one place (`MB.65`):
+    # The package names exist in more than one place (`MB.65`):
     # `packaging/package-set.sh` is the table the builders read, while this matrix
-    # and `scripts/rpm/blastit.spec` (asserted by `package-set.sh --check`) keep a
-    # copy, because rpmbuild and a Python module cannot run a shell script.
+    # keeps `PACKAGE_FORMATS[*]["set"]`, because a Python module cannot run a
+    # shell script.
     # `--check` diffs the matrix's copy here, so a rename that lands in one of them
     # names the package that drifted. `e2e/run_packaging.py` keeps no copy: it runs
     # `--shims` at test time, so there is nothing there to drift.
@@ -1266,17 +1374,24 @@ def check(problems: list[str]) -> None:
                 f"PACKAGE_FORMATS {fmt}: `set` has drifted from "
                 f"packaging/package-set.sh --names ({'; '.join(detail)})"
             )
+    # Each package owns the shim its own TSV row names — never "the PHP name for
+    # everything, the CPython name for `blastit-python-*`" (`MB.67.2` review): a
+    # third language's package would otherwise be checked against a foreign glob.
+    rows_by_package = {row.package: row for row in LANGUAGE_ROWS}
     for name, glob in shim_globs.items():
-        minor = name.rsplit("-", 1)[-1]
-        expected = (
-            py_shim_name(minor, "x86_64", "gnu")
-            if name.startswith("blastit-python-")
-            else shim_name(minor, "x86_64", "gnu")
-        )
-        if not fnmatch.fnmatchcase(expected, glob):
+        row = rows_by_package.get(name)
+        if row is None:
             problems.append(
-                f"packaging/package-set.sh: {name} owns {glob}, which does not match "
-                f"{expected}: that package would ship no file"
+                f"packaging/package-set.sh: {name} owns {glob} but "
+                "packaging/languages.tsv declares no such package"
+            )
+            continue
+        expected = languages.shim_glob(row.slug)
+        concrete = f"libblastit_{row.slug}-x86_64-gnu.so"
+        if glob != expected or not fnmatch.fnmatchcase(concrete, glob):
+            problems.append(
+                f"packaging/package-set.sh: {name} owns {glob}, which is not "
+                f"{expected} (e.g. {concrete}): that package would ship no file"
             )
 
     # Every declared artifact has a place in PROVEN or it is a promise; every
@@ -1338,19 +1453,46 @@ def check(problems: list[str]) -> None:
             )
         if "wsgi" in modes and leg["image"] != "debian:trixie":
             problems.append(
-                f"{where}: runs the WSGI gate in {leg['image']}, which ships no CPython "
-                "3.13/3.14 (the `debian:trixie` leg is the one image that does), so the "
-                "leg would import through an interpreter the packaged shim never binds to"
+                f"{where}: runs the WSGI gate in {leg['image']}, which ships no "
+                "declared CPython minor (the `debian:trixie` leg is the one image that "
+                "does), so the leg would import through an interpreter the packaged "
+                "shim never binds to"
             )
         # `php`: the leg installs the embed package the shim recommends before
         # the installer runs, so a package set whose runtime row or `Recommends:`
-        # is wrong fails here. Only `debian:trixie` in this table has
-        # `libphp8.4-embed` in its own repositories.
+        # is wrong fails here. Only `debian:trixie` in this table ships an
+        # embedded PHP in its own repositories.
         if "php" in modes and leg["image"] != "debian:trixie":
             problems.append(
                 f"{where}: runs the PHP gate in {leg['image']}, which has no "
-                "`libphp8.4-embed`: the leg would prove a dependency it never installed"
+                "embedded PHP package: the leg would prove a dependency it never installed"
             )
+
+    # The RPM spec is generated from the same table (`MB.67.2`), so the committed
+    # file is only honest while its generator reproduces it. `packages.yml` and
+    # `nightly.yml` run exactly this `--check`, so the staleness gate is the one
+    # they already execute — the spec's stanzas are never a second hand-kept copy.
+    generator = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "rpm" / "gen_spec.py"), "--check"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if generator.returncode == 3:
+        # Not staleness: the generator has no template for a language the table
+        # declares, so no committed file can be fresh. Reporting that as "stale"
+        # would send a reader to `--write`, which cannot succeed either.
+        reason = (generator.stderr or generator.stdout).strip().splitlines()
+        problems.append(
+            "scripts/rpm/gen_spec.py refuses this table: "
+            + ("\n  ".join(reason[:4]) or "no reason printed")
+        )
+    elif generator.returncode != 0:
+        detail = (generator.stderr or generator.stdout).strip().splitlines()
+        problems.append(
+            "scripts/rpm/blastit.spec is stale: `scripts/rpm/gen_spec.py --write` "
+            "regenerates it from packaging/languages.tsv\n  " + "\n  ".join(detail[:40])
+        )
 
 
 # --- the output -------------------------------------------------------------
@@ -1468,14 +1610,15 @@ def summary(family: str = "") -> str:
         for leg in package_legs():
             node = PROVEN.get(("packages", leg["arch"], leg["format"]))
             lines.append(
-                f"| `{leg['pattern']}` + its 6 shims (`{leg['set_glob']}`) "
+                f"| `{leg['pattern']}` + its {len(leg['set']) - 1} shims (`{leg['set_glob']}`) "
                 f"({leg['format']}) | {leg['image']} on {leg['runs_on']} | "
                 f"{'proved by ' + node if node else 'declared, unbuilt'}; "
                 f"bundle ceiling glibc {leg['bundle_ceiling']}, binaries {leg['binary_floor']} |"
             )
         lines.append("")
         lines.append(
-            "The seven binary packages one architecture writes (`packaging/package-set.sh`), "
+            f"The {len(package_legs()[0]['set'])} binary packages one architecture writes "
+            "(`packaging/package-set.sh`), "
             "the same set in both formats: "
             + ", ".join(f"`{name}`" for name in package_legs()[0]["set"])
             + ". The core carries `blastit`, `blastit-lsp`, `LICENSE` and "
@@ -1510,7 +1653,7 @@ def summary(family: str = "") -> str:
     lines.append("|---|---|")
     for minor in PHP_MINORS:
         for libc in LIBCS:
-            spec = PHP_BUILDS[(minor, libc)]
+            spec = _php_leg(minor, libc)
             cell = "yes" if spec["suites"] else f"no — {spec['suites_because']}"
             lines.append(f"| PHP {minor}, {libc} | {cell} |")
     lines.append("")
@@ -1653,7 +1796,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--minor",
         default="",
-        help="with shims: the PHP minor (8.3-8.6); with py-shims: the CPython minor (3.13, 3.14)",
+        help="with shims: the PHP minor; with py-shims: the CPython minor (both from packaging/languages.tsv)",
     )
     parser.add_argument(
         "--python",

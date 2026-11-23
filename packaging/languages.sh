@@ -88,14 +88,15 @@ blastit_language_py_minors() {
 }
 
 # Validate the TSV: header, field count, duplicate package/slug, `core` used as
-# a language, a shim without a runtime, and a version that is not
-# `<major>.<minor>` (`8` and `8.1.0` are refused; `8.10` is allowed).
+# a language, a shim without a runtime, a runtime value that carries `%`/`#`/`{`/
+# `}` or surrounding whitespace (it becomes a `Recommends:` value), and a version
+# that is not `<major>.<minor>` (`8` and `8.1.0` are refused; `8.10` is allowed).
 blastit_language_check() {
     local tsv=${BLASTIT_LANGUAGES_TSV:-}
     local problems=0 rows=0 headers=0 number=0 line
     local -a fields=()
     local -A names=() slugs=()
-    local language version slug deb_runtime rpm_runtime name
+    local language version slug deb_runtime rpm_runtime name runtime
     if [ ! -f "$tsv" ]; then
         echo "languages: $tsv is missing" >&2
         return 1
@@ -145,6 +146,24 @@ blastit_language_check() {
             echo "languages: $tsv:$number: shim $name needs a deb-runtime and rpm-runtime Recommends value ((none) is only for the core package)" >&2
             problems=$((problems + 1))
         fi
+        # A runtime column is interpolated into `Recommends:` in a Debian control
+        # file and an RPM spec, so it is a package name: `%`/`#`/`{`/`}` would
+        # expand a macro or start a comment in one of the two consumers, and
+        # surrounding whitespace would silently change the package asked for.
+        for runtime in "$deb_runtime" "$rpm_runtime"; do
+            case "$runtime" in
+                ' '* | *' ' | $'\t'* | *$'\t')
+                    echo "languages: $tsv:$number: $name has runtime '$runtime' with leading or trailing whitespace: it is a Recommends: value, not prose" >&2
+                    problems=$((problems + 1))
+                    ;;
+            esac
+            case "$runtime" in
+                *%* | *#* | *'{'* | *'}'*)
+                    echo "languages: $tsv:$number: $name has runtime '$runtime' containing % # { or }: a runtime column is a package name for Recommends:, never spec/control syntax" >&2
+                    problems=$((problems + 1))
+                    ;;
+            esac
+        done
         if [ -n "${names[$name]+set}" ]; then
             echo "languages: $tsv:$number: package $name is declared twice (first on line ${names[$name]})" >&2
             problems=$((problems + 1))
