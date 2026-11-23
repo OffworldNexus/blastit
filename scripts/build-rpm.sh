@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Packages a staged Blastit bundle as seven RPMs (`universal-distribution.md`
-# §6.1, `MB.65`).
+# Packages a staged Blastit bundle as one RPM per package `packaging/package-set.sh`
+# names (`universal-distribution.md` §6.1, `MB.65`).
 #
 #   make install PREFIX=/tmp/opencode/bundle
 #   scripts/build-rpm.sh --version 0.2.1 --release 1 --bundle /tmp/opencode/bundle
+#   scripts/build-rpm.sh --print-set        # the rows, no bundle needed
 #
 # The layout is `scripts/build-deb.sh`'s, restated for RPM, and the split is
 # named once in `packaging/package-set.sh` (this script *reads* it):
 #
-#   blastit               /usr/bin/{blastit,blastit-lsp}, LICENSE, python/blastit/*.py
-#   blastit-python-3.13   /usr/share/blastit/lib/libblastit_py313-<arch>-gnu.so
-#   blastit-python-3.14   /usr/share/blastit/lib/libblastit_py314-<arch>-gnu.so
-#   blastit-php-8.3 …8.6  /usr/share/blastit/lib/libblastit_php8{3,4,5,6}-<arch>-gnu.so
+#   blastit                       /usr/bin/{blastit,blastit-lsp}, LICENSE, python/blastit/*.py
+#   blastit-<language>-<version>  /usr/share/blastit/lib/libblastit_<slug>-<arch>-gnu.so
 #
 # `scripts/rpm/blastit.spec` is checked in and only moves the staged tree into the
 # buildroot. `rpmbuild` runs on the host when it exists; otherwise the same spec is
@@ -20,18 +19,18 @@
 # is `e2e/run_packaging.py --leg rpm` inside a container.
 #
 # The staged tree is asserted against §6.1 before anything is written
-# (`scripts/check-bundle-layout.sh`: 2 Python shims, 4 PHP shims, the 7 modules, no
-# strays), every shim must be owned by exactly one package, and
-# `BUNDLE_SKIP_VERSION=1` lets a cross-arch `--arch arm64` set be built on an
-# x86_64 host.
+# (`scripts/check-bundle-layout.sh`: every shim `packaging/languages.tsv`
+# declares, the four modules, no strays), every shim must be owned by exactly one
+# package, and `BUNDLE_SKIP_VERSION=1` lets a cross-arch `--arch arm64` set be
+# built on an x86_64 host.
 #
 # # The dependency floor is measured per package, never as a bundle maximum
 #
 # `scripts/check-portable-elf.sh --max-glibc` is run for `blastit`+`blastit-lsp`
 # (the core) and then for each shim on its own, exactly as
 # `scripts/build-deb.sh` does: the core gets `glibc >= <core floor>` (2.34 on
-# today's artifacts) and `blastit-php-8.4` gets `glibc >= <its own floor>` (2.17),
-# so no package demands a newer glibc than its own bytes need. Each measurement
+# today's artifacts) and a PHP shim gets `glibc >= <its own floor>` (2.17), so no
+# package demands a newer glibc than its own bytes need. Each measurement
 # also says whether that package's `DT_NEEDED` set carries `libgcc_s.so.1`; only
 # those packages declare `libgcc`. The measurement is handed to the spec as
 # `blastit_glibc_<tag>`/`blastit_libgcc_<tag>` defines.
@@ -40,11 +39,11 @@
 # `WEAK` version needs (glibc's own advisory references) do not raise the floor,
 # because the loader does not require them.
 #
-# The interpreter relationship is `Recommends: python3.13` and `Recommends:
-# php-embedded` — weak on both formats, never a hard `Requires:`, because Rocky 9
-# has no `python3.13` and its `php-embedded` is 8.0: a shim package that cannot be
-# installed on a supported distribution is worse than a visible advisory (see the
-# spec's comment).
+# The interpreter relationship is a `Recommends:` on the runtime package
+# `packaging/languages.tsv` names — weak on both formats, never a hard
+# `Requires:`, because a supported distribution may ship another minor (Rocky 9's
+# `php-embedded` is 8.0): a shim package that cannot be installed on a supported
+# distribution is worse than a visible advisory (see the spec's comment).
 set -euo pipefail
 
 # One timestamp for the payload, so two hosts produce the same bytes; a release
@@ -56,6 +55,19 @@ scratch_base="${TMPDIR:-/tmp}/opencode"
 spec="$root/scripts/rpm/blastit.spec"
 # shellcheck source=../packaging/package-set.sh
 source "$root/packaging/package-set.sh"
+
+# How many shims one language family ships. `packaging/languages.tsv` names every
+# shim row `blastit-<language>-<version>`, so the family is the segment after
+# `blastit-`: the count is the table's, never a literal here.
+shim_count_of() {
+    local wanted=$1 name _ rest count=0
+    while IFS=$'\t' read -r name _; do
+        rest=${name#blastit-}
+        [ "${rest%%-*}" = "$wanted" ] || continue
+        count=$((count + 1))
+    done < <(blastit_package_shims)
+    printf '%s\n' "$count"
+}
 
 version=""
 release="1"
@@ -70,15 +82,18 @@ usage_text() {
 usage: scripts/build-rpm.sh --version <ver> --bundle <dir>
                             [--release <rel>] [--arch amd64|arm64]
                             [--max-glibc <major>_<minor>] [--out <dir>]
+       scripts/build-rpm.sh --print-set
 
   --bundle     a `make install PREFIX=<dir>` tree (bin/ + share/blastit/)
   --release    RPM release, default 1 (nightly: 0.nightly.<date>.r<n>.g<sha>)
   --arch       defaults to the machine type of the bundle's `blastit`
   --max-glibc  refuse a set whose measured floor is above this ceiling
-  --out        where the seven RPMs are written:
-                 blastit-<ver>-<rel>.<arch>.rpm
-                 blastit-python-3.1{3,4}-<ver>-<rel>.<arch>.rpm
-                 blastit-php-8.{3,4,5,6}-<ver>-<rel>.<arch>.rpm
+  --out        where the RPMs are written; `packaging/package-set.sh` names
+               them (the core `blastit` plus one per shim row of
+               `packaging/languages.tsv`), as `blastit-<ver>-<rel>.<arch>.rpm`
+               and `<package>-<ver>-<rel>.<arch>.rpm`
+  --print-set  print the package rows (`packaging/package-set.sh --rows`) and
+               exit without needing a bundle or root
 
 Each package's `Requires: glibc >= …` is measured from its own ELFs, so the
 core and a PHP shim do not have to claim the same floor.
@@ -135,10 +150,18 @@ while [ "$#" -gt 0 ]; do
             max_glibc=$2
             shift 2
             ;;
+        --print-set) print_set=1; shift ;;
         -h | --help) usage 0 ;;
         *) usage ;;
     esac
 done
+
+# `--print-set` is the table, not a build: it prints the rows an operator (or a
+# test) can compare before a bundle or root exists.
+if [ -n "${print_set:-}" ]; then
+    "$root/packaging/package-set.sh" --rows
+    exit 0
+fi
 
 [ -n "$version" ] || usage
 [ -n "$bundle" ] || usage
@@ -203,10 +226,12 @@ case "$arch" in
 esac
 
 # --- the split is only honest if every shim has exactly one owner ------------
+# One core package plus one package per shim row: both counts are the table's.
+shim_count=$(blastit_package_shims | grep -c '' || true)
 package_names=()
 while IFS= read -r name; do package_names+=("$name"); done < <(blastit_package_names)
-[ "${#package_names[@]}" -eq 7 ] ||
-    die "packaging/package-set.sh names ${#package_names[@]} packages, this build writes 7"
+[ "${#package_names[@]}" -eq "$((shim_count + 1))" ] ||
+    die "packaging/package-set.sh names ${#package_names[@]} packages but packaging/languages.tsv declares $shim_count shims (one package each) plus the core"
 
 while IFS=$'\t' read -r owner glob; do
     matches=()
@@ -259,7 +284,8 @@ ln -s ../share/blastit/lib/blastit "$stage/usr/bin/blastit"
 ln -s ../share/blastit/lib/blastit-lsp "$stage/usr/bin/blastit-lsp"
 
 # --- the payload is §6.1's, or this is not a Blastit package ------------------
-layout=$(BUNDLE_REQUIRE_PY_SHIMS=2 BUNDLE_REQUIRE_PHP_SHIMS=4 BUNDLE_SKIP_VERSION=1 \
+layout=$(BUNDLE_REQUIRE_PY_SHIMS="$(shim_count_of python)" \
+    BUNDLE_REQUIRE_PHP_SHIMS="$(shim_count_of php)" BUNDLE_SKIP_VERSION=1 \
     "$root/scripts/check-bundle-layout.sh" "$stage/usr")
 printf '%s\n' "$layout" | sed 's/^/build-rpm: layout: /'
 
@@ -409,8 +435,8 @@ for name in "${package_names[@]}"; do
     echo "build-rpm: $rpm ($(wc -c <"$rpm") bytes)"
 done
 [ "$missing" -eq 0 ] || die "$missing of ${#package_names[@]} package(s) are missing from $out"
-[ "$shims" -eq 6 ] ||
-    die "$shims shim(s) in the bundle; the release ships 6 (2 CPython + 4 PHP)"
+[ "$shims" -eq "$shim_count" ] ||
+    die "$shims shim(s) in the bundle; packaging/languages.tsv declares $shim_count"
 printf 'build-rpm: %s package(s) in %s (%s shim(s), %s python module(s))\n' \
     "${#package_names[@]}" "$out" "$shims" "$modules"
 if command -v rpm >/dev/null 2>&1; then

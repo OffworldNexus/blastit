@@ -14,7 +14,7 @@
 #   make e2e              # application suite (§2): PHP, Django/Flask, static in Docker
 #   make e2e-prod         # both deployment presets in real containers: uids, caps, /proc, fair queue, drain
 #   make e2e-packaging    # install stories (§3): deb/rpm, install.sh --user + Alpine musl, wheel, composer
-#   make e2e-universal    # one staged bundle, four runtimes: CPython 3.13/3.14, PHP 8.4, static, handoff (slow)
+#   make e2e-universal    # one staged bundle proves every declared CPython minor, PHP, static and handoff (slow)
 #   make install          # stage a self-contained release bundle under PREFIX (default ~/.local)
 #   make uninstall        # remove the bundle `make install` staged under PREFIX
 #   make packages         # build blastit_<ver>_<arch>.deb + blastit-<ver>-<rel>.<arch>.rpm (slow)
@@ -545,15 +545,19 @@ e2e-packaging: ## Install stories (§3): deb, rpm, install.sh --user, Alpine mus
 # `install` refuse a bundle with no PHP shim, so the gate cannot exit 0 on a host
 # that never had `libphp-embed`.
 E2E_UNIVERSAL_PREFIX ?= $(if $(TMPDIR),$(TMPDIR),/tmp)/opencode/blastit-e2e/prefix
-E2E_UNIVERSAL_LEGS ?= --python 3.13 --python 3.14 --php 8.4 --static --handoff --check
+# The Python legs are the table's (`packaging/languages.tsv`); the PHP minor is one
+# worked example, because the gate needs the minor the host's bundle really carries.
+E2E_UNIVERSAL_PHP_MINOR ?= 8.4
+E2E_UNIVERSAL_LEGS ?= $(foreach minor,$(PY_MINORS),--python $(minor)) --php $(E2E_UNIVERSAL_PHP_MINOR) --static --handoff --check
 
-e2e-universal: ## One staged bundle proves CPython 3.13/3.14, PHP 8.4, static and handoff (slow)
+e2e-universal: ## One staged bundle proves every declared CPython minor, one PHP minor, static and handoff (slow)
 	BUNDLE_REQUIRE_PHP_SHIMS=1 $(MAKE) install PREFIX="$(E2E_UNIVERSAL_PREFIX)"
 	$(UV) run --no-project e2e/universal_binary.py \
 		--binary "$(E2E_UNIVERSAL_PREFIX)/bin/blastit" $(E2E_UNIVERSAL_LEGS)
 
 # Build per-minor C SAPI shims (`libblastit_php<mm>-<arch>-<libc>.so`) using `-isystem` for PHP headers.
-PHP_MINORS ?= 8.6 8.5 8.4 8.3
+# The minors are `packaging/languages.tsv`'s, newest first (`packaging/languages.sh --php-minors`).
+PHP_MINORS ?= $(shell bash $(CURDIR)/packaging/languages.sh --php-minors | tr '\n' ' ')
 PHP_SAPI_CRATE := $(CURDIR)/crates/blastit-php-sapi
 PHP_SAPI_OUT ?= $(CURDIR)/target/php-sapi
 PHP_SAPI_CC ?= $(CC)
@@ -626,7 +630,7 @@ php-sapi: ## Build C SAPI shims whose php-config exists; skip absent minors
 	done; \
 	echo "php-sapi: $$built shim(s) for $$arch-$$libc in $(PHP_SAPI_OUT); skipped:$${skipped:- none}"
 
-# Build per-minor CPython shims (`libblastit_py3{13,14}-<arch>-<libc>.so`): each carries
+# Build per-minor CPython shims (`libblastit_py<digits>-<arch>-<libc>.so`): each carries
 # `UND Py_*` symbols (resolved by the host's libpython at stage-1 `dlopen`) and its own
 # `DT_SONAME`, and links no libpython of its own (design §1.1/§1.2). Not part of `check`:
 # it needs interpreters, and `rs-no-python` already proves the binary links none.
@@ -634,7 +638,9 @@ php-sapi: ## Build C SAPI shims whose php-config exists; skip absent minors
 # `/opt/python/cp<digits>-cp<digits>/bin/python3` -> `uv python find --no-project <minor>`
 # -> `python<minor>` on `PATH`. A minor with no interpreter, or a free-threaded one, is
 # skipped; `PY_SAPI_REQUIRE_ALL=1` fails closed instead.
-PY_MINORS ?= 3.14 3.13
+# The minors are `packaging/languages.tsv`'s, newest first
+# (`packaging/languages.sh --py-minors`): adding one there adds a shim here.
+PY_MINORS ?= $(shell bash $(CURDIR)/packaging/languages.sh --py-minors | tr '\n' ' ')
 PY_SAPI_OUT ?= $(CURDIR)/target/py-sapi
 PY_SAPI_PROFILE ?= release
 PY_SAPI_ARCH ?=
@@ -643,7 +649,7 @@ PY_SAPI_REQUIRE_ALL ?=
 PY_SAPI_PYTHON_313 ?=
 PY_SAPI_PYTHON_314 ?=
 
-py-sapi: ## Build CPython shims per minor (PY_MINORS="3.14 3.13"; PY_SAPI_REQUIRE_ALL=1 fails closed)
+py-sapi: ## Build CPython shims per declared minor (PY_MINORS; PY_SAPI_REQUIRE_ALL=1 fails closed)
 	@set -eu; \
 	for tool in readelf nm; do \
 		command -v "$$tool" >/dev/null 2>&1 || { \
@@ -741,7 +747,7 @@ wheel: ## Build the `py3-none` wheel for this host (host tag; developer artifact
 wheel-manylinux: ## Build the release py3-none-manylinux_2_28 wheel in the builder image (Docker, slow)
 	scripts/build-wheel.sh --manylinux 2_28 --require-shims all -o "$(WHEEL_OUT)"
 
-wheel-smoke: ## Install the built wheel in python:3.12/3.13/3.14-slim and drive it (Docker, slow)
+wheel-smoke: ## Install the built wheel in a slim Python container and drive it (Docker, slow)
 	scripts/wheel_container_smoke.sh "$(WHEEL_OUT)"
 
 composer-smoke: ## Prove packages/composer-blastit in composer:2 from a local fixture (Docker, slow)
@@ -786,7 +792,7 @@ rs-test-php: php-sapi ## Real-pair PHP legs: e2e_dev's PHP half (per-view grants
 # caller's uid, so a served leg is proved for an ordinary user too. Both runs
 # must print the `served:` line and the crash-recovery line, and neither may
 # print a `SKIP` line: a skipped leg is not a witness, and this image is the only
-# boot-level proof of the documented 8.3–8.6 support.
+# boot-level proof of the documented PHP support (packaging/languages.tsv).
 rs-test-php-image: ## Docker: run the image-built e2e_dev PHP legs (root + unprivileged)
 	@docker image inspect "$(PHP_SAPI_IMAGE)" >/dev/null 2>&1 || { \
 		echo "rs-test-php-image: no image '$(PHP_SAPI_IMAGE)'; build it first:" >&2; \

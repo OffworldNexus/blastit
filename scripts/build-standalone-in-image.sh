@@ -300,21 +300,22 @@ build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
 # *where* the archive is built, never *what* it carries. What it carries is the
 # universal binary from the default features of `blastit` (`python`, `php`,
 # `static`, `ADR-0017` decision 1): no `libpython` and no `libphp` in
-# `DT_NEEDED`, and a WSGI app still served when the host has CPython 3.13/3.14
-# with its shim.
+# `DT_NEEDED`, and a WSGI app still served when the host has a declared CPython
+# minor with its shim.
 if [ -n "$SHIM_DIR" ]; then
     build+=(--shim-dir "$SHIM_DIR")
 fi
 # The per-minor CPython shims (`MB.47.2`): `scripts/build-standalone.sh` stages
 # them beside the binary so a WSGI view boots out of the box, and they are built
-# **here** so their glibc floor is the floor of this image. `manylinux_2_28`
-# ships `/opt/python/cp313-cp313` and `cp314-cp314`, so neither minor is
-# downloaded, and `make py-sapi` refuses a shim without `DT_SONAME`, an
-# undefined `Py_Initialize*` entry point or the three exports.
+# **here** so their glibc floor is the floor of this image. The minors are those
+# in `packaging/languages.tsv` (mounted at /src): `manylinux_2_28` already
+# ships `/opt/python/cp<digits>-cp<digits>` for the supported minors, so none is
+# downloaded, and `make py-sapi` refuses a shim without `DT_SONAME`, an undefined
+# `Py_Initialize*` entry point or the three exports.
 # The triple decides the shim libc, not this image: `--target` is the claim, and
 # a `-musl` triple here would otherwise get `-gnu`-named shims that staging then
 # refuses without naming the libc. `PY_SAPI_REQUIRE_ALL=1` makes a missing
-# `/opt/python/cp31x` name the interpreter instead of reporting "0 shims".
+# `/opt/python/cp<digits>` name the interpreter instead of reporting "0 shims".
 case "${TARGET##*-}" in
     gnu) shim_libc=gnu ;;
     musl) shim_libc=musl ;;
@@ -324,10 +325,15 @@ case "${TARGET##*-}" in
         ;;
 esac
 arch=${TARGET%%-*}
-make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_REQUIRE_ALL=1 \
+py_minors=$(bash /src/packaging/languages.sh --py-minors)
+py_vars=()
+for minor in $py_minors; do
+    digits=${minor//./}
+    py_vars+=("PY_SAPI_PYTHON_$digits=/opt/python/cp$digits-cp$digits/bin/python3")
+done
+make py-sapi PY_MINORS="$(printf '%s\n' $py_minors | tr '\n' ' ')" PY_SAPI_REQUIRE_ALL=1 \
     PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC="$shim_libc" \
-    PY_SAPI_PYTHON_313=/opt/python/cp313-cp313/bin/python3 \
-    PY_SAPI_PYTHON_314=/opt/python/cp314-cp314/bin/python3
+    "${py_vars[@]}"
 bash scripts/build-standalone.sh "${build[@]}"
 BUILD_BODY
         chmod 0755 /tmp/blastit-inner-build.sh

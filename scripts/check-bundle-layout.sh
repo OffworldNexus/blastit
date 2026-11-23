@@ -17,10 +17,11 @@
 # A *package set* is checked by extracting every package into one scratch root
 # (`dpkg-deb -x`, or `rpm2cpio | cpio -id` — inside a container when the host has
 # no RPM tools) and running the **same** tree assertions on the merged `/usr`.
-# The set must be the seven packages `packaging/package-set.sh` names — one core,
-# two CPython and four PHP — because a split package set that silently lost a
-# shim is exactly the regression the split could introduce; the failure names the
-# missing package, and any unexpected package in the directory is refused too.
+# The set must be exactly the packages `packaging/package-set.sh` names — the
+# core plus one per shim row of `packaging/languages.tsv` — because a split
+# package set that silently lost a shim is exactly the regression the split could
+# introduce; the failure names the missing package, and any unexpected package in
+# the directory is refused too.
 #
 # Every installed ELF is also run through `scripts/check-portable-elf.sh`:
 # §6.1 puts `blastit`, `blastit-lsp` and both shim families under the same
@@ -33,13 +34,27 @@
 # are reported. `BUNDLE_REQUIRE_PY_SHIMS=N` / `BUNDLE_REQUIRE_PHP_SHIMS=N` demand
 # **at least** N of each (`BUNDLE_REQUIRE_PHP_SHIMS=1` is what `make
 # e2e-universal` sets: the gate may not claim PHP was proved on a bundle with no
-# PHP shim). The set modes demand the release's 2 and 4, because a package set
-# that ships fewer is the defect they exist to catch.
+# PHP shim). The set modes demand one shim per row `packaging/languages.tsv`
+# declares for each language, because a package set that ships fewer is the
+# defect they exist to catch.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=../packaging/package-set.sh
 source "$root/packaging/package-set.sh"
+
+# How many shims one language family ships. `packaging/languages.tsv` names every
+# shim row `blastit-<language>-<version>`, so the family is the segment after
+# `blastit-`: the count is the table's, never a literal here.
+shim_count_of() {
+    local wanted=$1 name _ rest count=0
+    while IFS=$'\t' read -r name _; do
+        rest=${name#blastit-}
+        [ "${rest%%-*}" = "$wanted" ] || continue
+        count=$((count + 1))
+    done < <(blastit_package_shims)
+    printf '%s\n' "$count"
+}
 
 mode=prefix
 prefix=""
@@ -53,13 +68,13 @@ usage: scripts/check-bundle-layout.sh PREFIX
        scripts/check-bundle-layout.sh --rpm-set <dir> [--arch x86_64|aarch64]
 
   PREFIX       a `make install PREFIX=<dir>` tree (or an unpacked archive's root)
-  --deb-set    a directory of the seven `.deb`s `scripts/build-deb.sh` wrote
-  --rpm-set    a directory of the seven `.rpm`s `scripts/build-rpm.sh` wrote
+  --deb-set    a directory of the `.deb`s `scripts/build-deb.sh` wrote
+  --rpm-set    a directory of the `.rpm`s `scripts/build-rpm.sh` wrote
   --arch       the package architecture of the set (default: this machine)
 
 A set check extracts every package into one scratch root and asserts the same
-§6.1 tree as the PREFIX check; a set missing one of the seven packages fails,
-naming the package.
+§6.1 tree as the PREFIX check; a set missing one of the packages
+`packaging/package-set.sh` names fails, naming the package.
 USAGE
 }
 
@@ -272,9 +287,12 @@ case "$mode:$arch" in
     rpm:*) die "--rpm-set takes --arch x86_64|aarch64, not $arch" ;;
 esac
 
+# One core package plus one package per shim row: both counts are the table's.
+shim_total=$(blastit_package_shims | grep -c '' || true)
 package_names=()
 while IFS= read -r name; do package_names+=("$name"); done < <(blastit_package_names)
-[ "${#package_names[@]}" -eq 7 ] || die "packaging/package-set.sh names ${#package_names[@]} packages, a set has 7"
+[ "${#package_names[@]}" -eq "$((shim_total + 1))" ] ||
+    die "packaging/package-set.sh names ${#package_names[@]} packages but packaging/languages.tsv declares $shim_total shims (one package each) plus the core"
 # The core is the first row of the table: it is the one package a set cannot be
 # missing without being no set at all, so it gets its own sentence below.
 core_name=${package_names[0]}
@@ -282,8 +300,8 @@ core_name=${package_names[0]}
 found=()
 for name in "${package_names[@]}"; do
     # A version starts with a digit, and the name separator differs per format:
-    # `blastit_<ver>_<arch>.deb` is not `blastit-python-3.13_<ver>_<arch>.deb`,
-    # and `blastit-<ver>-<rel>.<arch>.rpm` is not `blastit-php-8.4-<ver>…`.
+    # `blastit_<ver>_<arch>.deb` is not `blastit-<language>-<version>_<ver>_<arch>.deb`,
+    # and `blastit-<ver>-<rel>.<arch>.rpm` is not `blastit-<language>-<version>-<ver>…`.
     case "$mode" in
         deb) pattern="$setdir/${name}_[0-9]*_${arch}.deb" ;;
         rpm) pattern="$setdir/${name}-[0-9]*.${arch}.rpm" ;;
@@ -318,9 +336,9 @@ for candidate in $glob; do
 done
 release_total=${#package_names[@]}
 if [ "$unexpected" -lt "$release_total" ]; then
-    fail "$setdir holds $unexpected $mode package(s) for $arch; the release ships $release_total (1 core + 2 Python + 4 PHP) and $((release_total - unexpected)) is missing — see the package named above"
+    fail "$setdir holds $unexpected $mode package(s) for $arch; the release ships $release_total (the core plus one package per shim in packaging/languages.tsv) and $((release_total - unexpected)) is missing — see the package named above"
 elif [ "$unexpected" -gt "$release_total" ]; then
-    fail "$setdir holds $unexpected $mode package(s) for $arch; the release ships $release_total (1 core + 2 Python + 4 PHP), so at least one is a package no name in packaging/package-set.sh accounts for"
+    fail "$setdir holds $unexpected $mode package(s) for $arch; the release ships $release_total (the core plus one package per shim in packaging/languages.tsv), so at least one is a package no name in packaging/package-set.sh accounts for"
 fi
 
 [ "$problems" -eq 0 ] || {
@@ -372,9 +390,9 @@ else
 fi
 
 prefix="$scratch/root/usr"
-# The set is the release's: the same 2 + 4 shims the package names promise.
-export BUNDLE_REQUIRE_PY_SHIMS=2
-export BUNDLE_REQUIRE_PHP_SHIMS=4
+# The set is the release's: one shim per row packaging/languages.tsv declares.
+export BUNDLE_REQUIRE_PY_SHIMS="$(shim_count_of python)"
+export BUNDLE_REQUIRE_PHP_SHIMS="$(shim_count_of php)"
 # A set may be unpacked on another architecture; the container smoke runs it.
 case "$mode:$arch" in
     deb:amd64 | rpm:x86_64) host_arch=amd64 ;;

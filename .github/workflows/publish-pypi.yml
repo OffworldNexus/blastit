@@ -383,15 +383,16 @@ jobs:
                   fi
                   export PATH="$HOME/.local/bin:$PATH"
                   # The archive stages the per-minor CPython shims (`MB.47.2`), and a
-                  # musl shim must be linked by musl: both minors are built here,
-                  # against the musl CPython that `uv` installs, before the archive
-                  # is packaged. No apostrophe anywhere in this block: it is one
-                  # single-quoted `sh -c` word, so an apostrophe in a comment ends
+                  # musl shim must be linked by musl: every declared minor is built
+                  # here, against the musl CPython that `uv` installs, before the
+                  # archive is packaged. No apostrophe anywhere in this block: it is
+                  # one single-quoted `sh -c` word, so an apostrophe in a comment ends
                   # the word there and the rest of the script runs on the runner
                   # with `TARGET` unbound (`MB.49`).
-                  uv python install 3.13 3.14 >/dev/null
+                  uv python install $(bash packaging/languages.sh --py-minors | tr '\n' ' ') >/dev/null
                   arch=${TARGET%%-*}
-                  make py-sapi PY_MINORS="3.14 3.13" \
+                  # `PY_MINORS` is the Makefile default: `packaging/languages.tsv`.
+                  make py-sapi \
                       PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC=musl
                   bash scripts/build-standalone.sh --target "$TARGET" \
                       --shim-dir dist/shims --require-shims "$OWED" \

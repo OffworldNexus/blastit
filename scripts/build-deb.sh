@@ -1,34 +1,33 @@
 #!/usr/bin/env bash
-# Packages a staged Blastit bundle as seven Debian archives
-# (`universal-distribution.md` §6.1, `MB.65`).
+# Packages a staged Blastit bundle as one Debian archive per package
+# `packaging/package-set.sh` names (`universal-distribution.md` §6.1, `MB.65`).
 #
 #   make install PREFIX=/tmp/opencode/bundle
 #   scripts/build-deb.sh --version 0.2.1 --bundle /tmp/opencode/bundle
+#   scripts/build-deb.sh --print-set        # the rows, no bundle needed
 #
 # The input is a *bundle*: exactly the §6.1 tree `make install PREFIX=<dir>`
 # stages, or the deterministic one `scripts/build-package-bundle.sh` builds from
-# the floor images. Inside every archive §6.1's prefix is `/usr`, and the
-# packages are split per interpreter minor (`packaging/package-set.sh`):
+# the floor images. Inside every archive §6.1's prefix is `/usr`, and the split
+# is one package per row of `packaging/languages.tsv`:
 #
-#   blastit               /usr/bin/{blastit,blastit-lsp}, LICENSE, python/blastit/*.py
-#   blastit-python-3.13   /usr/share/blastit/lib/libblastit_py313-<arch>-gnu.so
-#   blastit-python-3.14   /usr/share/blastit/lib/libblastit_py314-<arch>-gnu.so
-#   blastit-php-8.3 …8.6  /usr/share/blastit/lib/libblastit_php8{3,4,5,6}-<arch>-gnu.so
+#   blastit                       /usr/bin/{blastit,blastit-lsp}, LICENSE, python/blastit/*.py
+#   blastit-<language>-<version>  /usr/share/blastit/lib/libblastit_<slug>-<arch>-gnu.so
 #
-# The split is per **interpreter**, because that is the dependency a host has:
-# `blastit-python-3.13` recommends `python3.13`, `blastit-php-8.4` recommends
-# `libphp8.4-embed`, and every shim package depends on `blastit (= <version>)`.
-# The interpreter is a **`Recommends:`**, never a `Depends:`: apt pulls the
-# distro runtime by default, and the shim still installs beside a pyenv or
-# source-built interpreter, or on a distro without that minor (it is inert until
-# one is present).
+# The split is per **interpreter minor**, because that is the dependency a host
+# has: each shim package recommends its interpreter's distro runtime package and
+# depends on `blastit (= <version>)`. The interpreter is a **`Recommends:`**,
+# never a `Depends:`: apt pulls the distro runtime by default, and the shim still
+# installs beside a pyenv or source-built interpreter, or on a distro without
+# that minor (it is inert until one is present).
 #
-# The names, globs and runtimes are read from `packaging/package-set.sh`; this
-# script refuses to write anything if a shim in the bundle is owned by no
-# package or by two. The staged tree is also asserted against §6.1 before
-# anything is written: `scripts/check-bundle-layout.sh` requires 2 Python shims,
-# 4 PHP shims (8.3–8.6), the 7 modules and no strays, so a bundle that lost a
-# shim cannot become a package set whose install "passes" on a static route.
+# The names, globs and runtimes are read from `packaging/package-set.sh`, which
+# derives them from `packaging/languages.tsv`; this script refuses to write
+# anything if a shim in the bundle is owned by no package or by two. The staged
+# tree is also asserted against §6.1 before anything is written:
+# `scripts/check-bundle-layout.sh` requires every shim the table declares, the
+# four pure-Python modules and no strays, so a bundle that lost a shim cannot
+# become a package set whose install "passes" on a static route.
 # `BUNDLE_SKIP_VERSION=1` because an `--arch arm64` set is built on an x86_64
 # host; the container smoke runs the binary on the arch it installs.
 #
@@ -60,6 +59,19 @@ scratch_base="${TMPDIR:-/tmp}/opencode"
 # shellcheck source=../packaging/package-set.sh
 source "$root/packaging/package-set.sh"
 
+# How many shims one language family ships. `packaging/languages.tsv` names every
+# shim row `blastit-<language>-<version>`, so the family is the segment after
+# `blastit-`: the count is the table's, never a literal here.
+shim_count_of() {
+    local wanted=$1 name _ rest count=0
+    while IFS=$'\t' read -r name _; do
+        rest=${name#blastit-}
+        [ "${rest%%-*}" = "$wanted" ] || continue
+        count=$((count + 1))
+    done < <(blastit_package_shims)
+    printf '%s\n' "$count"
+}
+
 version=""
 release=""
 arch=""
@@ -72,15 +84,18 @@ usage_text() {
 usage: scripts/build-deb.sh --version <ver> --bundle <dir>
                             [--release <rel>] [--arch amd64|arm64]
                             [--max-glibc <major>_<minor>] [--out <dir>]
+       scripts/build-deb.sh --print-set
 
   --bundle     a `make install PREFIX=<dir>` tree (bin/ + share/blastit/)
   --release    appended as `-<rel>` to the Debian version (optional)
   --arch       defaults to the machine type of the bundle's `blastit`
   --max-glibc  refuse an archive whose measured floor is above this ceiling
-  --out        where the seven archives are written:
-                 blastit_<ver>_<arch>.deb
-                 blastit-python-3.1{3,4}_<ver>_<arch>.deb
-                 blastit-php-8.{3,4,5,6}_<ver>_<arch>.deb
+  --out        where the archives are written; `packaging/package-set.sh` names
+               them (the core `blastit` plus one per shim row of
+               `packaging/languages.tsv`), as `blastit_<ver>_<arch>.deb` and
+               `<package>_<ver>_<arch>.deb`
+  --print-set  print the package rows (`packaging/package-set.sh --rows`) and
+               exit without needing a bundle or root
 USAGE
 }
 
@@ -131,10 +146,18 @@ while [ "$#" -gt 0 ]; do
             max_glibc=$2
             shift 2
             ;;
+        --print-set) print_set=1; shift ;;
         -h | --help) usage 0 ;;
         *) usage ;;
     esac
 done
+
+# `--print-set` is the table, not a build: it prints the rows an operator (or a
+# test) can compare before a bundle or root exists.
+if [ -n "${print_set:-}" ]; then
+    "$root/packaging/package-set.sh" --rows
+    exit 0
+fi
 
 [ -n "$version" ] || usage
 [ -n "$bundle" ] || usage
@@ -207,10 +230,12 @@ esac
 [ -n "$arch" ] || die "could not read the machine type of $lib/blastit: pass --arch amd64|arm64"
 
 # --- the split is only honest if every shim has exactly one owner ------------
+# One core package plus one package per shim row: both counts are the table's.
+shim_count=$(blastit_package_shims | grep -c '' || true)
 package_names=()
 while IFS= read -r name; do package_names+=("$name"); done < <(blastit_package_names)
-[ "${#package_names[@]}" -eq 7 ] ||
-    die "packaging/package-set.sh names ${#package_names[@]} packages, this build writes 7"
+[ "${#package_names[@]}" -eq "$((shim_count + 1))" ] ||
+    die "packaging/package-set.sh names ${#package_names[@]} packages but packaging/languages.tsv declares $shim_count shims (one package each) plus the core"
 
 while IFS=$'\t' read -r owner glob; do
     matches=()
@@ -243,7 +268,8 @@ scratch=$(mktemp -d "$scratch_base/blastit-deb.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
 # --- the payload is §6.1's, or these are not Blastit packages ----------------
-layout=$(BUNDLE_REQUIRE_PY_SHIMS=2 BUNDLE_REQUIRE_PHP_SHIMS=4 BUNDLE_SKIP_VERSION=1 \
+layout=$(BUNDLE_REQUIRE_PY_SHIMS="$(shim_count_of python)" \
+    BUNDLE_REQUIRE_PHP_SHIMS="$(shim_count_of php)" BUNDLE_SKIP_VERSION=1 \
     "$root/scripts/check-bundle-layout.sh" "$bundle")
 printf '%s\n' "$layout" | sed 's/^/build-deb: layout: /'
 
@@ -404,6 +430,6 @@ binary; install it together with blastit, never instead of it." \
     shims=$((shims + 1))
 done
 
-[ "$shims" -eq 6 ] ||
-    die "wrote $shims shim package(s); the release ships 6 (2 CPython + 4 PHP)"
+[ "$shims" -eq "$shim_count" ] ||
+    die "wrote $shims shim package(s); packaging/languages.tsv declares $shim_count"
 printf 'build-deb: %s package(s) in %s (%s python module(s))\n' "$((shims + 1))" "$out" "$modules"
