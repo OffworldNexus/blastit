@@ -4609,3 +4609,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T11:06 [MB.74] (lead) base 8cbf0ef; worktree .worktrees/dnf-retry on release/dnf-retry (release-0.2.0 worktree has MB.72 in flight)
 - 2026-11-23T11:22 [MB.74] (lead) REVIEW (review-arch): 1 MAJOR accepted on evidence - build-lsp.sh:262 + check-bundle-layout.sh:381 ARE release-path (publish-pypi.yml:483 runs build-lsp.sh --im
 - 2026-11-23T11:30 [MB.74] (lead) status active -> done
+- 2026-11-23T11:40 [MB.75] (conductor) created (epic) Add a channel dimension: Python 3.15 stable, 3.16 nightly-only
+- 2026-11-23T11:40 AUTOPILOT on by conductor python 3.15/3.16 channels in MB.75
+- 2026-11-23T11:41 HUMAN H-022 opened by planner (node MB.75)
+- 2026-11-23T11:41 [MB.75.1] (planner) created (task) MB.75.1 Schema: channels column in all three loaders + package-set channel + all-row Rust tables
+- 2026-11-23T11:41 [MB.75.2] (planner) created (task) MB.75.2 Channel-aware matrices, RPM spec, builders, bundle layout and workflows
+- 2026-11-23T11:41 [MB.75.3] (planner) created (task) MB.75.3 Docs/installer/e2e: stable 3.13-3.15 blocks, nightly 3.16 prose, derived counts
+- 2026-11-23T11:41 [MB.75.4] (planner) created (task) MB.75.4 Real 3.15/3.16 shim builds, 3.15 boot probe, stable-vs-nightly diff, install legs
+- 2026-11-23T11:41 [MB.75] (planner) status ready -> blocked: TESTING_PLAN.md user-story gate H-022: validate stable 3.13-3.15 / nightly 3.16 before any test/code slice starts
+- 2026-11-23T11:42 HUMAN H-022 closed by conductor
+- 2026-11-23T11:42 [MB.75] (conductor) status blocked -> ready: H-022 approved: stable 3.13-3.15, nightly adds 3.16

@@ -201,3 +201,11 @@ Release v0.2.1 is ready and fully green: PR #66 (https://github.com/OffworldNexu
 
 **Answer:**
 
+## H-022 [closed] (node MB.75)
+
+- asked: 2026-11-23T11:41 by planner
+
+Validate the TESTING_PLAN.md update for the nightly CPython 3.16 channel: stable ships CPython 3.13/3.14/3.15, nightly additionally ships 3.16 built from cpython-3.16.0a2, and the same blastit binary selects every declared minor.
+
+**Answer:**
+
