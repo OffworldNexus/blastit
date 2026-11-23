@@ -12,7 +12,7 @@ Focused non-E2E tests exist **only** for self-contained language, protocol, and 
 
 - **Laravel and Symfony (PHP) with per-view PostgreSQL rights and static files:** Run a multi-route Laravel or Symfony application where public routes serve static assets and read-only views, authenticated routes hold narrow per-table and per-column write grants, and ungranted queries or columns are rejected without exposing database credentials.
 - **PHP runtime compatibility and fault isolation (PHP 8.3, 8.4, 8.5, and 8.6):** Serve PHP applications seamlessly across every supported PHP minor release; recover cleanly when an individual request calls `exit()` or hits a fatal error without taking down other requests; and remain immune by construction to CGI/FastCGI argument-injection exploit classes (`php2shell`).
-- **Django and Flask / SQLAlchemy (Python WSGI) across Python 3.13 and 3.14:** Run a multi-view WSGI project using shared `trait` grants, parameterized read/write queries, and static mounts across supported Python releases, proving each view can execute only its declared database operations.
+- **Django and Flask / SQLAlchemy (Python WSGI) across Python 3.13, 3.14 and 3.15 (and 3.16 on the nightly channel):** Run a multi-view WSGI project using shared `trait` grants, parameterized read/write queries, and static mounts across supported Python releases, proving each view can execute only its declared database operations.
 - **Standalone Static Sites and Single-Page Applications (SPAs):** Serve static directories, fingerprinted `immutable` bundles, conditional `ETag` requests, and SPA history-mode index fallbacks **with neither Python nor PHP installed**, strictly confining file access to the declared root and blocking path traversal (`..`), symlinks, dotfiles, and source-file leaks.
 
 ---
@@ -21,7 +21,7 @@ Focused non-E2E tests exist **only** for self-contained language, protocol, and 
 
 - **System packages (`apt` and `dnf`):** Install Blastit on Debian/Ubuntu and Fedora/RHEL through the setup script and signed package repositories, and immediately run `blastit dev`, `blastit check`, `blastit fmt`, and `blastit-lsp`.
 - **Unprivileged user-space and Alpine installs:** Install standalone releases without root privileges in user space and on Alpine Linux across `x86_64` and `arm64` (`glibc` and `musl`), rejecting tampered archives on checksum mismatch.
-- **Project-pinned Python and PHP installs with safe CLI handoff:** Add Blastit to a Python project (`uv` or `pip`, Python 3.12+ for CLI/CI commands and 3.13–3.14 for WSGI apps) or a PHP project (`composer`), with the global `blastit` command automatically delegating to the project-pinned binary when permissions are safe and refusing untrusted or group/world-writable paths.
+- **Project-pinned Python and PHP installs with safe CLI handoff:** Add Blastit to a Python project (`uv` or `pip`, Python 3.12+ for CLI/CI commands and 3.13–3.15 for WSGI apps (3.16 on the nightly channel)) or a PHP project (`composer`), with the global `blastit` command automatically delegating to the project-pinned binary when permissions are safe and refusing untrusted or group/world-writable paths.
 
 ---
 

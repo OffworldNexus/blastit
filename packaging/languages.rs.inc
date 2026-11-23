@@ -1,4 +1,4 @@
-// The one Rust reader of `packaging/languages.tsv` (`MB.67.3`).
+// The one Rust reader of `packaging/languages.tsv` (`MB.67.3`, `MB.75.1`).
 //
 // An include-only fragment, not a crate: every `build.rs` and every freshness
 // test spells
@@ -10,7 +10,7 @@
 // (`scripts/languages.py`). `std` only, on purpose: a build script must not drag
 // a dependency into `Cargo.lock`.
 
-/// One language row: the five tab-separated fields of one non-comment line.
+/// One language row: the six tab-separated fields of one non-comment line.
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Row {
@@ -19,6 +19,8 @@ struct Row {
     slug: String,
     deb_runtime: String,
     rpm_runtime: String,
+    /// The `channels` column, verbatim: `stable`, `nightly` or `stable nightly`.
+    channels: String,
 }
 
 /// The `slug` column: the shim's file-name infix (`php84`, `py314`).
@@ -33,11 +35,37 @@ impl Row {
     fn digits(&self) -> String {
         digits(&self.version)
     }
+
+    /// Whether this row ships in `channel` (`"stable"` or `"nightly"`).
+    ///
+    /// This is the one *selection* rule, used by packaging/docs generators. The
+    /// Rust runtime never calls it: the same binary serves every channel, so its
+    /// tables are all-row (see `rows_of`/`versions`).
+    fn in_channel(&self, channel: &str) -> bool {
+        self.channels.split(' ').any(|declared| declared == channel)
+    }
+}
+
+/// Whether `row` ships in `channel`, for a caller holding `&Row`.
+#[allow(dead_code)]
+fn in_channel(row: &Row, channel: &str) -> bool {
+    row.in_channel(channel)
 }
 
 /// The header a valid file starts with (its first non-comment line).
 #[allow(dead_code)]
-const LANGUAGE_HEADER: [&str; 5] = ["language", "version", "slug", "deb-runtime", "rpm-runtime"];
+const LANGUAGE_HEADER: [&str; 6] = [
+    "language",
+    "version",
+    "slug",
+    "deb-runtime",
+    "rpm-runtime",
+    "channels",
+];
+
+/// The only legal `channels` values: the two channels, or both with `stable` first.
+#[allow(dead_code)]
+const CHANNEL_COMBINATIONS: [&str; 3] = ["stable", "nightly", "stable nightly"];
 
 /// The names the TSV reserves for the row-less core package and its header.
 #[allow(dead_code)]
@@ -45,9 +73,10 @@ const RESERVED_LANGUAGES: [&str; 3] = ["core", "blastit", "language"];
 
 /// Parses `text`, or names every problem in file order.
 ///
-/// The rules are the ones `scripts/languages.py` states: a header line, five
+/// The rules are the ones `scripts/languages.py` states: a header line, six
 /// fields per row, `<major>.<minor>` versions, `[a-z0-9_]` slugs, no `(none)`
-/// runtime for a shim, no spec/control syntax in a `Recommends:` value, and no
+/// runtime for a shim, no spec/control syntax in a `Recommends:` value, a
+/// `channels` value of `stable`, `nightly` or `stable nightly`, and no
 /// package or slug twice.
 #[allow(dead_code)]
 fn parse(text: &str) -> Result<Vec<Row>, String> {
@@ -73,10 +102,10 @@ fn parse(text: &str) -> Result<Vec<Row>, String> {
             }
             continue;
         }
-        if fields.len() != 5 {
+        if fields.len() != 6 {
             problems.push(format!(
-                "{number}: {} fields, a row is exactly 5 \
-                 (language<TAB>version<TAB>slug<TAB>deb-runtime<TAB>rpm-runtime)",
+                "{number}: {} fields, a row is exactly 6 \
+                 (language<TAB>version<TAB>slug<TAB>deb-runtime<TAB>rpm-runtime<TAB>channels)",
                 fields.len()
             ));
             continue;
@@ -87,6 +116,7 @@ fn parse(text: &str) -> Result<Vec<Row>, String> {
             slug: fields[2].to_string(),
             deb_runtime: fields[3].to_string(),
             rpm_runtime: fields[4].to_string(),
+            channels: fields[5].to_string(),
         };
         let package = format!("blastit-{}-{}", row.language, row.version);
         let parts: Vec<&str> = row.version.split('.').collect();
@@ -116,6 +146,18 @@ fn parse(text: &str) -> Result<Vec<Row>, String> {
                 "{number}: {:?} is not a language ({} are reserved)",
                 row.language,
                 RESERVED_LANGUAGES.join(", ")
+            ));
+        }
+        if !CHANNEL_COMBINATIONS.contains(&row.channels.as_str()) {
+            problems.push(format!(
+                "{number}: {package} has channels {:?}; expected one of {} (space-separated, \
+                 `stable` first, never empty, never repeated)",
+                row.channels,
+                CHANNEL_COMBINATIONS
+                    .iter()
+                    .map(|value| format!("{value:?}"))
+                    .collect::<Vec<String>>()
+                    .join(", ")
             ));
         }
         for (field, value) in [

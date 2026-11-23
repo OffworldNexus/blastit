@@ -353,8 +353,11 @@ def expected(rows: list[languages.Language], version: str) -> dict[Path, str]:
 
 def _usage() -> str:
     return (
-        "usage: scripts/gen_language_blocks.py [--write|--check]\n"
+        "usage: scripts/gen_language_blocks.py [--channel stable|nightly] "
+        "[--write|--check]\n"
         "\n"
+        "  --channel CH  the release channel the blocks render: stable (the\n"
+        "                default, and what the site documents) or nightly\n"
         "  --write   rewrite the marked blocks in docs/install.md and\n"
         "            docs/install.sh from packaging/languages.tsv (the download\n"
         "            sample's version comes from Cargo.toml via scripts/version.sh)\n"
@@ -366,18 +369,39 @@ def _usage() -> str:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     mode = "check"
-    for arg in args:
+    channel = languages.DEFAULT_CHANNEL
+    index = 0
+    while index < len(args):
+        arg = args[index]
         if arg in ("-h", "--help"):
             sys.stdout.write(_usage())
             return 0
         if arg in ("--write", "--check"):
             mode = arg[2:]
-            continue
-        sys.stderr.write(f"generated-blocks: unknown argument {arg}\n{_usage()}")
+        elif arg == "--channel" or arg.startswith("--channel="):
+            if arg == "--channel":
+                index += 1
+                if index >= len(args):
+                    sys.stderr.write(
+                        f"generated-blocks: --channel needs stable|nightly\n{_usage()}"
+                    )
+                    return 2
+                channel = args[index]
+            else:
+                channel = arg.partition("=")[2]
+        else:
+            sys.stderr.write(f"generated-blocks: unknown argument {arg}\n{_usage()}")
+            return 2
+        index += 1
+    if channel not in languages.CHANNELS:
+        sys.stderr.write(
+            f"generated-blocks: unknown channel {channel!r}; expected one of "
+            f"{', '.join(languages.CHANNELS)}\n{_usage()}"
+        )
         return 2
 
     try:
-        rows = languages.load()
+        rows = languages.rows_in_channel(languages.load(), channel)
         files = expected(rows, workspace_version())
     except languages.LanguageError as error:
         sys.stderr.write(f"generated-blocks: {error}\n")

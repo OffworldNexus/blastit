@@ -36,6 +36,14 @@ use self::minor::{minor_of, python_home, read_pyvenv};
 /// re-exported here so the discovery's own call sites spell one path.
 pub use crate::SUPPORTED_MINORS;
 
+/// The CPython minors a **stable** install ships a shim for, newest first.
+///
+/// The preference order the development boot's interpreter search walks
+/// (`MB.75`): the runtime accepts every declared minor ([`SUPPORTED_MINORS`]),
+/// but a stable release packages no nightly-only shim, so auto-picking one would
+/// refuse a boot the shipped artifacts cannot satisfy.
+pub use crate::PREFERRED_MINORS;
+
 /// What a `blastit dev`/`blastit check` boot read before it chose to discover.
 ///
 /// This is the only carrier of `$VIRTUAL_ENV`, `PATH` and
@@ -313,7 +321,13 @@ fn search(directories: &[PathBuf]) -> Option<PathBuf> {
     // exists on the runner while `/usr/bin/python3` is 3.12, and a 3.12 pick would
     // only be refused one step later. The generic names stay last, so an
     // old-only host still gets `UnsupportedMinor`, not `NoInterpreter`.
-    let names: Vec<String> = SUPPORTED_MINORS
+    //
+    // The preference is the **stable** set (`PREFERRED_MINORS`, `MB.75`): a stable
+    // install ships no nightly-only shim, so a `python3.16` a `uv` run happened to
+    // leave on `PATH` must not outrank the 3.15 the stable packages really serve.
+    // The minor is only *preferred* here — `SUPPORTED_MINORS` still accepts it when
+    // a project names it.
+    let names: Vec<String> = PREFERRED_MINORS
         .into_iter()
         .map(|minor| format!("python3.{minor}"))
         .chain(["python3".to_owned(), "python".to_owned()])

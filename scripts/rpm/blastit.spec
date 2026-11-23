@@ -1,4 +1,4 @@
-# Packs a staged Blastit bundle (`make install PREFIX=<dir>`) as seven RPM
+# Packs a staged Blastit bundle (`make install PREFIX=<dir>`) as eight RPM
 # packages (`universal-distribution.md` §6.1, `MB.65`).
 #
 # `scripts/build-rpm.sh` drives this spec; it defines `blastit_version`,
@@ -6,7 +6,7 @@
 # package — `blastit_glibc_<tag>`/`blastit_libgcc_<tag>`: the floor
 # `scripts/check-portable-elf.sh --max-glibc` measured **for that package's own
 # ELFs** and whether its measured `DT_NEEDED` set needs `libgcc_s.so.1`. The tags
-# are `core`, `py313`, `py314`, `php83`, `php84`, `php85`, `php86`. The spec's
+# are `core`, `py313`, `py314`, `py315`, `php83`, `php84`, `php85`, `php86`. The spec's
 # only job is to move that tree into the buildroot and declare those measured
 # relationships; it never compiles anything.
 #
@@ -31,12 +31,12 @@
 #
 # Every shim package — `blastit-python-*` and `blastit-php-*` — carries the
 # matching distro runtime as a **`Recommends:`**, exactly as
-# `scripts/build-deb.sh`'s control files do (`Recommends: python3.14` /
-# `Recommends: libphp8.6-embed` there, `Recommends: python3.14` /
+# `scripts/build-deb.sh`'s control files do (`Recommends: python3.15` /
+# `Recommends: libphp8.6-embed` there, `Recommends: python3.15` /
 # `Recommends: php-embedded` here, because RPM distributions name no interpreter
 # package per minor). RPM distributions cannot back a hard requirement: Rocky 9
-# has **no** `python3.14` (it ships 3.9) and its `php-embedded` is 8.0, so
-# `Requires: python3.14` or `Requires: php-embedded` would make the shim package
+# has **no** `python3.15` (it ships 3.9) and its `php-embedded` is 8.0, so
+# `Requires: python3.15` or `Requires: php-embedded` would make the shim package
 # uninstallable on a distribution the release still supports. `Recommends:`
 # states the intent, shows in `dnf info`, is pulled by a plain `dnf install` when
 # available and skipped when it is not, and leaves the operator in control. A
@@ -77,6 +77,8 @@
 %{!?blastit_libgcc_py313:%global blastit_libgcc_py313 0}
 %{!?blastit_glibc_py314:%global blastit_glibc_py314 2.17}
 %{!?blastit_libgcc_py314:%global blastit_libgcc_py314 0}
+%{!?blastit_glibc_py315:%global blastit_glibc_py315 2.17}
+%{!?blastit_libgcc_py315:%global blastit_libgcc_py315 0}
 %{!?blastit_glibc_php83:%global blastit_glibc_php83 2.17}
 %{!?blastit_libgcc_php83:%global blastit_libgcc_php83 0}
 %{!?blastit_glibc_php84:%global blastit_glibc_php84 2.17}
@@ -135,6 +137,22 @@ Recommends: python3.14
 
 %description -n blastit-python-3.14
 The libblastit_py314 shim lets blastit run Python WSGI views on CPython 3.14. It is
+loaded into the host interpreter by the blastit binary; install it together with
+blastit, never instead of it.
+
+%package -n blastit-python-3.15
+Summary: CPython 3.15 view shim for blastit
+Requires: glibc >= %{blastit_glibc_py315}
+%if "%{blastit_libgcc_py315}" == "1"
+Requires: libgcc
+%endif
+Requires: blastit = %{version}-%{release}
+AutoReq: no
+AutoProv: no
+Recommends: python3.15
+
+%description -n blastit-python-3.15
+The libblastit_py315 shim lets blastit run Python WSGI views on CPython 3.15. It is
 loaded into the host interpreter by the blastit binary; install it together with
 blastit, never instead of it.
 
@@ -227,6 +245,10 @@ cp -a %{blastit_bundle}/usr %{buildroot}/
 %files -n blastit-python-3.14
 %defattr(-,root,root,-)
 %{_datadir}/blastit/lib/libblastit_py314-*.so
+
+%files -n blastit-python-3.15
+%defattr(-,root,root,-)
+%{_datadir}/blastit/lib/libblastit_py315-*.so
 
 %files -n blastit-php-8.3
 %defattr(-,root,root,-)

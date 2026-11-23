@@ -97,6 +97,11 @@ fn emit(python: &[&Row], minor: u32, artifact: bool) -> String {
     );
 
     out.push_str("/// Whether `minor` is one of the CPython minors `packaging/languages.tsv`\n/// declares.\n");
+    // The arms are the table's rows, spelled one by one on purpose: a range
+    // pattern would accept a minor between two declared ones (a withdrawn 3.14
+    // between 3.13 and 3.15 must stay a refusal), so the lint that suggests
+    // collapsing them is wrong here.
+    out.push_str("#[allow(clippy::manual_range_patterns)]\n");
     let _ = writeln!(
         out,
         "pub const fn supports_py_minor(minor: u32) -> bool {{\n    matches!(minor, {})\n}}\n",

@@ -36,6 +36,21 @@ else (no package registry, no publishing secret in CI):
 - Fedora/RHEL/Rocky/Alma — `https://rpm.offworld-nexus.app/stable/$basearch/`,
   or `/nightly/$basearch/`.
 
+The sixth column of [`languages.tsv`](languages.tsv) states which channel(s) a
+row ships in (`stable`, `nightly`, or `stable nightly`), so a version can lead the
+nightly channel before it is in a stable release:
+
+| Channel | Package set |
+| --- | --- |
+| `stable` | the core package plus every row whose `channels` names `stable` (`blastit-python-3.13/3.14/3.15`, the four PHP shims): 8 packages, 32 artifacts |
+| `nightly` | the same plus every nightly-only row (`blastit-python-3.16` built from `cpython-3.16.0a2`): 9 packages |
+
+The **runtime** is not channel-scoped: one `blastit` binary selects any minor the
+table declares, so a nightly-only shim is loadable from a stable build too.
+`packaging/package-set.sh --channel nightly`, the builders' `--channel`, and the
+generators' `--channel` are what keep a stable artifact set free of a
+nightly-only package.
+
 Nightly stamps sort strictly below the release they lead up to, so a stable
 `apt-get upgrade` never picks a nightly and an RPM upgrade nightly→stable is an
 upgrade in both directions:

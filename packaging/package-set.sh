@@ -54,10 +54,20 @@
 # depending on it, so a pyenv or source-built interpreter, or a distro without
 # that minor, is not refused — the shim is simply inert until one is present.
 # `blastit-python-3.13` works the same way.
+#
+# Channels (`MB.75`): the set is derived **per channel**, `stable` by default, so
+# a stable release is core + the stable rows and a nightly is that plus the
+# nightly-only ones (`blastit-python-3.16`). `--check` validates both channels and
+# the count a stable release promises.
 set -euo pipefail
 
 BLASTIT_PACKAGE_SET_SOURCED=1
 BLASTIT_PACKAGE_SET_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# What a `stable` release promises: the core package, CPython 3.13/3.14/3.15 and
+# the four PHP shims (`MB.75`). A stable set that is not this count means a row
+# changed channel without this file's knowledge.
+BLASTIT_PACKAGE_STABLE_COUNT=8
 
 # The version rows are derived from the canonical TSV (`MB.67`); this file only
 # adds the row-less core package `blastit` on top of them.
@@ -70,6 +80,24 @@ source "$BLASTIT_PACKAGE_SET_ROOT/packaging/languages.sh"
 source "$BLASTIT_PACKAGE_SET_ROOT/scripts/version.sh"
 
 # --- readers ----------------------------------------------------------------
+
+# The release channel this set is derived for (`stable` unless `--channel`, or
+# `$BLASTIT_LANGUAGES_CHANNEL`, says otherwise).
+blastit_package_channel() {
+    printf '%s\n' "$BLASTIT_LANGUAGES_CHANNEL"
+}
+
+# Run a function with `$BLASTIT_LANGUAGES_CHANNEL` temporarily set to `$1`, then
+# restore it: the two-channel check below derives each set through the one loader.
+with_channel() {
+    local channel=$1
+    shift
+    local saved=$BLASTIT_LANGUAGES_CHANNEL status=0
+    BLASTIT_LANGUAGES_CHANNEL=$channel
+    "$@" || status=$?
+    BLASTIT_LANGUAGES_CHANNEL=$saved
+    return $status
+}
 
 # The version a package set is built at: `Cargo.toml`'s
 # `[workspace.package] version`, never a copy.
@@ -184,10 +212,96 @@ validate_table() {
 # so there is no copy to diff here: its freshness gate is the generator's own
 # `--check`, run by `scripts/platform_matrix.py --check`.
 
+# Both channels, on top of `validate_table`'s one-channel pass: each channel's
+# derived set must be internally consistent, the two together must name every
+# declared row exactly once, and `stable` must be the count a release promises.
+validate_channels() {
+    local problems=0 channel stable_names nightly_names distinct total
+    for channel in $BLASTIT_LANGUAGES_CHANNELS; do
+        with_channel "$channel" validate_table || problems=$((problems + 1))
+    done
+    stable_names=$(with_channel stable blastit_package_names)
+    nightly_names=$(with_channel nightly blastit_package_names)
+    distinct=$(printf '%s\n%s\n' "$stable_names" "$nightly_names" | sort -u | grep -c '')
+    total=$(blastit_language_all_rows | cut -f1 | sort -u | grep -c '')
+    [ "$distinct" -eq "$total" ] ||
+        { echo "package-set: the two channels name $distinct packages, but packaging/languages.tsv declares $total (core included)" >&2; problems=$((problems + 1)); }
+    [ "$(printf '%s\n' "$stable_names" | grep -c '')" -eq "$BLASTIT_PACKAGE_STABLE_COUNT" ] ||
+        { echo "package-set: stable names $(printf '%s\n' "$stable_names" | grep -c '') packages, but a release promises $BLASTIT_PACKAGE_STABLE_COUNT (check the channels column in packaging/languages.tsv)" >&2; problems=$((problems + 1)); }
+    [ "$problems" -eq 0 ]
+}
+
 # --- CLI (only when executed, never when sourced) ---------------------------
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-    case "${1:-}" in
+    _usage() {
+        cat >&2 <<'USAGE'
+usage: packaging/package-set.sh [--channel stable|nightly] --names|--rows|--shims|--version|--check
+
+  --channel CH the release channel the set is derived for: stable (the default)
+             or nightly. `--check` validates both channels whatever this is.
+  --names   the binary package names, one per line (core first; language
+            versions come from packaging/languages.tsv)
+  --rows    name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-runtime
+  --shims   <package><TAB><glob> for every package that ships a shim
+  --version the workspace version a set is built at: Cargo.toml's
+            `[workspace.package] version`, through scripts/version.sh
+  --check   validate both channels of this table and packaging/languages.tsv,
+            and that `stable` is the promised 8 packages; the generated
+            scripts/rpm/blastit.spec has its own gate, `scripts/rpm/gen_spec.py
+            --check`, run by `scripts/platform_matrix.py --check`
+
+The file is also sourceable: `source packaging/package-set.sh` then
+`blastit_package_names`, `blastit_package_shims`, `blastit_package_owners FILE`,
+`blastit_package_deb_runtime NAME`, `blastit_package_rpm_weak NAME`,
+`blastit_package_version`, `blastit_package_channel` — with
+`$BLASTIT_LANGUAGES_CHANNEL` (default `stable`) selecting the channel.
+USAGE
+    }
+    command=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --channel)
+                if [ "$#" -lt 2 ]; then
+                    echo "package-set: --channel needs stable|nightly" >&2
+                    _usage
+                    exit 2
+                fi
+                BLASTIT_LANGUAGES_CHANNEL=$2
+                shift 2
+                ;;
+            --channel=*)
+                BLASTIT_LANGUAGES_CHANNEL=${1#--channel=}
+                shift
+                ;;
+            -h | --help)
+                _usage
+                exit 0
+                ;;
+            --names | --rows | --shims | --version | --check)
+                command=$1
+                shift
+                ;;
+            *)
+                echo "package-set: unknown argument '$1'" >&2
+                _usage
+                exit 2
+                ;;
+        esac
+    done
+    case " $BLASTIT_LANGUAGES_CHANNELS " in
+        *" $BLASTIT_LANGUAGES_CHANNEL "*) ;;
+        *)
+            echo "package-set: unknown channel '$BLASTIT_LANGUAGES_CHANNEL'; expected stable or nightly" >&2
+            _usage
+            exit 2
+            ;;
+    esac
+    [ -n "$command" ] || {
+        _usage
+        exit 2
+    }
+    case "$command" in
         --names)
             validate_table || exit 1
             blastit_package_names
@@ -204,29 +318,8 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
             blastit_package_shims
             ;;
         --check)
-            validate_table || exit 1
-            echo "package-set: ok ($(blastit_package_rows | grep -c '') packages; packaging/languages.tsv is consistent)"
+            validate_channels || exit 1
+            echo "package-set: ok ($(blastit_package_rows | grep -c '') $(blastit_package_channel) packages, $(with_channel nightly blastit_package_names | grep -c '') nightly; packaging/languages.tsv is consistent)"
             ;;
-        -h | --help)
-            cat >&2 <<'USAGE'
-usage: packaging/package-set.sh --names|--rows|--shims|--version|--check
-
-  --names   the binary package names, one per line (core first; language
-            versions come from packaging/languages.tsv)
-  --rows    name<TAB>kind<TAB>shim-glob<TAB>deb-runtime<TAB>rpm-runtime
-  --shims   <package><TAB><glob> for every package that ships a shim
-  --version the workspace version a set is built at: Cargo.toml's
-            `[workspace.package] version`, through scripts/version.sh
-  --check   validate this table and packaging/languages.tsv; the generated
-            scripts/rpm/blastit.spec has its own gate, `scripts/rpm/gen_spec.py
-            --check`, run by `scripts/platform_matrix.py --check`
-
-The file is also sourceable: `source packaging/package-set.sh` then
-`blastit_package_names`, `blastit_package_shims`, `blastit_package_owners FILE`,
-`blastit_package_deb_runtime NAME`, `blastit_package_rpm_weak NAME`,
-`blastit_package_version`.
-USAGE
-            ;;
-        *) echo "usage: packaging/package-set.sh --names|--rows|--shims|--version|--check" >&2; exit 2 ;;
     esac
 fi

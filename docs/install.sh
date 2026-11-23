@@ -431,7 +431,7 @@ detect_shims() { # <deb|rpm>
     shims=; missing_python=; missing_php=; hinted_python=
     # The shim versions ship with Blastit; this list is generated — do not edit.
     # BEGIN generated:languages
-    for minor in 3.13 3.14; do
+    for minor in 3.13 3.14 3.15; do
         if runtime_installed "$fmt" "python$minor"; then
             shims="$shims blastit-python-$minor"
         else

@@ -44,8 +44,10 @@ import languages  # noqa: E402
 
 SPEC = SCRIPT_DIR / "blastit.spec"
 
-_USAGE = """usage: scripts/rpm/gen_spec.py [--stdout|--write|--check]
+_USAGE = """usage: scripts/rpm/gen_spec.py [--channel stable|nightly] [--stdout|--write|--check]
 
+  --channel CH  the release channel the spec is rendered for: stable (the
+             default, and the shape the committed spec has) or nightly
   --stdout   print the generated spec (the default)
   --write    rewrite scripts/rpm/blastit.spec from packaging/languages.tsv
   --check    exit 1 with a unified diff when the committed spec is stale, and
@@ -400,17 +402,39 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     modes = {"--stdout": "stdout", "--write": "write", "--check": "check"}
     mode = "stdout"
-    for arg in args:
+    channel = languages.DEFAULT_CHANNEL
+    index = 0
+    while index < len(args):
+        arg = args[index]
         if arg in ("-h", "--help"):
             sys.stdout.write(_USAGE)
             return 0
-        if arg not in modes:
+        if arg in modes:
+            mode = modes[arg]
+        elif arg == "--channel" or arg.startswith("--channel="):
+            if arg == "--channel":
+                index += 1
+                if index >= len(args):
+                    sys.stderr.write(
+                        f"gen_spec: --channel needs stable|nightly\n{_USAGE}"
+                    )
+                    return 2
+                channel = args[index]
+            else:
+                channel = arg.partition("=")[2]
+        else:
             sys.stderr.write(f"gen_spec: unknown argument {arg}\n{_USAGE}")
             return 2
-        mode = modes[arg]
+        index += 1
+    if channel not in languages.CHANNELS:
+        sys.stderr.write(
+            f"gen_spec: unknown channel {channel!r}; expected one of "
+            f"{', '.join(languages.CHANNELS)}\n{_USAGE}"
+        )
+        return 2
 
     try:
-        rows = languages.load()
+        rows = languages.rows_in_channel(languages.load(), channel)
     except languages.LanguageError as error:
         sys.stderr.write(f"gen_spec: {error}\n")
         return 1
