@@ -14,8 +14,8 @@
 #
 # `scripts/build-deb.sh` measures `blastit`+`blastit-lsp` for the core and each
 # shim for its own package, and this spec is the RPM mirror of that: the core
-# `Requires: glibc >= %{blastit_glibc_core}` (2.34 on today's artifacts) and
-# `blastit-php-8.6` `Requires: glibc >= %{blastit_glibc_php86}` (2.17), so a
+# `Requires: glibc >= %%{blastit_glibc_core}` (2.34 on today's artifacts) and
+# `blastit-php-8.6` `Requires: glibc >= %%{blastit_glibc_php86}` (2.17), so a
 # shim does not demand a newer glibc than its own bytes need. `libgcc` is
 # declared only where the measured `DT_NEEDED` set carries `libgcc_s.so.1`
 # (the binaries and the CPython shims; not the PHP shims).
@@ -45,6 +45,20 @@
 # `__os_install_post` is disabled so the payload stays byte-identical to the
 # bundle that was measured: a strip or a build-id relink would make the floor a
 # fact about a file nobody measured.
+#
+# # The packager writes the files, the package owns them
+#
+# `rpmbuild` runs as an ordinary user — a GitHub runner is one, and the
+# local container build drops to the caller with `setpriv` — so the install
+# step cannot `chown` the buildroot, and never tries: ownership is package
+# *metadata*, not a filesystem property of whoever built it. Each files
+# block therefore opens with a `defattr(-,root,root,-)` line, which records
+# every payload entry as `root:root` in the RPM header; the mode still comes
+# from the staged tree, because `scripts/build-rpm.sh` stages binaries `0755`
+# and modules `0644` with `install -m`. `scripts/build-rpm.sh` asserts the
+# recorded ownership of every payload entry after the build, and the container
+# build asserts it again before it copies each RPM out, so a spec that ever
+# loses that `defattr` line fails where it is written, not on a runner.
 
 %global _build_id_links none
 %global debug_package %{nil}
@@ -196,11 +210,9 @@ with blastit and a PHP 8.6 embedded build, never instead of it.
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
 cp -a %{blastit_bundle}/usr %{buildroot}/
-# `cp -a` keeps the staging user; a package's files belong to root whoever built
-# it (and `scripts/test_packages.sh` asserts `root:root` from the RPM header).
-chown -R 0:0 %{buildroot}
 
 %files
+%defattr(-,root,root,-)
 %{_bindir}/blastit
 %{_bindir}/blastit-lsp
 %{_datadir}/blastit/LICENSE
@@ -209,19 +221,25 @@ chown -R 0:0 %{buildroot}
 %{_datadir}/blastit/lib/blastit-lsp
 
 %files -n blastit-python-3.13
+%defattr(-,root,root,-)
 %{_datadir}/blastit/lib/libblastit_py313-*.so
 
 %files -n blastit-python-3.14
+%defattr(-,root,root,-)
 %{_datadir}/blastit/lib/libblastit_py314-*.so
 
 %files -n blastit-php-8.3
+%defattr(-,root,root,-)
 %{_datadir}/blastit/lib/libblastit_php83-*.so
 
 %files -n blastit-php-8.4
+%defattr(-,root,root,-)
 %{_datadir}/blastit/lib/libblastit_php84-*.so
 
 %files -n blastit-php-8.5
+%defattr(-,root,root,-)
 %{_datadir}/blastit/lib/libblastit_php85-*.so
 
 %files -n blastit-php-8.6
+%defattr(-,root,root,-)
 %{_datadir}/blastit/lib/libblastit_php86-*.so

@@ -15,8 +15,14 @@
 # `scripts/rpm/blastit.spec` is checked in and only moves the staged tree into the
 # buildroot. `rpmbuild` runs on the host when it exists; otherwise the same spec is
 # built inside a `rockylinux:9` container (the builder distribution, not the
-# supported floor). The RPMs' payload is never installed on the host — the proof
-# is `e2e/run_packaging.py --leg rpm` inside a container.
+# supported floor). Both paths run it as the calling user, never as root: the
+# container installs the builder and stages the inputs as root, then drops to
+# `HOST_UID`/`HOST_GID` with `setpriv` for `rpmbuild`, exactly as
+# `scripts/build-package-bundle.sh` does. That is also why `%install` never
+# `chown`s the buildroot: the payload's owner is the spec's `%defattr`, and every
+# RPM is checked after the build that each of its payload entries records
+# `root:root`. The RPMs' payload is never installed on the host — the proof is
+# `e2e/run_packaging.py --leg rpm` inside a container.
 #
 # The staged tree is asserted against §6.1 before anything is written
 # (`scripts/check-bundle-layout.sh`: every shim `packaging/languages.tsv`
@@ -379,7 +385,11 @@ else
     echo "build-rpm: no rpmbuild on this host, building $spec inside $builder_image"
     # The container gets the staged tree and the spec read-only and writes only the
     # finished RPMs into `--out`: nothing is installed on the host, and the build
-    # distribution never becomes the package's floor.
+    # distribution never becomes the package's floor. Installing `rpm-build` and
+    # staging the inputs is root's job; the build itself is not — it drops to the
+    # caller with `setpriv`, mirroring `scripts/build-package-bundle.sh`, so a
+    # `%install` that tried to `chown` the buildroot fails here exactly as it does
+    # on a GitHub runner (which is how `MB.69` found it).
     defines_text=$(printf '%s\n' "${defines[@]}")
     docker run --rm \
         --env "SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH" \
@@ -394,32 +404,51 @@ else
             if ! command -v rpmbuild >/dev/null 2>&1; then
                 dnf -y -q install rpm-build >/dev/null
             fi
-            top=/work/rpmbuild
+            command -v setpriv >/dev/null 2>&1 || {
+                echo "error: no setpriv (util-linux): the build cannot drop to uid $HOST_UID" >&2
+                exit 1
+            }
+            work=/work
+            top=$work/rpmbuild
             mkdir -p "$top"/BUILD "$top"/BUILDROOT "$top"/RPMS "$top"/SOURCES "$top"/SPECS "$top"/SRPMS
-            args=()
-            while IFS= read -r line; do
-                [ -n "$line" ] || continue
-                args+=(--define "$line")
-            done <<< "$BLASTIT_RPM_DEFINES"
-            rpmbuild -bb /spec/blastit.spec \
-                --define "_topdir $top" \
-                --define "blastit_version $1" \
-                --define "blastit_release $2" \
-                --define "blastit_bundle /bundle" \
-                "${args[@]}" \
-                --target "$3"
-            copied=()
-            for pkg in "$top"/RPMS/*/*.rpm; do
-                [ -e "$pkg" ] || continue
-                cp "$pkg" /out/
-                copied+=("/out/$(basename "$pkg")")
-                rpm -qp --requires "$pkg" | sed "s/^/container-requires: /"
-                rpm -qp --recommends "$pkg" | sed "s/^/container-recommends: /"
-            done
-            # The build ran as root; only the files this run copied belong to the
-            # caller who owns --out (a stale RPM in that directory is not ours).
-            [ "${#copied[@]}" -eq 0 ] ||
-                chown "$HOST_UID:$HOST_GID" "${copied[@]}"
+            mkdir -p "$work/spec" "$work/home"
+            cp -a /bundle "$work/bundle"
+            cp /spec/blastit.spec "$work/spec/blastit.spec"
+            cat > "$work/build.sh" <<\INNER
+set -euo pipefail
+top=/work/rpmbuild
+args=()
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    args+=(--define "$line")
+done <<< "$BLASTIT_RPM_DEFINES"
+rpmbuild -bb /work/spec/blastit.spec \
+    --define "_topdir $top" \
+    --define "blastit_version $1" \
+    --define "blastit_release $2" \
+    --define "blastit_bundle /work/bundle" \
+    "${args[@]}" \
+    --target "$3"
+for pkg in "$top"/RPMS/*/*.rpm; do
+    [ -e "$pkg" ] || continue
+    if ! listing=$(rpm -qp --qf "[%{FILEUSERNAME}:%{FILEGROUPNAME} %{FILENAMES}\n]" "$pkg"); then
+        echo "error: cannot read the payload of $pkg: rpm -qp failed" >&2
+        exit 1
+    fi
+    foreign=$(printf "%s\n" "$listing" | awk "!/^root:root /" | head -n 5 | tr "\n" " ")
+    [ -z "$foreign" ] ||
+        { echo "error: $pkg records payload entries that are not root:root: $foreign" >&2; exit 1; }
+    echo "container-payload-ownership: $(basename "$pkg"): every payload entry is root:root"
+    cp "$pkg" /out/
+    rpm -qp --requires "$pkg" | sed "s/^/container-requires: /"
+    rpm -qp --recommends "$pkg" | sed "s/^/container-recommends: /"
+done
+INNER
+            chmod 0755 "$work/build.sh"
+            chown -R "$HOST_UID:$HOST_GID" "$work"
+            exec setpriv --reuid "$HOST_UID" --regid "$HOST_GID" --clear-groups \
+                env HOME="$work/home" \
+                bash -euo pipefail "$work/build.sh" "$1" "$2" "$3"
         ' _ "$version" "$release" "$rpm_arch"
 fi
 
@@ -439,11 +468,27 @@ done
     die "$shims shim(s) in the bundle; packaging/languages.tsv declares $shim_count"
 printf 'build-rpm: %s package(s) in %s (%s shim(s), %s python module(s))\n' \
     "${#package_names[@]}" "$out" "$shims" "$modules"
+
+# --- the header records root:root, whoever built it ---------------------------
+# This is the assertion `%defattr(-,root,root,-)` exists for (`MB.69`): the build
+# runs as an ordinary user, so the only thing that makes the installed files
+# root-owned is the metadata. A payload entry that is not root:root is a spec
+# bug, not a builder difference, and fails here by name. The container build runs
+# the same check before it copies each RPM, since `rockylinux` has `rpm` too; this
+# host-side pass only repeats it where `rpm` is installed, and an unreadable
+# payload is a failure, never an empty pass.
 if command -v rpm >/dev/null 2>&1; then
     for name in "${package_names[@]}"; do
-        rpm -qp --requires "$out/$name-$version-$release.$rpm_arch.rpm" |
-            sed "s/^/build-rpm: requires ($name): /"
-        rpm -qp --recommends "$out/$name-$version-$release.$rpm_arch.rpm" |
-            sed "s/^/build-rpm: recommends ($name): /"
+        built="$out/$name-$version-$release.$rpm_arch.rpm"
+        if ! listing=$(rpm -qp --qf '[%{FILEUSERNAME}:%{FILEGROUPNAME} %{FILENAMES}\n]' "$built"); then
+            die "cannot read the payload of $built: rpm -qp failed"
+        fi
+        foreign=$(printf '%s\n' "$listing" | awk '!/^root:root /' | head -n 5)
+        [ -z "$foreign" ] ||
+            die "$built records payload entries that are not root:root: $(printf '%s\n' "$foreign" | tr '\n' ' ')every %files block needs %defattr(-,root,root,-)"
+        rpm -qp --requires "$built" | sed "s/^/build-rpm: requires ($name): /"
+        rpm -qp --recommends "$built" | sed "s/^/build-rpm: recommends ($name): /"
     done
+else
+    echo "build-rpm: no rpm command on this host, so the payload ownership of each RPM was asserted by the builder or is left to e2e/run_packaging.py --leg rpm (the install image re-checks every payload entry is root:root)"
 fi

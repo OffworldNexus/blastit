@@ -9,6 +9,15 @@ all derived from one row of `packaging/languages.tsv` per package. The plumbing
 that is not per-language — `Name:`/`Version:`/`Release:`, the measured-floor
 rationale, `%install`, the core `%files` — stays verbatim in this file.
 
+Two invariants are the generator's, not the packaging scripts' (`MB.69`):
+
+* `%install` never `chown`s the buildroot: ownership is package *metadata*, so
+  every `%files` block opens with `%defattr(-,root,root,-)` and a non-root
+  `rpmbuild` (a GitHub runner, the local container's `setpriv` step) records the
+  same `root:root` payload a root build would.
+* A `#` comment never carries a live `%{…}`: RPM expands macros inside comments
+  and warns about it, so the prose escapes them as `%%{…}`.
+
 Stdlib only, and it reads the table through the one loader (`scripts/languages.py`)
 like every other consumer:
 
@@ -85,9 +94,9 @@ def _prose_one_floor(rows: list[languages.Language]) -> str:
         "each\n"
         "# shim for its own package, and this spec is the RPM mirror of that: the "
         "core\n"
-        "# `Requires: glibc >= %{blastit_glibc_core}` (2.34 on today's artifacts) "
+        "# `Requires: glibc >= %%{blastit_glibc_core}` (2.34 on today's artifacts) "
         "and\n"
-        f"# `{php.package}` `Requires: glibc >= %{{blastit_glibc_{php.slug}}}` "
+        f"# `{php.package}` `Requires: glibc >= %%{{blastit_glibc_{php.slug}}}` "
         "(2.17), so a\n"
         "# shim does not demand a newer glibc than its own bytes need. `libgcc` is\n"
         "# declared only where the measured `DT_NEEDED` set carries "
@@ -137,6 +146,38 @@ def _prose_one_floor(rows: list[languages.Language]) -> str:
     )
 
 
+def _prose_ownership() -> str:
+    """The header's statement of the non-root invariant (`MB.69`).
+
+    Prose names the steps plainly ("the install step", "each files block", "a
+    `defattr(...)` line") so `^%install` stays greppable in the generated file;
+    the only doubled sigils left are the macro *names*, which RPM would otherwise
+    expand inside a comment.
+    """
+    return (
+        "# # The packager writes the files, the package owns them\n"
+        "#\n"
+        "# `rpmbuild` runs as an ordinary user — a GitHub runner is one, and the\n"
+        "# local container build drops to the caller with `setpriv` — so the "
+        "install\n"
+        "# step cannot `chown` the buildroot, and never tries: ownership is "
+        "package\n"
+        "# *metadata*, not a filesystem property of whoever built it. Each files\n"
+        "# block therefore opens with a `defattr(-,root,root,-)` line, which "
+        "records\n"
+        "# every payload entry as `root:root` in the RPM header; the mode still "
+        "comes\n"
+        "# from the staged tree, because `scripts/build-rpm.sh` stages binaries "
+        "`0755`\n"
+        "# and modules `0644` with `install -m`. `scripts/build-rpm.sh` asserts the\n"
+        "# recorded ownership of every payload entry after the build, and the "
+        "container\n"
+        "# build asserts it again before it copies each RPM out, so a spec that "
+        "ever\n"
+        "# loses that `defattr` line fails where it is written, not on a runner."
+    )
+
+
 _GLOBALS = """\
 %global _build_id_links none
 %global debug_package %{nil}
@@ -170,17 +211,19 @@ This package ships the interpreter-free server, the native language server, the
 licence and the pure-Python helper package; the language shims are the
 `blastit-python-*` and `blastit-php-*` subpackages beside it."""
 
+# `cp -a` keeps the staging user on disk; the payload's *recorded* owner is the
+# `%defattr` of every `%files` block below, which is what a non-root build needs
+# and what the installed files get.
 _INSTALL = """\
 %install
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
-cp -a %{blastit_bundle}/usr %{buildroot}/
-# `cp -a` keeps the staging user; a package's files belong to root whoever built
-# it (and `scripts/test_packages.sh` asserts `root:root` from the RPM header).
-chown -R 0:0 %{buildroot}"""
+cp -a %{blastit_bundle}/usr %{buildroot}/"""
 
+# `-` for the mode: each entry keeps the mode the staging tree gave it.
 _CORE_FILES = """\
 %files
+%defattr(-,root,root,-)
 %{_bindir}/blastit
 %{_bindir}/blastit-lsp
 %{_datadir}/blastit/LICENSE
@@ -324,6 +367,7 @@ def _files(row: languages.Language) -> str:
     return "\n".join(
         [
             f"%files -n {row.package}",
+            "%defattr(-,root,root,-)",
             f"%{{_datadir}}/blastit/lib/libblastit_{row.slug}-*.so",
         ]
     )
@@ -333,8 +377,9 @@ def render(rows: list[languages.Language]) -> str:
     """The whole spec, byte for byte, from the declared language rows."""
     blocks = [
         # The header is one contiguous comment run: the generated intro, a `#`
-        # separator, then the measured-floor rationale (lines 1-47 of the file).
-        _intro(rows) + "\n#\n" + _prose_one_floor(rows),
+        # separator, then the measured-floor rationale and the ownership
+        # invariant (`MB.69`).
+        _intro(rows) + "\n#\n" + _prose_one_floor(rows) + "\n#\n" + _prose_ownership(),
         _GLOBALS,
         _VARIABLES,
         _floors(rows),
