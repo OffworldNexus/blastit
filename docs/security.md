@@ -155,7 +155,8 @@ only from a peer in `BLASTIT_TRUSTED_PROXIES`; both presets name `*`,
 ## The full harness
 
 The end-to-end tests drive real frameworks over real sockets: `run_apps.py` runs
-a Symfony-shaped PHP front controller, Django and Flask on CPython 3.13 and 3.14,
+a Symfony-shaped PHP front controller, Django and Flask on the CPython minors the
+[install table](install.md#one-package-per-language-version) lists,
 and a bare static container against a real PostgreSQL 18, proving per-view grants,
 the same raw SQL refused in the wrong view, and a password that appears nowhere in
 a worker or a response.

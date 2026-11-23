@@ -4477,3 +4477,104 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-21T15:55 [MB.64] (lead) base 6b43c548720237a81652881d7ae37580f7bb7bcd
 - 2026-11-21T16:12 [MB.64] (lead) status active -> done
 - 2026-11-21T16:12 [MB.64] (lead) commit 15b1620ad865afaffe8151389a9d463258d6e1a9
+- 2026-11-22T23:00 [MB.65] (conductor) created (task) Offworld Nexus packaging pipeline + one Debian package per interpreter version
+- 2026-11-22T23:00 AUTOPILOT on by conductor offworld packaging migration in MB.65
+- 2026-11-22T23:03 [MB.65] (lead) status ready -> active
+- 2026-11-22T23:03 [MB.65] (lead) attempt 1/3 started
+- 2026-11-22T23:03 [MB.65] (lead) base 9e23b163504f12f56433cd41afee71011f46b0fc
+- 2026-11-22T23:03 [MB.65] (lead) owner naming: blastit-<lang>-<version> (blastit-python-3.13, blastit-php-8.4); version 0.2.1 bump + publish-pypi explicit workflow_dispatch folded in
+- 2026-11-22T23:07 [MB.65] (unknown) edited fields
+- 2026-11-22T23:31 [MB.65] (unknown) edited fields
+- 2026-11-22T23:43 [MB.65] (unknown) edited fields
+- 2026-11-22T23:52 [MB.65] (lead) status active -> done
+- 2026-11-22T23:52 [MB.65] (lead) commit 3841a5a4ebc3dbef52edd89cc00c5d49e6af9c4b
+- 2026-11-22T23:53 AUTOPILOT off by conductor release PR v0.2.1 awaiting human merge
+- 2026-11-22T23:53 HUMAN H-020 opened by conductor (node MB)
+- 2026-11-22T23:53 HUMAN H-019 closed by conductor
+- 2026-11-23T00:13 HUMAN H-020 closed by conductor
+- 2026-11-23T00:13 HUMAN H-021 opened by conductor (node MB)
+- 2026-11-23T00:23 [MB.66] (conductor) created (task) Shim packages recommend (not depend on) the distro language runtime
+- 2026-11-23T00:23 AUTOPILOT on by conductor dependency level fix in MB.66
+- 2026-11-23T00:24 [MB.66] (lead) status ready -> active
+- 2026-11-23T00:24 [MB.66] (lead) attempt 1/3 started
+- 2026-11-23T00:24 [MB.66] (lead) base 6f2f1c105bc5aba1ecb9d6b982e856736af0151e
+- 2026-11-23T00:24 [MB.66] (unknown) edited fields
+- 2026-11-23T00:35 [MB.66] (lead) status active -> review
+- 2026-11-23T00:35 [MB.66] (lead) proof: rpm python shims are symmetric with php: blastit-python-3.13-0.2.1-1.x86_64.rpm -qpR = blastit = 0.2.1-1, glibc >= 2.34, libgcc (no python), --recommends
+- 2026-11-23T00:39 [MB.66] (lead) REVIEW: review-arch PASS zero blockers (6 MINORs rejected: core negative assertion sufficient, redundant table guard, substring recommends, spec-diff covered by
+- 2026-11-23T00:39 [MB.66] (lead) status review -> done
+- 2026-11-23T00:40 [MB.66] (lead) commit cd9712dfdac8d15450568b3ec725645f53ccbf87
+- 2026-11-23T00:43 [MB.67] (conductor) created (epic) Canonical supported-language table: one file, everything derives
+- 2026-11-23T00:43 AUTOPILOT on by conductor canonical language table in MB.67
+- 2026-11-23T00:44 [MB.67.1] (planner) created (task) Canonical languages.tsv + bash/Python loaders + package-set derives
+- 2026-11-23T00:44 [MB.67.2] (planner) created (task) CI & packaging matrices + RPM spec generated from languages.tsv
+- 2026-11-23T00:44 [MB.67.3] (planner) created (task) Rust compile-time language tables (view-php, php-sapi, py-shim)
+- 2026-11-23T00:44 [MB.67.4] (planner) created (task) Generated docs/installer blocks, e2e + php 8.7 propagation proof
+- 2026-11-23T00:45 [MB.67.1] (lead) status ready -> active
+- 2026-11-23T00:45 [MB.67.1] (lead) attempt 1/3 started
+- 2026-11-23T00:45 [MB.67.1] (lead) base 6401e5f7e9a08348efd19d32fdb1d5062e3a72b0
+- 2026-11-23T00:47 [MB.67] (unknown) edited fields
+- 2026-11-23T00:47 [MB.67] (unknown) edited fields
+- 2026-11-23T00:47 [MB.67.5] (unknown) created (task) Workspace version has one source (Cargo.toml), every fixture and doc example derives
+- 2026-11-23T00:47 [MB.67.3] (unknown) edited fields
+- 2026-11-23T00:51 [MB.67.6] (unknown) created (task) Test fixtures: honour TMPDIR and keep socket paths under SUN_LEN
+- 2026-11-23T00:51 [MB.67] (unknown) edited fields
+- 2026-11-23T00:51 [MB.67.6] (lead) status ready -> active
+- 2026-11-23T00:51 [MB.67.6] (lead) attempt 1/3 started
+- 2026-11-23T00:51 [MB.67.6] (lead) base 6401e5f7e9a08348efd19d32fdb1d5062e3a72b0
+- 2026-11-23T00:57 [MB.67.1] (lead) status active -> done
+- 2026-11-23T00:57 [MB.67.6] (lead) status active -> done
+- 2026-11-23T00:57 [MB.67.7] (unknown) created (task) Packaging builders & shell helpers derive counts and minors from the loaders
+- 2026-11-23T00:57 [MB.67.2] (unknown) edited fields
+- 2026-11-23T00:57 [MB.67.3] (unknown) edited fields
+- 2026-11-23T00:57 [MB.67] (unknown) edited fields
+- 2026-11-23T00:57 [MB.67.2] (lead) status ready -> active
+- 2026-11-23T00:57 [MB.67.2] (lead) attempt 1/3 started
+- 2026-11-23T00:57 [MB.67.2] (lead) base bc5d013171f0f4f96ad5ec58578b567b22d6c597
+- 2026-11-23T01:03 [MB.67.2] (lead) status active -> review
+- 2026-11-23T01:03 [MB.67.7] (lead) status ready -> active
+- 2026-11-23T01:03 [MB.67.7] (lead) attempt 1/3 started
+- 2026-11-23T01:03 [MB.67.7] (lead) base bc5d013171f0f4f96ad5ec58578b567b22d6c597
+- 2026-11-23T01:06 [MB.67.2] (unknown) edited fields
+- 2026-11-23T01:06 [MB.67.2] (lead) REVIEW FIX: SMOKE_PYTHONS dedupe+floor; packag-set shim cross-check by row slug; drop tautological leg loops; PACKAGE_SET per-format copy; spec prose example fr
+- 2026-11-23T01:10 [MB.67.2] (lead) status review -> done
+- 2026-11-23T01:10 [MB.67.7] (lead) status active -> done
+- 2026-11-23T01:10 [MB.67.3] (lead) status ready -> active
+- 2026-11-23T01:10 [MB.67.3] (lead) attempt 1/3 started
+- 2026-11-23T01:10 [MB.67.3] (lead) base 6de380ebaeaf2bb12f887d46c1e4e75258c5ed9d
+- 2026-11-23T01:19 [MB.67.3] (lead) status active -> review
+- 2026-11-23T01:23 [MB.67.3] (lead) REVIEW FIX: assert NEWEST_PHP + PY_MINOR_<digits>; drop abi re-export; slug-sourced shim names; py-shim strict only for artifact; SUPPORTED_PY_MINORS load-beari
+- 2026-11-23T01:23 [MB.67] (unknown) edited fields
+- 2026-11-23T01:23 [MB.67.4] (unknown) edited fields
+- 2026-11-23T01:28 [MB.67.3] (lead) status review -> done
+- 2026-11-23T01:29 [MB.67.4] (lead) status ready -> active
+- 2026-11-23T01:29 [MB.67.4] (lead) attempt 1/3 started
+- 2026-11-23T01:29 [MB.67.4] (lead) base 375a89e284daa6739d45a712c7bd2081c804f6ec
+- 2026-11-23T01:37 [MB.67.4] (lead) status active -> review
+- 2026-11-23T01:39 [MB.67.4] (unknown) edited fields
+- 2026-11-23T01:39 [MB.67] (unknown) edited fields
+- 2026-11-23T01:39 [MB.67.4] (lead) REVIEW FIX: frameworks/index list, Debian/Ubuntu repo commands, rpm Recommends column, python3-absent guard, e2e README overclaim, 7-package docstrings, help po
+- 2026-11-23T01:42 [MB.67.4] (lead) status review -> done
+- 2026-11-23T01:42 [MB.67.5] (unknown) edited fields
+- 2026-11-23T01:42 [MB.67.5] (lead) status ready -> active
+- 2026-11-23T01:42 [MB.67.5] (lead) attempt 1/3 started
+- 2026-11-23T01:42 [MB.67.5] (lead) base 815e5d8dc021931f02f68786fc68541f2a5fcb35
+- 2026-11-23T01:49 [MB.67.5] (unknown) edited fields
+- 2026-11-23T01:49 [MB.67] (unknown) edited fields
+- 2026-11-23T01:49 [MB.67.5] (lead) REVIEW FIX: generate BLASTIT_DEFAULT_VERSION; RELEASING pip example; e2e/install_matrix usage; packaging/README worked examples
+- 2026-11-23T01:53 [MB.67.5] (lead) status active -> done
+- 2026-11-23T01:54 [MB.67] (lead) status ready -> active
+- 2026-11-23T01:54 [MB.67] (lead) attempt 1/3 started
+- 2026-11-23T01:56 [MB.67] (lead) status active -> done
+- 2026-11-23T02:18 [MB.67.4] (unknown) edited fields
+- 2026-11-23T02:18 [MB.67] (unknown) edited fields
+- 2026-11-23T02:18 [MB.67.4] (lead) CI FIX: probe expected php_minor code 803 vs digits sets; sdist missing packaging/languages.{tsv,rs.inc}
+- 2026-11-23T02:53 [MB.67.7] (unknown) edited fields
+- 2026-11-23T02:53 [MB.67] (unknown) edited fields
+- 2026-11-23T02:53 [MB.67.7] (lead) CI FIX: standalone-runtime-check greps stale NoInterpreter sentence; version-agnostic guard
+- 2026-11-23T02:53 [MB.67.7] (unknown) edited fields
+- 2026-11-23T02:53 [MB.67] (unknown) edited fields
+- 2026-11-23T03:15 [MB.67.7] (unknown) edited fields
+- 2026-11-23T03:15 [MB.67] (unknown) edited fields
+- 2026-11-23T03:15 [MB.67.7] (lead) CI FIX: publish-pypi musl block apostrophes; add workflow inline-script syntax gate
+- 2026-11-23T03:15 [MB.67] (unknown) edited fields

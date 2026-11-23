@@ -28,7 +28,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # blastit-view embeds CPython (pyo3); every job builds it.
+  # blastit-view embeds CPython (pyo3); every job builds it. This pin is that
+  # build interpreter — a tool floor, not the list of CPython minors Blastit
+  # ships shims for (`packaging/languages.tsv`, read through its loader).
   PYTHON_VERSION: "3.13"
 
 jobs:
@@ -81,18 +83,18 @@ jobs:
       # so a `cargo test` that never built them passes only by accident.
       # `make python-runtime` builds both minors and fails closed
       # (`PY_SAPI_REQUIRE_ALL=1`) when an interpreter is missing, and
-      # `uv python install` is what puts CPython 3.13 *and* 3.14 on the runner
-      # (setup-python above pins 3.13 for PYO3 only).
+      # `uv python install` is what puts every declared CPython minor on the
+      # runner (setup-python above pins 3.13 for PYO3 only, a tool floor).
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the CPython minors the shims need
         run: |
           set -euo pipefail
-          uv python install 3.13 3.14
+          uv python install $(bash packaging/languages.sh --py-minors | tr '\n' ' ')
           # `uv python install` puts CPython under `$UV_PYTHON_INSTALL_DIR`
           # (`~/.local/share/uv`), not on `PATH`, so every consumer that asks for
           # `/usr/local/bin/python3.13` finds nothing (`MB.49`). The link is the
           # interpreter `uv` just installed, never a second one.
-          for minor in 3.13 3.14; do
+          for minor in $(bash packaging/languages.sh --py-minors); do
             sudo --non-interactive ln -sfn "$(uv python find --no-project "$minor")" "/usr/local/bin/python$minor"
           done
       - name: Build the per-minor CPython shims (fails closed)
@@ -226,12 +228,12 @@ jobs:
       - run: echo "PYO3_PYTHON=${{ steps.python.outputs.python-path }}" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The two WSGI legs run on the host's CPython 3.13/3.14 and load the
+      # The two WSGI legs run on the host's declared CPython minors and load the
       # per-minor shims, and `run_apps.py` mounts the release binary into every
       # container: build both before the suite starts.
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the CPython minors the shims need
-        run: uv python install 3.13 3.14
+        run: uv python install $(bash packaging/languages.sh --py-minors | tr '\n' ' ')
       - name: Build the per-minor CPython shims (fails closed)
         run: make python-runtime
       - name: Build the binary under test
@@ -303,8 +305,12 @@ jobs:
       - name: The image really has no Python
         run: |
           set -euo pipefail
-          docker run --rm debian:trixie-slim sh -eu -c '
-            for candidate in python python3 python3.13 python3.14; do
+          # The probe order is the table's minors beside the two bare names: the
+          # day a distribution ships one of them, this job says which rather than
+          # the check quietly becoming an inspection.
+          candidates="$(bash packaging/languages.sh --py-minors | sed 's/^/python/')"
+          docker run --rm --env "PY_CANDIDATES=$candidates" debian:trixie-slim sh -eu -c '
+            for candidate in python python3 $PY_CANDIDATES; do
               if command -v "$candidate" >/dev/null 2>&1; then
                 echo "error: debian:trixie-slim now ships $candidate at $(command -v "$candidate")" >&2
                 exit 1
@@ -433,7 +439,7 @@ jobs:
       # (`MB.47.2`).
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Install the CPython minors the shims need
-        run: uv python install 3.13 3.14
+        run: uv python install $(bash packaging/languages.sh --py-minors | tr '\n' ' ')
       - name: Build the per-minor CPython shims (fails closed)
         run: make python-runtime
       - name: Build the wheel

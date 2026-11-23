@@ -18,8 +18,8 @@ install or boot command:
 
 | Story | Workflow job | Driver |
 |---|---|---|
-| §2 PHP 8.3/8.4/8.5/8.6, per-view grants, faults, `php2shell` | `php-sapi.yml` `§2 PHP … (arch-libc)` (16 matrix legs) | `make php-sapi-e2e` + `make rs-test-php-image` (`e2e_dev`) |
-| §2 Django & Flask on CPython 3.13/3.14 | `py-sapi.yml` `§2 WSGI views…` and `ci.yml` `§2 apps…` | `run_apps.py --legs wsgi` (and the whole suite in `ci.yml`) |
+| §2 PHP, per-view grants, faults, `php2shell` | `php-sapi.yml` `§2 PHP … (arch-libc)` (one leg per `packaging/languages.tsv` PHP minor × arch × libc) | `make php-sapi-e2e` + `make rs-test-php-image` (`e2e_dev`) |
+| §2 Django & Flask on CPython | `py-sapi.yml` `§2 WSGI views…` and `ci.yml` `§2 apps…` | `run_apps.py --legs wsgi` (and the whole suite in `ci.yml`) |
 | §2 static site with no interpreter | `ci.yml` `§2 apps…` | `run_apps.py` (`static`) |
 | §3 `.deb`/`.rpm` in every distribution | `packages.yml` / `nightly.yml` `§3 … installs the … package` | `scripts/install_matrix.sh` → `run_packaging.py --leg deb` / `--leg rpm` |
 | §3 `py3-none` wheel in every CPython | `wheels.yml`, `publish-pypi.yml`, `ci.yml` | `run_packaging.py --leg wheel` (via `.github/actions/build-wheel`) |
@@ -162,13 +162,25 @@ command: `packages.yml` (`--leg deb` / `--leg rpm` through
 `publish-pypi.yml` (`--leg install` and `--leg alpine` against the release
 archives), and `wheels.yml` / `.github/actions/build-wheel` (`--leg wheel`).
 
+The **shim and package names this driver asserts** come from
+`packaging/languages.tsv` at run time — this driver, `php_sapi_probe.py` and
+`universal_binary.py` read it through `scripts/languages.py`, and each prints
+what it derived with `--print-legs` (no Docker, no build), so the derivation is
+provable on its own. The host runtime each Docker leg *provisions*
+(`libpython3.13`, `libphp8.4-embed`) is a named fixture: the leg proves the
+installer offers exactly the shim that runtime satisfies, so withdrawing such a
+row means changing that fixture deliberately, not just the table.
+
 ```console
 $ make e2e-packaging                                 # every leg
 $ uv run --no-project e2e/run_packaging.py --leg composer
 $ uv run --no-project e2e/run_packaging.py \
-    --deb dist/blastit_0.2.0_amd64.deb --rpm dist/blastit-0.2.0-1.x86_64.rpm \
-    --wheel dist/blastit-0.2.0-py3-none-manylinux_2_28_x86_64.whl
+    --deb dist/blastit_<version>_amd64.deb --rpm dist/blastit-<version>-1.x86_64.rpm \
+    --wheel dist/blastit-<version>-py3-none-manylinux_2_28_x86_64.whl
 ```
+
+`<version>` is `Cargo.toml`'s `[workspace.package] version` — the release the
+artifacts were built from.
 
 | Leg | What it installs | What it proves |
 |---|---|---|

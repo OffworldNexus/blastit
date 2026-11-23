@@ -10,13 +10,14 @@
 #     dynamic loader, on musl `libc.musl-<arch>` and libgcc_s — and that one file
 #     serves every backend, because each runtime is `dlopen`ed: embedded PHP from
 #     the distro's NTS `libphp` plus the PHP shims below, a WSGI app from the
-#     host's CPython 3.13/3.14 plus the CPython shims below, and `static` mounts
+#     host's CPython (any minor `packaging/languages.tsv` declares) plus the
+#     CPython shims below, and `static` mounts
 #     (`ADR-0017` decision 1, `ADR-0016` decision 6). There is no Python-less
 #     variant of this artifact any more.
 #   * `libblastit_php<digits>-<arch>-<libc>.so` — one PHP shim per minor this leg
 #     has built *and* probed (`scripts/platform_matrix.py` is the list).
-#   * `libblastit_py3<digits>-<arch>-<libc>.so` — the `3.13` and `3.14` CPython
-#     shims this leg built, so a WSGI view boots out of the box instead of
+#   * `libblastit_py3<digits>-<arch>-<libc>.so` — one CPython shim per declared
+#     minor this leg built, so a WSGI view boots out of the box instead of
 #     asking the operator to copy one in (`MB.47.2`).
 #   * `LICENSE`, and `SHA256SUMS` over everything in the archive.
 #
@@ -25,9 +26,10 @@
 # executable and nowhere else — no `PATH`, no environment variable
 # (`crates/blastit-py-sapi/src/discovery/mod.rs`) — which is exactly where this
 # script puts them, so `install.sh --user` and an Alpine `.tar.gz` install both
-# serve Python WSGI. `--require-py-shims` (default `2`) and `--require-shims`
-# (PHP) fail closed when a family is missing: an archive that cannot serve a
-# declared backend is refused loudly, never shipped half-working.
+# serve Python WSGI. `--require-py-shims` (default: the number of CPython rows
+# `packaging/languages.tsv` declares) and `--require-shims` (PHP) fail closed when
+# a family is missing: an archive that cannot serve a declared backend is refused
+# loudly, never shipped half-working.
 #
 # `scripts/check-portable-elf.sh` runs on the binary before packaging: no
 # `libpython`/`libphp` `NEEDED` entry, no `RPATH`/`RUNPATH` into a build host.
@@ -56,8 +58,9 @@ shim_dir="${PHP_SAPI_OUT:-$root/target/php-sapi}"
 py_shim_dir="${PY_SAPI_OUT:-$root/target/py-sapi}"
 require_shims=0
 # A tarball with no CPython shim cannot serve a WSGI view, and that refusal
-# belongs to the build rather than to a user's first request (`MB.47.2`).
-require_py_shims=2
+# belongs to the build rather than to a user's first request (`MB.47.2`). The
+# default is one shim per CPython row `packaging/languages.tsv` declares.
+require_py_shims=$(bash packaging/languages.sh --py-minors | grep -c '' || true)
 max_glibc=""
 builder_image=""
 
@@ -281,7 +284,7 @@ if [ "$py" -eq 0 ]; then
     echo "  host's CPython, never a linked interpreter (\`ADR-0017\` decision 1)" >&2
     exit 1
 fi
-echo "build-standalone: blastit-py-sapi present (the dlopen loader: a WSGI view also needs the host's CPython 3.13/3.14 and that minor's shim beside the binary)"
+echo "build-standalone: blastit-py-sapi present (the dlopen loader: a WSGI view also needs the host's CPython minor (packaging/languages.tsv) and that minor's shim beside the binary)"
 
 php=$(printf '%s\n' "$tree" | grep -c '^blastit-view-php v' || true)
 if [ "$php" -eq 0 ]; then
@@ -458,6 +461,10 @@ if [ -n "$py_minors" ]; then
     done
 fi
 
+# One worked example per package manager uses the newest minor this archive
+# staged, never a literal: the table owns the list.
+example_minor=$(printf '%s\n' $py_minors | sort -V | tail -n 1)
+
 # What a WSGI view really needs, once per archive (both libc branches share it).
 # The archive removes the "copy the shim beside the binary" step, not the
 # interpreter requirement: stage 0 `dlopen`s the *host's* `libpython3.1x.so` and
@@ -472,10 +479,10 @@ interpreter is still the host's, and its boot refusal names the reason:
 \`NoLibpython\` when that CPython was built without a shared \`libpython3.1x.so\`.
 The app's own dependencies have to be installed for that interpreter too.
 
-    apt install libpython3.13      # Debian/Ubuntu
-    apk add python3                # Alpine
-    dnf install python3-libs       # Fedora/RHEL
-    uv python install 3.14         # anywhere, via uv"
+    apt install libpython$example_minor   # Debian/Ubuntu
+    apk add python3                       # Alpine
+    dnf install python3-libs              # Fedora/RHEL
+    uv python install $example_minor      # anywhere, via uv"
 else
     wsgi_contract="**This archive carries no CPython shim**, so a WSGI view refuses at boot
 (\`NoShim\`). Rebuild the archive on a leg that builds one (\`scripts/build-standalone.sh\`

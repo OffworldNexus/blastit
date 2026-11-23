@@ -1,7 +1,7 @@
 # Getting started
 
 Blastit is a **Linux** application server: three steps from a `./Blastfile`, no root, no `sudo`.
-One binary serves Python WSGI, embedded NTS PHP (8.3, 8.4, 8.5 and 8.6) and static sites.
+One binary serves Python WSGI, embedded NTS PHP (one shim per `libphp` minor — the [install table](install.md#one-package-per-language-version) lists them) and static sites.
 
 ## 1. Install
 
@@ -10,7 +10,7 @@ $ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
 ```
 
 The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM (Fedora/RHEL/Rocky/Alma)
-repository and installs `blastit`, or puts the release archive in `~/.local/bin` instead.
+repository and installs `blastit` plus a shim per runtime it finds, or the archive under `~/.local`.
 
 !!! warning "musl hosts need one more package"
 
@@ -20,7 +20,6 @@ repository and installs `blastit`, or puts the release archive in `~/.local/bin`
 ??? note "Escape hatches — one line each"
 
     * `--nightly` — the nightly repository component instead of the releases.
-    * `--mirror forgejo` — the mirror at `https://forge.offworld.nexus` instead of Cloudsmith.
     * `--user` — no root: the archive under `~/.local`, then the `PATH` line it prints.
     * `--develop [ref]` — the branch build CI made, with the digest you pass in `BLASTIT_SHA256`.
     * Alpine/musl, or neither `apt-get` nor `dnf` — the installer takes the `.tar.gz` itself;
@@ -119,8 +118,9 @@ flowchart LR
 ??? note "Linux targets, one wheel, one binary"
 
     Linux x86_64 and aarch64, glibc and musl: one `py3-none` wheel per platform runs
-    `blastit check`, `fmt` and `fold` on any CPython 3.12+; serving WSGI needs CPython
-    3.13 or 3.14 on the host. The same binary serves PHP on the NTS `libphp` and static sites.
+    `blastit check`, `fmt` and `fold` on any CPython 3.12+; serving WSGI needs one of the
+    CPython minors the [install table](install.md#one-package-per-language-version) lists on
+    the host. The same binary serves PHP on the NTS `libphp` and static sites.
 
 ## Where next
 

@@ -50,26 +50,26 @@ static = ["blastit-scheduler/static"]
 coverage = []
 
 [dependencies]
-blastit-dbproxy = { version = "0.2.0", path = "../blastit-dbproxy" }
-blastit-env = { version = "0.2.0", path = "../blastit-env" }
-blastit-events = { version = "0.2.0", path = "../blastit-events" }
-blastit-frame = { version = "0.2.0", path = "../blastit-frame" }
-blastit-http = { version = "0.2.0", path = "../blastit-http" }
-blastit-ingress = { version = "0.2.0", path = "../blastit-ingress" }
-blastit-lsp = { version = "0.2.0", path = "../blastit-lsp" }
-blastit-manifest = { version = "0.2.0", path = "../blastit-manifest" }
+blastit-dbproxy = { version = "0.2.1", path = "../blastit-dbproxy" }
+blastit-env = { version = "0.2.1", path = "../blastit-env" }
+blastit-events = { version = "0.2.1", path = "../blastit-events" }
+blastit-frame = { version = "0.2.1", path = "../blastit-frame" }
+blastit-http = { version = "0.2.1", path = "../blastit-http" }
+blastit-ingress = { version = "0.2.1", path = "../blastit-ingress" }
+blastit-lsp = { version = "0.2.1", path = "../blastit-lsp" }
+blastit-manifest = { version = "0.2.1", path = "../blastit-manifest" }
 # The per-minor CPython shim's ABI, discovery and loader (`MB.42`): stage 0
 # resolves the interpreter and pins `libpython` + the shim, and stage 1 adopts
 # the two descriptors. Optional, so a build without `python` carries none of it.
-blastit-py-sapi = { version = "0.2.0", path = "../blastit-py-sapi", optional = true }
+blastit-py-sapi = { version = "0.2.1", path = "../blastit-py-sapi", optional = true }
 # The PHP half of a view (`MB.36.5`): the embedded worker, the boot's discovery
 # gate, the `(st_dev, st_ino)` pins and the probe child. Optional, so a build
 # without `php` links neither this nor `blastit-php-sapi` (`R13`).
-blastit-view-php = { version = "0.2.0", path = "../blastit-view-php", optional = true }
-blastit-scheduler = { version = "0.2.0", path = "../blastit-scheduler", default-features = false }
-blastit-sqlpolicy = { version = "0.2.0", path = "../blastit-sqlpolicy" }
-blastit-sys = { version = "0.2.0", path = "../blastit-sys" }
-blastit-view = { version = "0.2.0", path = "../blastit-view", default-features = false }
+blastit-view-php = { version = "0.2.1", path = "../blastit-view-php", optional = true }
+blastit-scheduler = { version = "0.2.1", path = "../blastit-scheduler", default-features = false }
+blastit-sqlpolicy = { version = "0.2.1", path = "../blastit-sqlpolicy" }
+blastit-sys = { version = "0.2.1", path = "../blastit-sys" }
+blastit-view = { version = "0.2.1", path = "../blastit-view", default-features = false }
 # The Python half of a view is the per-minor shim, `dlopen`ed at stage 1 (design
 # §1.1/§1.2): this crate links no `pyo3` and no `libpython`, and the frozen ABI
 # it speaks is `blastit-py-sapi`'s.

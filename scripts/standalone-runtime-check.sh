@@ -36,7 +36,23 @@ if [ "$require_no_python" -eq 1 ]; then
     # different sentence and would read as a mystery failure. Everything `dev`
     # discovery reads is refused here, not only `PATH`
     # (`crates/blastit/src/stage0/project_python.rs`).
-    for candidate in python python3 python3.13 python3.14; do
+    # The bare names plus any versioned interpreter, found by globbing each PATH
+    # entry for a `python[0-9]*` executable: the check spells no minor, so adding
+    # or removing one in `packaging/languages.tsv` cannot make it pass by accident.
+    # `*-config` are the build helpers, never an interpreter.
+    path_dirs=()
+    IFS=':' read -r -a path_dirs <<<"${PATH:-}"
+    candidates=(python python3)
+    for dir in "${path_dirs[@]}"; do
+        for found in "$dir"/python[0-9]*; do
+            [ -f "$found" ] && [ -x "$found" ] || continue
+            case "${found##*/}" in
+                *-config) continue ;;
+            esac
+            candidates+=("$found")
+        done
+    done
+    for candidate in "${candidates[@]}"; do
         if command -v "$candidate" >/dev/null 2>&1; then
             echo "error: $candidate is on PATH ($(command -v "$candidate")), so this run would not" >&2
             echo "  prove the standalone artifact works without an interpreter" >&2
@@ -236,18 +252,18 @@ if [ "$wsgi_rc" -ne 1 ]; then
     tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
     exit 1
 fi
-if ! grep -q 'no CPython 3.13 or 3.14 interpreter was found' "$work/wsgi.err" "$work/wsgi.out"; then
+if ! grep -Eq 'no CPython .* interpreter was found' "$work/wsgi.err" "$work/wsgi.out"; then
     echo "FAIL the WSGI refusal does not name the missing interpreter:" >&2
     echo "  (run this where no CPython is reachable — CI uses debian:trixie-slim)" >&2
     tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
     exit 1
 fi
-if ! grep -q 'run uv python install 3.14' "$work/wsgi.err" "$work/wsgi.out"; then
+if ! grep -Eq 'run uv python install [0-9]+\.[0-9]+' "$work/wsgi.err" "$work/wsgi.out"; then
     echo "FAIL the WSGI refusal does not say how to get an interpreter:" >&2
     tail -n 20 "$work/wsgi.out" "$work/wsgi.err" >&2
     exit 1
 fi
-echo "ok   exit 1 before binding: no CPython 3.13/3.14 (discovery names 'uv python install 3.14')"
+echo "ok   exit 1 before binding: no CPython (discovery names the 'uv python install <minor>' step)"
 if [ "$require_no_python" -eq 1 ]; then
     echo "standalone-runtime-check: 3/3 passed on a host with no CPython"
 else

@@ -1,8 +1,6 @@
 # Install
 
-Blastit is **one Linux binary** — Python WSGI, embedded NTS PHP and static sites —
-installed one way on every machine. Python and PHP apps each want their runtime on
-the host; static sites want nothing.
+Blastit installs on Linux as `blastit` plus **one shim package per language version your host runs** — Python WSGI, embedded NTS PHP and static sites all drive the same server.
 
 ```console
 $ curl -fsSL https://offworldnexus.github.io/blastit/install.sh | sh
@@ -10,81 +8,119 @@ $ blastit --version
 $ blastit dev
 ```
 
-[![hosted by Cloudsmith](https://img.shields.io/badge/hosted%20by-Cloudsmith-1f2d3d)](https://cloudsmith.io)
+!!! warning "musl hosts, and hosts without apt or dnf"
 
-Package repositories are hosted by [Cloudsmith](https://cloudsmith.io) as part of
-their free open-source plan.
+    A musl host needs `apk add libgcc` before `blastit` runs, and a distro with
+    neither `apt-get` nor `dnf` has no repository here: the installer places the
+    signed release archive under `~/.local` and prints the `PATH` line.
 
 ```mermaid
 flowchart LR
     sh["install.sh"] -- "root + apt-get/dnf" --> repo["signed APT / RPM repository"]
-    sh -- "--user · musl · no sudo" --> home["~/.local/bin + the archive"]
+    sh -- "--user · musl · no sudo" --> home["~/.local + the archive"]
     repo -- "apt-get upgrade" --> bin["blastit on PATH"]
-    home -- "re-run install.sh" --> bin
+    home -- "re-run the one-liner" --> bin
     bin --> dev["blastit dev · check · fmt"]
 ```
 
-## Managed by your package manager
+## The two signed repositories
 
-The installer's default path only adds the repository and installs the package, so
-everything afterwards is ordinary package management:
+The default path writes one source definition and lets the package manager verify every
+byte; `apt-get upgrade` / `dnf upgrade` keep both current. As root:
 
-```console
-$ sudo apt-get install blastit          # Debian, Ubuntu
-$ sudo apt-get upgrade blastit          # a later release
-$ sudo apt-get remove blastit           # and its repository line stays
+<!-- BEGIN generated:languages:apt -->
+```bash
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://apt.offworld-nexus.app/keyring.gpg -o /etc/apt/keyrings/offworld-nexus.gpg
+cat >/etc/apt/sources.list.d/offworld-nexus.sources <<'EOF'
+Types: deb
+URIs: https://apt.offworld-nexus.app
+Suites: any-distro
+Components: main
+Signed-By: /etc/apt/keyrings/offworld-nexus.gpg
+EOF
+apt-get update
+apt-get install blastit                      # server: static mounts, fmt, check work now
+py=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+case "$py" in 3.13|3.14) apt-get install "blastit-python-$py" ;; *) echo "no WSGI shim for CPython ${py:-no python3}: the table below lists the versions Blastit ships" ;; esac
+php=$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;' 2>/dev/null || true)
+case "$php" in 8.3|8.4|8.5|8.6) apt-get install "blastit-php-$php" ;; *) echo "no PHP shim for ${php:-no php}: the table below lists the versions Blastit ships" ;; esac
 ```
+<!-- END generated:languages:apt -->
 
-```console
-$ sudo dnf install blastit              # Fedora, RHEL, Rocky, Alma
-$ sudo dnf upgrade blastit
-$ sudo dnf remove blastit
+Fedora, RHEL, Rocky and Alma, as root:
+
+<!-- BEGIN generated:languages:dnf -->
+```bash
+cat >/etc/yum.repos.d/offworld-nexus.repo <<'EOF'
+[offworld-nexus]
+name=Offworld Nexus packages
+baseurl=https://rpm.offworld-nexus.app/stable/$basearch/
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://rpm.offworld-nexus.app/gpg.key
+EOF
+dnf install blastit                      # server: static mounts, fmt, check work now
+py=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+case "$py" in 3.13|3.14) dnf install "blastit-python-$py" ;; *) echo "no WSGI shim for CPython ${py:-no python3}: the table below lists the versions Blastit ships" ;; esac
+php=$(php -r 'echo PHP_MAJOR_VERSION, ".", PHP_MINOR_VERSION;' 2>/dev/null || true)
+case "$php" in 8.3|8.4|8.5|8.6) dnf install "blastit-php-$php" ;; *) echo "no PHP shim for ${php:-no php}: the table below lists the versions Blastit ships" ;; esac
 ```
+<!-- END generated:languages:dnf -->
 
-`blastit --version` prints what is installed and `blastit --help` the preset list;
-both are answered by the installed binary even inside a project that pins its own
-([which binary runs](reference/cli.md#blastit)).
+<!-- BEGIN generated:languages:sentence -->
+Shims ship for **CPython 3.13 and 3.14, and PHP 8.3, 8.4, 8.5 and 8.6**, by design: an older host interpreter is
+supported-but-unavailable, and core `blastit` still serves static mounts, `check`.
+<!-- END generated:languages:sentence -->
 
-!!! note "0.2.0 needs a recent libc"
+`nightly` is a second component — `Components: nightly` in the `.sources` file (remove it to return) or a nightly RPM `baseurl`; shims pin the exact core, so install both in one run.
 
-    0.2.0 packages require glibc 2.34+ — Debian 12+, Ubuntu 22.04+, RHEL/Rocky/Alma 9+;
-    older distributions get an apt/dnf refusal naming the libc found.
+## One package per language version
 
-## Repositories
+<!-- BEGIN generated:languages:table -->
+| Package | What it adds | `Depends` | `Recommends` (deb / rpm) |
+|---|---|---|---|
+| `blastit` | server, `blastit-lsp`, pure-Python CLI, `/usr/bin` links | measured `libc6 (>= …)`, plus `libgcc-s1` only when a shipped ELF needs it | — |
+| `blastit-python-3.13` | the WSGI shim for CPython 3.13 | `blastit (= <version>)`, measured `libc6` | `python3.13` / `python3.13` |
+| `blastit-python-3.14` | the WSGI shim for CPython 3.14 | `blastit (= <version>)`, measured `libc6` | `python3.14` / `python3.14` |
+| `blastit-php-8.3` | the PHP shim for NTS `libphp` 8.3 | `blastit (= <version>)`, measured `libc6` | `libphp8.3-embed` / `php-embedded` |
+| `blastit-php-8.4` | the PHP shim for NTS `libphp` 8.4 | `blastit (= <version>)`, measured `libc6` | `libphp8.4-embed` / `php-embedded` |
+| `blastit-php-8.5` | the PHP shim for NTS `libphp` 8.5 | `blastit (= <version>)`, measured `libc6` | `libphp8.5-embed` / `php-embedded` |
+| `blastit-php-8.6` | the PHP shim for NTS `libphp` 8.6 | `blastit (= <version>)`, measured `libc6` | `libphp8.6-embed` / `php-embedded` |
+<!-- END generated:languages:table -->
 
-| Store | Coordinates | Components |
-|---|---|---|
-| APT | `offworld-nexus/apt` on Cloudsmith | `main` (releases), `nightly` |
-| RPM | `offworld-nexus/rpm` on Cloudsmith | `rpm` (releases), `rpm-nightly` |
-| Mirror | `https://forge.offworld.nexus` | the same two, signed with its own key |
+Published for **amd64 and arm64** only, with the same names on each: core `blastit` needs no shim, and each shim depends on `blastit (= <version>)` — the release it was built against, resolved by apt/dnf and never typed by hand.
+Each shim only *recommends* its distro runtime, so `apt-get install blastit-php-8.4` still pulls `libphp8.4-embed`; a pyenv build needs the shim by name.
 
-`--nightly` switches a machine to `nightly`; re-running without it returns to
-releases. `--mirror forgejo` uses the mirror when Cloudsmith is unreachable — the
-key it imports is the mirror's, so a host that already trusts Cloudsmith adds a
-second source rather than replacing it.
+!!! note "a newer minor than the distro ships"
+
+    Debian 12 and Ubuntu 22.04 carry older PHP builds. Ubuntu:
+    `sudo add-apt-repository ppa:ondrej/php`. Debian: add a keyring-signed source
+    (`deb https://packages.sury.org/php/ bookworm main` in a `.sources` file,
+    `Signed-By` your copy of `https://packages.sury.org/php/apt.gpg`). Then
+    `sudo apt-get update` and `sudo apt-get install blastit-php-<minor>`.
 
 ## Without `curl | sh`
 
-A machine with no `curl`, or a policy against piping a script into a shell, installs
-a downloaded package directly — the repository is then yours to add:
+A machine with no `curl`, or a policy against piping a script into a shell, installs downloaded packages directly — the repository is then yours to add:
 
+<!-- BEGIN generated:version -->
 ```console
-$ sudo apt-get install ./blastit_0.2.0_amd64.deb
-$ sudo dnf install ./blastit-0.2.0-1.x86_64.rpm
+$ sudo apt-get install ./blastit_0.2.1_amd64.deb ./blastit-php-8.6_0.2.1_amd64.deb
+$ sudo dnf install ./blastit-0.2.1-1.x86_64.rpm ./blastit-php-8.6-0.2.1-1.x86_64.rpm
 ```
+<!-- END generated:version -->
 
-The installer's own steps are readable: `sh -s -- --help` on the same URL prints
-every flag, including `--prefix <dir>` for an unprivileged tree. A local package is
-verified by apt/dnf like any other, and it does not add the repository, so later
-releases arrive the way they always did.
+The installer's own steps are readable: `sh -s -- --help` on the same URL prints every flag, including `--prefix <dir>`. A local package is verified by apt/dnf and adds no repository.
+
+`blastit --version` prints what is installed and `blastit --help` the preset list, both answered by the installed binary even under a project pin ([which binary runs](reference/cli.md#which-binary)).
 
 ## Per-project pins
 
-`uv add --dev blastit` (Python) and `composer require --dev offworldnexus/blastit`
-(PHP) install a second copy inside the project. The global binary hands `dev`,
-`check`, `fmt` and `lsp` to it — `--version` and `--help` never hand off — so a
-machine install and a lockfile pin agree instead of fighting. Upgrade them with
-`uv lock --upgrade` / `composer update`, never with the installer.
+`uv add --dev blastit` (Python) and `composer require --dev offworldnexus/blastit` (PHP)
+install a second copy inside the project; the global binary hands `dev`, `check`, `fmt` and
+`lsp` to it (`--version`/`--help` never hand off), and `uv lock --upgrade` updates the pin.
 
 ## Where next
 

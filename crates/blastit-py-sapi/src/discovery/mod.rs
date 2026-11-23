@@ -21,6 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::abi::encode_py_minor;
+use crate::py_slug;
 
 mod error;
 mod minor;
@@ -30,10 +31,10 @@ pub use self::error::DiscoveryError;
 use self::minor::{minor_of, python_home, read_pyvenv};
 
 /// CPython minors a WSGI view may be served by, newest first.
-pub const SUPPORTED_MINORS: [u32; 2] = [14, 13];
-
-/// The release the refusals tell a developer to install.
-const DEFAULT_MINOR: &str = "3.14";
+///
+/// Generated from `packaging/languages.tsv` (`build.rs`, `MB.67.3`) and
+/// re-exported here so the discovery's own call sites spell one path.
+pub use crate::SUPPORTED_MINORS;
 
 /// What a `blastit dev`/`blastit check` boot read before it chose to discover.
 ///
@@ -179,11 +180,17 @@ pub fn discover(
     })
 }
 
-/// The per-minor shim file name: `libblastit_py3<m>-<arch>-<libc>.so`.
+/// The per-minor shim file name: `libblastit_<slug>-<arch>-<libc>.so`.
+///
+/// The infix is the row's `slug` column (`py_slug`), not a re-spelling of the
+/// minor, so renaming a slug in `packaging/languages.tsv` changes the file stage
+/// 0 looks for. An undeclared minor has no slug; discovery refuses it before it
+/// can ask for a shim, and the fallback keeps this function total.
 #[must_use]
 pub fn shim_file(minor: u32) -> String {
+    let infix = py_slug(minor).map_or_else(|| format!("py3{minor}"), str::to_owned);
     format!(
-        "libblastit_py3{minor}-{}-{}.so",
+        "libblastit_{infix}-{}-{}.so",
         std::env::consts::ARCH,
         libc_suffix()
     )

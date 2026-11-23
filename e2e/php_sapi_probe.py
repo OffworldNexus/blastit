@@ -59,6 +59,26 @@ DOCKERFILE = os.path.join(HERE, "php-sapi", "Dockerfile")
 DEFAULT_IMAGE = os.environ.get("PHP_SAPI_IMAGE", "blastit-php-sapi-e2e:local")
 TIMEOUT = int(os.environ.get("PHP_SAPI_TIMEOUT", "1800"))
 
+sys.path.insert(0, os.path.join(REPO, "scripts"))
+
+import languages  # noqa: E402
+import platform_matrix  # noqa: E402
+
+try:
+    # `packaging/languages.tsv`'s PHP rows decide which `php_minor` values the
+    # probe may report. The shim reports `Minor::code()` — `major * 100 + minor`,
+    # so `803` for 8.3 — never the table's digits (`"83"`), so the rows are
+    # mapped to that code here; a version leaving the table fails here too.
+    SUPPORTED_MINORS = {
+        row.version for row in languages.load() if row.language == "php"
+    }
+    EXPECTED_CODES = {
+        int(version.split(".")[0]) * 100 + int(version.split(".")[1])
+        for version in SUPPORTED_MINORS
+    }
+except languages.LanguageError as error:
+    raise SystemExit(f"php-sapi-e2e: {error}") from error
+
 # The three runs of the same binary. `inet_socket_errno` is the layer that does
 # not depend on PHP's wording: 0 = a plain `socket(AF_INET)` succeeded (no
 # filter), 1 = `EPERM` (the real `View { egress: false }` filter is installed in
@@ -352,8 +372,10 @@ def verify(report):
 
     want(report.get("abi") == 1, f"ABI version {report.get('abi')!r} is not 1")
     want(
-        str(report.get("php_minor")) in {"803", "804", "805", "806"},
-        f"php_minor {report.get('php_minor')!r} is not a supported minor",
+        report.get("php_minor") in EXPECTED_CODES,
+        f"php_minor {report.get('php_minor')!r} is not one of "
+        f"{sorted(EXPECTED_CODES)} (packaging/languages.tsv's php rows, as "
+        "Minor::code() = major*100+minor)",
     )
     want(
         str(report.get("shim_before_libphp", "")).startswith("refused"),
@@ -522,6 +544,20 @@ def verify_egress(report, case):
     return problems
 
 
+def print_legs():
+    """The probe legs `scripts/platform_matrix.py` derives, one per line.
+
+    No Docker and no build: acceptance proves the derivation (minors, shim names,
+    distro package names) against `packaging/languages.tsv` from this alone.
+    """
+    for spec in platform_matrix.shim_legs():
+        print(
+            f"{spec['minor']}\t{spec['libc']}\t{spec['arch']}\t{spec['shim']}\t"
+            f"{spec['base']}\t{spec['dev']}\t{spec['embed']}\t{spec['libphp']}\t"
+            f"{spec['suites']}"
+        )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -539,7 +575,16 @@ def main(argv=None):
     parser.add_argument(
         "--keep", action="store_true", help="do not remove the image afterwards"
     )
+    parser.add_argument(
+        "--print-legs",
+        action="store_true",
+        help="print the derived probe legs from packaging/languages.tsv and exit",
+    )
     args = parser.parse_args(argv)
+
+    if args.print_legs:
+        print_legs()
+        return 0
 
     spec = leg(args.minor, args.libc)
     print(

@@ -58,6 +58,10 @@
 //! owns — is compiled out of that one build shape. The artifact itself never
 //! sees `cfg(test)`, and every other build compiles all five modules.
 
+// The CPython minors this build ships a shim for, generated from
+// `packaging/languages.tsv` at build time (`build.rs`).
+include!(concat!(env!("OUT_DIR"), "/languages.rs"));
+
 // Both are reached only through `surface`: the request codec fills the structs
 // `boot`/`env`/`serve` consume, and every buffer helper writes the answers those
 // boundaries return. A test build that enabled `extension-module` compiles
@@ -93,11 +97,12 @@ mod surface {
 
     /// The CPython minor this shim was built for (`313`/`314`).
     ///
-    /// `build.rs` records the minor of the interpreter `PYO3_PYTHON` named, so
-    /// the same source produces a truthful `py_minor` for every artifact
-    /// `make py-sapi` writes.
+    /// `build.rs` generated `BUILT_PY_MINOR` from the interpreter
+    /// `PYO3_PYTHON` named (and, for the shipped artifact, asserted at compile
+    /// time that the TSV declares it), so the same source produces a truthful
+    /// `py_minor` for every artifact `make py-sapi` writes.
     fn built_minor() -> u32 {
-        env!("BLASTIT_PY_MINOR").parse().unwrap_or(0)
+        crate::BUILT_PY_MINOR
     }
 
     /// The ABI this shim implements: `ABI_VERSION` (`1`).

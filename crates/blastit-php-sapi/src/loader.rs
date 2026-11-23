@@ -49,7 +49,7 @@ use crate::abi::{
     AbiVersionFn, ConfigV1, FileSinkInstallFn, IniOpenedPathFn, MinorFn, OUTCOME_BAILOUT,
     OUTCOME_OK, RequestFn, RequestV1, ResultV1, SinkV1, WorkerInitFn, WorkerShutdownFn,
 };
-use crate::toolchain::{Minor, SUPPORTED_MINORS};
+use crate::toolchain::{Minor, SUPPORTED_MINORS, supported_minors_sentence};
 
 /// `RTLD_NOW` (glibc `dlfcn.h`): every undefined symbol must resolve now.
 const RTLD_NOW: c_int = 2;
@@ -181,8 +181,9 @@ impl fmt::Display for LoadError {
             Self::MinorUnsupported { found, path } => write!(
                 f,
                 "{} was built for PHP minor {found}, which this build has no ABI for \
-                 (8.3, 8.4, 8.5 and 8.6 are supported)",
-                path.display()
+                 ({} are supported)",
+                path.display(),
+                supported_minors_sentence()
             ),
             Self::MinorMismatch { shim, host } => write!(
                 f,

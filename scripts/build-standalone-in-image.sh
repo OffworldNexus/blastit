@@ -269,6 +269,8 @@ docker run --rm \
         # delimiter is backslash-quoted rather than `<<BUILD_BODY` so the body is
         # literal, and NOT apostrophe-quoted because this whole container script
         # is one single-quoted `bash -c` argument: a literal quote ends it early.
+        # For the same reason the body below carries no single quote at all, not
+        # even in a printf format: it splits the minors with positional parameters.
         # `CARGO_HOME` is a *writable* directory **seeded by copying** the
         # read-only host cache: cargo extracts `registry/src/<crate>` and
         # `git/checkouts/<dep>` into `CARGO_HOME`, so symlinking those at the
@@ -300,21 +302,22 @@ build=(--target "$TARGET" --out "$OUT" --require-shims "$OWED"
 # *where* the archive is built, never *what* it carries. What it carries is the
 # universal binary from the default features of `blastit` (`python`, `php`,
 # `static`, `ADR-0017` decision 1): no `libpython` and no `libphp` in
-# `DT_NEEDED`, and a WSGI app still served when the host has CPython 3.13/3.14
-# with its shim.
+# `DT_NEEDED`, and a WSGI app still served when the host has a declared CPython
+# minor with its shim.
 if [ -n "$SHIM_DIR" ]; then
     build+=(--shim-dir "$SHIM_DIR")
 fi
 # The per-minor CPython shims (`MB.47.2`): `scripts/build-standalone.sh` stages
 # them beside the binary so a WSGI view boots out of the box, and they are built
-# **here** so their glibc floor is the floor of this image. `manylinux_2_28`
-# ships `/opt/python/cp313-cp313` and `cp314-cp314`, so neither minor is
-# downloaded, and `make py-sapi` refuses a shim without `DT_SONAME`, an
-# undefined `Py_Initialize*` entry point or the three exports.
+# **here** so their glibc floor is the floor of this image. The minors are those
+# in `packaging/languages.tsv` (mounted at /src): `manylinux_2_28` already
+# ships `/opt/python/cp<digits>-cp<digits>` for the supported minors, so none is
+# downloaded, and `make py-sapi` refuses a shim without `DT_SONAME`, an undefined
+# `Py_Initialize*` entry point or the three exports.
 # The triple decides the shim libc, not this image: `--target` is the claim, and
 # a `-musl` triple here would otherwise get `-gnu`-named shims that staging then
 # refuses without naming the libc. `PY_SAPI_REQUIRE_ALL=1` makes a missing
-# `/opt/python/cp31x` name the interpreter instead of reporting "0 shims".
+# `/opt/python/cp<digits>` name the interpreter instead of reporting "0 shims".
 case "${TARGET##*-}" in
     gnu) shim_libc=gnu ;;
     musl) shim_libc=musl ;;
@@ -324,12 +327,29 @@ case "${TARGET##*-}" in
         ;;
 esac
 arch=${TARGET%%-*}
-make py-sapi PY_MINORS="3.14 3.13" PY_SAPI_REQUIRE_ALL=1 \
+py_minors=$(bash /src/packaging/languages.sh --py-minors)
+set -- $py_minors
+py_vars=()
+for minor in "$@"; do
+    digits=${minor//./}
+    py_vars+=("PY_SAPI_PYTHON_$digits=/opt/python/cp$digits-cp$digits/bin/python3")
+done
+[ "${#py_vars[@]}" -gt 0 ] || {
+    echo "error: packaging/languages.tsv declares no CPython minor, so no shim can be built" >&2
+    exit 1
+}
+make py-sapi PY_MINORS="$*" PY_SAPI_REQUIRE_ALL=1 \
     PY_SAPI_OUT=/src/target/py-sapi PY_SAPI_ARCH="$arch" PY_SAPI_LIBC="$shim_libc" \
-    PY_SAPI_PYTHON_313=/opt/python/cp313-cp313/bin/python3 \
-    PY_SAPI_PYTHON_314=/opt/python/cp314-cp314/bin/python3
+    "${py_vars[@]}"
 bash scripts/build-standalone.sh "${build[@]}"
 BUILD_BODY
+        # The heredoc is literal inside this single-quoted argument, so a stray
+        # character in it can silently truncate the generated script. Parse it
+        # before chmod (bash -n prints the file and line it rejects).
+        if ! bash -n /tmp/blastit-inner-build.sh; then
+            echo "error: the generated build body /tmp/blastit-inner-build.sh is not valid bash" >&2
+            exit 1
+        fi
         chmod 0755 /tmp/blastit-inner-build.sh
 
         exec setpriv --reuid "$HOST_UID" --regid "$HOST_GID" --clear-groups \
@@ -337,4 +357,13 @@ BUILD_BODY
             bash -euo pipefail /tmp/blastit-inner-build.sh
     '
 
-echo "build-standalone-in-image: $out/blastit-$target.tar.gz"
+# The container can exit 0 after a truncated body: a stray quote in the
+# single-quoted argument ends it before the archive is written, and the outer
+# script then reported a path that does not exist (PR #66). The archive is the
+# proof, so it is required here.
+archive="$out/blastit-$target.tar.gz"
+[ -s "$archive" ] || {
+    echo "build-standalone-in-image: the builder exited 0 but wrote no $archive" >&2
+    exit 1
+}
+echo "build-standalone-in-image: $archive"

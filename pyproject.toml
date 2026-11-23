@@ -101,7 +101,7 @@ python-source = "python"
 # The wheel carries one program under `blastit/_bin/` — `blastit`, which runs the
 # credentials-holding role as `--role=dbproxy` — and nothing has to be staged
 # into the package before maturin runs. The `include` list below is the sdist's
-# cargo tree and nothing else.
+# cargo tree plus the two files its build scripts read.
 include = [
     # **Every** workspace member, not just the graph `crates/blastit` reaches.
     # The workspace is `members = ["crates/*"]`, and a source install builds the
@@ -119,6 +119,9 @@ include = [
     # those reach `pip install .` here and every local rehearsal. Hence the
     # `exclude` list below, which is the price of the glob.
     { path = "crates/**/*", format = "sdist" },
+    # The two files every `build.rs` in that tree `include!`s at compile time.
+    { path = "packaging/languages.tsv", format = "sdist" },
+    { path = "packaging/languages.rs.inc", format = "sdist" },
 ]
 
 exclude = [

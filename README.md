@@ -21,13 +21,14 @@ $ blastit check
 ```
 
 The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM
-(Fedora/RHEL/Rocky/Alma) repository and installs `blastit`; where it cannot use a
-system package manager it puts the release archive in `~/.local/bin` instead
+(Fedora/RHEL/Rocky/Alma) repository and installs `blastit` plus a shim for each
+runtime it finds; where it cannot use a package manager it puts the release archive
+in `~/.local/bin` instead
 ([install reference](https://offworldnexus.github.io/blastit/install/)).
 
-One binary serves all three interfaces. Python (WSGI) is a callable on CPython
-3.13/3.14, PHP runs a front controller on the host's embedded NTS `libphp` (8.3,
-8.4, 8.5 and 8.6), or a `static` mount serves files with no interpreter at all.
+One binary serves all three interfaces. Python (WSGI) is a callable on CPython, PHP runs
+a front controller on the host's embedded NTS `libphp` — one shim per version, listed in
+[`packaging/languages.tsv`](packaging/languages.tsv) — or a `static` mount serves files.
 `blastit-lsp` runs natively on Linux, macOS and Windows; on a macOS or Windows
 laptop, run `blastit` in Docker/Compose or a Linux VM.
 

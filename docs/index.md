@@ -23,15 +23,16 @@ $ blastit check
 ```
 
 The installer adds the signed Blastit APT (Debian/Ubuntu) or RPM
-(Fedora/RHEL/Rocky/Alma) repository and installs `blastit`; where it cannot use a
-system package manager it puts the release archive in `~/.local/bin` instead
+(Fedora/RHEL/Rocky/Alma) repository and installs `blastit` plus a
+`blastit-python-*` / `blastit-php-*` shim for each runtime it finds; where it cannot
+use a package manager it puts the release archive in `~/.local/bin` instead
 ([install reference](install.md)).
 
 !!! note "Linux, and one file for every interface"
 
     `entrypoint python "module:attr"` starts a WSGI callable; `entrypoint php
     "public/index.php"` runs a PSR-7/PSR-15 front controller on the host's embedded
-    NTS `libphp` (8.3, 8.4, 8.5 and 8.6); no `entrypoint` plus a `static` mount
+    NTS `libphp` (one shim per minor the [install table](install.md#one-package-per-language-version) lists); no `entrypoint` plus a `static` mount
     serves a built front end. One `blastit` binary serves all three. `blastit-lsp`
     runs natively on Linux, macOS and Windows; on a macOS or Windows laptop, run
     the server in Docker/Compose or a Linux VM, because serving rests on Linux
@@ -114,8 +115,9 @@ block says so. [Security model](security.md) has the argument.
 
     Linux x86_64 and aarch64, glibc and musl: one `py3-none` wheel per platform
     runs `blastit check`, `fmt` and `fold` on any CPython 3.12+, and serving WSGI
-    views needs CPython 3.13 or 3.14 on the host. PHP is the distro's NTS
-    `libphp` 8.3–8.6. Static sites need no language runtime. On musl,
+    views needs one of the CPython minors the [install
+    table](install.md#one-package-per-language-version) lists. PHP is the distro's NTS
+    `libphp`, one shim per minor there. Static sites need no language runtime. On musl,
     `apk add libgcc`.
 
 ## Where next

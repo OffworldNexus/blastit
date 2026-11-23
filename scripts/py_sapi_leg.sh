@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Builds and asserts **one** `py_shims` leg from `scripts/platform_matrix.py`.
 #
-#   scripts/py_sapi_leg.sh --minor 3.13 --arch x86_64 --libc gnu
-#   scripts/py_sapi_leg.sh --minor 3.14 --arch x86_64 --libc musl
+#   scripts/py_sapi_leg.sh --minor <cpython-minor> --arch x86_64 --libc gnu
+#
+# The minor must be one `packaging/languages.tsv` declares: the table is the one
+# list, and an undeclared minor is refused by name before anything is built.
 #
 # Why this script exists (`MB.42.3.3` review): `.github/workflows/py-sapi.yml`
 # ran `make py-sapi … PY_SAPI_LIBC=musl` **on an Ubuntu runner**, and the Makefile
@@ -25,7 +27,7 @@
 #     (`libc.musl-<arch>.so.1` for musl, `libc.so.6` for gnu);
 #   * `scripts/check-portable-elf.sh` passes with no relaxation.
 #
-# Usage: scripts/py_sapi_leg.sh --minor <3.13|3.14> --arch <x86_64|aarch64>
+# Usage: scripts/py_sapi_leg.sh --minor <cpython-minor> --arch <x86_64|aarch64>
 #                               --libc <gnu|musl> [--out DIR] [--image IMAGE]
 set -euo pipefail
 
@@ -38,17 +40,28 @@ inside=""
 image="alpine:3.21"
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --minor) minor=${2:?--minor requires 3.13 or 3.14}; shift 2 ;;
+        --minor) minor=${2:?--minor requires a declared CPython minor}; shift 2 ;;
         --arch) arch=${2:?--arch requires x86_64 or aarch64}; shift 2 ;;
         --libc) libc=${2:?--libc requires gnu or musl}; shift 2 ;;
         --out) out=${2:?--out requires a directory}; shift 2 ;;
         --image) image=${2:?--image requires an image}; shift 2 ;;
         --inside) inside=1; shift ;;
-        *) echo "usage: $0 --minor <3.13|3.14> --arch <x86_64|aarch64> --libc <gnu|musl> [--out DIR]" >&2; exit 2 ;;
+        *) echo "usage: $0 --minor <cpython-minor> --arch <x86_64|aarch64> --libc <gnu|musl> [--out DIR]" >&2; exit 2 ;;
     esac
 done
 [ -n "$minor" ] && [ -n "$arch" ] && [ -n "$libc" ] ||
-    { echo "usage: $0 --minor <3.13|3.14> --arch <x86_64|aarch64> --libc <gnu|musl>" >&2; exit 2; }
+    { echo "usage: $0 --minor <cpython-minor> --arch <x86_64|aarch64> --libc <gnu|musl>" >&2; exit 2; }
+
+# The minor is the table's (`packaging/languages.tsv`): a leg for an interpreter
+# Blastit does not ship would build an artifact no release names.
+declared_py_minors=$(bash "$root/packaging/languages.sh" --py-minors | tr '\n' ' ')
+case " $declared_py_minors " in
+    *" $minor "*) ;;
+    *)
+        echo "error: --minor '$minor' is not a CPython minor packaging/languages.tsv declares (declared: ${declared_py_minors% })" >&2
+        exit 2
+        ;;
+esac
 
 digits=${minor//./}
 soname="libblastit_py${digits}-${arch}-${libc}.so"

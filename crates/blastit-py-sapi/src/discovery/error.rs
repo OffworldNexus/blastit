@@ -4,7 +4,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use super::DEFAULT_MINOR;
+use crate::{DEFAULT_MINOR, supported_minors_sentence};
 
 /// Why a boot refuses to serve a Python view. Every case is one sentence.
 #[derive(Debug)]
@@ -140,15 +140,16 @@ impl fmt::Display for DiscoveryError {
             } => write!(
                 f,
                 "blastit {command}: CPython {found} at {} is not supported for WSGI views \
-                 (CPython 3.13 and 3.14 are supported; Python 3.12+ runs blastit check, fmt, \
-                 and fold): run uv python install {DEFAULT_MINOR} && uv venv --python \
-                 {DEFAULT_MINOR}",
-                interpreter.display()
+                 ({} are supported; Python 3.12+ runs blastit check, fmt, and fold): run uv \
+                 python install {DEFAULT_MINOR} && uv venv --python {DEFAULT_MINOR}",
+                interpreter.display(),
+                supported_minors_sentence()
             ),
             Self::NoInterpreter { command, searched } => write!(
                 f,
-                "blastit {command}: no CPython 3.13 or 3.14 interpreter was found (searched {}); \
-                 run uv python install 3.14",
+                "blastit {command}: no {} interpreter was found (searched {}); run uv python \
+                 install {DEFAULT_MINOR}",
+                supported_minors_sentence(),
                 searched
                     .iter()
                     .map(|path| path.display().to_string())

@@ -102,6 +102,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # `PY_VER` is the wheel-build interpreter (a tool pin): the extension is
+          # compiled against exactly that CPython, and `scripts/build-musl-wheel.sh`
+          # refuses a minor `packaging/languages.tsv` does not declare. It is not
+          # the list of supported minors, which the loader owns.
           docker run --rm \
               -e HOST_UID="$(id -u)" \
               -e HOST_GID="$(id -g)" \

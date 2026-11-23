@@ -30,11 +30,11 @@
 # *proof line per leg* rather than "the target exited 0", and it is what fails
 # when `make py-sapi` is refactored into something weaker.
 #
-# The `wsgi` job is the boot-level half: Django and Flask on **CPython 3.13 and
-# 3.14**, serving their views through these shims, with per-view SQL grants and
-# the five refusals (`e2e/run_apps.py --legs wsgi`). The minors it installs and
-# the runner it uses come from the matrix, so a newly declared minor is a leg
-# here before it is a promise in the docs.
+# The `wsgi` job is the boot-level half: Django and Flask on every CPython minor
+# `packaging/languages.tsv` declares, serving their views through these shims,
+# with per-view SQL grants and the five refusals (`e2e/run_apps.py --legs wsgi`).
+# The minors it installs and the runner it uses come from the matrix, so a newly
+# declared minor is a leg here before it is a promise in the docs.
 #
 # Kept out of `make check` (Docker-free but needs several interpreters), exactly
 # like `php-sapi.yml`, so the shim cannot rot unnoticed between gates.
@@ -150,11 +150,12 @@ jobs:
           path: target/py-sapi/${{ matrix.shim }}
           if-no-files-found: error
 
-  # `TESTING_PLAN.md` §2's WSGI story: Django and Flask on CPython 3.13 **and**
-  # 3.14, each view executing only its declared statements, the same five
-  # refusals answering `403`/`42501`, and no database password in any worker
-  # environment or response. The PHP and static legs of the same driver belong
-  # to `ci.yml`; this job runs one family so its log is the WSGI proof.
+  # `TESTING_PLAN.md` §2's WSGI story: Django and Flask on every CPython minor
+  # `packaging/languages.tsv` declares, each view executing only its declared
+  # statements, the same five refusals answering `403`/`42501`, and no database
+  # password in any worker environment or response. The PHP and static legs of the
+  # same driver belong to `ci.yml`; this job runs one family so its log is the
+  # WSGI proof.
   wsgi:
     name: '§2 WSGI views: Django & Flask on CPython ${{ needs.matrix.outputs.minors }}'
     needs: [matrix, legs]

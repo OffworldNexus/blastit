@@ -24,8 +24,8 @@ names and which files it may read.
 
 | Interface | What the file says | Install | Pages |
 |---|---|---|---|
-| **Python (WSGI)** | `entrypoint python "module:attr"` | `blastit` + CPython 3.13 or 3.14 | [Connector](python/index.md) · [Django](python/django.md) · [Flask, SQLAlchemy and raw WSGI](python/flask.md) |
-| **PHP (PSR-7/PSR-15, front controller)** | `entrypoint php "public/index.php"`, on the host's NTS `libphp` (8.3, 8.4, 8.5 and 8.6) | `blastit` + `libphp` | [Connector](php/index.md) · [Symfony](php/symfony.md) · [Laravel](php/laravel.md) |
+| **Python (WSGI)** | `entrypoint python "module:attr"` | `blastit` + one of the CPython minors in the [install table](../install.md#one-package-per-language-version) | [Connector](python/index.md) · [Django](python/django.md) · [Flask, SQLAlchemy and raw WSGI](python/flask.md) |
+| **PHP (PSR-7/PSR-15, front controller)** | `entrypoint php "public/index.php"`, on the host's NTS `libphp` (one shim per minor the [install table](../install.md#one-package-per-language-version) lists) | `blastit` + `libphp` | [Connector](php/index.md) · [Symfony](php/symfony.md) · [Laravel](php/laravel.md) |
 | **Static & SPA** | `static "/"` with a `root`, and no `entrypoint` | `blastit` | [Static sites and SPAs](static-and-spa.md) |
 
 ## What each interface answers

@@ -177,11 +177,27 @@ Pre-existing (not MB.56): split the >800-LOC god-files — blastit-events/src/li
 
 **Answer:**
 
-## H-019 [open] (node MB)
+## H-019 [closed] (node MB)
 
 - asked: 2026-11-21T12:35 by conductor
 
 Release v0.2.0 is ready on branch release/0.2.0 (PR #64 -> develop, HEAD ea5cd17). All GitHub Actions checks are green. Review and squash-merge the PR on GitHub: merging validates CI, Docs and the live DigitalOcean e2e on develop, and the automated pipeline then publishes v0.2.0 to PyPI, GitHub Releases and the signed Cloudsmith APT/RPM repositories. Scope: one libc-only blastit ELF for every role (CPython 3.13/3.14 + PHP 8.3-8.6 dlopen shims pinned by inode), signed APT/RPM repos + install.sh, 4 py3-none-* wheels, a Composer wrapper, a pruned codebase and E2E-first suite (-148,885 net LOC), and the human-gated user-story TESTING_PLAN.md.
+
+**Answer:**
+
+## H-020 [closed] (node MB)
+
+- asked: 2026-11-22T23:53 by conductor
+
+Release v0.2.1 is ready on branch release/0.2.1-packages (PR into develop). It ships the Offworld Nexus packaging pipeline (zero secrets: CI stages one offworld-dist artifact, the offworld-nexus-packages App signs and publishes to *.offworld-nexus.app) and splits the packages to one per interpreter: blastit, blastit-python-3.13, blastit-python-3.14, blastit-php-8.3, blastit-php-8.4, blastit-php-8.5, blastit-php-8.6 (28 artifacts: 7 names x amd64/arm64 x deb/rpm). Merging it makes Publish upload PyPI 0.2.1, cut the annotated v0.2.1 tag, create the GitHub Release, and dispatch Packages on that tag -- the exact step that was missing for 0.2.0. Please review and squash-merge.
+
+**Answer:**
+
+## H-021 [open] (node MB)
+
+- asked: 2026-11-23T00:13 by conductor
+
+Release v0.2.1 is ready and fully green: PR #66 (https://github.com/OffworldNexus/blastit/pull/66) from release/0.2.1 into develop, head ae6b10d1, 79 checks pass / 0 fail / 10 skipped, MERGEABLE. It ships the Offworld Nexus packaging pipeline (zero secrets: CI stages one offworld-dist artifact; the offworld-nexus-packages App signs and publishes to *.offworld-nexus.app) and one package per interpreter: blastit, blastit-python-3.13/3.14, blastit-php-8.3/8.4/8.5/8.6 (28 artifacts = 7 names x amd64/arm64 x deb/rpm). Merging makes Publish upload PyPI 0.2.1, cut the annotated v0.2.1 tag, create the GitHub Release, and DISPATCH Packages on that tag -- the step missing for 0.2.0 -- after which the App publishes the signed packages.
 
 **Answer:**
 

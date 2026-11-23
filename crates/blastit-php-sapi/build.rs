@@ -1,35 +1,39 @@
-//! Discovery of the host's PHP development toolchain, at build time only.
+//! The host's PHP development toolchain, discovered at build time, and the
+//! per-minor table both the crate and this script read.
+//!
+//! The table (`Minor`, `SUPPORTED_MINORS`, `CONFIG_NAMES`,
+//! `SUPPORTED_MINORS_SENTENCE`) is generated from `packaging/languages.tsv`
+//! (`MB.67.3`) into `$OUT_DIR/languages.rs`, which `src/toolchain.rs`
+//! `include!`s. The TSV is the one declaration: a version added to (or withdrawn
+//! from) it changes this crate on the next build, and no `php8.x` list lives in
+//! the source. Every name is emitted from its `Row` — the shim infix from the
+//! `slug` column, the distro names from `version`/`digits` — never a re-split of
+//! a version string. The freshness test parses the same file with the same
+//! fragment.
 //!
 //! A machine without PHP must still build this crate: the shim is a C artefact
-//! built by `make php-sapi`, and the Rust side is only ABI declarations plus
-//! the security types. So this script **never** fails the build. When it finds
-//! a usable `php-config` it sets the `php_toolchain` cfg (and the
+//! built by `make php-sapi`, and the Rust side is only ABI declarations plus the
+//! security types. So the toolchain half **never** fails the build. When it
+//! finds a usable `php-config` it sets the `php_toolchain` cfg (and the
 //! `BLASTIT_PHP_CONFIG` / `BLASTIT_PHP_VERSION` env vars); when it does not, it
 //! prints the one warning that says how to get one, and the crate compiles
 //! without the ABI surface. `tests/critical_shim_contract.rs` asserts both
 //! worlds, so the degrade is tested rather than assumed.
 //!
-//! Search order (the plan's "Toolchain reality" section): `PHP_CONFIG`, then
-//! `php-config`, `php-config8.6`, `php-config8.5`, `php-config8.4`,
-//! `php-config8.3` on `PATH`.
+//! Search order: `PHP_CONFIG`, then the generated `CONFIG_NAMES` on `PATH`.
 
-use std::env;
+include!("../../packaging/languages.rs.inc");
+
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The unversioned name first, then one per supported minor, newest first.
-const CANDIDATES: [&str; 5] = [
-    "php-config",
-    "php-config8.6",
-    "php-config8.5",
-    "php-config8.4",
-    "php-config8.3",
-];
-
-/// The minors this crate has an ABI for, newest first.
-const SUPPORTED: [&str; 4] = ["8.6", "8.5", "8.4", "8.3"];
-
 fn main() {
+    let root = workspace_root();
+    let tsv = root.join("packaging/languages.tsv");
+    let inc = root.join("packaging/languages.rs.inc");
+    println!("cargo:rerun-if-changed={}", absolute(&tsv));
+    println!("cargo:rerun-if-changed={}", absolute(&inc));
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=c/blastit_php_sapi.c");
     println!("cargo:rerun-if-changed=c/include/blastit_php_abi_v1.h");
@@ -37,47 +41,234 @@ fn main() {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rustc-check-cfg=cfg(php_toolchain)");
 
-    match find_toolchain() {
-        Some((path, version)) => {
+    let rows = load(&tsv).unwrap_or_else(|err| panic!("blastit-php-sapi: {err}"));
+    let php = rows_of(&rows, "php");
+    if php.is_empty() {
+        panic!(
+            "blastit-php-sapi: {} declares no php row, so no shim can be built",
+            tsv.display()
+        );
+    }
+    let out_dir =
+        std::env::var("OUT_DIR").unwrap_or_else(|_| panic!("blastit-php-sapi: cargo sets OUT_DIR"));
+    let path = Path::new(&out_dir).join("languages.rs");
+    std::fs::write(&path, emit(&php))
+        .unwrap_or_else(|err| panic!("blastit-php-sapi: cannot write {}: {err}", path.display()));
+
+    let php_versions: Vec<&str> = php.iter().map(|row| row.version.as_str()).collect();
+    let config_names: Vec<String> = std::iter::once("php-config".to_string())
+        .chain(php.iter().map(|row| format!("php-config{}", row.version)))
+        .collect();
+    match find_toolchain(&php_versions, &config_names) {
+        Some((php_config, version)) => {
             println!("cargo:rustc-cfg=php_toolchain");
-            println!("cargo:rustc-env=BLASTIT_PHP_CONFIG={}", path.display());
+            println!(
+                "cargo:rustc-env=BLASTIT_PHP_CONFIG={}",
+                php_config.display()
+            );
             println!("cargo:rustc-env=BLASTIT_PHP_VERSION={version}");
         }
-        None => {
-            println!(
-                "cargo:warning=no PHP development toolchain found (looked for PHP_CONFIG, then \
-                 php-config, php-config8.6, php-config8.5, php-config8.4, php-config8.3 on PATH): \
-                 the C SAPI shim is not built and the ABI surface is not compiled. Install it with \
-                 `apt install php8.6-dev libphp8.6-embed` (Debian/Ubuntu; stock Debian: \
-                 `apt install libphp-embed`), `apk add php86-dev php86-embed` (Alpine) or \
-                 `dnf install php86-php-devel php-embedded` (Fedora/RHEL), or set \
-                 PHP_CONFIG=/path/to/php-config8.6. `make php-sapi-e2e` builds and exercises the \
-                 shim in its container."
-            );
-        }
+        None => println!(
+            "cargo:warning={}",
+            no_toolchain_warning(&php_versions, &config_names)
+        ),
     }
 }
 
+/// The repository root, two directories above this crate.
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| panic!("blastit-php-sapi: build.rs has no workspace root"))
+}
+
+/// The absolute spelling of `path`, for `cargo:rerun-if-changed`.
+fn absolute(path: &Path) -> String {
+    std::fs::canonicalize(path).map_or_else(
+        |_| path.display().to_string(),
+        |resolved| resolved.display().to_string(),
+    )
+}
+
+/// The generated `$OUT_DIR/languages.rs`, included by `src/toolchain.rs`.
+fn emit(php: &[&Row]) -> String {
+    // The enum variants keep their historical order (`Php83` first), so the
+    // derived `Ord` a caller may rely on stays the same; every *list* the crate
+    // publishes is newest first.
+    let mut oldest_first: Vec<&Row> = php.to_vec();
+    oldest_first.reverse();
+
+    let mut out = String::new();
+    out.push_str("// @generated by build.rs from packaging/languages.tsv. Do not edit.\n");
+    out.push_str(
+        "//\n// One variant per `php` row, with the lists the crate publishes newest first.\n\n",
+    );
+
+    out.push_str("/// One supported PHP minor. The shim is compiled once per variant.\n");
+    out.push_str("#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]\n");
+    out.push_str("pub enum Minor {\n");
+    for row in &oldest_first {
+        let digits = row.digits();
+        let _ = writeln!(out, "    /// PHP {}.\n    Php{digits},", row.version);
+    }
+    out.push_str("}\n\n");
+
+    out.push_str("impl Minor {\n");
+    out.push_str("    /// Parses a `php-config --version` reply (`\"8.5.4\"`, `\"8.5\"`).\n");
+    out.push_str("    ///\n    /// Anything whose first two components are not a `php` row of\n    /// `packaging/languages.tsv` is `None`: an older or newer minor is refused,\n    /// not guessed at.\n");
+    out.push_str("    pub fn parse(version: &str) -> Option<Self> {\n");
+    out.push_str("        let mut parts = version.trim().split('.');\n");
+    out.push_str("        let major: u32 = parts.next()?.parse().ok()?;\n");
+    out.push_str("        let minor: u32 = parts.next()?.parse().ok()?;\n");
+    out.push_str("        match (major, minor) {\n");
+    for row in &oldest_first {
+        let (major, minor) = split(&row.version);
+        let digits = row.digits();
+        let _ = writeln!(
+            out,
+            "            ({major}, {minor}) => Some(Self::Php{digits}),"
+        );
+    }
+    out.push_str("            _ => None,\n        }\n    }\n\n");
+
+    out.push_str("    /// The code `blastit_php_minor()` returns from a shim of this minor.\n");
+    out.push_str("    pub fn code(self) -> u32 {\n        match self {\n");
+    for row in &oldest_first {
+        let (major, minor) = split(&row.version);
+        let digits = row.digits();
+        let _ = writeln!(
+            out,
+            "            Self::Php{digits} => {major} * 100 + {minor},"
+        );
+    }
+    out.push_str("        }\n    }\n\n");
+
+    out.push_str("    /// The `slug` column: the `libblastit_<slug>` infix of the shim name.\n");
+    out.push_str("    pub const fn slug(self) -> &'static str {\n        match self {\n");
+    for row in &oldest_first {
+        let digits = row.digits();
+        let _ = writeln!(
+            out,
+            "            Self::Php{digits} => {},",
+            quote(row.slug())
+        );
+    }
+    out.push_str("        }\n    }\n\n");
+
+    out.push_str("    /// The `<major><minor>` infix of the distro names (`\"84\"`).\n");
+    out.push_str("    pub const fn digits(self) -> &'static str {\n        match self {\n");
+    for row in &oldest_first {
+        let digits = row.digits();
+        let _ = writeln!(out, "            Self::Php{digits} => {},", quote(&digits));
+    }
+    out.push_str("        }\n    }\n\n");
+
+    out.push_str("    /// The dotted minor (`\"8.4\"`), for messages and package names.\n");
+    out.push_str("    pub fn dotted(self) -> &'static str {\n        match self {\n");
+    for row in &oldest_first {
+        let digits = row.digits();
+        let _ = writeln!(
+            out,
+            "            Self::Php{digits} => {},",
+            quote(&row.version)
+        );
+    }
+    out.push_str("        }\n    }\n\n");
+
+    out.push_str("    /// The `php-config` names that provide this minor, most specific first.\n");
+    out.push_str("    pub fn config_names(self) -> [&'static str; 2] {\n        match self {\n");
+    for row in &oldest_first {
+        let digits = row.digits();
+        let _ = writeln!(
+            out,
+            "            Self::Php{digits} => [{}, \"php-config\"],",
+            quote(&format!("php-config{}", row.version))
+        );
+    }
+    out.push_str("        }\n    }\n}\n\n");
+
+    out.push_str("/// The PHP minors this crate has a shim ABI for, newest first.\n");
+    let _ = writeln!(
+        out,
+        "pub const SUPPORTED_MINORS: [Minor; {}] = [{}];\n",
+        php.len(),
+        php.iter()
+            .map(|row| format!("Minor::Php{}", row.digits()))
+            .collect::<Vec<String>>()
+            .join(", ")
+    );
+
+    out.push_str("/// The newest declared minor: the package and `php-config` a refusal names.\n");
+    let _ = writeln!(
+        out,
+        "pub const NEWEST_MINOR: Minor = Minor::Php{};\n",
+        php[0].digits()
+    );
+
+    let mut config_names: Vec<String> = vec!["php-config".to_string()];
+    config_names.extend(php.iter().map(|row| format!("php-config{}", row.version)));
+    let config_literals: Vec<String> = config_names.iter().map(|name| quote(name)).collect();
+    out.push_str("/// The `php-config` names searched on `PATH`, in order.\n");
+    let _ = writeln!(
+        out,
+        "pub const CONFIG_NAMES: [&str; {}] = [{}];\n",
+        config_names.len(),
+        config_literals.join(", ")
+    );
+
+    let ordered: Vec<&str> = php.iter().map(|row| row.version.as_str()).collect();
+    out.push_str("/// The declared PHP minors as one sentence (`PHP 8.3, 8.4, 8.5 and 8.6`).\n");
+    let _ = writeln!(
+        out,
+        "pub const SUPPORTED_MINORS_SENTENCE: &str = {};\n",
+        quote(&sentence("PHP", &ascending(&ordered)))
+    );
+
+    out.push_str("/// [`SUPPORTED_MINORS_SENTENCE`].\n#[must_use]\npub fn supported_minors_sentence() -> &'static str {\n    SUPPORTED_MINORS_SENTENCE\n}\n");
+
+    out
+}
+
+/// The one warning a PHP-free host gets: no toolchain, and the package to
+/// install for the newest declared minor.
+fn no_toolchain_warning(php: &[&str], config_names: &[String]) -> String {
+    let newest = php[0];
+    let digits = digits(newest);
+    format!(
+        "no PHP development toolchain found (looked for PHP_CONFIG, then {} on PATH): the C SAPI \
+         shim is not built and the ABI surface is not compiled. Install it with `apt install \
+         php{newest}-dev libphp{newest}-embed` (Debian/Ubuntu; stock Debian: `apt install \
+         libphp-embed`), `apk add php{digits}-dev php{digits}-embed` (Alpine) or `dnf install \
+         php{digits}-php-devel php-embedded` (Fedora/RHEL), or set \
+         PHP_CONFIG=/path/to/php-config{newest}. `make php-sapi-e2e` builds and exercises the shim \
+         in its container.",
+        config_names.join(", ")
+    )
+}
+
 /// The first working `php-config` and the PHP version it reports.
-fn find_toolchain() -> Option<(PathBuf, String)> {
-    if let Some(explicit) = env::var_os("PHP_CONFIG") {
+fn find_toolchain(supported: &[&str], candidates: &[String]) -> Option<(PathBuf, String)> {
+    if let Some(explicit) = std::env::var_os("PHP_CONFIG") {
         let path = PathBuf::from(explicit);
-        if let Some(version) = probe(&path) {
+        if let Some(version) = probe(&path, supported) {
             return Some((path, version));
         }
         // An explicit PHP_CONFIG that does not work is a typo, not a reason to
         // fall back silently to whatever else is on PATH: say so, then look.
         println!(
-            "cargo:warning=PHP_CONFIG={} does not report a supported PHP version; falling back to PATH",
+            "cargo:warning=PHP_CONFIG={} does not report a supported PHP version; falling back to \
+             PATH",
             path.display()
         );
     }
 
-    let path = env::var_os("PATH")?;
-    for candidate in CANDIDATES {
-        for dir in env::split_paths(&path) {
-            let exe = dir.join(candidate);
-            if let Some(version) = probe(&exe) {
+    let path = std::env::var_os("PATH")?;
+    for candidate in candidates {
+        for directory in std::env::split_paths(&path) {
+            let exe = directory.join(candidate);
+            if let Some(version) = probe(&exe, supported) {
                 return Some((exe, version));
             }
         }
@@ -86,8 +277,8 @@ fn find_toolchain() -> Option<(PathBuf, String)> {
     None
 }
 
-/// The version `php-config` reports, when it names a supported minor.
-fn probe(exe: &Path) -> Option<String> {
+/// The version `php-config` reports, when it names a declared minor.
+fn probe(exe: &Path, supported: &[&str]) -> Option<String> {
     if !exe.is_file() {
         return None;
     }
@@ -98,5 +289,24 @@ fn probe(exe: &Path) -> Option<String> {
     let version = String::from_utf8(output.stdout).ok()?;
     let version = version.trim().to_owned();
     let minor = version.split('.').take(2).collect::<Vec<_>>().join(".");
-    SUPPORTED.contains(&minor.as_str()).then_some(version)
+    supported.contains(&minor.as_str()).then_some(version)
+}
+
+/// A Rust string literal for `value`.
+fn quote(value: &str) -> String {
+    format!("{value:?}")
+}
+
+/// `"8.6"` as `(8, 6)`.
+fn split(version: &str) -> (u32, u32) {
+    let (major, minor) = version
+        .split_once('.')
+        .unwrap_or_else(|| panic!("packaging/languages.rs.inc parsed a version without a dot"));
+    let major = major
+        .parse()
+        .unwrap_or_else(|_| panic!("packaging/languages.rs.inc parsed a non-numeric major"));
+    let minor = minor
+        .parse()
+        .unwrap_or_else(|_| panic!("packaging/languages.rs.inc parsed a non-numeric minor"));
+    (major, minor)
 }

@@ -163,12 +163,15 @@ jobs:
       # hand a user, and the pipe proves a real `curl … | sh` still reaches
       # usage.
       #
-      # Three version guards live beside it: `BLASTIT_DEFAULT_VERSION` must equal
-      # `Cargo.toml`'s version, the embedded digest table must be keyed by that
-      # same constant (so a release has one version to bump), and a `v*` tag may
-      # not publish a table whose rows are still `-` — an archive install would
-      # then verify against the origin's own SHA256SUMS, which shares the
-      # download's trust root and adds no assurance.
+      # Two version guards live beside it: `BLASTIT_DEFAULT_VERSION` must equal
+      # `Cargo.toml`'s version, and the embedded digest table must be keyed by
+      # that same constant (so a release has one version to bump). A row that is
+      # still `-` is **not** a failure: `docs/install.sh` reads it as "verify this
+      # archive against the release's own `SHA256SUMS` at install time"
+      # (`embedded_sha256` -> `resolve_digest`), and the archives those digests
+      # describe are built by `Publish` *after* the tag exists — so demanding
+      # stamped rows on the tag path made every release tag red (`v0.2.0`
+      # included). A tag run prints the notice instead of refusing.
       - name: Publish and prove install.sh (the README's one command)
         run: |
           set -euo pipefail
@@ -183,8 +186,7 @@ jobs:
             exit 1
           fi
           if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && grep -qE "printf '%s.n' - ;;" docs/install.sh; then
-            echo "::error file=docs/install.sh::this is the $GITHUB_REF tag but the embedded digest table still holds '-' rows: stamp the four release digests before tagging"
-            exit 1
+            echo "::notice file=docs/install.sh::$GITHUB_REF's embedded digest table still holds '-' rows: the installer verifies those archives against the release's own SHA256SUMS (resolve_digest), because the archives are built after the tag exists"
           fi
           cp docs/install.sh site/install.sh
           chmod 0755 site/install.sh

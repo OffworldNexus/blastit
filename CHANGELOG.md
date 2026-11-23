@@ -5,6 +5,48 @@ lives in `Cargo.toml` (`[workspace.package] version`), and a release is the tag
 `v` plus that version — `scripts/check-release-tag.sh` refuses a tag that says
 anything else, and [`RELEASING.md`](RELEASING.md) has the steps.
 
+## 0.2.1 (2026-11-22)
+
+**Native packages ship from the Offworld Nexus repositories, one package per
+interpreter minor.** `apt.offworld-nexus.app` and `rpm.offworld-nexus.app` are
+the only package sources: the GitHub Actions build still runs with
+`permissions: contents: read` and no publishing secret, stages a single
+`offworld-dist` artifact, and the organization's signed publisher carries it to
+the repositories and posts an `offworld-pkg / publish` check. The retired
+package-registry upload (Cloudsmith/Forgejo) and its retention step are gone.
+
+- **Seven packages per architecture instead of one.** Debian and RPM both split
+  into `blastit` (`blastit`, `blastit-lsp`, `LICENSE` and the pure-Python
+  package), `blastit-python-3.13`/`-3.14` and `blastit-php-8.3`/`8.4`/`8.5`/`8.6`;
+  each shim package carries exactly its one `libblastit_*.so` under
+  `/usr/share/blastit/lib/`. `apt-get install blastit blastit-php-8.4` (or
+  `blastit-python-3.13`) installs only the interpreter the host runs. The
+  Debian shim packages depend on the distribution's `python3.1X` /
+  `libphp8.X-embed`; the RPM subpackages use `Recommends:`/`Suggests:` instead,
+  because Rocky 9 has no `python3.13` and its `php-embedded` is 8.0 — a hard
+  `Requires:` there would be unsatisfiable on a supported distribution. The
+  measured `libc6`/`glibc` floor is unchanged and is still measured from
+  `scripts/check-portable-elf.sh` for every package.
+- **Closes the 0.2.0 publication gap.** `v0.2.0` was tagged before the packaging
+  workflow existed, and a `stable` publication needs that workflow at a
+  `refs/tags/v*` ref. `0.2.1` is the first release whose tag runs it end to end:
+  build → install verification in `debian:12`/`13`, `ubuntu:22.04`/`24.04`,
+  `rockylinux:9` and `fedora` → one `offworld-dist` artifact → signed
+  repositories.
+- **An explicit `workflow_dispatch`.** The packaging workflow can be started by
+  hand on a tag (full build and verification, `stage-dist.py --dry-run` in
+  rehearsal mode) as well as by the tag push, so a publication can be re-run
+  without moving a tag. Nightly keeps its staggered `03:xx UTC` schedule and its
+  `0.2.1~nightly<date>.r<n>+g<sha>` (deb) / `-0.nightly.<date>.r<n>.g<sha>` (rpm)
+  stamps, which sort strictly below the release.
+- **`packaging/` is the source of truth.** `package-set.sh` names the seven
+  packages, their shim globs and their interpreter dependency;
+  `package-stamp.sh` prints `deb_version`/`deb_release`/`rpm_version`/
+  `rpm_release` for `$GITHUB_OUTPUT`; `stage-dist.py` is the packaging skill's
+  staging script copied verbatim. `scripts/check-bundle-layout.sh --deb-set` and
+  `--rpm-set` unpack a whole package set into one root and fail — naming the
+  missing package — when a shim package is absent.
+
 ## 0.2.0 (2026-11-20)
 
 Blastit now reads a purpose-built `Blastfile`, serves static sites and SPAs with

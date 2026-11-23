@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the one §6.1 bundle a `.deb`/`.rpm` is packaged from (`MB.42.3.1`,
-# `universal-distribution.md` §6.1).
+# Builds the one §6.1 bundle the `.deb`s and `.rpm`s are packaged from
+# (`MB.42.3.1`, `MB.65`, `universal-distribution.md` §6.1).
 #
 #   scripts/build-package-bundle.sh --out /tmp/opencode/blastit-packages/bundle
 #
@@ -13,18 +13,19 @@
 #     `quay.io/pypa/manylinux_2_28_<arch>` (the matrix's `glibc_floor`) and
 #     measured with `--max-glibc 2_28`, exactly as `scripts/build-standalone-in-image.sh`
 #     does for the archive family;
-#   * the two `gnu` Python shims and the four PHP shims are the artifacts `make
-#     py-sapi` / the distro `shims` legs already built **and probed** (`--py-shim-dir`,
-#     `--shim-dir`). The Python shims cannot be built in manylinux: those images
-#     ship no shared `libpython` at all, and a shim is only allowed to ship after
-#     `make py-sapi` loaded it against a real interpreter. Their projects are
-#     built for glibc 2.28 and measure 2.34, which is inside the package's ceiling
-#     (below);
-#   * the four PHP shims come from their distro legs, and measure far below the
+#   * the `gnu` Python shims and the PHP shims are the artifacts `make py-sapi` /
+#     the distro `shims` legs already built **and probed** (`--py-shim-dir`,
+#     `--shim-dir`), one per row of `packaging/languages.tsv`. The Python shims
+#     cannot be built in manylinux: those images ship no shared `libpython` at
+#     all, and a shim is only allowed to ship after `make py-sapi` loaded it
+#     against a real interpreter. Their projects are built for glibc 2.28 and
+#     measure 2.34, which is inside the package's ceiling (below);
+#   * the PHP shims come from their distro legs, and measure far below the
 #     ceiling (2.17 today).
 #
-# The result is assembled here (bin symlinks, `LICENSE`, the 7 modules) and asserted
-# with `scripts/check-bundle-layout.sh` (2 Python + 4 PHP shims, no strays) and
+# The result is assembled here (bin symlinks, `LICENSE`, the four modules) and
+# asserted with `scripts/check-bundle-layout.sh` (one shim per
+# `packaging/languages.tsv` row, no strays) and
 # `check-portable-elf.sh --max-glibc <bundle-floor>` before it is returned: a bundle
 # that lost a shim, or whose measured floor exceeds the oldest advertised
 # distribution, never reaches a package.
@@ -36,6 +37,21 @@ set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
+# shellcheck source=../packaging/package-set.sh
+source "$root/packaging/package-set.sh"
+
+# How many shims one language family ships. `packaging/languages.tsv` names every
+# shim row `blastit-<language>-<version>`, so the family is the segment after
+# `blastit-`: the count is the table's, never a literal here.
+shim_count_of() {
+    local wanted=$1 name _ rest count=0
+    while IFS=$'\t' read -r name _; do
+        rest=${name#blastit-}
+        [ "${rest%%-*}" = "$wanted" ] || continue
+        count=$((count + 1))
+    done < <(blastit_package_shims)
+    printf '%s\n' "$count"
+}
 
 arch=""
 out=""
@@ -43,8 +59,9 @@ shim_dir=""
 py_shim_dir=""
 binary_floor="2_28"
 bundle_floor=""
-require_php=4
-require_py=2
+# One shim per row of the table, per language family.
+require_php=$(shim_count_of php)
+require_py=$(shim_count_of python)
 
 usage() {
     cat >&2 <<'USAGE'
@@ -54,17 +71,17 @@ usage: scripts/build-package-bundle.sh --out <dir> [--arch x86_64|aarch64]
 
   --out           where the §6.1 bundle (bin/ + share/blastit/) is assembled
   --arch          default: this machine (only native builds are allowed)
-  --shim-dir      the 4 PHP shims `make php-sapi` / the distro legs built
+  --shim-dir      the PHP shims `make php-sapi` / the distro legs built
                   (default target/php-sapi)
-  --py-shim-dir   the 2 Python shims `make py-sapi` built and probed
+  --py-shim-dir   the CPython shims `make py-sapi` built and probed
                   (default target/py-sapi)
   --binary-floor  ceiling for blastit/blastit-lsp in the manylinux image (2_28)
   --bundle-floor  ceiling for the whole bundle, every shim included (the matrix's
                   `--shim-floor`: the oldest advertised distribution)
 
-Both builders take this bundle next (`build-deb.sh`, `build-rpm.sh`), and the
-package's own ceiling is the matrix's shim floor:
-`scripts/platform_matrix.py --shim-floor`.
+Both builders take this bundle next (`build-deb.sh` writes the seven `.deb`s,
+`build-rpm.sh` the seven `.rpm`s), and each package's own ceiling is the matrix's
+shim floor: `scripts/platform_matrix.py --shim-floor`.
 USAGE
     exit 2
 }
@@ -131,14 +148,14 @@ for shim in "$shim_dir"/libblastit_php*-"$arch"-gnu.so; do
     php_shims=$((php_shims + 1))
 done
 [ "$php_shims" -ge "$require_php" ] ||
-    die "$shim_dir has $php_shims PHP shim(s), a package needs $require_php (8.3-8.6): build the missing legs (\`make php-sapi-e2e PHP_MINOR=8.3\` then \`scripts/collect-shim.sh\`)"
+    die "$shim_dir has $php_shims PHP shim(s), a package needs $require_php (one per PHP row in packaging/languages.tsv): build the missing legs (\`make php-sapi-e2e PHP_MINOR=<minor>\` then \`scripts/collect-shim.sh\`)"
 py_shims_present=0
 for shim in "$py_shim_dir"/libblastit_py3*-"$arch"-gnu.so; do
     [ -e "$shim" ] || continue
     py_shims_present=$((py_shims_present + 1))
 done
 [ "$py_shims_present" -ge "$require_py" ] ||
-    die "$py_shim_dir has $py_shims_present Python shim(s), a package needs $require_py (3.13, 3.14): run \`make py-sapi\`"
+    die "$py_shim_dir has $py_shims_present Python shim(s), a package needs $require_py (one per CPython row in packaging/languages.tsv): run \`make py-sapi\`"
 
 echo "build-package-bundle: $arch in $image (binaries <= $binary_floor; Python shims from $py_shim_dir; PHP shims from $shim_dir)"
 
@@ -211,7 +228,7 @@ for shim in "$py_shim_dir"/libblastit_py3*-"$arch"-gnu.so; do
     py_shims=$((py_shims + 1))
 done
 [ "$py_shims" -eq "$require_py" ] ||
-    die "$py_shim_dir has $py_shims Python shim(s), a package needs $require_py (3.13, 3.14)"
+    die "$py_shim_dir has $py_shims Python shim(s), a package needs $require_py"
 copied_php=0
 for shim in "$shim_dir"/libblastit_php*-"$arch"-gnu.so; do
     [ -e "$shim" ] || continue

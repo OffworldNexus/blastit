@@ -4,7 +4,8 @@ Releases are **pull-request driven**: autonomous work happens on a `release/<ver
 branch, the conductor opens a pull request into `develop` when a release gate
 passes, and **a human merging that PR into `develop` validates everything on
 `develop` and triggers the entire release pipeline automatically** — PyPI upload,
-annotated `v<version>` git tag, GitHub Release, and GitHub Pages docs deployment.
+annotated `v<version>` git tag, GitHub Release, GitHub Pages docs deployment, and
+the signed `apt`/`rpm` packages.
 
 The workflow is [`.github/workflows/publish-pypi.yml`](.github/workflows/publish-pypi.yml),
 and it publishes through **trusted publishing**: PyPI checks a GitHub OIDC token,
@@ -88,68 +89,123 @@ release corresponds to git tag `v<version>` (for example, `0.2.0` → `v0.2.0`).
      not exist yet, and every leg comes from `scripts/platform_matrix.py`; then
      `wheels_gnu` + `wheels_musl` (`4` universal
      `py3-none-{manylinux_2_28,musllinux_1_2}_{x86_64,aarch64}` wheels,
-     `manylinux` wheels smoke-tested on CPython `3.12`/`3.13`/`3.14`,
-     `musllinux` on `3.13`, each carrying the four PHP shims of its own
+     `manylinux` wheels smoke-tested on the matrix's CPython smoke images
+     (`--matrix wheels`), `musllinux` on its own, each carrying the PHP shims of its own
      `<arch>`/`<libc>` beside the CPython ones — a short shim leg fails its own
      leg and skips the wheels rather than publishing a wheel without PHP — built
      by `scripts/build-wheel.sh`
      (`maturin build --bindings bin` + `scripts/repack_universal_wheel.py` — no
      extension module compiled any more), `sdist`, `shims`
-     (`16` probed PHP `8.3`–`8.6` legs), `binaries_gnu` + `binaries_musl`
+     (every `--matrix shims` leg: `packaging/languages.tsv`'s PHP minors × arch ×
+     libc), `binaries_gnu` + `binaries_musl`
      (`4` standalone Linux archives), `lsp` (`5` `blastit-lsp` archives across
      Linux, macOS, and Windows), and `verify` (`scripts/check-long-description.py`)
      rehearse the full distribution build.
 3. **Human validation & merge**:
    * Review the PR on GitHub and click **Squash and merge** into `develop`.
    * Merging into `develop` automatically runs `CI`, `Docs` (deploying GitHub
-     Pages), `Live (DigitalOcean)` (App Platform cloud e2e), and `Publish`.
+     Pages), and `Publish`.
    * On `develop`, `Publish` detects that `v<version>` is not yet tagged, builds
      and verifies the wheels, `sdist`, standalone archives, PHP shims, and
      `blastit-lsp` archives with README links pinned to `v<version>`, waits in
-     `validate` until `CI`, `Docs`, and `Live (DigitalOcean)` on that exact
-     `develop` commit are all green, uploads the wheels and `sdist` to **PyPI**,
-     creates and pushes the annotated `v<version>` git tag, and creates the
-     **GitHub Release** with all archives, shims, `SHA256SUMS`, and
-     `CHANGELOG.md` notes attached.
-   * That tag push then runs **Packages** (`.github/workflows/packages.yml`) in
-     the same `release-${{ github.ref }}` concurrency group as `Publish`, so the
-     two can never overlap: it builds the `4` `.deb`/`.rpm` packages from the
-     §6.1 bundle, installs each package on the legs of its own format (`8` `deb`
-     + `4` `rpm`, from `scripts/platform_matrix.py --matrix install`; `6`
-     distributions × `2` architectures), publishes to the signed Cloudsmith
-     `main` component, mirrors to Forgejo
-     (skips with one `::notice::` when `FORGEJO_PACKAGES_TOKEN` is unset), waits
-     for that `Publish` run, then reseals one `SHA256SUMS` over archives +
-     packages + shims. A `workflow_dispatch` rehearses (`--dry-run`, printing
-     every command) unless `publish: true`.
-   * **Nightly** (`.github/workflows/nightly.yml`, `03:17 UTC`) stamps
-     `0.2.0~nightly20261120.r<run>+g<sha>` / `0.2.0-0.nightly.…`, publishes to
-     the `nightly` component and keeps the newest seven.
+     `validate` until `CI` and `Docs` on that exact `develop` commit are green,
+     uploads the wheels and `sdist` to **PyPI**, creates and pushes the annotated
+     `v<version>` git tag, and creates the **GitHub Release** with all archives,
+     shims, `SHA256SUMS`, and `CHANGELOG.md` notes attached.
+   * `Publish` then **dispatches Packages explicitly** — on the `develop` merge
+     path only. GitHub documents that
+     "events created with the repository's `GITHUB_TOKEN` do not start new
+     workflow runs, with the exception of `workflow_dispatch` and
+     `repository_dispatch`" — so the tag `Publish` pushes is invisible to
+     `on: push: tags`, and the workflow has to ask for the run:
+
+     ```yaml
+     permissions:
+       contents: read
+       actions: write
+     # ...
+     - run: gh workflow run packages.yml --ref "$RELEASE_TAG"
+       env:
+         GH_TOKEN: ${{ github.token }}
+     ```
+
+     That documented exception is why `0.2.0`'s packages never built: the tag was
+     pushed by `GITHUB_TOKEN`, so no `push` event started `Packages`.
+   * **Packages** (`.github/workflows/packages.yml`) builds **28 package files** —
+     seven names × two architectures in each of two formats (`7` × `{amd64, arm64}`
+     `.deb`, `7` × `{x86_64, aarch64}` `.rpm`) — install-verifies each set in its
+     own distribution container, runs `packaging/stage-dist.py`, and uploads exactly
+     one artifact named `offworld-dist`.
+   * Nothing needs a shared concurrency group: `Publish` runs on
+     `refs/heads/develop` (group `release-refs/heads/develop`), while the dispatched
+     `Packages` run has `github.ref = refs/tags/v<version>` and therefore the tag's
+     own group. What serialises them is ordering, not a lock — `Publish`'s `release`
+     job issues the dispatch as its **last** act and then asserts that a
+     `workflow_dispatch` run exists for that tag, and `Packages` keeps
+     `cancel-in-progress: false`.
+   * `rehearsal: true` is the only safe way to exercise this path:
+     `gh workflow run packages.yml --ref v<version> -f rehearsal=true` runs the full
+     build and verify matrix plus `stage-dist.py --dry-run` and uploads no
+     `offworld-dist`, so the App never sees it.
+   * The **`offworld-nexus-packages` GitHub App** signs that artifact and publishes
+     it to `apt.offworld-nexus.app` and `rpm.offworld-nexus.app`, enforcing
+     `release_set` retention — every stable release kept forever, the newest seven
+     nightlies — and posts an `offworld-pkg / publish (stable)` check run. No
+     token, key or secret lives in Actions: the App holds the signing key, and the
+     workflow only hands it the bytes.
+   * **Nightly** (`.github/workflows/nightly.yml`, cron `41 3 * * *`) stamps
+     `<version>~nightly<YYYYMMDD>.r<run>+g<sha7>` (`.deb`) and
+     `<version>-0.nightly.<YYYYMMDD>.r<run>.g<sha7>` (`.rpm`) into the `nightly`
+     component and keeps nothing locally; the server retains the newest seven.
    * Ordinary non-release PRs merged into `develop` (where `v<version>` already
      exists) skip the release jobs in a few seconds.
 4. **Check the result**:
 
    ```console
-   $ uv venv /tmp/blastit-check && VIRTUAL_ENV=/tmp/blastit-check uv pip install blastit==0.2.0
+   $ uv venv /tmp/blastit-check && VIRTUAL_ENV=/tmp/blastit-check uv pip install blastit==<version>
    $ /tmp/blastit-check/bin/blastit --help
    ```
 
-   and the [project page](https://pypi.org/project/blastit/), whose description
-   is the README (with its links rewritten to absolute ones pinned to `v<version>`,
-   because PyPI renders it without a repository around it).
+   `<version>` is `Cargo.toml`'s `[workspace.package] version` — the release the
+   merge just published — and the [project page](https://pypi.org/project/blastit/)
+   shows it, with the description taken from the README (and its links rewritten to
+   absolute ones pinned to `v<version>`, because PyPI renders it without a repository
+   around it).
 
-*(Manual fallback: pushing an annotated `v<version>` tag directly still triggers
-the same `Publish` workflow idempotently if ever needed.)*
+*(Manual fallback: pushing an annotated `v<version>` tag by hand still releases
+idempotently — the human-pushed tag is not a `GITHUB_TOKEN` event, so `Packages`
+starts from its own `on: push: tags` and `Publish`'s dispatch step (gated to
+`develop`) stays out of the way, rather than building the tag twice.)*
+
+## The package names
+
+Every architecture gets the same names, so a host installs `blastit` plus the shim(s) it
+needs. [`packaging/languages.tsv`](packaging/languages.tsv) is the one place a name is
+added; [`packaging/package-set.sh`](packaging/package-set.sh) derives the full set from it:
+
+| Package | Payload | Hard dependency |
+|---|---|---|
+| `blastit` | `blastit`, `blastit-lsp`, `LICENSE`, the pure-Python modules, `/usr/bin` links | measured `libc6` floor |
+| `blastit-php-8.4` — worked example; one such package per `languages.tsv` row | that `libphp`'s PHP shim | `blastit (= <version>)`, measured `libc6`; recommends `libphp8.4-embed` |
+
+The version sits in the name so `apt-get install blastit-php-8.4` reads as "Blastit's
+PHP 8.4 shim", and every shim pins the exact core version it was built against. A minor
+the distribution does not ship comes from a signed third-party repository (Ondřej Surý's
+on Debian and Ubuntu).
 
 ## When it goes wrong
 
 * **Branch/version mismatch or undated changelog**: caught on the `release/<version>`
   PR by `guard` before merge; push a fix to `release/<version>`.
-* **`CI`, `Docs`, or `Live (DigitalOcean)` fails after merge onto `develop`**:
+* **`CI` or `Docs` fails after merge onto `develop`**:
   `validate` stops `Publish` before PyPI or the `v<version>` tag is touched. If
   the failure was transient, re-run the failed workflow and then re-run `Publish`;
   if it needs a code fix, merge a follow-up PR into `develop` (since `v<version>`
   was never created, the fixed `develop` commit will automatically release `<version>`).
+* **The tag exists but `Packages` never ran**: the dispatch step in `Publish` is
+  what starts it. Re-run it by hand and watch the App's
+  `offworld-pkg / publish (stable)` check run:
+  `gh workflow run packages.yml --ref v<version>`.
 * **The upload failed partway**: re-run the `pypi` job. PyPI never accepts the
   same file twice, and `skip-existing` leaves the files that made it where they
   are, then `release` tags and creates the GitHub release.
@@ -161,9 +217,9 @@ the same `Publish` workflow idempotently if ever needed.)*
 ## The development wheels are not this
 
 Every commit to `develop` builds the same wheels (`.github/workflows/wheels.yml`)
-and leaves them as artifacts of that run, with a `<version>-dev<run>` version
-(for example, `0.2.0-dev<run>`) so they can't be mistaken for the release of the
-same commit. Nothing publishes
+and leaves them as artifacts of that run, with a `<version>-dev<run>` version —
+the workspace version above plus `-dev<run>` (`scripts/dev-version.sh`) — so they
+can't be mistaken for the release of the same commit. Nothing publishes
 them, and nothing outside the run can install from them — they exist to catch a
 broken wheel on the commit that broke it, and for whoever wants to try the
 current tree. The two workflows build with the same action,
@@ -196,8 +252,8 @@ artifacts (`--matrix`/`--count`/`--leg` are what the workflows consume, and
 `--check` validates the matrix itself):
 
 * **Linux serving artifacts** (the `4` universal `blastit` wheels, `4` standalone
-  archives, the `16` PHP `8.3`–`8.6` C SAPI shims, and the `8` CPython
-  `3.13`/`3.14` Python SAPI shims) target `{x86_64, aarch64} × {gnu
+  archives, one PHP C SAPI shim per `packaging/languages.tsv` row, and the CPython
+  shims the same file declares) target `{x86_64, aarch64} × {gnu
   (manylinux_2_28), musl (musllinux_1_2 / Alpine)}`. Every `x86_64` wheel,
   standalone archive, and shim is built and smoked locally on Linux `x86_64`;
   the `aarch64` legs build and run natively in GitHub Actions on

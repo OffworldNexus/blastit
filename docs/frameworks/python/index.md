@@ -17,8 +17,9 @@ flowchart LR
 Blastit is a Linux application server. `uv add --dev blastit` pins it in the project, and the
 global `blastit` hands `dev`, `check`, `fmt` and `lsp` to that copy automatically. One `py3-none`
 wheel covers every CPython 3.12+ on x86_64 and aarch64, glibc and musl; serving WSGI views needs
-CPython 3.13 or 3.14 on the host. Nothing is installed outside the project, and nothing needs
-`sudo`.
+one of the CPython minors in the [install
+table](../../install.md#one-package-per-language-version) on the host. Nothing is installed
+outside the project, and nothing needs `sudo`.
 
 ## The Blastfile
 
