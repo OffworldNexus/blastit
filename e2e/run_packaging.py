@@ -594,6 +594,42 @@ def shim_path(package: str, machine: str) -> str:
     return f"/usr/share/blastit/lib/libblastit_{stem}-{machine}-gnu.so"
 
 
+def rpm_set_arch(package: Path) -> str:
+    """The RPM architecture to install, after asserting the leg holds that set.
+
+    `package` is the core `.rpm` (`blastit-0.2.1-1.x86_64.rpm`), so the arch is
+    the one the builder stamped into the filename — no literal, no second matrix
+    call. The directory beside it must then be exactly the core plus one `.rpm`
+    per shim row for that arch: a leg handed six of seven fails naming the count
+    instead of installing what it found, and the scoped glob it returns can never
+    name the other architecture.
+    """
+    fields = package.name.rsplit(".", 2)
+    if len(fields) != 3 or not fields[1]:
+        raise LegFailure(
+            f"{package.name} is not a `blastit-<version>-<release>.<arch>.rpm`"
+        )
+    arch = fields[1]
+    suffix = package.name.removeprefix("blastit")
+    expected = {package.name, *(shim + suffix for shim in shim_packages())}
+    present = {
+        entry.name
+        for entry in package.parent.iterdir()
+        if entry.is_file()
+        and entry.name.startswith("blastit-")
+        and entry.name.endswith(f".{arch}.rpm")
+    }
+    if present != expected:
+        missing = sorted(expected - present)
+        unexpected = sorted(present - expected)
+        raise LegFailure(
+            f"this leg saw {len(present)} of {len(expected)} rpm packages for "
+            f"{arch}: missing {', '.join(missing) or 'none'}"
+            + (f"; unexpected {', '.join(unexpected)}" if unexpected else "")
+        )
+    return arch
+
+
 def installed_packages(box: Container, kind: str) -> list[str]:
     """The Blastit packages the image has installed, sorted (`dpkg-query`/`rpm -qa`)."""
     if kind == "deb":
@@ -1384,19 +1420,23 @@ def leg_package(
             # transaction, with weak dependencies switched off: nothing there may
             # be an unsatisfiable hard `Requires:` (Rocky 9 has no `python3.13`,
             # and its `php-embedded` is 8.0, which is why every shim carries
-            # `Recommends:`), and every subpackage's files still land.
+            # `Recommends:`), and every subpackage's files still land. The glob is
+            # scoped to this leg's own architecture — `dnf` rejects a foreign one
+            # with "does not have a compatible architecture" — after asserting the
+            # set is whole for that architecture.
+            rpm_glob = f"/pkg/blastit-*.{rpm_set_arch(package)}.rpm"
             whole = box.exec(
                 [
                     "sh",
                     "-c",
-                    "dnf install -y --setopt=install_weak_deps=False /pkg/blastit-*.rpm",
+                    f"dnf install -y --setopt=install_weak_deps=False {rpm_glob}",
                 ],
                 timeout=1800,
             )
             checks.that(
                 whole.returncode == 0,
                 "`dnf install -y --setopt=install_weak_deps=False "
-                f"/pkg/blastit-*.rpm` exits {whole.returncode}: {tail(joined(whole), 14)}",
+                f"{rpm_glob}` exits {whole.returncode}: {tail(joined(whole), 14)}",
             )
             full = installed_files(box, kind, installed_packages(box, kind))
             for name in ("blastit", *expected_shim_names):
