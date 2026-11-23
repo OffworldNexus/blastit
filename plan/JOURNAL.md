@@ -4594,3 +4594,13 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T09:43 [MB.69] (lead) status review -> done
 - 2026-11-23T09:44 [MB.69] (lead) commit e7a9804 (verified: 7 RPMs non-root, all payload root:root)
 - 2026-11-23T09:44 [MB.69] (lead) commit 4ccb3ff (amended to carry the node log)
+- 2026-11-23T10:34 [MB.71] (conductor) created (task) RPM install legs must not see the other architecture's packages
+- 2026-11-23T10:34 AUTOPILOT on by conductor arch-scoped package selection in MB.71
+- 2026-11-23T10:35 [MB.71] (lead) status ready -> active
+- 2026-11-23T10:35 [MB.71] (lead) attempt 1/3 started
+- 2026-11-23T10:35 [MB.71] (lead) base 1ebd4d3419fc98d44b35226ee2b1013c752d7015 (branch release/packages-arch)
+- 2026-11-23T10:38 [MB.71] (lead) status active -> review
+- 2026-11-23T10:38 [MB.71] (lead) implementer done: install-job download scoped to matrix.arch; rpm leg glob scoped by core-filename arch + exactly-seven assertion; fast-check exit 0
+- 2026-11-23T10:40 [MB.71] (lead) REVIEW (review-arch): clean. NO BLOCKER/MAJOR. MINOR rejected as non-actionable: rpm_set_arch guard does not also check fields[2]=='rpm' (unreachable path, alre
+- 2026-11-23T10:40 [MB.71] (lead) status review -> done
+- 2026-11-23T10:41 [MB.71] (lead) commit 55e6b1c (fast-check exit 0 by implementer; guard+plan validate green)

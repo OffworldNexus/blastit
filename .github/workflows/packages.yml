@@ -275,9 +275,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v10.3.2
+      # Only this leg's architecture: a `package-*` download hands an x86_64
+      # container the aarch64 RPMs too, and `dnf` refuses those with
+      # "does not have a compatible architecture".
       - uses: actions/download-artifact@v4
         with:
-          pattern: package-*
+          pattern: package-${{ matrix.arch }}-*
           path: dist
           merge-multiple: true
       # One leg per (distribution, architecture): the image, the package format
