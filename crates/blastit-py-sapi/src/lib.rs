@@ -9,9 +9,9 @@
 //! Blastit serves a Python WSGI view from a forked, unprivileged `view` worker
 //! (design `docs/design/universal-distribution.md` §1). The shipped `blastit`
 //! binary links no `libpython`; instead each supported CPython minor gets one
-//! `libblastit_py3{13,14}-<arch>-<libc>.so` shim, loaded by descriptor, that
-//! owns the interpreter. This crate holds the three pieces the composition root
-//! and the shim share:
+//! `libblastit_py<major><minor>-<arch>-<libc>.so` shim, loaded by descriptor,
+//! that owns the interpreter. This crate holds the three pieces the composition
+//! root and the shim share:
 //!
 //! * [`abi`] — the frozen `#[repr(C)]` types of §1.2, verbatim: [`PyBufV1`],
 //!   [`PyZygoteOpaque`], [`PyForkHooks`] and [`BlastitPyVtableV1`] with its ten
@@ -29,26 +29,32 @@
 //! than a review question.
 //!
 //! ```
-//! use blastit_py_sapi::{ABI_VERSION, PY_MINOR_313, PY_MINOR_314, activates};
+//! use blastit_py_sapi::{ABI_VERSION, activates, encode_py_minor};
 //!
 //! assert_eq!(ABI_VERSION, 1);
-//! assert_eq!((PY_MINOR_313, PY_MINOR_314), (313, 314));
+//! assert_eq!(encode_py_minor(3, 13), 313);
+//! assert_eq!(encode_py_minor(3, 14), 314);
 //! // A PHP-only or static-only boot never searches for an interpreter (§2.1).
 //! assert!(!activates(true, false));
 //! assert!(activates(false, false));
 //! ```
+
+// The CPython table this crate publishes, generated from
+// `packaging/languages.tsv` at build time (`build.rs`).
+include!(concat!(env!("OUT_DIR"), "/languages.rs"));
+
 pub mod abi;
 mod boundary;
 pub mod discovery;
 pub mod loader;
 
 pub use abi::{
-    ABI_VERSION, BlastitPyVtableV1, PY_MINOR_313, PY_MINOR_314, PyBufV1, PyForkHooks, PyRuntime,
-    PyZygote, PyZygoteOpaque, dotted_py_minor, encode_py_minor,
+    ABI_VERSION, BlastitPyVtableV1, PyBufV1, PyForkHooks, PyRuntime, PyZygote, PyZygoteOpaque,
+    dotted_py_minor, encode_py_minor,
 };
 pub use discovery::{
-    DevEnv, DiscoveredPython, DiscoveryEnv, DiscoveryError, ProductionEnv, SUPPORTED_MINORS,
-    activates, discover, shim_file,
+    DevEnv, DiscoveredPython, DiscoveryEnv, DiscoveryError, ProductionEnv, activates, discover,
+    shim_file,
 };
 pub use loader::{
     LoadError, LoadedPy, Opened, PinnedRef, REQUIRED_SYMBOLS, gate_libpython, gate_pinned,

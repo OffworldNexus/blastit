@@ -10,90 +10,22 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The PHP minors this crate has a shim ABI for, newest first.
-pub const SUPPORTED_MINORS: [Minor; 4] = [Minor::Php86, Minor::Php85, Minor::Php84, Minor::Php83];
-
-/// The `php-config` names searched on `PATH`, in order.
-pub const CONFIG_NAMES: [&str; 5] = [
-    "php-config",
-    "php-config8.6",
-    "php-config8.5",
-    "php-config8.4",
-    "php-config8.3",
-];
-
-/// One supported PHP minor. The shim is compiled once per variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Minor {
-    /// PHP 8.3 — `ZEND_MODULE_API_NO` 20230831.
-    Php83,
-    /// PHP 8.4 — `ZEND_MODULE_API_NO` 20240924.
-    Php84,
-    /// PHP 8.5 — `ZEND_MODULE_API_NO` 20250925.
-    Php85,
-    /// PHP 8.6 — the minor `libphp8.6-embed` (`debian:bookworm-slim` + the
-    /// Surý repository) and `php86-embed` (`alpine:edge`) ship.
-    Php86,
-}
+// The minor table is generated from `packaging/languages.tsv` at build time
+// (`build.rs`): the enum, `SUPPORTED_MINORS`, `NEWEST_MINOR`, `CONFIG_NAMES` and
+// the supported-set sentence. Nothing in this file enumerates a PHP version.
+include!(concat!(env!("OUT_DIR"), "/languages.rs"));
 
 impl Minor {
-    /// Parses a `php-config --version` reply (`"8.5.4"`, `"8.5"`).
-    ///
-    /// Anything whose first two components are not `8.3`, `8.4`, `8.5` or
-    /// `8.6` is `None`: an older or newer minor is refused, not guessed at.
-    pub fn parse(version: &str) -> Option<Self> {
-        let mut parts = version.trim().split('.');
-        let major = parts.next()?.parse::<u32>().ok()?;
-        let minor = parts.next()?.parse::<u32>().ok()?;
-        match (major, minor) {
-            (8, 3) => Some(Self::Php83),
-            (8, 4) => Some(Self::Php84),
-            (8, 5) => Some(Self::Php85),
-            (8, 6) => Some(Self::Php86),
-            _ => None,
-        }
-    }
-
-    /// The code `blastit_php_minor()` returns from a shim of this minor.
-    pub fn code(self) -> u32 {
-        match self {
-            Self::Php83 => 803,
-            Self::Php84 => 804,
-            Self::Php85 => 805,
-            Self::Php86 => 806,
-        }
-    }
-
-    /// The `<major><minor>` infix of the shim name (`"84"`).
-    pub(crate) const fn digits(self) -> &'static str {
-        match self {
-            Self::Php83 => "83",
-            Self::Php84 => "84",
-            Self::Php85 => "85",
-            Self::Php86 => "86",
-        }
-    }
-
-    /// The dotted minor (`"8.4"`), for messages and package names.
-    pub fn dotted(self) -> &'static str {
-        match self {
-            Self::Php83 => "8.3",
-            Self::Php84 => "8.4",
-            Self::Php85 => "8.5",
-            Self::Php86 => "8.6",
-        }
-    }
-
     /// The shipped shim for this minor on this build's target, e.g.
     /// `libblastit_php84-x86_64-gnu.so` (`ADR-0010` §4.1).
     ///
-    /// The `<arch>` and `<libc>` come from the compile-time target, not from a
-    /// runtime probe, so the name the boot selects and the name `make php-sapi`
-    /// writes cannot disagree on a native build.
+    /// The `php84` half is the row's `slug` column, and `<arch>`/`<libc>` come
+    /// from the compile-time target, so the name the boot selects and the name
+    /// `make php-sapi` writes cannot disagree on a native build.
     pub fn shim_file(self) -> String {
         format!(
-            "libblastit_php{}-{}-{}.so",
-            self.digits(),
+            "libblastit_{}-{}-{}.so",
+            self.slug(),
             target_arch(),
             target_libc()
         )
@@ -101,22 +33,12 @@ impl Minor {
 
     /// Whether a shim reporting `code` may serve a host of this minor.
     ///
-    /// The worker asks the shim for `blastit_php_minor()` and refuses a
-    /// mismatch before the first request: a 8.3 shim against an 8.4 `libphp`
-    /// reads `EG(bailout)` at the wrong offset, which turns `exit()` into a
-    /// `SIGSEGV` (ADR-0010 §3).
+    /// The worker asks the shim for `blastit_php_minor()` and refuses a mismatch
+    /// before the first request: an older shim against a newer `libphp` reads
+    /// `EG(bailout)` at the wrong offset, which turns `exit()` into a `SIGSEGV`
+    /// (ADR-0010 §3).
     pub fn accepts(self, shim_code: u32) -> bool {
         shim_code == self.code()
-    }
-
-    /// The `php-config` names that provide this minor, most specific first.
-    pub fn config_names(self) -> [&'static str; 2] {
-        match self {
-            Self::Php83 => ["php-config8.3", "php-config"],
-            Self::Php84 => ["php-config8.4", "php-config"],
-            Self::Php85 => ["php-config8.5", "php-config"],
-            Self::Php86 => ["php-config8.6", "php-config"],
-        }
     }
 }
 
@@ -374,11 +296,13 @@ impl fmt::Display for ToolchainError {
             Self::NotFound => write!(
                 f,
                 "no php-config found (searched PHP_CONFIG, then {} on PATH); install the PHP embed \
-                 development package — Debian/Ubuntu: apt install php8.6-dev libphp8.6-embed \
-                 (stock Debian: apt install libphp-embed), Alpine: apk add php86-dev php86-embed, \
-                 Fedora/RHEL: dnf install php86-php-devel php-embedded — or set \
-                 PHP_CONFIG=/path/to/php-config8.6",
-                CONFIG_NAMES.join(", ")
+                 development package — Debian/Ubuntu: apt install php{dotted}-dev \
+                 libphp{dotted}-embed (stock Debian: apt install libphp-embed), Alpine: apk add \
+                 php{digits}-dev php{digits}-embed, Fedora/RHEL: dnf install php{digits}-php-devel \
+                 php-embedded — or set PHP_CONFIG=/path/to/php-config{dotted}",
+                CONFIG_NAMES.join(", "),
+                dotted = NEWEST_MINOR.dotted(),
+                digits = NEWEST_MINOR.digits(),
             ),
             Self::NotExecutable { path } => write!(
                 f,
@@ -394,9 +318,10 @@ impl fmt::Display for ToolchainError {
             ),
             Self::UnsupportedVersion { path, version } => write!(
                 f,
-                "{} reports PHP {version}; this build has SAPI shims for 8.3, 8.4, 8.5 and 8.6 \
-                 only (install the matching php8.X-dev package, or set PHP_CONFIG to one of them)",
-                path.display()
+                "{} reports PHP {version}; this build supports {} only (install the matching \
+                 php8.X-dev package, or set PHP_CONFIG to one of them)",
+                path.display(),
+                supported_minors_sentence()
             ),
             Self::IncludeDir { path, detail } => write!(
                 f,

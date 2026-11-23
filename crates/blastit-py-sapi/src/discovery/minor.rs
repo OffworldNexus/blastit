@@ -7,7 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{DEFAULT_MINOR, DiscoveryError};
+use super::DiscoveryError;
+use crate::DEFAULT_MINOR;
 
 /// What `pyvenv.cfg` states: the interpreter's `home`, the venv's minor and
 /// the release it names.

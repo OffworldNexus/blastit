@@ -8,8 +8,8 @@
 //! here is an ABI break and must bump [`ABI_VERSION`] and every shim together.
 //!
 //! The exported symbols a shim must carry are `blastit_py_abi_version() -> u32`
-//! (`1`), `blastit_py_minor() -> u32` ([`PY_MINOR_313`] or [`PY_MINOR_314`]) and
-//! `blastit_py_abi_v1() -> *const BlastitPyVtableV1`.
+//! (`1`), `blastit_py_minor() -> u32` (a declared `PY_MINOR_<digits>` value, see
+//! [`encode_py_minor`]) and `blastit_py_abi_v1() -> *const BlastitPyVtableV1`.
 
 use core::marker::PhantomData;
 
@@ -23,12 +23,6 @@ pub const ABI_VERSION: u32 = 1;
 pub const fn encode_py_minor(major: u32, minor: u32) -> u32 {
     major * 100 + minor
 }
-
-/// CPython 3.13 as a shim reports it through `py_minor`.
-pub const PY_MINOR_313: u32 = encode_py_minor(3, 13);
-
-/// CPython 3.14 as a shim reports it through `py_minor`.
-pub const PY_MINOR_314: u32 = encode_py_minor(3, 14);
 
 /// `313` -> `"3.13"`, for a sentence an operator reads.
 ///
@@ -131,7 +125,8 @@ pub struct PyRuntime<'a> {
 pub struct BlastitPyVtableV1 {
     /// [`ABI_VERSION`] as the shim was built against.
     pub abi_version: extern "C" fn() -> u32,
-    /// The CPython minor, encoded as [`PY_MINOR_313`]/[`PY_MINOR_314`].
+    /// The CPython minor, encoded as [`encode_py_minor`] (one
+    /// `PY_MINOR_<digits>` constant per declared row).
     pub py_minor: extern "C" fn() -> u32,
     /// `PyOS_BeforeFork`, called with the GIL held.
     pub before_fork: extern "C" fn(),

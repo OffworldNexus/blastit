@@ -11,11 +11,11 @@
 //! `libphp.so` inside a forked, unprivileged `view` worker (ADR-0010 §1). Rust
 //! cannot declare `sapi_globals_struct` or `EG(bailout)` by hand and survive a
 //! PHP minor bump (`docs/research/php-embed-sapi.md` §2), so each minor gets one
-//! ~25 KiB Apache-2.0 C shim, `libblastit_php8{3,4,5,6}-<arch>-<libc>.so`,
+//! ~25 KiB Apache-2.0 C shim, `libblastit_php<minor>-<arch>-<libc>.so`,
 //! compiled against that minor's headers. This crate holds:
 //!
-//! * [`toolchain`] — finds `php-config` (`PHP_CONFIG`, then `php-config`,
-//!   `php-config8.6`, `php-config8.5`, `php-config8.4`, `php-config8.3`),
+//! * [`toolchain`] — finds `php-config` (`PHP_CONFIG`, then `php-config` itself
+//!   and one versioned name per minor declared in `packaging/languages.tsv`),
 //!   refuses an unsupported minor with the package to install, and maps a
 //!   version to a shim filename.
 //! * [`request`] — [`ServerVars`] (a `$_SERVER` entry list where `PHP_VALUE`,
@@ -53,7 +53,7 @@
 //! a fatal leave the worker able to serve the next request.
 //!
 //! ```
-//! use blastit_php_sapi::{Minor, ReservedVar, ServerVar, ServerVars};
+//! use blastit_php_sapi::{Minor, ReservedVar, ServerVar, ServerVars, SUPPORTED_MINORS};
 //!
 //! let mut vars = ServerVars::new();
 //! vars.insert("REQUEST_METHOD", "GET").expect("allowed");
@@ -62,13 +62,14 @@
 //! assert!(vars.iter().all(|v| v.name() != "HTTP_PROXY"));
 //! // And the CGI/FastCGI escalation names cannot be built at all.
 //! assert_eq!(ServerVar::new("PHP_VALUE", "allow_url_include=1"), Err(ReservedVar::PhpValue.into()));
-//! assert_eq!(Minor::parse("8.4.27"), Some(Minor::Php84));
-//! // The shipped name carries this build's `(arch, libc)`, the tuple the boot
-//! // selects by: `libblastit_php84-x86_64-gnu.so` on a glibc x86_64 host.
+//! // The newest declared minor parses, and its shim carries this build's
+//! // `(arch, libc)`, the tuple the boot selects by.
+//! let newest = SUPPORTED_MINORS[0];
+//! assert_eq!(Minor::parse(&format!("{}.1", newest.dotted())), Some(newest));
 //! let libc = if cfg!(target_env = "musl") { "musl" } else { "gnu" };
 //! assert_eq!(
-//!     Minor::Php84.shim_file(),
-//!     format!("libblastit_php84-{}-{libc}.so", std::env::consts::ARCH),
+//!     newest.shim_file(),
+//!     format!("libblastit_{}-{}-{libc}.so", newest.slug(), std::env::consts::ARCH),
 //! );
 //! ```
 
@@ -84,7 +85,8 @@ pub use request::{
     ReservedVar, ServerVar, ServerVarError, ServerVars,
 };
 pub use toolchain::{
-    CONFIG_NAMES, Env, Minor, ProcessEnv, SUPPORTED_MINORS, Toolchain, ToolchainError,
+    CONFIG_NAMES, Env, Minor, NEWEST_MINOR, ProcessEnv, SUPPORTED_MINORS, Toolchain,
+    ToolchainError, supported_minors_sentence,
 };
 
 /// The C ABI this crate speaks: `blastit_php_abi_v1` is version 1.

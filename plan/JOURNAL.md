@@ -4539,3 +4539,11 @@ Append-only one-line event log managed by `tools/plan.py`.
 - 2026-11-23T01:06 [MB.67.2] (lead) REVIEW FIX: SMOKE_PYTHONS dedupe+floor; packag-set shim cross-check by row slug; drop tautological leg loops; PACKAGE_SET per-format copy; spec prose example fr
 - 2026-11-23T01:10 [MB.67.2] (lead) status review -> done
 - 2026-11-23T01:10 [MB.67.7] (lead) status active -> done
+- 2026-11-23T01:10 [MB.67.3] (lead) status ready -> active
+- 2026-11-23T01:10 [MB.67.3] (lead) attempt 1/3 started
+- 2026-11-23T01:10 [MB.67.3] (lead) base 6de380ebaeaf2bb12f887d46c1e4e75258c5ed9d
+- 2026-11-23T01:19 [MB.67.3] (lead) status active -> review
+- 2026-11-23T01:23 [MB.67.3] (lead) REVIEW FIX: assert NEWEST_PHP + PY_MINOR_<digits>; drop abi re-export; slug-sourced shim names; py-shim strict only for artifact; SUPPORTED_PY_MINORS load-beari
+- 2026-11-23T01:23 [MB.67] (unknown) edited fields
+- 2026-11-23T01:23 [MB.67.4] (unknown) edited fields
+- 2026-11-23T01:28 [MB.67.3] (lead) status review -> done

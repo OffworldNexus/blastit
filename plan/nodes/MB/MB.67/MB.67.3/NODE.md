@@ -2,7 +2,7 @@
 id: MB.67.3
 title: "Rust compile-time language tables (view-php, php-sapi, py-shim)"
 kind: task
-status: ready
+status: done
 owner: implementer
 priority: 1
 depends_on: [MB.67.2, MB.67.7]
@@ -15,11 +15,11 @@ paths:
   - crates/blastit/src/stage0/project_python.rs
   - Cargo.toml
   - Cargo.lock
-attempts: 0
+attempts: 1
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:44"
-updated: "2026-11-23T00:57"
+updated: "2026-11-23T01:28"
 ---
 
 # Goal

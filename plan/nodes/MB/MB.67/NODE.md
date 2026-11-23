@@ -9,6 +9,7 @@ paths:
   - "packaging/**"
   - scripts/languages.py
   - scripts/version.sh
+  - scripts/gen_language_blocks.py
   - scripts/platform_matrix.py
   - "scripts/build-deb.sh"
   - "scripts/build-rpm.sh"
@@ -30,6 +31,14 @@ paths:
   - "crates/blastit/tests/**"
   - docs/install.md
   - docs/install.sh
+  - "docs/getting-started.md"
+  - docs/index.md
+  - docs/security.md
+  - docs/troubleshooting.md
+  - docs/deploy/index.md
+  - docs/frameworks/php/index.md
+  - docs/frameworks/python/index.md
+  - docs/reference/settings.md
   - README.md
   - RELEASING.md
   - "e2e/**"
@@ -39,7 +48,7 @@ attempts: 0
 max_attempts: 3
 escalation: none
 created: "2026-11-23T00:43"
-updated: "2026-11-23T00:57"
+updated: "2026-11-23T01:23"
 ---
 
 # Goal

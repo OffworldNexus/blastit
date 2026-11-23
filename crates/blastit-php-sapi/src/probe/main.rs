@@ -40,7 +40,9 @@ use std::time::Instant;
 use blastit_php_sapi::abi::{
     ConfigV1, OUTCOME_BAILOUT, OUTCOME_OK, RequestV1, ResultV1, ServerVarV1,
 };
-use blastit_php_sapi::{ABI_VERSION, Egress, IniPolicy, SUPPORTED_MINORS, ServerVars};
+use blastit_php_sapi::{
+    ABI_VERSION, Egress, IniPolicy, SUPPORTED_MINORS, ServerVars, supported_minors_sentence,
+};
 
 /// One fixture's request and everything it produced.
 struct Call {
@@ -137,7 +139,10 @@ fn run() -> Result<String, String> {
         .copied()
         .find(|minor| minor.accepts(minor_code))
         .ok_or_else(|| {
-            format!("the shim reports PHP minor {minor_code}; this build has 8.3, 8.4, 8.5 and 8.6")
+            format!(
+                "the shim reports PHP minor {minor_code}; this build supports {}",
+                supported_minors_sentence()
+            )
         })?;
 
     // 3. The real lockdown, rendered by the Rust side under test.

@@ -25,6 +25,7 @@ use blastit_py_sapi::discovery::{
     self, DevEnv, DiscoveredPython, DiscoveryEnv, ProductionEnv, SUPPORTED_MINORS,
 };
 use blastit_py_sapi::loader::gate_libpython;
+use blastit_py_sapi::{default_minor, supported_minors_sentence};
 use blastit_sys::pin::SharedObject;
 
 use crate::config::{Config, PythonHandoff};
@@ -134,11 +135,14 @@ fn agree_minor(boot: Boot, found: &DiscoveredPython) -> Result<(), String> {
         return Ok(());
     }
     Err(format!(
-        "blastit {}: CPython {} at {} is not supported for WSGI views (CPython 3.13 and 3.14 \
-         are supported); run uv python install 3.14 && uv venv --python 3.14",
+        "blastit {}: CPython {} at {} is not supported for WSGI views ({} are supported); run \
+         uv python install {} && uv venv --python {}",
         boot.verb(),
         dotted_py_minor(found.py_minor),
-        found.interpreter.display()
+        found.interpreter.display(),
+        supported_minors_sentence(),
+        default_minor(),
+        default_minor()
     ))
 }
 
